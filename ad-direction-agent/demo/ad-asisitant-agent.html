@@ -1,0 +1,2048 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>广告辅助决策Agent</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@5.1.0/marked.min.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════ 设计 Token ═══════════════ */
+:root {
+  --primary: #2563EB;
+  --primary-light: #DBEAFE;
+  --primary-bg: #EFF6FF;
+  --success: #059669;
+  --success-bg: #F0FDF4;
+  --warning: #D97706;
+  --warning-bg: #FFFBEB;
+  --danger: #DC2626;
+  --danger-bg: #FEF2F2;
+  --neutral: #64748B;
+  --neutral-bg: #F8FAFC;
+  --foreground: #1E293B;
+  --muted-fg: #64748B;
+  --border: #E2E8F0;
+  --card-bg: #FFFFFF;
+  --surface: #F1F5F9;
+  --radius-card: 8px;
+  --radius-ctl: 6px;
+  --radius-tag: 4px;
+  --transition-fast: 100ms ease;
+  --transition-ctl: 150ms ease;
+}
+
+/* ═══════════════ 全局 ═══════════════ */
+* { box-sizing: border-box; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px; line-height: 1.5; color: var(--foreground);
+  background: linear-gradient(135deg, hsl(220 10% 98%) 0%, hsl(260 5% 97%) 50%, hsl(280 5% 98%) 100%);
+  min-height: 100vh; margin: 0; padding: 0;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+}
+
+/* ═══════════════ 顶部导航栏 ═══════════════ */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px; background: rgba(255,255,255,0.8);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
+}
+.topbar-title { font-size: 15px; font-weight: 600; color: var(--foreground); display: flex; align-items: center; gap: 6px; }
+.topbar-badge { font-size: 10px; background: var(--primary-light); color: var(--primary); padding: 1px 7px; border-radius: 9999px; font-weight: 600; }
+.topbar-status { font-size: 12px; color: var(--muted-fg); display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: #9CA3AF; }
+.status-dot.online { background: #22C55E; }
+
+/* ═══════════════ 左右布局 ═══════════════ */
+.app-layout { display: flex; height: calc(100vh - 46px); }
+.sidebar { width: 400px; min-width: 400px; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.main-area { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 0; }
+
+/* ═══════════════ 卡片 ═══════════════ */
+.card {
+  background: var(--card-bg); border-radius: var(--radius-card);
+  border: 1px solid transparent; padding: 14px 16px;
+  transition: border-color var(--transition-ctl), box-shadow var(--transition-ctl);
+}
+.card:hover { border-color: var(--border); box-shadow: 0 1px 4px rgba(0,0,0,.04); }
+.card-title {
+  font-size: 13px; font-weight: 600; color: var(--foreground);
+  margin-bottom: 10px; display: flex; align-items: center; gap: 6px;
+}
+.card-desc { font-size: 12px; color: var(--muted-fg); margin-bottom: 8px; }
+
+/* ═══════════════ 输入框 ═══════════════ */
+.input {
+  width: 100%; border: 1.5px solid var(--border); border-radius: var(--radius-ctl);
+  padding: 8px 12px; font-size: 13px; font-family: inherit; color: var(--foreground);
+  background: var(--card-bg); transition: border-color var(--transition-ctl);
+  outline: none;
+}
+.input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+.input::placeholder { color: #9CA3AF; }
+
+/* ═══════════════ 按钮 ═══════════════ */
+.btn {
+  display: inline-flex; align-items: center; gap: 4px; font-family: inherit;
+  font-size: 12px; font-weight: 500; padding: 7px 14px; border-radius: var(--radius-ctl);
+  border: none; cursor: pointer; transition: all var(--transition-ctl);
+  white-space: nowrap; user-select: none; min-height: 36px;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: #1D4ED8; }
+.btn-primary:active { background: #1E40AF; }
+.btn-secondary { background: var(--surface); color: var(--foreground); border: 1.5px solid var(--border); }
+.btn-secondary:hover { background: #E2E8F0; }
+.btn-amber { background: #F59E0B; color: #fff; }
+.btn-amber:hover { background: #D97706; }
+.btn-teal { background: #0D9488; color: #fff; }
+.btn-teal:hover { background: #0F766E; }
+.btn-ghost { background: transparent; color: var(--muted-fg); padding: 6px 8px; min-height: 28px; }
+.btn-ghost:hover { background: var(--surface); color: var(--foreground); }
+.btn-danger-ghost { background: transparent; color: var(--danger); border: 1.5px solid #FECACA; padding: 4px 8px; font-size: 11px; min-height: 26px; }
+.btn-danger-ghost:hover { background: var(--danger-bg); }
+.btn:disabled { opacity: 0.5; pointer-events: none; }
+.btn-sm { font-size: 11px; padding: 5px 10px; min-height: 30px; }
+
+/* ═══════════════ 标签/Badge ═══════════════ */
+.badge { font-size: 10px; padding: 1px 7px; border-radius: 9999px; font-weight: 600; white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; }
+.badge-blue { background: var(--primary-light); color: var(--primary); }
+.badge-green { background: var(--success-bg); color: var(--success); }
+.badge-amber { background: var(--warning-bg); color: var(--warning); }
+.badge-red { background: var(--danger-bg); color: var(--danger); }
+.badge-gray { background: var(--surface); color: var(--muted-fg); }
+.badge-pill { font-size: 9px; padding: 0 5px; }
+
+/* ═══════════════ 药丸标签栏 ═══════════════ */
+.tab-bar {
+  display: flex; gap: 4px; margin-bottom: 12px;
+  background: var(--surface); border-radius: var(--radius-card); padding: 3px;
+}
+.tab-btn {
+  flex: 1; text-align: center; font-size: 13px; font-weight: 500; color: var(--muted-fg);
+  padding: 8px 14px; border-radius: var(--radius-ctl); cursor: pointer;
+  transition: all var(--transition-ctl); user-select: none; border: none; background: transparent; font-family: inherit;
+}
+.tab-btn:hover:not(.tab-disabled) { color: var(--foreground); background: rgba(255,255,255,.6); }
+.tab-btn.tab-active { background: var(--card-bg); color: var(--foreground); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+.tab-btn.tab-disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* Tab 面板 */
+.tab-panel { display: none; flex-direction: column; gap: 12px; }
+.tab-panel.active { display: flex; }
+.tab-panel.crossfading-out { opacity: 0; transition: opacity var(--transition-fast); }
+.tab-panel.crossfading-in { opacity: 1; transition: opacity var(--transition-fast); }
+.tab-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  padding: 40px 20px; font-size: 13px; color: var(--muted-fg);
+}
+
+/* ═══════════════ 自定义下拉框（覆盖式） ═══════════════ */
+.dd-wrapper { flex: 1; min-width: 0; }
+.dd-label { font-size: 11px; font-weight: 600; color: var(--foreground); margin-bottom: 3px; display: block; }
+.dd-btn, .md-btn { display: flex; align-items: center; justify-content: space-between; width: 100%;
+  border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 8px 10px; font-size: 13px;
+  background: var(--card-bg); cursor: pointer; transition: border-color var(--transition-ctl);
+  text-align: left; gap: 6px; font-family: inherit; color: var(--foreground); min-height: 40px; }
+.dd-btn:hover, .md-btn:hover { border-color: #93C5FD; }
+.dd-btn.open, .md-btn.open { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+.dd-text { color: var(--muted-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.dd-text.selected { color: var(--foreground); font-weight: 500; }
+.dd-arrow { font-size: 10px; color: #9CA3AF; flex-shrink: 0; transition: transform var(--transition-fast); }
+.dd-btn.open .dd-arrow, .md-btn.open .dd-arrow { transform: rotate(180deg); }
+.dd-panel, .md-panel { position: absolute; z-index: 50; top: 100%; left: 0; right: 0; margin-top: 3px;
+  background: var(--card-bg); border: 1.5px solid var(--border); border-radius: var(--radius-card);
+  box-shadow: 0 8px 24px rgba(0,0,0,.1); max-height: 260px; overflow-y: auto; }
+.dd-option { padding: 8px 12px; cursor: pointer; transition: background .1s; border-bottom: 1px solid var(--surface); font-size: 12px; }
+.dd-option:last-child { border-bottom: none; }
+.dd-option:hover { background: var(--primary-bg); }
+.dd-option.selected { background: var(--primary-light); }
+.dd-opt-label { font-size: 13px; font-weight: 500; color: var(--foreground); }
+.dd-opt-desc { font-size: 11px; color: var(--muted-fg); margin-top: 2px; line-height: 1.4; }
+
+/* 多选下拉 */
+.md-btn { min-height: 40px; flex-wrap: wrap; gap: 4px; padding: 6px 8px; }
+.md-tags { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; }
+.md-tag { display: inline-flex; align-items: center; gap: 3px; background: var(--primary-bg); color: var(--primary);
+  font-size: 12px; padding: 2px 7px; border-radius: var(--radius-tag); font-weight: 500; }
+.md-tag-remove { cursor: pointer; font-size: 13px; line-height: 1; color: #60A5FA; }
+.md-tag-remove:hover { color: var(--primary); }
+.md-placeholder { color: #9CA3AF; font-size: 12px; }
+.md-option { display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--surface); transition: background .1s; }
+.md-option:last-child { border-bottom: none; }
+.md-option:hover { background: #F5F3FF; }
+.md-option input[type="checkbox"] { margin-top: 2px; accent-color: var(--primary); }
+.md-opt-text { flex: 1; }
+.md-opt-label { font-size: 13px; font-weight: 500; color: var(--foreground); display: flex; align-items: center; gap: 5px; }
+.md-opt-desc { font-size: 11px; color: var(--muted-fg); margin-top: 2px; line-height: 1.4; }
+.md-check-rec { display: inline-flex; background: var(--warning-bg); color: var(--warning); font-size: 10px;
+  padding: 0 6px; border-radius: 9999px; font-weight: 600; }
+
+/* ═══════════════ 指标卡片 ═══════════════ */
+.metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.metric-card {
+  background: var(--neutral-bg); border-radius: var(--radius-ctl); padding: 8px 10px; text-align: center;
+  border: 1px solid transparent; transition: border-color var(--transition-ctl);
+}
+.metric-card:hover { border-color: var(--border); }
+.metric-label { font-size: 11px; color: var(--muted-fg); margin-bottom: 2px; }
+.metric-value { font-size: 18px; font-weight: 700; }
+.metric-value.good { color: var(--success); }
+.metric-value.warning { color: var(--warning); }
+.metric-value.danger { color: var(--danger); }
+.metric-value.neutral { color: var(--muted-fg); }
+.metric-unit { font-size: 10px; color: var(--muted-fg); font-weight: 400; margin-left: 2px; }
+
+/* ═══════════════ 评分卡片 ═══════════════ */
+.score-card { border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 10px; transition: border-color var(--transition-ctl); }
+.score-card:hover { border-color: #93C5FD; }
+.score-card.recommend { border-color: #86EFAC; background: var(--success-bg); }
+.score-card.optional { border-color: #93C5FD; }
+.score-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.score-title { font-size: 12px; font-weight: 600; }
+.score-badge { font-size: 10px; padding: 1px 7px; border-radius: 9999px; font-weight: 600; }
+.score-bar { width: 100%; height: 6px; background: #E2E8F0; border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+.score-bar-fill { height: 100%; border-radius: 3px; transition: width .3s ease; }
+.score-bar-fill.high { background: var(--success); }
+.score-bar-fill.medium { background: var(--primary); }
+.score-bar-fill.low { background: #D1D5DB; }
+.score-meta { display: flex; justify-content: space-between; font-size: 10px; }
+.score-reason { color: var(--muted-fg); font-size:11px; line-height:1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.score-reason:hover { color: var(--foreground); }
+.score-reason.expanded { -webkit-line-clamp: unset; display: block; }
+.score-value { font-weight: 700; }
+/* 评分理由弹窗 */
+.reason-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,.3); z-index: 200; display: flex; align-items: center; justify-content: center; animation: fi .15s ease-out; }
+.reason-popup { background: var(--card-bg); border-radius: var(--radius-card); padding: 20px 24px; max-width: 520px; width: 90%; box-shadow: 0 16px 48px rgba(0,0,0,.15); }
+.reason-popup h4 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
+.reason-popup p { font-size: 13px; line-height: 1.6; color: var(--foreground); margin: 0 0 16px; }
+.reason-popup .btn-close { font-size: 12px; }
+
+/* ═══════════════ 方向卡片 ═══════════════ */
+.dir-card { border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 10px 12px;
+  cursor: pointer; transition: all var(--transition-ctl); position: relative; }
+.dir-card:hover { border-color: #93C5FD; }
+.dir-card.selected { border-color: var(--primary); background: var(--primary-bg); }
+.dir-card.recommended { border-color: #FCD34D; background: var(--warning-bg); }
+.dir-card.selected.recommended { border-color: #8B5CF6; background: #F5F3FF; }
+.dir-color { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.dir-score { font-size: 10px; padding: 1px 6px; border-radius: 9999px; font-weight: 600; }
+
+/* ═══════════════ 校验项 ═══════════════ */
+.val-item { padding: 8px 12px; border-radius: 4px; margin-bottom: 4px; font-size: 12px; }
+.val-force { border-left: 3px solid var(--danger); background: var(--danger-bg); }
+.val-suggest { border-left: 3px solid var(--warning); background: var(--warning-bg); }
+.val-confirmed { border-left: 3px solid var(--success); background: var(--success-bg); }
+
+/* ═══════════════ 任务项 ═══════════════ */
+.task-item { padding: 8px 12px; border-radius: 4px; margin-bottom: 4px; border-left: 3px solid var(--border); font-size: 12px; }
+.task-high { border-left-color: var(--danger); }
+.task-medium { border-left-color: var(--warning); }
+.task-low { border-left-color: var(--primary); }
+
+/* ═══════════════ 告警条 ═══════════════ */
+.alert-ok { border-left: 3px solid var(--success); background: var(--success-bg); padding: 8px 12px; border-radius: 4px; font-size: 12px; color: var(--success); }
+.alert-warn { border-left: 3px solid var(--warning); background: var(--warning-bg); padding: 8px 12px; border-radius: 4px; font-size: 12px; color: var(--warning); }
+
+/* ═══════════════ 表格 ═══════════════ */
+.tbl-wrapper { overflow-x: auto; border: 1px solid var(--border); border-radius: 0; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 11px; }
+.tbl thead { background: var(--surface); position: sticky; top: 0; }
+.tbl th { padding: 8px 10px; text-align: left; font-weight: 600; color: var(--muted-fg); border-bottom: 1px solid var(--border); font-size: 11px; }
+.tbl td { padding: 7px 10px; border-bottom: 1px solid var(--surface); }
+.tbl tbody tr:hover { background: var(--neutral-bg); }
+
+/* ═══════════════ AI 推荐面板 + 报告 ═══════════════ */
+.ai-panel { background: var(--primary-bg); border-left: 3px solid var(--primary); padding: 10px 14px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; font-size: 12px; color: var(--primary); margin-bottom: 8px; }
+.ai-reasoning { background: #F5F3FF; border-left: 3px solid #8B5CF6; padding: 10px 14px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; font-size: 12px; color: #5B21B6; margin-top: 8px; }
+
+/* ═══════════════ 加载 ═══════════════ */
+.spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .5s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-size: 12px; color: var(--muted-fg); display: flex; align-items: center; gap: 6px; }
+
+/* ═══════════════ 隐藏 + 动画 ═══════════════ */
+.hidden { display: none !important; }
+.fade-in { animation: fi .25s ease-out; }
+@keyframes fi { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+.section-muted { opacity: 0.4; pointer-events: none; }
+
+/* ═══════════════ P3 面板 ═══════════════ */
+.p3-panel {
+  background: linear-gradient(135deg, #EEF2FF 0%, #F5F3FF 100%);
+  border: 1px solid #C7D2FE; border-radius: var(--radius-card); padding: 14px;
+}
+.p3-badge-pill { font-size: 10px; padding: 1px 6px; border-radius: 9999px; font-weight: 600; }
+.p3-conf-high { color: var(--success); }
+.p3-conf-medium { color: var(--warning); }
+.p3-conf-low { color: var(--danger); }
+/* P3 AI 推荐卡片（紫色调） */
+.p3-ai-card {
+  background: linear-gradient(135deg, #F5F3FF 0%, #EDE9FE 100%);
+  border: 1px solid #DDD6FE; border-radius: var(--radius-card); padding: 14px;
+}
+.p3-ai-card .p3-ai-label { font-size: 11px; color: #7C3AED; font-weight: 600; margin-bottom: 6px; }
+/* P3 人工覆盖卡片（白色调） */
+.p3-manual-card {
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: var(--radius-card); padding: 14px; margin-top: 10px;
+}
+.p3-manual-card .p3-manual-label { font-size: 11px; color: var(--muted-fg); font-weight: 600; margin-bottom: 6px; }
+
+/* ═══════════════ 右侧隐藏占位 ═══════════════ */
+.sidebar-hidden { display: none; flex-direction: column; align-items: center; justify-content: center; padding: 60px 20px; text-align: center; color: var(--muted-fg); }
+
+/* ═══════════════ 反馈弹窗 ═══════════════ */
+/* ═══════════════ AI 浮动对话窗口 ═══════════════ */
+.chat-fab {
+  position: fixed; bottom: 28px; right: 28px; z-index: 300;
+  width: 52px; height: 52px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), #1D4ED8);
+  color: #fff; border: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; box-shadow: 0 4px 16px rgba(37,99,235,.35);
+  transition: all 200ms ease; user-select: none;
+}
+.chat-fab:hover { transform: scale(1.08); box-shadow: 0 6px 24px rgba(37,99,235,.45); }
+.chat-fab:active { transform: scale(0.96); }
+.chat-fab .fab-badge {
+  position: absolute; top: -4px; right: -4px;
+  background: var(--danger); color: #fff; font-size: 9px;
+  width: 18px; height: 18px; border-radius: 50%;
+  display: none; align-items: center; justify-content: center;
+  font-weight: 700; border: 2px solid #fff;
+}
+.chat-fab .fab-badge.show { display: flex; }
+
+.chat-panel {
+  position: fixed; bottom: 90px; right: 28px; z-index: 299;
+  width: 380px; max-height: 560px; background: var(--card-bg);
+  border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,.15);
+  border: 1px solid var(--border);
+  display: none; flex-direction: column;
+  animation: chatSlideUp .2s ease-out;
+}
+.chat-panel.open { display: flex; }
+@keyframes chatSlideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+.chat-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  background: var(--primary-bg); border-radius: 12px 12px 0 0;
+}
+.chat-header-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.chat-header-close { background: none; border: none; cursor: pointer; font-size: 16px; color: var(--muted-fg); padding: 2px 6px; border-radius: 4px; }
+.chat-header-close:hover { background: var(--surface); color: var(--foreground); }
+
+.chat-messages {
+  flex: 1; overflow-y: auto; padding: 12px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  min-height: 260px; max-height: 380px;
+}
+.chat-msg {
+  max-width: 85%; padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; line-height: 1.6; word-break: break-word;
+}
+.chat-msg.user {
+  align-self: flex-end; background: var(--primary); color: #fff;
+  border-bottom-right-radius: 2px;
+}
+.chat-msg.assistant {
+  align-self: flex-start; background: var(--surface); color: var(--foreground);
+  border-bottom-left-radius: 2px;
+}
+.chat-msg.assistant.streaming { border-left: 2px solid var(--primary); }
+.chat-msg.assistant.error { background: var(--danger-bg); color: var(--danger); }
+.chat-msg .msg-ts {
+  font-size: 9px; opacity: 0.6; margin-top: 4px; display: block;
+}
+.chat-msg.user .msg-ts { text-align: right; color: rgba(255,255,255,.7); }
+
+/* 聊天消息中的 Markdown 样式 */
+.chat-msg.assistant strong { font-weight: 600; }
+.chat-msg.assistant em { font-style: italic; }
+.chat-msg.assistant ul, .chat-msg.assistant ol { padding-left: 18px; margin: 4px 0; }
+.chat-msg.assistant li { margin-bottom: 2px; }
+.chat-msg.assistant code {
+  background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 3px;
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace; font-size: 12px;
+}
+.chat-msg.assistant pre {
+  background: #1E293B; color: #E2E8F0; padding: 10px 12px; border-radius: 6px;
+  overflow-x: auto; margin: 6px 0; font-size: 12px; line-height: 1.5;
+}
+.chat-msg.assistant pre code { background: none; padding: 0; color: inherit; }
+.chat-msg.assistant p { margin: 4px 0; }
+.chat-msg.assistant h1, .chat-msg.assistant h2, .chat-msg.assistant h3, .chat-msg.assistant h4 {
+  font-size: 13px; font-weight: 600; margin: 6px 0 3px;
+}
+.chat-msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+
+
+.chat-input-area {
+  display: flex; gap: 8px; padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.chat-input-area textarea {
+  flex: 1; border: 1.5px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 13px; font-family: inherit;
+  resize: none; outline: none; min-height: 36px; max-height: 80px;
+  transition: border-color 150ms ease;
+}
+.chat-input-area textarea:focus { border-color: var(--primary); }
+.chat-input-area .chat-send-btn {
+  align-self: flex-end; width: 36px; height: 36px; border-radius: 50%;
+  background: var(--primary); color: #fff; border: none;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 16px; transition: background 150ms;
+}
+.chat-input-area .chat-send-btn:hover { background: #1D4ED8; }
+.chat-input-area .chat-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-input-area .chat-send-btn.loading { animation: chatPulse .8s infinite; }
+@keyframes chatPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.chat-welcome {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 40px 20px; color: var(--muted-fg); text-align: center;
+}
+.chat-welcome .icon { font-size: 32px; margin-bottom: 8px; }
+.chat-welcome .text { font-size: 13px; }
+
+.feedback-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 150ms ease;
+}
+
+.feedback-overlay.hidden { display: none; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.feedback-modal {
+  background: var(--card-bg); border-radius: 12px;
+  width: min(820px, 95vw); max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,.15);
+  padding: 0;
+}
+.feedback-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--card-bg); z-index: 1;
+  border-radius: 12px 12px 0 0;
+}
+.feedback-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.feedback-close { cursor: pointer; font-size: 18px; color: var(--muted-fg); background: none; border: none; padding: 4px 8px; border-radius: 4px; }
+.feedback-close:hover { background: var(--surface); color: var(--foreground); }
+.feedback-body { padding: 16px 20px; }
+.feedback-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.feedback-table th {
+  text-align: left; font-weight: 600; color: var(--muted-fg); font-size: 11px;
+  padding: 8px 6px; border-bottom: 2px solid var(--border); white-space: nowrap;
+}
+.feedback-table td { padding: 8px 6px; border-bottom: 1px solid var(--surface); vertical-align: top; }
+.feedback-table tr:last-child td { border-bottom: none; }
+.feedback-cell-module { font-weight: 600; font-size: 12px; white-space: nowrap; color: var(--foreground); }
+.feedback-cell-value { font-size: 12px; max-width: 140px; word-break: break-word; }
+.feedback-cell-value.empty { color: var(--muted-fg); font-style: italic; }
+.feedback-select { font-size: 12px; padding: 4px 6px; border: 1.5px solid var(--border); border-radius: 4px; background: var(--card-bg); font-family: inherit; cursor: pointer; min-width: 90px; }
+.feedback-select:focus { border-color: var(--primary); outline: none; }
+.feedback-select.hint { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
+.feedback-input { font-size: 12px; padding: 4px 6px; border: 1.5px solid var(--border); border-radius: 4px; background: var(--card-bg); font-family: inherit; width: 100%; box-sizing: border-box; }
+.feedback-input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
+.feedback-input.hint { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
+.feedback-input::placeholder { color: #93C5FD; font-size: 11px; }
+.feedback-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.feedback-success { font-size: 12px; color: var(--success); font-weight: 500; display: flex; align-items: center; gap: 4px; }
+.feedback-err { font-size: 11px; color: var(--danger); }
+.feedback-counter { font-size: 10px; background: var(--primary); color: #fff; border-radius: 9999px; padding: 0 5px; min-width: 16px; text-align: center; line-height: 16px; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-title">广告辅助决策Agent</div>
+  <div class="topbar-status">
+    <span id="statusDot" class="status-dot"></span>
+    <span id="statusText">检测中</span>
+    <button onclick="openFeedback()" id="btnFeedback" class="btn btn-secondary btn-sm" style="margin-left:8px;position:relative">
+      📝 反馈
+      <span id="fbCounter" class="feedback-counter hidden" style="position:absolute;top:-6px;right:-6px">0</span>
+    </button>
+  </div>
+</div>
+
+<div class="app-layout">
+
+  <!-- ═══════════════ 左侧 配置区 (400px) ═══════════════ -->
+  <aside class="sidebar" id="sidebar">
+
+    <!-- ASIN 段 -->
+    <div class="card">
+      <div class="card-title" style="margin-bottom:8px">分析 ASIN</div>
+      <div class="flex gap-2">
+        <input id="asinInput" type="text" placeholder="输入 ASIN" autocomplete="off"
+               class="input flex-1" style="min-width:0">
+        <button onclick="loadAll()" id="btnStart" class="btn btn-primary">
+          加载分析
+        </button>
+      </div>
+      <p id="errGlobal" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
+    </div>
+
+    <!-- 战略层 -->
+    <div class="card" id="cardStrategy">
+      <div class="flex items-center justify-between" style="margin-bottom:8px">
+        <div class="card-title" style="margin-bottom:0">战略层</div>
+        <span id="sec1Done" class="hidden badge badge-green">已保存</span>
+      </div>
+      <div id="strategyContent">
+        <p class="card-desc">加载 ASIN 后显示选项</p>
+      </div>
+      <div id="sec1Loader" class="hidden loading-text" style="margin-top:6px"><span class="spinner"></span>加载中...</div>
+      <button onclick="confirmStrategy()" id="btnStrategy" class="btn btn-primary btn-sm hidden" style="margin-top:8px">保存</button>
+      <p id="errSec1" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
+    </div>
+
+    <!-- 策略层 -->
+    <div class="card" id="cardTactics">
+      <div class="flex items-center justify-between" style="margin-bottom:8px">
+        <div class="card-title" style="margin-bottom:0">策略层</div>
+        <span id="sec2Done" class="hidden badge badge-green">已保存</span>
+      </div>
+      <div id="strategyContext" class="hidden" style="font-size:11px;color:var(--muted-fg);margin-bottom:6px;display:flex;flex-wrap:wrap;gap:4px"></div>
+      <div id="tacticsContent">
+        <p class="card-desc">保存战略层后显示</p>
+      </div>
+      <div id="sec2Loader" class="hidden loading-text" style="margin-top:6px"><span class="spinner"></span>加载中...</div>
+      <div class="flex gap-2" style="margin-top:8px">
+        <button onclick="confirmTactics()" id="btnTactics" class="btn btn-primary btn-sm hidden">保存</button>
+        <button onclick="refreshTacticsRecommendations()" id="btnRefreshRec" class="btn btn-amber btn-sm hidden">AI 重新推荐</button>
+      </div>
+      <span id="tacticsRecLoader" class="hidden loading-text" style="margin-top:4px"><span class="spinner"></span>AI 重新推荐中...</span>
+      <p id="errSec2" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
+    </div>
+
+    <!-- P3 手动覆盖（初始隐藏） -->
+    <div class="card hidden" id="cardP3Override">
+      <div class="card-title" style="margin-bottom:10px">目标 ACOS 与预算推荐</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <!-- 目标 ACOS -->
+        <div>
+          <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">目标 ACOS 推荐</label>
+          <div class="flex items-center gap-2">
+            <input type="number" id="p3AcosLeftInput" min="5" max="100" step="5"
+                   class="input flex-1" style="max-width:100px" placeholder="AI 推荐">
+            <span style="font-size:13px;color:var(--muted-fg)">%</span>
+            <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm">保存</button>
+          </div>
+          <div id="p3AcosLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
+        </div>
+        <!-- 预算 -->
+        <div>
+          <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">每日预算推荐</label>
+          <div class="flex items-center gap-2">
+            <span style="font-size:13px;color:var(--muted-fg)">$</span>
+            <input type="number" id="p3BudgetLeftInput" min="1" step="1"
+                   class="input flex-1" style="max-width:120px" placeholder="AI 推荐">
+            <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm">保存</button>
+
+          </div>
+          <div id="p3BudgetLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ═══════════════ 右侧 洞察输出区 ═══════════════ -->
+  <main class="main-area" id="mainArea">
+    <!-- 初始空状态（ASIN 加载前） -->
+    <div id="mainEmpty" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted-fg);font-size:13px">
+      输入 ASIN 并点击「加载分析」开始
+    </div>
+
+    <!-- 右侧内容区（初始隐藏） -->
+    <div id="mainContent" class="hidden" style="display:none;flex-direction:column;gap:0;flex:1">
+
+      <!-- 药丸标签栏 -->
+      <div class="tab-bar" id="tabBar">
+        <button class="tab-btn tab-disabled" data-tab="tab1" onclick="switchTab('tab1')">广告目的与目标关键词推荐</button>
+        <button class="tab-btn tab-disabled" data-tab="tab2" onclick="switchTab('tab2')">数据监控</button>
+        <button class="tab-btn tab-disabled" data-tab="tab3" onclick="switchTab('tab3')">目标ACOS和预算推荐</button>
+        <button class="tab-btn tab-disabled" data-tab="tab4" onclick="switchTab('tab4')">广告方向推荐</button>
+      </div>
+
+      <!-- Tab1 面板 — 策略推荐 -->
+      <div class="tab-panel" id="panel-tab1">
+        <div class="card">
+          <div class="card-title">广告目的评分</div>
+          <div id="targetScoreCards" class="grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px"></div>
+        </div>
+        <div class="card">
+          <div class="card-title">核心关键词监控 (<span id="tacticsKwCount">0</span>条)</div>
+          <div class="tbl-wrapper" style="max-height:400px;overflow-y:auto">
+            <table class="tbl">
+              <thead><tr>
+                <th>关键词</th><th style="text-align:right">自身坑位</th>
+                <th style="text-align:right">14天变化</th><th>类型</th><th>投放建议</th>
+              </tr></thead>
+              <tbody id="tacticsKwBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab2 面板 — 诊断 -->
+      <div class="tab-panel" id="panel-tab2">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span id="diagRefreshLoader" class="hidden loading-text"><span class="spinner"></span>刷新中...</span>
+          </div>
+          <button onclick="refreshDiagnosis()" id="btnRefreshDiag" class="btn btn-teal btn-sm">⟳ 刷新</button>
+        </div>
+        <div id="diagContext" style="font-size:11px;color:var(--muted-fg);display:flex;flex-wrap:wrap;gap:8px"></div>
+        <div id="alertSignals"></div>
+        <div id="diagMetrics" class="metrics-grid"></div>
+        <div id="diagTrendChart" style="height:200px;min-height:200px"></div>
+        <div id="diagRefreshStatus" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:10px 14px;margin-top:6px"></div>
+      </div>
+
+      <!-- Tab3 面板 — 目标ACOS与预算 -->
+      <div class="tab-panel" id="panel-tab3">
+        <!-- 共享头部 -->
+        <div class="flex items-center justify-between" style="margin-bottom:10px">
+          <div class="flex items-center gap-2">
+            <span class="badge badge-blue" style="font-size:10px">P3</span>
+            <span style="font-size:13px;font-weight:600">AI 智能推荐</span>
+            <span id="p3CacheBadge" class="hidden badge badge-green">缓存</span>
+          </div>
+          <button onclick="refreshP3()" id="btnRefreshP3" class="btn btn-amber btn-sm">⟳ AI 重新推荐</button>
+        </div>
+        <div id="p3Loader" class="hidden loading-text"><span class="spinner"></span>AI 分析中...</div>
+        <!-- 一左一右：ACOS | 预算 -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <!-- 左：目标 ACOS -->
+          <div id="p3AcosColumn"></div>
+          <!-- 右：每日预算 -->
+          <div id="p3BudgetColumn"></div>
+        </div>
+        <!-- 共享推理 + 警告 -->
+        <div id="p3Reasoning" class="hidden ai-reasoning" style="margin-top:10px"></div>
+        <div id="p3Warnings" class="hidden" style="margin-top:8px;font-size:11px;color:var(--warning)"></div>
+      </div>
+
+      <!-- Tab4 面板 — 广告方向 -->
+      <div class="tab-panel" id="panel-tab4">
+        <!-- 上半段：方向卡片 -->
+        <div class="card">
+          <div class="card-title">广告方向推荐</div>
+          <div id="execDirections" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"></div>
+          <div id="aiReasoningExec" class="hidden ai-panel" style="margin-top:8px"></div>
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button onclick="generateReport()" id="btnGenerate" class="btn btn-primary">生成评估报告</button>
+          </div>
+          <p id="errSec4" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
+        </div>
+        <!-- 下半段：校验报告（初始隐藏） -->
+        <div id="reportArea" class="hidden" style="display:flex;flex-direction:column;gap:10px">
+          <div class="card" style="background:var(--primary-bg)">
+            <div class="card-title">AI 综合分析</div>
+            <div id="reportAnalysis" style="font-size:12px"></div>
+          </div>
+          <div id="reportValidations" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"></div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+
+<!-- ═══════════════ 反馈弹窗 ═══════════════ -->
+<div id="feedbackOverlay" class="feedback-overlay hidden" onclick="if(event.target===this)closeFeedback()">
+  <div class="feedback-modal">
+    <div class="feedback-header">
+      <h3>📝 使用反馈</h3>
+      <button class="feedback-close" onclick="closeFeedback()">✕</button>
+    </div>
+    <div class="feedback-body">
+      <table class="feedback-table">
+        <thead><tr>
+          <th>模块</th><th>AI判断</th><th>人的判断</th><th style="min-width:100px">采纳情况 <span style="color:var(--danger)">*</span></th>
+          <th style="min-width:160px">纠错理由</th><th style="min-width:130px">备注/建议</th>
+        </tr></thead>
+        <tbody id="feedbackTbody"></tbody>
+      </table>
+    </div>
+    <div class="feedback-footer">
+      <div>
+        <span id="fbSuccess" class="hidden feedback-success">✅ 感谢反馈，持续优化中，祝工作顺利！</span>
+        <span id="fbError" class="hidden feedback-err"></span>
+      </div>
+      <button onclick="submitFeedback()" id="btnFbSubmit" class="btn btn-primary">提交反馈</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ AI 浮动对话窗口 ═══════════════ -->
+<!-- 浮动按钮 -->
+<button class="chat-fab" id="chatFab" onclick="toggleChat()" title="AI 助手">
+  💬
+  <span class="fab-badge" id="chatFabBadge">1</span>
+</button>
+
+<!-- 对话面板 -->
+<div class="chat-panel" id="chatPanel">
+  <div class="chat-header">
+    <span class="chat-header-title">🤖 AI 广告助手</span>
+    <button class="chat-header-close" onclick="toggleChat()">✕</button>
+  </div>
+  <div class="chat-messages" id="chatMessages">
+    <div class="chat-welcome" id="chatWelcome">
+      <div class="icon">👋</div>
+      <div class="text">你好！我是 AI 广告优化助手。请先输入 ASIN 并加载分析，然后我可以帮你解答广告投放相关问题。<br><br>💡 例如：<br>• 分析当前 ACOS 是否合理<br>• 建议如何优化广告投放策略<br>• 解释数据趋势变化原因<br>• 给出关键词投放建议</div>
+    </div>
+  </div>
+  <div class="chat-input-area">
+    <textarea id="chatInput" rows="1" placeholder="输入问题，按 Enter 发送..." onkeydown="onChatKeydown(event)"></textarea>
+    <button class="chat-send-btn" id="chatSendBtn" onclick="sendChatMessage()" title="发送">➤</button>
+  </div>
+</div>
+
+<script>
+// ═══════════════ 全局变量 ═══════════════
+const API = window.location.origin + '/api/v1/agent/ad-direction';
+let asin = '';
+let sec1Confirmed = false;
+let sec2Confirmed = false;
+let diagnosisLoaded = false;
+const tabState = { tab1: false, tab2: false, tab3: false, tab4: false };
+let activeTab = null;
+window._p3data = null;
+const SESSION_START = new Date().toISOString();
+
+// ═══════════════ AI 对话功能 ═══════════════
+let _chatAbortController = null;
+
+function toggleChat() {
+  const panel = $('chatPanel');
+  const isOpen = panel.classList.contains('open');
+  if (isOpen) {
+    panel.classList.remove('open');
+    hide('chatFabBadge');
+  } else {
+    panel.classList.add('open');
+    // 自动聚焦输入
+    setTimeout(() => { $('chatInput').focus(); }, 200);
+  }
+}
+
+function renderMsg(role, content) {
+  if (role === 'user') return escapeHtml(content);
+  return marked.parse(content, { breaks: true });
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function addChatMessage(role, content) {
+  const container = $('chatMessages');
+  // 移除欢迎语
+  const welcome = $('chatWelcome');
+  if (welcome) welcome.remove();
+
+  const div = document.createElement('div');
+  div.className = `chat-msg ${role}`;
+  div.innerHTML = renderMsg(role, content);
+  const ts = document.createElement('span');
+  ts.className = 'msg-ts';
+  ts.textContent = new Date().toLocaleTimeString();
+  div.appendChild(ts);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+
+function showChatStreamingIndicator() {
+  const container = $('chatMessages');
+  const welcome = $('chatWelcome');
+  if (welcome) welcome.remove();
+
+  const div = document.createElement('div');
+  div.className = 'chat-msg assistant streaming';
+  div.id = 'chatStreamingMsg';
+  const ts = document.createElement('span');
+  ts.className = 'msg-ts';
+  ts.textContent = new Date().toLocaleTimeString();
+  div.appendChild(ts);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function onChatKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+}
+
+async function sendChatMessage() {
+  const input = $('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  // 检查 ASIN 是否已加载
+  if (!asin) {
+    addChatMessage('assistant error', '⚠️ 请先在左侧输入 ASIN 并点击「加载分析」，然后才能进行对话。');
+    return;
+  }
+
+  // 添加用户消息
+  addChatMessage('user', text);
+  input.value = '';
+  input.style.height = 'auto';
+
+  // 显示流式加载
+  const sendBtn = $('chatSendBtn');
+  sendBtn.disabled = true;
+  sendBtn.classList.add('loading');
+  sendBtn.textContent = '⋯';
+
+  // 中止之前的请求（如果有）
+  if (_chatAbortController) {
+    _chatAbortController.abort();
+  }
+  _chatAbortController = new AbortController();
+
+  // 创建流式消息占位
+  const streamingEl = showChatStreamingIndicator();
+  let fullContent = '';
+
+  try {
+    // 构建 context（从当前页面数据中提取）
+    const context = { asin };
+    if (window._p3data) {
+      const ta = window._p3data.target_acos;
+      const bb = window._p3data.budget_bid;
+      if (ta) context.target_acos = ta;
+      if (bb) context.budget_bid = bb;
+    }
+
+    const resp = await fetch(`${API}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ asin, message: text, context }),
+      signal: _chatAbortController.signal,
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '未知错误');
+      throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (!payload) continue;
+        try {
+          const data = JSON.parse(payload);
+          if (data.done) {
+            // 流结束
+            streamingEl.classList.remove('streaming');
+            streamingEl.id = '';
+            // 用 Markdown 渲染完整内容
+            streamingEl.innerHTML = renderMsg('assistant', fullContent);
+            // 重新添加时间戳
+            const ts2 = document.createElement('span');
+            ts2.className = 'msg-ts';
+            ts2.textContent = new Date().toLocaleTimeString();
+            streamingEl.appendChild(ts2);
+          } else if (data.token) {
+            fullContent += data.token;
+            // 流式渲染：用 innerHTML 实时渲染 Markdown
+            streamingEl.innerHTML = renderMsg('assistant', fullContent);
+          } else if (data.error) {
+
+            throw new Error(data.error);
+          }
+        } catch (e) {
+          if (e.message !== 'AbortError') {
+            console.warn('SSE parse error:', e);
+          }
+        }
+      }
+      $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      // 被中止，忽略
+      return;
+    }
+    streamingEl.classList.remove('streaming');
+    streamingEl.classList.add('error');
+    streamingEl.textContent = `❌ 请求出错: ${e.message}`;
+    const ts3 = document.createElement('span');
+    ts3.className = 'msg-ts';
+    ts3.textContent = new Date().toLocaleTimeString();
+    streamingEl.appendChild(ts3);
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.classList.remove('loading');
+    sendBtn.textContent = '➤';
+    _chatAbortController = null;
+  }
+}
+
+
+// ═══════════════ 反馈数据追踪 ═══════════════
+// 各模块状态：{ ai_judgment, human_judgment, adoption, correction_reason, notes }
+window._feedbackModules = {
+  ad_purpose:     { module: '广告目的推荐',      ai_judgment: null, human_judgment: null },
+  keyword_type:   { module: '目标关键词推荐',    ai_judgment: null, human_judgment: null },
+  target_acos:    { module: '目标ACOS推荐',      ai_judgment: null, human_judgment: null },
+  daily_budget:   { module: '每日预算推荐',      ai_judgment: null, human_judgment: null },
+  ad_direction:   { module: '广告方向推荐',      ai_judgment: null, human_judgment: null },
+};
+
+function _fbUpdateCounter() {
+  const cnt = Object.values(window._feedbackModules).filter(m => m.ai_judgment != null).length;
+  const el = $('fbCounter');
+  if (cnt > 0) { el.textContent = cnt; show('fbCounter'); }
+  else hide('fbCounter');
+}
+
+// ── 各模块数据捕获函数，由各层的确认/保存按钮调用 ──
+
+function fbCaptureTactics(aiPurposes, aiKwTypes, humanPurposes, humanKwTypes) {
+  window._feedbackModules.ad_purpose.ai_judgment = aiPurposes.length > 0 ? [...aiPurposes] : null;
+  window._feedbackModules.ad_purpose.human_judgment = humanPurposes.length > 0 ? [...humanPurposes] : null;
+  window._feedbackModules.keyword_type.ai_judgment = aiKwTypes.length > 0 ? [...aiKwTypes] : null;
+  window._feedbackModules.keyword_type.human_judgment = humanKwTypes.length > 0 ? [...humanKwTypes] : null;
+  _fbUpdateCounter();
+}
+
+function fbCaptureP3Acos(aiVal, humanVal) {
+  window._feedbackModules.target_acos.ai_judgment = aiVal != null ? `${aiVal}%` : null;
+  window._feedbackModules.target_acos.human_judgment = humanVal != null ? `${humanVal}%` : '未手动设定';
+  _fbUpdateCounter();
+}
+
+function fbCaptureP3Budget(aiVal, humanVal) {
+  window._feedbackModules.daily_budget.ai_judgment = aiVal != null ? `$${Math.round(aiVal)}` : null;
+  window._feedbackModules.daily_budget.human_judgment = humanVal != null ? `$${humanVal}` : '未手动设定';
+  _fbUpdateCounter();
+}
+
+function fbCaptureExecution(aiDirs, humanDirs) {
+  window._feedbackModules.ad_direction.ai_judgment = aiDirs.length > 0 ? [...aiDirs] : null;
+  window._feedbackModules.ad_direction.human_judgment = humanDirs.length > 0 ? [...humanDirs] : null;
+  _fbUpdateCounter();
+}
+
+// ═══════════════ Markdown 配置 ═══════════════
+marked.setOptions({ breaks: true, gfm: true });
+
+// ═══════════════ 工具函数 ═══════════════
+function $(id) { return document.getElementById(id); }
+
+function qs(s) { return document.querySelector(s); }
+function qsa(s) { return document.querySelectorAll(s); }
+function setHTML(id, h) { const el = $(id); if (el) el.innerHTML = h; }
+function show(id) { const el = $(id); if (el) el.classList.remove('hidden'); }
+function hide(id) { const el = $(id); if (el) el.classList.add('hidden'); }
+function err(id, msg) { const e = $(id); e.textContent = msg; e.classList.remove('hidden'); }
+
+// ═══════════════ API 调用 ═══════════════
+async function callAPI(path, body, timeout = 90, method = 'POST') {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout*1000);
+  try {
+    const opts = { method, headers:{'Content-Type':'application/json'}, signal:ctrl.signal };
+    if (body != null) opts.body = JSON.stringify(body);
+    const r = await fetch(`${API}${path}`, opts);
+    if (!r.ok) { const txt = await r.text(); throw new Error(`HTTP ${r.status}: ${txt.slice(0,200)}`); }
+    return await r.json();
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`请求超时(${timeout}秒)`);
+    throw e;
+  } finally { clearTimeout(t); }
+}
+
+// ═══════════════ 服务检测 ═══════════════
+(async function(){
+  try {
+    const r = await fetch(window.location.origin + '/health', { signal:AbortSignal.timeout(3000) });
+    if (r.ok) { $('statusDot').classList.add('online'); $('statusText').textContent = '在线'; }
+  } catch {}
+})();
+
+// ═══════════════ Tab 管理 ═══════════════
+function setTabEnabled(tabId, enabled) {
+  tabState[tabId] = enabled;
+  const btn = qs(`[data-tab="${tabId}"]`);
+  if (enabled) btn.classList.remove('tab-disabled');
+  else btn.classList.add('tab-disabled');
+}
+
+function switchTab(tabId) {
+  if (!tabState[tabId]) return;
+  // hide all panels
+  qsa('.tab-panel').forEach(p => p.classList.remove('active'));
+  // show target
+  $('panel-'+tabId).classList.add('active');
+  // update tab bar
+  qsa('.tab-btn').forEach(b => b.classList.remove('tab-active'));
+  qs(`[data-tab="${tabId}"]`).classList.add('tab-active');
+  activeTab = tabId;
+  // resize ECharts when switching to Tab2 (chart persists across tab switches)
+  if (tabId === 'tab2') {
+    const dom = $('diagTrendChart');
+    if (dom && dom._echart) dom._echart.resize();
+  }
+}
+
+function showMainContent() {
+  hide('mainEmpty');
+  const mc = $('mainContent');
+  mc.style.display = 'flex';
+  mc.classList.remove('hidden');
+}
+
+// ═══════════════ 主加载 ═══════════════
+async function loadAll() {
+  asin = $('asinInput').value.trim();
+  if (!asin) { err('errGlobal', '请输入 ASIN'); return; }
+  hide('errGlobal');
+  const startBtn = $('btnStart');
+  startBtn.disabled = true;
+  startBtn.textContent = '⏳ 加载中...';
+
+
+  // 重置状态
+  sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
+  ['tab1','tab2','tab3','tab4'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
+  activeTab = null;
+  qsa('.tab-btn').forEach(b => b.classList.remove('tab-active'));
+  qsa('.tab-panel').forEach(p => p.classList.remove('active'));
+
+  hide('sec1Done'); hide('sec2Done'); hide('cardP3Override');
+  hide('btnStrategy'); hide('btnTactics'); hide('btnRefreshRec');
+  hide('reportArea');
+  setHTML('execDirections', '');
+  setHTML('diagMetrics', '');
+  setHTML('alertSignals', '');
+  setHTML('diagTrendChart', '');
+  setHTML('diagRefreshStatus', '');
+  hide('diagRefreshStatus');
+  setHTML('p3AcosColumn', ''); setHTML('p3BudgetColumn', '');
+  hide('p3Reasoning'); hide('p3Warnings'); hide('p3CacheBadge');
+  setHTML('targetScoreCards', '');
+  setHTML('tacticsKwBody', '');
+  $('tacticsKwCount').textContent = '0';
+  hide('aiReasoningExec');
+
+  // 初始：右侧隐藏
+  const mc = $('mainContent');
+  mc.style.display = 'none';
+  mc.classList.add('hidden');
+  show('mainEmpty');
+  $('mainEmpty').textContent = '加载中...';
+
+  try {
+    await Promise.all([loadStrategy(), loadTactics()]);
+  } catch (e) {
+    err('errGlobal', e.message);
+  } finally {
+    startBtn.disabled = false;
+    startBtn.textContent = '加载分析';
+  }
+
+}
+
+// ═══════════════ 战略层 ═══════════════
+async function loadStrategy() {
+  show('sec1Loader');
+  setHTML('strategyContent', '');
+  const data = await callAPI('/strategy/options', { asin });
+
+  if (!data.data_ok) {
+    hide('sec1Loader');
+    const is404 = data.missing_fields && data.missing_fields.includes('asin_not_found');
+    err('errGlobal', is404 ? `ASIN "${asin}" 不存在于数据源中` : `ASIN "${asin}" 数据不完整`);
+    $('btnStart').disabled = false;
+    return;
+  }
+  hide('errGlobal');
+
+  const prefilled = data.current_selection && data.current_selection.product_level;
+  if (prefilled) { show('sec1Done'); sec1Confirmed = true; }
+
+  let html = `<div style="display:flex;gap:10px">`;
+  data.dimensions.forEach(dim => {
+    const selVal = prefilled ? data.current_selection[dim.id] : null;
+    html += `<div class="dd-wrapper"><label class="dd-label">${dim.label}</label>
+      <div style="position:relative"><button type="button" class="dd-btn" data-dim="${dim.id}" onclick="toggleDropdown(this)">
+        <span class="dd-text ${selVal?'selected':''}">${selVal || '请选择'}</span><span class="dd-arrow">▾</span>
+      </button><div class="dd-panel hidden">`;
+    dim.options.forEach(opt => {
+      const sel = selVal === opt.id ? ' selected' : '';
+      html += `<div class="dd-option${sel}" data-value="${opt.id}" data-dim="${dim.id}" onclick="selectDropdown(this)">
+        <div class="dd-opt-label">${opt.label}</div>
+        <div class="dd-opt-desc">${opt.description||''}</div>
+      </div>`;
+    });
+    html += '</div></div></div>';
+  });
+  html += '</div>';
+  setHTML('strategyContent', html);
+  show('btnStrategy');
+  hide('sec1Loader');
+}
+
+let _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
+let _lastExecAiDirs = [];
+
+async function confirmStrategy() {
+  const btn = $('btnStrategy');
+  const g = dim => {
+    const txt = qs(`.dd-btn[data-dim="${dim}"] .dd-text`);
+    return txt && txt.textContent !== '请选择' ? txt.textContent : null;
+  };
+  const p = g('product_level'), ps = g('product_stage'), ss = g('season_stage');
+  if (!p || !ps || !ss) { err('errSec1', '请完整选择三个维度'); return; }
+  hide('errSec1');
+  btn.disabled = true; btn.textContent = '⏳ 保存中...';
+  try {
+    const res = await callAPI('/strategy/confirm', { asin, product_level:p, product_stage:ps, season_stage:ss });
+    if (!res.accepted) {
+      err('errSec1', 'ASIN 不存在于数据源，请检查后重试');
+      btn.disabled = false; btn.textContent = '保存';
+      return;
+    }
+    show('sec1Done'); sec1Confirmed = true;
+    refreshStrategyContext();
+    await loadTactics();
+    setTabEnabled('tab1', true);
+    showMainContent();
+    switchTab('tab1');
+    if (sec2Confirmed) {
+      enableTabsForReturnVisit();
+    }
+    btn.disabled = false; btn.textContent = '保存';
+  } catch (e) {
+    err('errSec1', e.message);
+    btn.disabled = false; btn.textContent = '保存';
+  }
+}
+
+
+function refreshStrategyContext() {
+  const labels = ['product_level','product_stage','season_stage'].map(dim => {
+    const btn = qs(`.dd-btn[data-dim="${dim}"]`);
+    const txt = btn?.querySelector('.dd-text');
+    return txt && txt.textContent !== '请选择' ? txt.textContent : null;
+  });
+  if (labels.some(Boolean)) {
+    const ctx = $('strategyContext');
+    ctx.innerHTML = labels.filter(Boolean).map(l => `<span class="badge badge-gray">${l}</span>`).join('');
+    show('strategyContext');
+  }
+}
+
+// ═══════════════ 策略层 ═══════════════
+async function loadTactics() {
+  show('sec2Loader');
+  hide('btnTactics'); hide('btnRefreshRec');
+  const data = await callAPI('/tactics/options', { asin });
+
+  // 缓存 AI 推荐值供反馈使用
+  _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
+  if (data.dimensions) {
+    data.dimensions.forEach(dim => {
+      if (dim.id === 'ad_purposes') _lastTacticsAiRec.ad_purposes = dim.recommendations || [];
+      if (dim.id === 'keyword_types') _lastTacticsAiRec.keyword_types = dim.recommendations || [];
+    });
+  }
+
+  // 回填 strategy_context
+  if (data.strategy_context) {
+    const s = data.strategy_context;
+    setHTML('strategyContext', ['product_level','product_stage','season_stage'].map(k => s[k] ? `<span class="badge badge-gray">${s[k]}</span>` : '').join(''));
+    show('strategyContext');
+  }
+
+  const prefilled = data.current_selection && data.current_selection.ad_purposes;
+  if (prefilled) { show('sec2Done'); sec2Confirmed = true; }
+
+  // 评分卡片 — 首次加载用 renderTargetScores
+  const scores = data.target_scores || [];
+  if (scores.length > 0) renderTargetScores(scores); else setHTML('targetScoreCards', '');
+
+  // 策略层多选下拉框
+  let html = `<div style="display:flex;gap:10px">`;
+  data.dimensions.forEach(dim => {
+    const recs = dim.recommendations || [];
+    const selVals = prefilled ? (data.current_selection[dim.id]||[]) : [];
+    html += `<div class="tactics-dropdown" style="flex:1;min-width:0"><label class="dd-label">${dim.label} <span style="font-weight:400;color:var(--muted-fg)">多选</span></label>
+      <div style="position:relative"><button type="button" class="md-btn" data-dim="${dim.id}" onclick="toggleMultiDropdown(this)">
+        <span class="md-tags" id="mtags_${dim.id}"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
+      </button><div class="md-panel hidden">`;
+    dim.options.forEach(opt => {
+      const isRec = recs.includes(opt.id);
+      const ck = selVals.includes(opt.id) ? 'checked' : '';
+      html += `<label class="md-option"><input type="checkbox" value="${opt.id}" data-dim="${dim.id}" ${ck} onchange="updateMultiTags('${dim.id}')">
+        <div class="md-opt-text"><div class="md-opt-label">${opt.label}${isRec?' <span class="md-check-rec">AI推荐</span>':''}</div>
+        <div class="md-opt-desc">${opt.description||''}</div></div></label>`;
+    });
+    html += '</div></div></div>';
+  });
+  html += '</div>';
+  setHTML('tacticsContent', html);
+  data.dimensions.forEach(dim => updateMultiTags(dim.id));
+  show('btnTactics'); show('btnRefreshRec');
+
+  // 关键词监控表 — 首次加载用 renderKeywordTable
+  const kws = data.keyword_analysis || [];
+  if (kws.length > 0) {
+    renderKeywordTable(kws);
+  } else {
+    setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">AI 分析中，保存策略后显示关键词分类</td></tr>');
+    $('tacticsKwCount').textContent = '0';
+  }
+
+  hide('sec2Loader');
+
+  // 回访：有缓存 → 解锁 Tab2/3/4
+  if (prefilled && sec1Confirmed) {
+    sec2Confirmed = true;
+    enableTabsForReturnVisit();
+  }
+}
+
+async function confirmTactics() {
+  const btn = $('btnTactics');
+  const g = dim => Array.from(qsa(`input[data-dim="${dim}"]:checked`)).map(cb => cb.value);
+  const ap = g('ad_purposes'), kt = g('keyword_types');
+  if (ap.length===0 || kt.length===0) { err('errSec2', '请至少选择一项'); return; }
+  hide('errSec2');
+  btn.disabled = true; btn.textContent = '⏳ 保存中...';
+  try {
+    const res = await callAPI('/tactics/confirm', { asin, ad_purposes:ap, keyword_types:kt });
+    if (!res.accepted) { err('errSec2', '保存失败'); btn.disabled = false; btn.textContent = '保存'; return; }
+    show('sec2Done'); sec2Confirmed = true;
+    btn.disabled = false; btn.textContent = '保存';
+  } catch (e) {
+    err('errSec2', e.message);
+    btn.disabled = false; btn.textContent = '保存';
+    return;
+  }
+
+  // 反馈数据捕获
+
+  fbCaptureTactics(_lastTacticsAiRec.ad_purposes, _lastTacticsAiRec.keyword_types, ap, kt);
+
+  // 解锁 Tab2(诊断) + Tab3(ACOS)
+  setTabEnabled('tab2', true);
+  setTabEnabled('tab3', true);
+
+  // 显示左侧 P3 输入区
+  show('cardP3Override');
+
+  // 触发级联加载
+  loadP3Rec();
+  loadDiagnosis();
+  loadExecution();
+}
+
+async function refreshTacticsRecommendations() {
+  show('tacticsRecLoader');
+  try {
+    const data = await callAPI('/tactics/recommend', { asin });
+    data.dimensions.forEach(dim => {
+      const recs = dim.recommendations || [];
+      qsa(`input[data-dim="${dim.id}"]`).forEach(cb => {
+        const labelEl = cb.closest('.md-option');
+        if (!labelEl) return;
+        const isRec = recs.includes(cb.value);
+        const labelSpan = labelEl.querySelector('.md-opt-label');
+        const existingBadge = labelSpan?.querySelector('.md-check-rec');
+        if (isRec) {
+          if (!existingBadge && labelSpan) {
+            const b = document.createElement('span');
+            b.className = 'md-check-rec'; b.textContent = 'AI推荐';
+            labelSpan.appendChild(b);
+          }
+        } else {
+          if (existingBadge) existingBadge.remove();
+        }
+      });
+    });
+    // 刷新评分卡片
+    const scores = data.target_scores || [];
+    if (scores.length > 0) { renderTargetScores(scores); }
+    // 刷新关键词监控表
+    const kws = data.keyword_analysis || [];
+    if (kws.length > 0) { renderKeywordTable(kws); }
+  } catch (e) { console.warn('AI 重新推荐失败:', e.message); }
+  hide('tacticsRecLoader');
+}
+
+function renderTargetScores(scores) {
+  const targetMap = {Traffic:'引流型',Conversion:'转化型',Ranking:'排名型',Profit:'盈利型',Clearance:'清货型'};
+  let html = '';
+  scores.forEach(s => {
+    const sc = s.score || 0;
+    const barW = Math.min(sc, 100);
+    const level = sc >= 70 ? 'high' : sc >= 50 ? 'medium' : 'low';
+    const tag = sc >= 70 ? '推荐' : sc >= 50 ? '可选' : '不推荐';
+    const tagCls = sc >= 70 ? 'badge-green' : sc >= 50 ? 'badge-blue' : 'badge-gray';
+    const cardCls = sc >= 70 ? 'recommend' : sc >= 50 ? 'optional' : '';
+    html += `<div class="score-card ${cardCls}">
+      <div class="score-header"><span class="score-title">${targetMap[s.target]||s.target}</span><span class="badge ${tagCls} score-badge">${tag}</span></div>
+      <div class="score-bar"><div class="score-bar-fill ${level}" style="width:${barW}%"></div></div>
+      <div class="score-meta"><span class="score-reason" data-reason="${encodeURIComponent(s.reason||'暂无')}" data-title="${encodeURIComponent(targetMap[s.target]||s.target)}" onclick="showReasonPopup(this)" title="点击展开完整理由">${s.reason||'暂无'}</span><span class="score-value">${sc}分</span></div>
+    </div>`;
+  });
+  setHTML('targetScoreCards', html);
+}
+
+function renderKeywordTable(kws) {
+  $('tacticsKwCount').textContent = kws.length;
+  const stColorMap = {'Broad':'badge-red','Long-tail':'badge-green','Competitor':'badge-amber','Brand':'badge-blue','Custom':'badge-blue'};
+  const stCnMap = {'Broad':'大词','Long-tail':'长尾词','Competitor':'竞品词','Brand':'品牌词','Custom':'自定义词'};
+  let html = '';
+  kws.forEach(kw => {
+    const rank = kw.rank != null ? `第 ${kw.rank} 位` : (kw.near_rank != null ? '<span style="color:var(--danger);font-weight:700">已掉榜</span>' : '<span style="color:var(--warning);font-weight:700">未入榜</span>');
+    const chg = kw.rank_change_14d || kw.rank_change || 0;
+    let chgHtml = kw.rank == null ? '<span style="color:var(--muted-fg)">—</span>'
+      : chg >= 5 ? `<span style="color:var(--success);font-weight:700">↑${chg} 快速上升</span>`
+      : chg >= 1 ? `<span style="color:var(--success);font-weight:500">↑${chg} 缓慢上升</span>`
+      : chg <= -5 ? `<span style="color:var(--danger);font-weight:700">↓${Math.abs(chg)} 快速下滑</span>`
+      : chg <= -1 ? `<span style="color:var(--danger);font-weight:500">↓${Math.abs(chg)} 轻微下滑</span>`
+      : '<span style="color:var(--muted-fg)">— 持平</span>';
+    const st = kw.strategy_type || '';
+    const stBadge = st ? `<span class="badge ${stColorMap[st]||'badge-gray'}">${st} ${stCnMap[st]||''}</span>` : '<span style="color:var(--muted-fg)">—</span>';
+    html += `<tr><td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${kw.word||kw.keyword||'?'}</td><td style="text-align:right;font-size:12px;font-weight:600">${rank}</td><td style="text-align:right;font-size:11px">${chgHtml}</td><td>${stBadge}</td><td style="font-size:11px;color:var(--muted-fg);max-width:160px">${renderExpandableAction(kw.action||'暂无建议')}</td></tr>`;
+  });
+  setHTML('tacticsKwBody', html);
+}
+
+// ═══════════════ 回访模式：一次性解锁全部 Tab ═══════════════
+function enableTabsForReturnVisit() {
+  setTabEnabled('tab1', true);
+  setTabEnabled('tab2', true);
+  setTabEnabled('tab3', true);
+  setTabEnabled('tab4', true);
+  show('cardP3Override');
+  showMainContent();
+  switchTab('tab1');
+  loadDiagnosis();
+  loadP3Rec();
+  loadExecution();
+}
+
+// ═══════════════ 诊断层 → Tab2 ═══════════════
+async function loadDiagnosis(refresh = false) {
+  if (refresh) show('diagRefreshLoader');
+  const data = await callAPI('/diagnosis', { asin, refresh });
+  renderDiagnosis(data);
+  diagnosisLoaded = true;
+  setTabEnabled('tab4', true);
+  if (refresh) hide('diagRefreshLoader');
+}
+
+function renderDiagnosis(data) {
+  // 上下文
+  if (data.strategy_context) {
+    const s = data.strategy_context;
+    const acts = data.tactics_context || {};
+    let ctx = [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => `<span class="badge badge-gray">${v}</span>`).join('');
+    if (acts.ad_purposes) {
+      const ap = Array.isArray(acts.ad_purposes) ? acts.ad_purposes.join(', ') : acts.ad_purposes;
+      ctx += `<span class="badge badge-blue">${ap}</span>`;
+    }
+    setHTML('diagContext', ctx);
+  }
+
+  // 告警
+  let ah = '';
+  (data.alert_signals||[]).forEach(a => {
+    const ok = a.includes('无异常');
+    ah += `<div class="${ok?'alert-ok':'alert-warn'}" style="margin-bottom:4px">${ok?'✓':'!'} ${a}</div>`;
+  });
+  setHTML('alertSignals', ah);
+
+  // 北极星指标卡片
+  const m = data.metric_board;
+  let metricsHtml = '';
+  if (m && m.metrics) {
+    m.metrics.forEach(mt => {
+      const v = mt.value != null ? mt.value : '-';
+      const u = mt.unit || '';
+      metricsHtml += `<div class="metric-card">
+        <div class="metric-label">${mt.label}</div>
+        <div class="metric-value ${mt.status}">${v}<span class="metric-unit">${u}</span></div>
+      </div>`;
+    });
+    $('diagMetrics').style.display = 'grid';
+    $('diagMetrics').style.gridTemplateColumns = `repeat(${Math.min(m.metrics.length, 4)}, 1fr)`;
+  } else {
+    const s = data.data_summary || {};
+    metricsHtml = [
+      ['关键词', s.keyword_count, '个'], ['ACOS', s.acos!=null ? s.acos+'%' : '-'],
+      ['CPC', s.cpc!=null ? '$'+s.cpc : '-'], ['CVR', s.cvr!=null ? s.cvr+'%' : '-'],
+      ['花费', s.spend!=null ? '$'+s.spend : '-'], ['库存', s.inventory_days!=null ? s.inventory_days+'天' : '-'],
+    ].map(([l,v,u]) => `<div class="metric-card"><div class="metric-label">${l}</div><div class="metric-value neutral">${v}<span class="metric-unit">${u||''}</span></div></div>`).join('');
+    $('diagMetrics').style.gridTemplateColumns = 'repeat(3, 1fr)';
+  }
+  setHTML('diagMetrics', metricsHtml);
+
+  // 趋势图
+  const trend = data.trend_data || [];
+  const chartDom = $('diagTrendChart');
+  if (trend.length > 0 && typeof echarts !== 'undefined') {
+    // 先 dispose 旧实例
+    if (chartDom._echart) { chartDom._echart.dispose(); chartDom._echart = null; }
+    const chart = echarts.init(chartDom);
+    chartDom._echart = chart;
+    const dates = trend.map(t => t.date);
+    const acosData = trend.map(t => t.acos != null ? parseFloat(t.acos) : null);
+    const cvrData = trend.map(t => t.cvr != null ? parseFloat(t.cvr) : null);
+    chart.setOption({
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['ACOS','CVR'], textStyle: { fontSize: 11 } },
+      grid: { left: 45, right: 45, top: 30, bottom: 25 },
+      xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+      yAxis: [
+        { type: 'value', name: '%', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#E2E8F0' } } },
+        { type: 'value', name: '%', axisLabel: { fontSize: 10 } }
+      ],
+      series: [
+        { name: 'ACOS', type: 'line', data: acosData, smooth: true, symbol: 'circle', symbolSize: 4,
+          lineStyle: { color: '#F97316', width: 1.5 }, itemStyle: { color: '#F97316' } },
+        { name: 'CVR', type: 'line', yAxisIndex: 1, data: cvrData, smooth: true, symbol: 'circle', symbolSize: 4,
+          lineStyle: { color: '#3B82F6', width: 1.5 }, itemStyle: { color: '#3B82F6' } }
+      ]
+    }, true);
+  } else if (trend.length === 0) {
+    setHTML('diagTrendChart', '<div style="text-align:center;padding:40px;color:var(--muted-fg);font-size:12px">趋势数据不足</div>');
+  }
+}
+
+async function refreshDiagnosis() {
+  setHTML('diagMetrics', '');
+  setHTML('alertSignals', '');
+  const cd = $('diagTrendChart');
+  if (cd && cd._echart) { cd._echart.dispose(); cd._echart = null; }
+  setHTML('diagTrendChart', '');
+  show('diagRefreshStatus');
+  const status = $('diagRefreshStatus');
+  status.textContent = '正在清除服务器缓存...';
+  status.style.cssText = 'color:var(--primary);background:var(--primary-bg);border:1px solid #BFDBFE;border-radius:var(--radius-ctl);padding:10px 14px';
+  try {
+    const data = await callAPI('/diagnosis', { asin, refresh: true });
+    status.textContent = '数据已返回，正在渲染...';
+    renderDiagnosis(data);
+    status.textContent = `✓ 缓存已清除，已从数据库获取最新数据 — ${new Date().toLocaleTimeString()}`;
+    status.style.cssText = 'color:var(--success);background:var(--success-bg);border:1px solid #A7F3D0;border-radius:var(--radius-ctl);padding:10px 14px';
+  } catch (e) {
+    status.textContent = `✗ 刷新失败: ${e.message}`;
+    status.style.cssText = 'color:var(--danger);background:var(--danger-bg);border:1px solid #FECACA;border-radius:var(--radius-ctl);padding:10px 14px';
+  }
+}
+
+// ═══════════════ P3 → Tab3 ═══════════════
+async function loadP3Rec() {
+  try {
+    const data = await callAPI('/execution/recommend', { asin, refresh: false });
+    window._p3data = data;
+    autoFillLeftInputs(data);
+    renderP3(data);
+    // 反馈：捕获 AI P3 推荐值
+    const ta = data.target_acos, bb = data.budget_bid;
+    if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
+    if (bb) fbCaptureP3Budget(bb.suggested, bb.manual_override ? $('p3BudgetLeftInput').value || null : null);
+  } catch(e) {
+    $('p3AcosColumn').innerHTML = `<span style="color:var(--danger);font-size:12px">加载失败</span>`;
+    $('p3BudgetColumn').innerHTML = `<span style="color:var(--danger);font-size:12px">${e.message}</span>`;
+  }
+}
+
+async function refreshP3() {
+  show('p3Loader');
+  $('btnRefreshP3').disabled = true;
+  try {
+    const data = await callAPI('/execution/recommend', { asin, refresh: true });
+    window._p3data = data;
+    autoFillLeftInputs(data);
+    renderP3(data);
+    const ta = data.target_acos, bb = data.budget_bid;
+    if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
+    if (bb) fbCaptureP3Budget(bb.suggested, bb.manual_override ? $('p3BudgetLeftInput').value || null : null);
+  } catch(e) {
+    $('p3AcosColumn').innerHTML = `<span style="color:var(--danger);font-size:12px">推荐失败</span>`;
+    $('p3BudgetColumn').innerHTML = `<span style="color:var(--danger);font-size:12px">${e.message}</span>`;
+  }
+  hide('p3Loader');
+  $('btnRefreshP3').disabled = false;
+}
+
+function renderP3(data) {
+  const ta = data.target_acos, bb = data.budget_bid;
+  const fc = data.from_cache;
+  if (fc) show('p3CacheBadge'); else hide('p3CacheBadge');
+
+  const taManual = ta && ta.manual_override;
+  const bbManual = bb && bb.manual_override;
+
+  // ── 左列：目标 ACOS（单个卡片，根据 override 切换颜色） ──
+  const acosCardCls = taManual ? '' : 'p3-ai-card';
+  const acosCardStyle = taManual ? 'background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-card);padding:14px' : '';
+  let acosHtml = `<div class="${acosCardCls}" style="${acosCardStyle}">
+    <div style="font-size:11px;font-weight:600;color:${taManual?'var(--muted-fg)':'#7C3AED'};margin-bottom:8px">
+      ${taManual ? '当前使用' : 'AI 推荐'} ${taManual ? '<span class="badge badge-amber" style="font-size:9px;margin-left:4px">手动覆盖</span>' : ''}
+    </div>`;
+  if (taManual) {
+    // 人工值（大字）+ AI 建议（小字灰色）
+    acosHtml += `<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <span style="font-size:28px;font-weight:700">${$('p3AcosLeftInput').value || ta.recommended_target}%</span>
+      <span style="font-size:13px;color:var(--muted-fg)">AI建议 <span style="font-weight:500;color:var(--muted-fg)">${ta.recommended_target != null ? ta.recommended_target+'%' : '—'}</span></span>
+    </div>
+    <button onclick="clearP3Acos()" class="btn btn-danger-ghost" style="margin-top:8px">✕ 取消覆盖</button>`;
+  } else {
+    // AI 推荐值（大字）
+    acosHtml += `<div style="display:flex;align-items:baseline;gap:6px">
+      <span style="font-size:28px;font-weight:700" class="${ta.confidence==='high'?'p3-conf-high':ta.confidence==='medium'?'p3-conf-medium':'p3-conf-low'}">${ta.recommended_target != null ? ta.recommended_target+'%' : '—'}</span>
+      <span style="font-size:11px;font-weight:600" class="${ta.confidence==='high'?'p3-conf-high':ta.confidence==='medium'?'p3-conf-medium':'p3-conf-low'}">${ta.confidence==='high'?'高置信':ta.confidence==='medium'?'中置信':'低置信'}</span>
+    </div>`;
+  }
+  if (ta.reasoning) {
+    acosHtml += `<div style="font-size:11px;color:${taManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${taManual?'var(--border)':'#DDD6FE'}">${ta.reasoning}</div>`;
+  }
+  acosHtml += '</div>';
+  setHTML('p3AcosColumn', acosHtml);
+
+  // ── 右列：每日预算（单个卡片，根据 override 切换颜色） ──
+  const budgetCardCls = bbManual ? '' : 'p3-ai-card';
+  const budgetCardStyle = bbManual ? 'background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-card);padding:14px' : '';
+  let budgetHtml = `<div class="${budgetCardCls}" style="${budgetCardStyle}">
+    <div style="font-size:11px;font-weight:600;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-bottom:8px">
+      ${bbManual ? '当前使用' : 'AI 推荐'} ${bbManual ? '<span class="badge badge-amber" style="font-size:9px;margin-left:4px">手动覆盖</span>' : ''}
+    </div>`;
+  if (bbManual) {
+    budgetHtml += `<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <span style="font-size:28px;font-weight:700">&dollar;${$('p3BudgetLeftInput').value || Math.round(bb.suggested)}</span>
+      <span style="font-size:13px;color:var(--muted-fg)">AI建议 <span style="font-weight:500;color:var(--muted-fg)">&dollar;${bb.suggested != null ? bb.suggested.toFixed(0) : '—'}</span></span>
+    </div>
+    <button onclick="clearP3Budget()" class="btn btn-danger-ghost" style="margin-top:8px">✕ 取消覆盖</button>`;
+  } else {
+    budgetHtml += `<div style="font-size:28px;font-weight:700;margin-bottom:4px">&dollar;${bb.suggested != null ? bb.suggested.toFixed(0) : '—'}</div>
+    <div style="font-size:11px;color:var(--muted-fg);line-height:1.5">
+      当前 <b>&dollar;${bb.current != null ? bb.current.toFixed(0) : '—'}</b>
+      &rarr; <b class="${bb.direction==='increase'?'p3-conf-high':bb.direction==='decrease'?'p3-conf-low':''}">${bb.direction==='increase'?'+':bb.direction==='decrease'?'-':''}${bb.magnitude_pct}%</b>
+    </div>`;
+  }
+  if (bb.reason) {
+    budgetHtml += `<div style="font-size:11px;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}">${bb.reason}</div>`;
+  }
+  if (bb.bid_adjustments && bb.bid_adjustments.length > 0) {
+    budgetHtml += `<details style="font-size:11px;margin-top:8px;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}"><summary>关键词 Bid 调整 (${bb.bid_adjustments.length}条)</summary>
+      <div style="max-height:120px;overflow-y:auto;margin-top:4px">` +
+      bb.bid_adjustments.slice(0,5).map(a =>
+        `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--surface);font-size:10px">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">${a.keyword}</span>
+          <span>&dollar;${a.current_bid.toFixed(2)} &rarr; <b style="color:${a.direction==='decrease'?'var(--danger)':'var(--success)'}">&dollar;${a.suggested_bid.toFixed(2)}</b></span>
+        </div>`).join('') +
+      `</div></details>`;
+  }
+  budgetHtml += '</div>';
+  setHTML('p3BudgetColumn', budgetHtml);
+
+  hide('p3Loader');
+
+  // 共享推理 + 警告
+  if (data.overall_reasoning) { show('p3Reasoning'); setHTML('p3Reasoning', data.overall_reasoning); }
+  else hide('p3Reasoning');
+  if (data.risk_warnings && data.risk_warnings.length) { show('p3Warnings'); setHTML('p3Warnings', '⚠ ' + data.risk_warnings.join('；')); }
+  else hide('p3Warnings');
+}
+
+// ── 左侧输入自动填充（仅在初始加载和 AI 重新推荐时调用） ──
+function autoFillLeftInputs(data) {
+  const ta = data.target_acos, bb = data.budget_bid;
+  if (ta && ta.recommended_target != null && !ta.manual_override) {
+    $('p3AcosLeftInput').value = ta.recommended_target;
+    $('p3AcosLeftInput').placeholder = ta.recommended_target;
+    hide('p3AcosLeftStatus');
+  }
+  if (bb && !bb.manual_override) {
+    $('p3BudgetLeftInput').value = bb.suggested != null ? Math.round(bb.suggested) : '';
+    $('p3BudgetLeftInput').placeholder = bb.suggested != null ? Math.round(bb.suggested) : '';
+    hide('p3BudgetLeftStatus');
+  }
+}
+
+// ═══════════════ P3 手动覆盖（左侧） ═══════════════
+const _btn = (id) => {
+  const b = $(id);
+  const orig = b.getAttribute('data-orig') || b.textContent;
+  b.setAttribute('data-orig', orig);
+  return { el: b, orig };
+};
+
+async function saveP3AcosLeft() {
+  const { el: btn, orig } = _btn('p3AcosLeftBtn');
+  const val = parseInt($('p3AcosLeftInput').value);
+  if (isNaN(val) || val < 5 || val > 100) { $('p3AcosLeftStatus').textContent = '请输入 5-100'; $('p3AcosLeftStatus').style.color = 'var(--danger)'; show('p3AcosLeftStatus'); return; }
+  btn.disabled = true; btn.textContent = '⏳ 保存中';
+  try {
+    await callAPI('/execution/target-acos/override', { asin, value: val });
+    if (window._p3data && window._p3data.target_acos) {
+      window._p3data.target_acos.manual_override = true;
+    }
+    const aiVal = window._p3data?.target_acos?.recommended_target;
+    fbCaptureP3Acos(aiVal != null ? aiVal : null, val);
+    renderP3(window._p3data);
+    $('p3AcosLeftStatus').textContent = '✓ 已保存手动值'; $('p3AcosLeftStatus').style.color = 'var(--success)'; show('p3AcosLeftStatus');
+    setTimeout(() => hide('p3AcosLeftStatus'), 2000);
+  } catch (e) {
+    $('p3AcosLeftStatus').textContent = '✗ 保存失败: ' + e.message;
+    $('p3AcosLeftStatus').style.color = 'var(--danger)'; show('p3AcosLeftStatus');
+  }
+  btn.disabled = false; btn.textContent = orig;
+}
+
+async function saveP3BudgetLeft() {
+  const { el: btn, orig } = _btn('p3BudgetLeftBtn');
+  const val = parseFloat($('p3BudgetLeftInput').value);
+  if (isNaN(val) || val <= 0) { $('p3BudgetLeftStatus').textContent = '请输入大于0的数值'; $('p3BudgetLeftStatus').style.color = 'var(--danger)'; show('p3BudgetLeftStatus'); return; }
+  btn.disabled = true; btn.textContent = '⏳ 保存中';
+  try {
+    await callAPI('/execution/budget-bid/override', { asin, value: val });
+    if (window._p3data && window._p3data.budget_bid) {
+      window._p3data.budget_bid.manual_override = true;
+    }
+    const aiVal = window._p3data?.budget_bid?.suggested;
+    fbCaptureP3Budget(aiVal != null ? aiVal : null, val);
+    renderP3(window._p3data);
+    $('p3BudgetLeftStatus').textContent = '✓ 已保存手动值'; $('p3BudgetLeftStatus').style.color = 'var(--success)'; show('p3BudgetLeftStatus');
+    setTimeout(() => hide('p3BudgetLeftStatus'), 2000);
+  } catch (e) {
+    $('p3BudgetLeftStatus').textContent = '✗ 保存失败: ' + e.message;
+    $('p3BudgetLeftStatus').style.color = 'var(--danger)'; show('p3BudgetLeftStatus');
+  }
+  btn.disabled = false; btn.textContent = orig;
+}
+
+
+async function clearP3Acos() {
+  await callAPI('/execution/target-acos/override', { asin }, 30, 'DELETE');
+  if (window._p3data && window._p3data.target_acos) {
+    window._p3data.target_acos.manual_override = false;
+    const aiVal = window._p3data.target_acos.recommended_target;
+    if (aiVal != null) {
+      $('p3AcosLeftInput').value = aiVal;
+      $('p3AcosLeftInput').placeholder = aiVal;
+    }
+  }
+  const aiVal = window._p3data?.target_acos?.recommended_target;
+  fbCaptureP3Acos(aiVal != null ? aiVal : null, null);
+  renderP3(window._p3data);
+  $('p3AcosLeftStatus').textContent = '✓ 已恢复 AI 推荐值';
+  $('p3AcosLeftStatus').style.color = 'var(--success)';
+  show('p3AcosLeftStatus');
+  setTimeout(() => hide('p3AcosLeftStatus'), 2000);
+}
+
+async function clearP3Budget() {
+  await callAPI('/execution/budget-bid/override', { asin }, 30, 'DELETE');
+  if (window._p3data && window._p3data.budget_bid) {
+    window._p3data.budget_bid.manual_override = false;
+    const aiVal = window._p3data.budget_bid.suggested;
+    if (aiVal != null) {
+      $('p3BudgetLeftInput').value = Math.round(aiVal);
+      $('p3BudgetLeftInput').placeholder = Math.round(aiVal);
+    }
+  }
+  const aiVal = window._p3data?.budget_bid?.suggested;
+  fbCaptureP3Budget(aiVal != null ? aiVal : null, null);
+  renderP3(window._p3data);
+  $('p3BudgetLeftStatus').textContent = '✓ 已恢复 AI 推荐值';
+  $('p3BudgetLeftStatus').style.color = 'var(--success)';
+  show('p3BudgetLeftStatus');
+  setTimeout(() => hide('p3BudgetLeftStatus'), 2000);
+}
+
+// ═══════════════ 英文→中文翻译映射 ═══════════════
+const DIR_CN = { push_natural:'推自然排名', expand_keywords:'新增扩词', optimize_acos:'优化ACOS', balance_maintain:'平衡维持' };
+const SUIT_CN = { recommended:'推荐', available:'可选', not_recommended:'不推荐' };
+const LEVEL_CN = { force_correct:'强制修正', suggest_optimize:'建议优化', confirmed:'已确认' };
+const PRI_CN = { high:'高', medium:'中', low:'低' };
+
+function cnDir(dirId) { return DIR_CN[dirId] || dirId; }
+function cnSuit(s) { return SUIT_CN[s] || s; }
+function cnLevel(l) { return LEVEL_CN[l] || l; }
+function cnPri(p) { return PRI_CN[p] || p; }
+
+// ═══════════════ 执行方向 → Tab4 ═══════════════
+async function loadExecution() {
+  const data = await callAPI('/execution/options', { asin });
+
+  // 缓存 AI 推荐方向供反馈使用
+  _lastExecAiDirs = data.recommended_directions || [];
+
+  const colors = { push_natural:'#3B82F6', expand_keywords:'#8B5CF6', optimize_acos:'#F97316', balance_maintain:'#14B8A6' };
+  let html = '';
+  data.directions.forEach(d => {
+    const c = colors[d.id]||'#6B7280';
+    const rc = d.recommended ? 'recommended' : '';
+    html += `<div class="dir-card ${rc}" id="dirc_${d.id}" onclick="togDir('${d.id}')" data-selected="${d.recommended?'true':'false'}">
+        <div style="flex:1;min-width:0">
+          <div class="flex items-center gap-2" style="flex-wrap:wrap;margin-bottom:4px">
+            <span class="dir-color" style="background:${c}"></span>
+            <span style="font-weight:600;font-size:13px">${cnDir(d.id)}</span>
+            <span class="badge dir-score ${d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray'}">${d.suitability_score}分 ${cnSuit(d.suitability)}</span>
+            ${d.recommended?'<span class="badge badge-amber" style="font-size:10px">AI推荐</span>':''}
+          </div>
+          <p style="font-size:11px;color:var(--muted-fg);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason||''}</p>
+        </div>
+    </div>`;
+  });
+  setHTML('execDirections', html);
+
+  if (data.recommendation_summary) { show('aiReasoningExec'); setHTML('aiReasoningExec', data.recommendation_summary); }
+  else hide('aiReasoningExec');
+}
+
+function togDir(id) {
+  const card = $('dirc_'+id);
+  const isSel = card.dataset.selected === 'true';
+  card.dataset.selected = isSel ? 'false' : 'true';
+  card.classList.toggle('selected', !isSel);
+}
+
+// ═══════════════ 报告 → Tab4 下半段 ═══════════════
+async function generateReport() {
+  const selected = [];
+  qsa('[id^="dirc_"]').forEach(c => { if (c.dataset.selected === 'true') selected.push(c.id.replace('dirc_','')); });
+  if (selected.length===0) { err('errSec4', '请至少选择一个方向'); return; }
+  hide('errSec4');
+
+  // 第一步：持久化选中方向 + 反馈数据捕获
+  await callAPI('/execution/select', { asin, selected_directions:selected, sub_options:{} });
+  fbCaptureExecution(_lastExecAiDirs, selected);
+
+  // 第二步：获取报告
+  $('btnGenerate').disabled = true;
+  $('btnGenerate').textContent = '生成中...';
+  try {
+    const data = await callAPI('/wizard/report', { asin });
+    renderReport(data);
+  } catch(e) {
+    err('errSec4', '报告生成失败: ' + e.message);
+  }
+  $('btnGenerate').disabled = false;
+  $('btnGenerate').textContent = '生成评估报告';
+}
+
+function renderReport(data) {
+  const dirs = data.directions || [];
+  const analysis = data.analysis || {};
+  const validations = data.validations || {};
+  const decisions = data.decisions || {};
+
+  // AI 综合分析
+  let analysisHtml = '';
+  if (analysis.overall_analysis) analysisHtml += `<p style="font-size:12px;margin-bottom:8px">${analysis.overall_analysis}</p>`;
+  if (analysis.direction_analyses) analysis.direction_analyses.forEach(da => {
+    analysisHtml += `<div style="border-left:3px solid var(--primary);padding:4px 10px;margin-top:6px">
+      <p style="font-size:12px;font-weight:600">${da.direction||''}</p>
+      <p style="font-size:11px;color:var(--muted-fg)">${da.analysis||''}</p>`;
+    if (da.suggestions) da.suggestions.forEach(s => analysisHtml += `<p style="font-size:11px;color:var(--muted-fg);margin-top:2px">• ${s}</p>`);
+    analysisHtml += '</div>';
+  });
+  if (analysis.action_priorities) {
+    const pc = {'高':'badge-red','中':'badge-amber','低':'badge-blue'};
+    analysis.action_priorities.forEach(a => analysisHtml += `<div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:11px"><span class="badge ${pc[a.priority]||'badge-gray'}">${a.priority}</span><span>${a.action}</span><span style="color:var(--muted-fg);font-size:10px">${a.expected_impact||''}</span></div>`);
+  }
+  if (analysis.risk_warnings) analysis.risk_warnings.forEach(w => analysisHtml += `<p style="font-size:11px;color:var(--danger);margin-top:4px">! ${w}</p>`);
+  setHTML('reportAnalysis', analysisHtml);
+
+  // 校验项 + 决策（按方向嵌套）
+  const ec = {push_natural:'#3B82F6',expand_keywords:'#8B5CF6',optimize_acos:'#F97316',balance_maintain:'#14B8A6'};
+  const dirKeys = Object.keys(validations).length > 0 ? Object.keys(validations) : Object.keys(decisions);
+  let valHtml = '';
+  dirKeys.forEach(dir => {
+    const v = validations[dir] || {};
+    const d = (decisions[dir]||{}).decision_package || {};
+    const items = v.items || [];
+    const tasks = d.tasks || [];
+	    valHtml += `<div class="card" style="border-left-width:3px;border-left-style:solid;border-left-color:${ec[dir]||'#ccc'}"><div class="card-title" style="font-size:12px">${cnDir(dir)}</div>`;
+	    items.forEach(it => {
+	      const lc = {force_correct:'val-force',suggest_optimize:'val-suggest',confirmed:'val-confirmed'};
+	      valHtml += `<div class="val-item ${lc[it.level]||'val-confirmed'}">
+	        <div style="display:flex;align-items:center;gap:6px"><span style="font-size:10px;font-family:monospace;color:var(--muted-fg)">${it.rule_id}</span><span class="badge ${it.level==='force_correct'?'badge-red':it.level==='suggest_optimize'?'badge-amber':'badge-green'}" style="font-size:10px">${cnLevel(it.level)}</span></div>
+	        <p style="margin:4px 0 0;font-size:12px">${it.message||''}</p></div>`;
+	    });
+	    tasks.forEach(t => {
+	      const pc = {high:'task-high',medium:'task-medium',low:'task-low'};
+	      valHtml += `<div class="task-item ${pc[t.priority]||'task-low'}">
+	        <span class="badge ${t.priority==='high'?'badge-red':t.priority==='medium'?'badge-amber':'badge-blue'}" style="font-size:10px">${cnPri(t.priority)}</span>
+	        <span style="font-size:12px;margin-left:4px">${t.action}</span>${t.details?`<p style="font-size:10px;color:var(--muted-fg);margin:2px 0 0">${t.details}</p>`:''}${t.estimated_impact?`<p style="font-size:10px;color:var(--muted-fg);margin:1px 0 0">${t.estimated_impact}</p>`:''}
+	      </div>`;
+	    });
+    valHtml += '</div>';
+  });
+  $('reportValidations').style.gridTemplateColumns = `repeat(${Math.min(dirKeys.length, 2)}, 1fr)`;
+  setHTML('reportValidations', valHtml);
+
+  show('reportArea');
+  $('reportArea').style.display = 'flex';
+  // 滚动到报告区
+  $('mainArea').scrollTop = $('mainArea').scrollHeight;
+}
+
+// ═══════════════ 评分理由弹窗 ═══════════════
+function showReasonPopup(el) {
+  const reason = decodeURIComponent(el.dataset.reason);
+  const title = decodeURIComponent(el.dataset.title);
+  const overlay = document.createElement('div');
+  overlay.className = 'reason-overlay';
+  overlay.innerHTML = `<div class="reason-popup">
+    <h4>${title} — AI 推荐理由</h4>
+    <div style="font-size:13px;line-height:1.7;color:var(--foreground);max-height:400px;overflow-y:auto">${reason.replace(/\n/g,'<br>')}</div>
+    <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-secondary btn-sm btn-close" onclick="this.closest('.reason-overlay').remove()">关闭</button>
+    </div></div>`;
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+// ═══════════════ 下拉框全家桶 ═══════════════
+function toggleDropdown(btn) {
+  const panel = btn.nextElementSibling;
+  const isOpen = !panel.classList.contains('hidden');
+  closeAllDropdowns();
+  if (!isOpen) { panel.classList.remove('hidden'); btn.classList.add('open'); }
+}
+
+function selectDropdown(el) {
+  const panel = el.closest('.dd-panel');
+  const btn = panel.parentElement.querySelector('.dd-btn');
+  const text = btn.querySelector('.dd-text');
+  const label = el.querySelector('.dd-opt-label').textContent;
+  text.textContent = label; text.classList.add('selected');
+  panel.querySelectorAll('.dd-option').forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  closeAllDropdowns();
+}
+
+function toggleMultiDropdown(btn) {
+  const panel = btn.nextElementSibling;
+  const isOpen = !panel.classList.contains('hidden');
+  closeAllDropdowns();
+  if (!isOpen) { panel.classList.remove('hidden'); btn.classList.add('open'); }
+}
+
+function updateMultiTags(dim) {
+  const container = document.getElementById('mtags_'+dim);
+  if (!container) return;
+  const checked = container.closest('[style*="position:relative"]')?.querySelectorAll(`input[data-dim="${dim}"]:checked`);
+  if (!checked || checked.length === 0) {
+    container.innerHTML = '<span class="md-placeholder">请选择</span>';
+  } else {
+    container.innerHTML = Array.from(checked).map(cb =>
+      `<span class="md-tag">${cb.value}<span class="md-tag-remove" onclick="event.stopPropagation();uncheckTag('${dim}','${cb.value}')">&times;</span></span>`
+    ).join('');
+  }
+}
+
+function uncheckTag(dim, val) {
+  const cb = qs(`input[data-dim="${dim}"][value="${val}"]`);
+  if (cb) { cb.checked = false; updateMultiTags(dim); }
+}
+
+function closeAllDropdowns() {
+  qsa('.dd-panel, .md-panel').forEach(p => p.classList.add('hidden'));
+  qsa('.dd-btn.open, .md-btn.open').forEach(b => b.classList.remove('open'));
+}
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.dd-wrapper') && !e.target.closest('.tactics-dropdown')) {
+    closeAllDropdowns();
+  }
+});
+
+// ── 投放建议可展开（>30字出现展开/收回按钮）──
+function renderExpandableAction(text) {
+  if (!text || text === '暂无建议') return '<span style="color:var(--muted-fg)">暂无建议</span>';
+  if (text.length <= 30) return text;
+  const id = 'exp_' + Math.random().toString(36).slice(2,8);
+  const escaped = text.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  return `<span id="${id}" data-full="${escaped}" style="cursor:pointer;color:var(--muted-fg);word-break:break-all" onclick="toggleExpandAction('${id}')" title="点击展开/收起">${text.slice(0,30)}…</span>`;
+}
+function toggleExpandAction(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const full = el.getAttribute('data-full') || '';
+  if (!full) return;
+  if (el.textContent.endsWith('…')) {
+    el.innerHTML = full + ' <span style="font-size:10px;color:var(--primary)">▲</span>';
+  } else {
+    el.innerHTML = full.slice(0,30) + '…';
+  }
+}
+
+// ═══════════════ 反馈弹窗 ═══════════════
+
+function openFeedback() {
+  _fbBuildTable();
+  show('feedbackOverlay');
+  hide('fbSuccess');
+  hide('fbError');
+  $('btnFbSubmit').disabled = false;
+}
+
+function closeFeedback() {
+  const overlay = $('feedbackOverlay');
+  overlay.classList.add('hidden');
+}
+
+function _fbBuildTable() {
+  const modules = window._feedbackModules;
+  const dirCn = {'push_natural':'推自然排名','expand_keywords':'新增扩词','optimize_acos':'优化ACOS','balance_maintain':'平衡维持'};
+
+  function formatVal(v) {
+    if (v == null) return '';
+    if (Array.isArray(v)) {
+      // 翻译英文方向ID
+      return v.map(x => dirCn[x] || x).join('、');
+    }
+    return String(v);
+  }
+
+  let html = '';
+  for (const [key, m] of Object.entries(modules)) {
+    const aiVal = formatVal(m.ai_judgment);
+    const humanVal = formatVal(m.human_judgment);
+    html += `<tr>
+      <td class="feedback-cell-module">${m.module}</td>
+      <td class="feedback-cell-value${aiVal ? '' : ' empty'}">${aiVal || '暂无数据'}</td>
+      <td class="feedback-cell-value${humanVal ? '' : ' empty'}">${humanVal || '暂无数据'}</td>
+      <td>
+        <select class="feedback-select" data-fb-mod="${key}" data-fb-field="adoption" onchange="_fbOnAdoptionChange(this)">
+          <option value="">请选择</option>
+          <option value="采纳">采纳</option>
+          <option value="可以优化">可以优化</option>
+          <option value="完全不采纳">完全不采纳</option>
+        </select>
+      </td>
+      <td><input class="feedback-input" data-fb-mod="${key}" data-fb-field="correction_reason" placeholder="AI哪里判断不准？" onfocus="this.classList.add('hint')" onblur="if(!this.value)this.classList.remove('hint')"></td>
+      <td><input class="feedback-input" data-fb-mod="${key}" data-fb-field="notes" placeholder="其他想说的..."></td>
+    </tr>`;
+  }
+  setHTML('feedbackTbody', html);
+}
+
+function _fbOnAdoptionChange(sel) {
+  const modKey = sel.dataset.fbMod;
+  const reasonInput = qs(`input[data-fb-mod="${modKey}"][data-fb-field="correction_reason"]`);
+  if (reasonInput) {
+    if (sel.value === '可以优化' || sel.value === '完全不采纳') {
+      reasonInput.classList.add('hint');
+      reasonInput.placeholder = '建议说明AI哪里判断不准，帮我们持续优化';
+    } else {
+      reasonInput.classList.remove('hint');
+      reasonInput.placeholder = 'AI哪里判断不准？';
+    }
+  }
+}
+
+async function submitFeedback() {
+  const modules = window._feedbackModules;
+  const feedbackItems = [];
+
+  // 收集表格数据
+  for (const [key, m] of Object.entries(modules)) {
+    const sel = qs(`select[data-fb-mod="${key}"][data-fb-field="adoption"]`);
+    const reason = qs(`input[data-fb-mod="${key}"][data-fb-field="correction_reason"]`);
+    const notes = qs(`input[data-fb-mod="${key}"][data-fb-field="notes"]`);
+    const adoption = sel ? sel.value : '';
+
+    feedbackItems.push({
+      module: m.module,
+      ai_judgment: m.ai_judgment,
+      human_judgment: m.human_judgment != null ? m.human_judgment : '未手动设定',
+      adoption: adoption,
+      correction_reason: reason ? reason.value.trim() : '',
+      notes: notes ? notes.value.trim() : '',
+    });
+  }
+
+  // 校验：所有 adoption 必填
+  const notFilled = feedbackItems.filter(f => !f.adoption);
+  if (notFilled.length > 0) {
+    const names = notFilled.map(f => f.module).join('、');
+    show('fbError');
+    $('fbError').textContent = `请为以下模块选择采纳情况：${names}`;
+    return;
+  }
+  hide('fbError');
+
+  // 组装提交
+  const payload = {
+    parent_asin: asin || '',
+    session_start: SESSION_START,
+    has_error: false,
+    error_info: null,
+    modules: feedbackItems,
+  };
+
+  $('btnFbSubmit').disabled = true;
+  $('btnFbSubmit').textContent = '提交中...';
+
+  try {
+    const res = await callAPI('/feedback', payload, 30);
+    if (res.ok) {
+      show('fbSuccess');
+      hide('fbError');
+      $('btnFbSubmit').textContent = '已提交';
+      setTimeout(() => closeFeedback(), 2000);
+    } else {
+      show('fbError');
+      $('fbError').textContent = res.message || '提交失败，请重试';
+      $('btnFbSubmit').disabled = false;
+      $('btnFbSubmit').textContent = '提交反馈';
+    }
+  } catch(e) {
+    show('fbError');
+    $('fbError').textContent = '网络错误: ' + e.message;
+    $('btnFbSubmit').disabled = false;
+    $('btnFbSubmit').textContent = '提交反馈';
+  }
+}
+</script>
+</body>
+</html>

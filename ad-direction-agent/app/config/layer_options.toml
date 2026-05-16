@@ -1,0 +1,157 @@
+# 四层工作流 — 选项定义
+# Layer 1.1 ~ 1.4 所有维度选项、描述、约束
+
+[strategy.product_level]
+label = "产品定位"
+description = "根据产品在店铺中的战略地位划分，决定广告投入力度"
+selection_type = "radio"
+[[strategy.product_level.options]]
+id = "头部"
+label = "头部"
+description = "店铺TOP销量/利润贡献品，占据核心流量位，需要全力防守"
+
+[[strategy.product_level.options]]
+id = "腰部"
+label = "腰部"
+description = "有稳定销量和利润贡献，具备上升潜力，需要持续投入"
+
+[[strategy.product_level.options]]
+id = "长尾"
+label = "长尾"
+description = "低销量或即将清货，控制广告成本为主"
+
+[strategy.product_stage]
+label = "产品阶段"
+description = "产品生命周期阶段，影响广告目标和预算分配策略"
+selection_type = "radio"
+[[strategy.product_stage.options]]
+id = "测试期"
+label = "测试期"
+description = "新品测试或起步验证阶段，验证市场需求和Listing质量，不宜大规模投入"
+
+[[strategy.product_stage.options]]
+id = "推进期"
+label = "推进期"
+description = "增长推进期，需要快速起量、推排名、抢占市场份额"
+
+[[strategy.product_stage.options]]
+id = "收割利润期"
+label = "收割利润期"
+description = "达成预期目标，重点控制利润和ACOS，追求盈利最大化"
+
+[[strategy.product_stage.options]]
+id = "维持期"
+label = "维持期"
+description = "超预期表现，维持当前稳定状态，精细化调控"
+
+[[strategy.product_stage.options]]
+id = "清货期"
+label = "清货期"
+description = "库存积压或准备退市，以清库存为主要目标"
+
+[strategy.season_stage]
+label = "淡旺季阶段"
+description = "当前所处的季节性时段，影响广告投放节奏和出价策略"
+selection_type = "radio"
+[[strategy.season_stage.options]]
+id = "淡季"
+label = "淡季"
+description = "类目搜索量处于低位，控制预算等待旺季"
+
+[[strategy.season_stage.options]]
+id = "旺季准备"
+label = "旺季准备"
+description = "旺季前1-2周，需要提前布局关键词排名和流量卡位"
+
+[[strategy.season_stage.options]]
+id = "大旺季"
+label = "大旺季"
+description = "流量和转化高峰期，最大化投入抢占市场份额"
+
+[[strategy.season_stage.options]]
+id = "旺季末期"
+label = "旺季末期"
+description = "旺季尾声，逐步缩减预算，防止库存积压"
+
+# ── Layer 1.2 策略层 ─────────────────────────────────────
+
+[tactics.ad_purposes]
+label = "广告目的"
+description = "当前广告投放的核心目标，可多选"
+selection_type = "multi_select"
+[[tactics.ad_purposes.options]]
+id = "引流型"
+label = "引流型"
+description = "以获取曝光和点击为主要目标，适合新品/冷启动阶段"
+
+[[tactics.ad_purposes.options]]
+id = "转化型"
+label = "转化型"
+description = "以获取订单和提升转化率为主要目标，适合有基础数据的产品"
+
+[[tactics.ad_purposes.options]]
+id = "排名型"
+label = "排名型"
+description = "以提升关键词自然排名为主要目标，适合推进期产品"
+
+[[tactics.ad_purposes.options]]
+id = "盈利型"
+label = "盈利型"
+description = "以控制ACOS和利润最大化为主要目标，适合达成期/超预期产品"
+
+[[tactics.ad_purposes.options]]
+id = "清货型"
+label = "清货型"
+description = "砍预算快速清库存，适合清货中/淘汰阶段产品"
+
+[tactics.keyword_types]
+label = "目标关键词类型"
+description = "广告投放的关键词类型选择，受广告目的影响"
+selection_type = "multi_select"
+[[tactics.keyword_types.options]]
+id = "大词"
+label = "大词"
+description = "高流量泛词/类目词，CPC高竞争激烈，适合引流和品牌曝光"
+
+[[tactics.keyword_types.options]]
+id = "长尾词"
+label = "长尾词"
+description = "精准长尾搜索词，CPC低转化率高，适合转化和ACOS优化"
+
+[[tactics.keyword_types.options]]
+id = "竞品词"
+label = "竞品词"
+description = "竞品品牌/ASIN词，适合截流和竞品防守"
+
+[[tactics.keyword_types.options]]
+id = "品牌词"
+label = "品牌词"
+description = "自身品牌词，防守流量防止竞品截流"
+
+[[tactics.keyword_types.options]]
+id = "自定义"
+label = "自定义"
+description = "运营手动指定的关键词列表"
+
+# ── Layer 1.4 执行层 ─────────────────────────────────────
+
+[execution.directions]
+[[execution.directions.options]]
+id = "push_natural"
+label = "推进自然位"
+description = "倾斜预算推核心词自然排名，扩大自然流量占比"
+
+[[execution.directions.options]]
+id = "expand_keywords"
+label = "新增扩词"
+description = "拓展关键词覆盖，发现高转化潜力新词并投放"
+
+[[execution.directions.options]]
+id = "optimize_acos"
+label = "优化ACOS"
+description = "清理高花费低效词，降低整体ACOS提升广告效率"
+
+[[execution.directions.options]]
+id = "balance_maintain"
+label = "平衡维持"
+description = "保持当前投放策略，微调参数维持稳定表现"

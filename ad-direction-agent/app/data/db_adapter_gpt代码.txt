@@ -1,0 +1,861 @@
+"""Doris 数仓适配器 — 从数据仓库拉取 ASIN 全量数据"""
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+
+import pymysql
+from dbutils.pooled_db import PooledDB
+from pymysql.cursors import DictCursor
+
+from app.config.settings import settings
+from app.data.base import DataSourceAdapter
+from app.data.template_registry import list_all
+from app.models.asin_data import ASINData, AdData, KeywordData, CompetitorData, SpecialSignals, TrendPoint
+
+logger = logging.getLogger(__name__)
+
+FETCH_TIMEOUT = 50  # DB 查询硬超时（略大于 read_timeout=30）
+
+# ── 元脚本 → DbAdapter 方法映射 ──────────────────────
+META_TO_METHOD: dict[str, str] = {
+    "META_KW_AD": "ad_keywords",
+    "META_COMPETITOR": "competitors",
+    "META_KW_COMPETITOR_RANK": "natural_rankings",
+    "META_KW_SUB_ASIN_RANK": "natural_rankings",
+    "META_FLOW_KEYWORD": "flow_keywords",
+    "META_AD_PRODUCT": "ad_summary",
+    "META_AD_PLACEMENT": "placement_summary",
+    "META_TREND": "trend_data",
+}
+
+
+class DbAdapter(DataSourceAdapter):
+    """从 Doris 数仓读取 ASIN 数据的适配器
+
+    使用 DBUtils PooledDB 连接池，每次查询从池获取独立连接。
+    同一 to_thread 内完成「取连接→执行→归还」，PyMySQL 连接不跨线程。
+    """
+
+    def __init__(self):
+        self._pool = PooledDB(
+            creator=pymysql,
+            mincached=8, maxcached=8, maxconnections=10,
+            maxusage=1000,
+            ping=1,
+            host=settings.db_host,
+            port=settings.db_port,
+            user=settings.db_user,
+            password=settings.db_pass,
+            database=settings.db_database,
+            cursorclass=DictCursor,
+            connect_timeout=10,
+            read_timeout=30,
+        )
+        self._query_sem = asyncio.Semaphore(8)
+        self._warmup()
+
+    def _warmup(self):
+        """预热连接池，避免首个请求冷启动 ~15s 延迟。"""
+        try:
+            conns = [self._pool.connection() for _ in range(8)]
+            for c in conns:
+                c.close()
+        except Exception:
+            logger.warning("连接池预热失败，首个请求将承受冷启动延迟")
+
+    async def _query(self, sql: str, params: tuple = ()) -> list[dict]:
+        """执行查询，返回字典列表。每次从池获取独立连接，整段在同一线程完成。"""
+        def _do_query():
+            conn = self._pool.connection()
+            closed = False
+            try:
+                cur = conn.cursor()
+                try:
+                    cur.execute(sql, params)
+                    return cur.fetchall()
+                finally:
+                    cur.close()
+            except (pymysql.err.OperationalError, pymysql.err.InterfaceError):
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                closed = True
+                conn = self._pool.connection()
+                try:
+                    cur = conn.cursor()
+                    try:
+                        cur.execute(sql, params)
+                        return cur.fetchall()
+                    finally:
+                        cur.close()
+                finally:
+                    conn.close()
+            finally:
+                if not closed:
+                    conn.close()
+
+        async with self._query_sem:
+            start = time.monotonic()
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_do_query),
+                    timeout=FETCH_TIMEOUT,
+                )
+                elapsed = time.monotonic() - start
+                if elapsed > 5:
+                    logger.warning("慢查询 %.2fs: %s", elapsed, sql[:120])
+                return result
+            except asyncio.TimeoutError:
+                logger.error("DB 查询超时 (%ds): %s...", FETCH_TIMEOUT, sql[:120])
+                raise
+
+    async def _query_one(self, sql: str, params: tuple = ()) -> dict | None:
+        rows = await self._query(sql, params)
+        return rows[0] if rows else None
+
+    # ── 入口 ─────────────────────────────────────────────
+
+    async def fetch_asin_data(self, asin: str, meta_filter: list[str] | None = None,
+                              days: int = 7) -> ASINData:
+        """获取 ASIN 全量数据"""
+        try:
+            data = await self._fetch_all(asin, meta_filter=meta_filter, days=days)
+            return data
+        except Exception as e:
+            logger.error("DbAdapter 查询失败 [%s]: %s", asin, e)
+            return ASINData(
+                asin=asin,
+                data_missing=True,
+                missing_fields=["all"],
+            )
+
+    def _should_fetch(self, meta_id: str, meta_filter: list[str] | None) -> bool:
+        """判断某个元脚本是否需要执行"""
+        if not meta_filter:
+            return True
+        method_name = META_TO_METHOD.get(meta_id)
+        return method_name is not None and any(
+            META_TO_METHOD.get(m) == method_name for m in meta_filter
+        )
+
+    # ── 优化项1：合并 context + listing 为一次查询 ──────────
+
+    async def _resolve_and_fetch_listing(self, parent_asin: str) -> tuple[dict | None, dict | None]:
+        """一次查询同时获取 context（shop_id, parent_seller_sku）和 listing 子 ASIN 列表。
+
+        Returns:
+            (context_dict, listing_dict) — 任何一步失败时对应项返回 None
+        """
+        children = await self._query("""
+            SELECT a.shop_id, s.account AS shop_account,
+                   a.asin, a.seller_sku, a.parent_seller_sku,
+                   a.product_price, a.in_stock_num,
+                   a.seven_sale_num, a.month_sale_num,
+                   a.product_line, a.brand, a.category_name, a.parent_asin,
+                   e.star_level, e.comment_num, e.single_gross_profit,
+                   e.refund_rate, e.craw_asin_star,
+                   e.progress_preparation, e.seasonality, e.product_grade,
+                   e.follow_up, a.seven_ad_cost, e.stock_inventory,
+                   a.buy_box_price, a.product_site_launch_date,
+                   a.seven_ad_sale_money, a.seven_order_num,
+                   a.month_order_num, a.can_sale_num,
+                   a.in_stock_receiving_num, a.in_stock_shipped_num,
+                   a.in_stock_working_num, a.three_ad_cost,
+                   a.three_ad_sale_money, a.product_type,
+                   a.near_day_ad_order_num
+            FROM dwd_whp_amazon_listing_general a
+            JOIN dwd_shop s ON a.shop_id = s.id
+            LEFT JOIN dwd_whp_az_extend e ON a.shop_id = e.shop_id
+                AND a.asin = e.asin AND a.seller_sku = e.seller_sku
+                AND e.follow_up = 'YES_FOLLOW_UP'
+            WHERE a.parent_asin = %s
+            ORDER BY a.product_price IS NOT NULL DESC, a.product_price ASC
+        """, (parent_asin,))
+
+        if not children:
+            return None, None
+
+        # 提取 context
+        first = children[0]
+        shop_id = first["shop_id"]
+        ctx = {
+            "shop_id": shop_id,
+            "shop_account": first.get("shop_account", ""),
+            "parent_seller_sku": first.get("parent_seller_sku") or "",
+        }
+
+        # 去重：按 (asin, seller_sku) 保留第一条
+        seen = set()
+        deduped = []
+        for c in children:
+            key = (c.get("asin"), c.get("seller_sku"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(c)
+        if len(deduped) < len(children):
+            logger.debug("_resolve_and_fetch_listing [%s]: deduped %d -> %d rows",
+                         parent_asin, len(children), len(deduped))
+        children = deduped
+
+        # 聚合逻辑（与原 _fetch_listing 一致）
+        main = dict(children[0])
+        main["child_asins"] = [(c["asin"], c["seller_sku"]) for c in children]
+        main["shop_id"] = shop_id
+
+        # 库存
+        main["in_stock_num"] = sum(_int(c.get("in_stock_num", 0)) or 0 for c in children)
+        main["in_stock_receiving_num"] = sum(_int(c.get("in_stock_receiving_num", 0)) or 0 for c in children)
+        main["in_stock_shipped_num"] = sum(_int(c.get("in_stock_shipped_num", 0)) or 0 for c in children)
+        main["in_stock_working_num"] = sum(_int(c.get("in_stock_working_num", 0)) or 0 for c in children)
+        main["can_sale_num"] = sum(_int(c.get("can_sale_num", 0)) or 0 for c in children)
+        main["stock_inventory"] = sum(_int(c.get("stock_inventory", 0)) or 0 for c in children)
+
+        # 销量/订单
+        main["seven_sale_num"] = sum(_float(c.get("seven_sale_num", 0)) or 0 for c in children)
+        main["month_sale_num"] = sum(_float(c.get("month_sale_num", 0)) or 0 for c in children)
+        main["seven_order_num"] = sum(_float(c.get("seven_order_num", 0)) or 0 for c in children)
+        main["month_order_num"] = sum(_float(c.get("month_order_num", 0)) or 0 for c in children)
+        main["near_day_ad_order_num"] = sum(_float(c.get("near_day_ad_order_num", 0)) or 0 for c in children)
+
+        # 广告花费
+        main["seven_ad_cost"] = sum(_float(c.get("seven_ad_cost", 0)) or 0 for c in children)
+        main["seven_ad_sale_money"] = sum(_float(c.get("seven_ad_sale_money", 0)) or 0 for c in children)
+        main["three_ad_cost"] = sum(_float(c.get("three_ad_cost", 0)) or 0 for c in children)
+        main["three_ad_sale_money"] = sum(_float(c.get("three_ad_sale_money", 0)) or 0 for c in children)
+
+        # 评价数
+        main["comment_num"] = sum(_int(c.get("comment_num", 0)) or 0 for c in children)
+
+        # 价格：优先取 buy_box_price
+        main["buy_box_price"] = next(
+            (c.get("buy_box_price") for c in children if c.get("buy_box_price") is not None), None
+        )
+        main["product_price"] = (main["buy_box_price"]
+                                 or next((c.get("product_price") for c in children
+                                          if c.get("product_price") is not None), None))
+
+        # 退款率：按月销量加权平均
+        total_sales_weight = sum(_float(c.get("month_sale_num", 0)) or 0 for c in children)
+        if total_sales_weight > 0:
+            main["refund_rate"] = sum(
+                (_float(c.get("refund_rate", 0)) or 0) * (_float(c.get("month_sale_num", 0)) or 0)
+                for c in children
+            ) / total_sales_weight
+
+        # 评分：按7天销量加权平均
+        star_pairs = [(_float(c.get("star_level")), _float(c.get("seven_sale_num", 0)) or 0)
+                      for c in children]
+        total_star_weight = sum(p[1] for p in star_pairs)
+        if total_star_weight > 0:
+            valid_stars = [(s, w) for s, w in star_pairs if s is not None]
+            if valid_stars:
+                main["star_level"] = sum(s * w for s, w in valid_stars) / total_star_weight
+
+        # 上架日期：取最早的
+        launch_dates = [c.get("product_site_launch_date") for c in children
+                        if c.get("product_site_launch_date") is not None]
+        if launch_dates:
+            main["product_site_launch_date"] = min(launch_dates)
+
+        # 日均销量
+        total_sales_7d = main["seven_sale_num"]
+        if total_sales_7d:
+            main["avg_daily"] = total_sales_7d / 7
+
+        return ctx, main
+
+    async def _fetch_all(self, parent_asin: str,
+                         meta_filter: list[str] | None = None,
+                         days: int = 7) -> ASINData:
+        """并行拉取数据并组装（按 meta_filter 选择性拉取）"""
+        # 优化项1：一次查询获取 context + listing
+        ctx, listing = await self._resolve_and_fetch_listing(parent_asin)
+        if not ctx or not listing:
+            return ASINData(asin=parent_asin, data_missing=True, missing_fields=["asin_not_found"])
+
+        shop_id = ctx["shop_id"]
+        parent_seller_sku = ctx["parent_seller_sku"]
+
+        # 按 meta_filter 选择性执行各维度查询
+        ad_task = (self._fetch_ad_summary(parent_asin, parent_seller_sku, shop_id, days=days)
+                   if self._should_fetch("META_AD_PRODUCT", meta_filter) else None)
+        placement_task = (self._fetch_placement_summary(parent_asin, parent_seller_sku, shop_id, days=days)
+                          if self._should_fetch("META_AD_PLACEMENT", meta_filter) else None)
+        kw_task = (self._fetch_ad_keywords(parent_asin, parent_seller_sku, shop_id, days=days)
+                   if self._should_fetch("META_KW_AD", meta_filter) else None)
+        nat_task = (self._fetch_natural_rankings(parent_asin, parent_seller_sku, shop_id)
+                    if (self._should_fetch("META_KW_COMPETITOR_RANK", meta_filter)
+                        or self._should_fetch("META_KW_SUB_ASIN_RANK", meta_filter)) else None)
+        comp_task = (self._fetch_competitors(parent_asin, shop_id)
+                     if self._should_fetch("META_COMPETITOR", meta_filter) else None)
+        flow_task = (self._fetch_flow_keywords(parent_asin, shop_id)
+                     if self._should_fetch("META_FLOW_KEYWORD", meta_filter) else None)
+        profit_task = self._fetch_gross_profit(parent_asin, parent_seller_sku, days=days)
+        trend_task = (self._fetch_trend_data(parent_asin, parent_seller_sku, days=days)
+                      if self._should_fetch("META_TREND", meta_filter) else None)
+
+        # 并行执行
+        coros = {
+            "ad": ad_task, "placement": placement_task,
+            "kw": kw_task, "nat": nat_task,
+            "comp": comp_task, "flow": flow_task,
+            "profit": profit_task, "trend": trend_task,
+        }
+        valid = {k: v for k, v in coros.items() if v is not None}
+        results = await asyncio.gather(*valid.values(), return_exceptions=True)
+        rmap = {}
+        for key, val in zip(valid.keys(), results):
+            if not isinstance(val, BaseException):
+                rmap[key] = val
+            else:
+                logger.warning("并行查询 %s 失败: %s", key, val)
+
+        ad_summary       = rmap.get("ad")
+        placement_summary = rmap.get("placement")
+        keywords         = rmap.get("kw", [])
+        rankings         = rmap.get("nat", [])
+        competitors_list = rmap.get("comp", [])
+        flow_kws         = rmap.get("flow", [])
+        gross_profit     = rmap.get("profit")
+        trend_rows       = rmap.get("trend", [])
+
+        # 组装 ASINData
+        data = ASINData(asin=parent_asin)
+
+        # 基础数据
+        data.sku = listing.get("seller_sku", "")
+        data.parent_asin = parent_asin
+        data.price = _float(listing.get("product_price"))
+        margin_val = _float(gross_profit.get("margin")) if gross_profit else None
+        if margin_val is not None:
+            data.margin = margin_val
+        else:
+            data.margin = _float(listing.get("single_gross_profit"))
+        data.avg_daily_sales_30d = _float(listing.get("avg_daily"))
+        data.rating = _float(listing.get("star_level")) or _float(listing.get("craw_asin_star"))
+        data.review_count = _int(listing.get("comment_num"))
+        data.product_level = listing.get("product_grade")
+        data.product_stage = listing.get("progress_preparation")
+        from app.models.layers import STAGE_OLD_TO_NEW
+        data.product_stage = STAGE_OLD_TO_NEW.get(data.product_stage, data.product_stage)
+        data.season_stage = listing.get("seasonality")
+        data.brand = listing.get("brand")
+        data.product_line = listing.get("product_line")
+        data.category_name = listing.get("category_name")
+
+        launch_date = listing.get("product_site_launch_date")
+        if launch_date and isinstance(launch_date, datetime):
+            data.days_since_launch = (datetime.now(timezone.utc).date() - launch_date.date()).days
+
+        data.refund_rate = _float(listing.get("refund_rate"))
+
+        # 广告数据
+        if ad_summary:
+            ad_kwargs = {
+                "acos": _float(ad_summary.get("acos")),
+                "cpc": _float(ad_summary.get("cpc")),
+                "ctr": _float(ad_summary.get("ctr")),
+                "cvr": _float(ad_summary.get("cvr")),
+                "impressions": _int(ad_summary.get("impressions")),
+                "clicks": _int(ad_summary.get("clicks")),
+                "spend": _float(ad_summary.get("cost")),
+                "sales": _float(ad_summary.get("sale")),
+                "orders": _int(ad_summary.get("units_order")),
+                "daily_budget": _float(ad_summary.get("campaign_budget")),
+            }
+            if gross_profit:
+                total_sales_window = _float(gross_profit.get("total_sales"))
+                total_ad_cost_window = _float(gross_profit.get("total_ad_cost"))
+                if total_sales_window is not None and total_ad_cost_window is not None and total_sales_window > 0:
+                    ad_kwargs["tacos"] = round(total_ad_cost_window / total_sales_window * 100, 1)
+                if total_sales_window is not None and total_sales_window > 0:
+                    daily_ad_cost = (total_ad_cost_window or 0) / days
+                    daily_total_sale = total_sales_window / days
+                    ad_kwargs["daily_ad_spend_ratio"] = round(daily_ad_cost / daily_total_sale * 100, 1)
+            if placement_summary:
+                ad_kwargs.update(placement_summary)
+            data.ad_data = AdData(**ad_kwargs)
+
+        # 关键词数据
+        ranking_map = {r["keyword"]: r for r in rankings}
+        for kw in keywords:
+            if kw.get("keyword_text"):
+                kd = KeywordData(
+                    keyword=str(kw["keyword_text"]),
+                    impressions=_int(kw.get("impressions")),
+                    clicks=_int(kw.get("clicks")),
+                    spend=_float(kw.get("cost")),
+                    orders=_int(kw.get("units_order")),
+                    acos=_float(kw.get("acos")),
+                    cvr=_float(kw.get("cvr")),
+                    bid=_float(kw.get("keyword_bid")),
+                    match_type=str(kw.get("match_type", "")),
+                )
+                rank_info = ranking_map.get(kd.keyword)
+                if rank_info:
+                    kd.natural_rank = _int(rank_info.get("craw_nature_rank"))
+                    kd.near_natural_rank = _int(rank_info.get("near_craw_nature_rank"))
+                    kd.sp_rank = _int(rank_info.get("craw_sp_rank"))
+                    near = kd.near_natural_rank
+                    cur = kd.natural_rank
+                    if near is not None and cur is not None:
+                        kd.rank_change_14d = near - cur
+
+                data.keywords.append(kd)
+
+        # 精准/非精准 ACOS/CPC
+        if data.keywords:
+            exact_cost = sum(kw.spend for kw in data.keywords if kw.match_type.upper() == "EXACT")
+            exact_sale = sum(kw.spend / kw.acos * 100 for kw in data.keywords
+                             if kw.match_type.upper() == "EXACT" and kw.acos and kw.acos > 0)
+            exact_clicks = sum(kw.clicks for kw in data.keywords if kw.match_type.upper() == "EXACT")
+            broad_cost = sum(kw.spend for kw in data.keywords if kw.match_type.upper() in ("BROAD", "PHRASE"))
+            broad_sale = sum(kw.spend / kw.acos * 100 for kw in data.keywords
+                             if kw.match_type.upper() in ("BROAD", "PHRASE") and kw.acos and kw.acos > 0)
+            broad_clicks = sum(kw.clicks for kw in data.keywords if kw.match_type.upper() in ("BROAD", "PHRASE"))
+            total_cost = exact_cost + broad_cost
+
+            if exact_sale and data.ad_data:
+                data.ad_data.precision_acos = round(exact_cost / exact_sale * 100, 1)
+            if exact_clicks and data.ad_data:
+                data.ad_data.precision_cpc = round(exact_cost / exact_clicks, 2)
+            if broad_sale and data.ad_data:
+                data.ad_data.broad_acos = round(broad_cost / broad_sale * 100, 1)
+            if broad_clicks and data.ad_data:
+                data.ad_data.broad_cpc = round(broad_cost / broad_clicks, 2)
+            if total_cost and data.ad_data:
+                data.ad_data.precision_spend_ratio = round(exact_cost / total_cost * 100, 1) if exact_cost else 0
+                data.ad_data.broad_spend_ratio = round(broad_cost / total_cost * 100, 1) if broad_cost else 0
+
+        data.keyword_count = len(data.keywords)
+
+        # 可用新词
+        ad_keywords_set = {kw.get("keyword_text") for kw in keywords}
+        new_kws = [fk for fk in flow_kws if fk.get("keyword") not in ad_keywords_set]
+        data.available_new_keywords = len(new_kws)
+
+        # 竞品数据
+        for comp in competitors_list:
+            data.competitors.append(CompetitorData(
+                asin=str(comp.get("asin", "")),
+                price=_float(comp.get("price")),
+                rating=_float(comp.get("asin_star")),
+                review_count=_int(comp.get("reviews_num")),
+                bsr=_int(comp.get("top_category_rank")),
+            ))
+
+        # 自然订单占比
+        gp_total_orders = _float(gross_profit.get("total_orders")) if gross_profit else None
+        gp_ad_orders = _float(gross_profit.get("ad_orders")) if gross_profit else None
+        if gp_total_orders and gp_ad_orders is not None and gp_total_orders > 0:
+            data.natural_order_ratio = max(0, (gp_total_orders - gp_ad_orders) / gp_total_orders * 100)
+
+        # 库存
+        stock = _int(gross_profit.get("stock")) if gross_profit else None
+        data.signals = SpecialSignals(
+            inventory_qty=stock or _int(listing.get("in_stock_num")),
+            in_transit_inventory=_int(listing.get("in_stock_receiving_num")),
+        )
+
+        # 趋势数据
+        for row in trend_rows:
+            row_orders = _float(row.get("orders", 0)) or 0
+            row_ad_orders = _float(row.get("ad_orders", 0)) or 0
+            row_clicks = _float(row.get("clicks", 0)) or 0
+            row_impressions = _float(row.get("impressions", 0)) or 0
+            row_spend = _float(row.get("spend", 0)) or 0
+            row_ad_sales = _float(row.get("ad_sales", 0)) or 0
+            data.trend.append(TrendPoint(
+                date=str(row.get("date", "")),
+                acos=round(row_spend / row_ad_sales * 100, 1) if row_ad_sales else None,
+                cvr=round(row_orders / row_clicks * 100, 1) if row_clicks else None,
+                ctr=round(row_clicks / row_impressions * 100, 1) if row_impressions else None,
+                cpc=round(row_spend / row_clicks, 2) if row_clicks else None,
+                orders=int(row_orders),
+                spend=round(row_spend, 2),
+            ))
+
+        return data
+
+    # ── 查询方法 ──────────────────────────────────────────
+
+    async def _resolve_asin_context(self, parent_asin: str) -> dict | None:
+        """根据 parent_asin 自动查找 shop_id（保留供外部可能的调用）"""
+        row = await self._query_one("""
+            SELECT lg.shop_id, s.account AS shop_account,
+                   MAX(lg.parent_seller_sku) AS parent_seller_sku
+            FROM dwd_whp_amazon_listing_general lg
+            JOIN dwd_shop s ON lg.shop_id = s.id
+            WHERE lg.parent_asin = %s
+            GROUP BY lg.shop_id, s.account
+            LIMIT 1
+        """, (parent_asin,))
+        if row:
+            return {
+                "shop_id": row["shop_id"],
+                "shop_account": row["shop_account"],
+                "parent_seller_sku": row.get("parent_seller_sku") or "",
+            }
+        return None
+
+    async def _fetch_listing(self, parent_asin: str, shop_id: int) -> dict | None:
+        """获取 ASIN 主数据（保留供外部可能的调用）"""
+        _, listing = await self._resolve_and_fetch_listing(parent_asin)
+        return listing
+
+    async def _fetch_ad_summary(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
+                                 days: int = 7) -> dict | None:
+        """汇总广告商品级报告"""
+        if not parent_asin or not parent_seller_sku:
+            return None
+
+        rows = await self._query("""
+            SELECT SUM(COALESCE(t.cost,0)) AS cost,
+                   SUM(COALESCE(t.sale,0)) AS sale,
+                   SUM(COALESCE(t.clicks,0)) AS clicks,
+                   SUM(COALESCE(t.impressions,0)) AS impressions,
+                   SUM(COALESCE(t.units_order,0)) AS units_order,
+                   (SELECT SUM(u.cb) FROM (
+                       SELECT DISTINCT campaign_id, campaign_budget AS cb
+                       FROM dwd_amazon_ad_product_report_update
+                       WHERE shop_id = %s
+                         AND LOCAL_REPORT_TIME >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+                         AND LOCAL_REPORT_TIME < CURDATE()
+                         AND asin IN (
+                           SELECT a.asin FROM dwd_whp_amazon_listing_general a
+                           WHERE a.shop_id = %s AND a.parent_asin = %s
+                         )
+                         AND campaign_budget IS NOT NULL
+                   ) u) AS campaign_budget
+            FROM dwd_amazon_ad_product_report_update t
+            WHERE t.shop_id = %s
+              AND t.LOCAL_REPORT_TIME >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+              AND t.LOCAL_REPORT_TIME < CURDATE()
+              AND EXISTS (
+                SELECT 1
+                FROM dwd_whp_amazon_listing_general a
+                INNER JOIN dwd_whp_az_extend e
+                  ON a.shop_id = e.shop_id AND a.asin = e.asin AND a.seller_sku = e.seller_sku
+                WHERE a.shop_id = t.shop_id
+                  AND a.parent_asin = %s
+                  AND a.parent_seller_sku = %s
+                  AND a.asin = t.asin
+                  AND a.seller_sku = t.sku
+                  AND e.follow_up = 'YES_FOLLOW_UP'
+              )
+        """, (shop_id, days, shop_id, parent_asin, shop_id, days, parent_asin, parent_seller_sku))
+        row = rows[0] if rows else None
+
+        if not row or row.get("cost") is None:
+            return None
+
+        cost = _float(row["cost"])
+        sale = _float(row["sale"])
+        clicks = _float(row["clicks"])
+        impressions = _float(row["impressions"])
+        orders = _float(row["units_order"])
+
+        return {
+            "cost": cost,
+            "sale": sale,
+            "clicks": clicks,
+            "impressions": impressions,
+            "units_order": orders,
+            "acos": (cost / sale * 100) if sale else None,
+            "cpc": (cost / clicks) if clicks else None,
+            "ctr": (clicks / impressions * 100) if impressions else None,
+            "cvr": (orders / clicks * 100) if clicks else None,
+            "campaign_budget": _float(row.get("campaign_budget")),
+        }
+
+    async def _fetch_placement_summary(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
+                                        days: int = 7) -> dict | None:
+        """获取 placement 维度的广告位数据（TOS vs ROS）"""
+        if not parent_asin or not parent_seller_sku:
+            return None
+
+        rows = await self._query("""
+            SELECT t.placement,
+                   SUM(COALESCE(t.cost,0)) AS cost,
+                   SUM(COALESCE(t.sale,0)) AS sale,
+                   SUM(COALESCE(t.clicks,0)) AS clicks,
+                   SUM(COALESCE(t.impressions,0)) AS impressions,
+                   SUM(COALESCE(t.units_order,0)) AS units_order
+            FROM dwd_amazon_ad_placement_report_update t
+            WHERE t.shop_id = %s
+              AND t.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+              AND t.CAMPAIGN_ID IN (
+                SELECT p.CAMPAIGN_ID
+                FROM dwd_amazon_ad_product p
+                WHERE p.state = 'enabled'
+                  AND p.shop_id = t.shop_id
+                  AND EXISTS (
+                    SELECT 1
+                    FROM dwd_whp_amazon_listing_general a
+                    INNER JOIN dwd_whp_az_extend e
+                      ON a.shop_id = e.shop_id AND a.asin = e.asin AND a.seller_sku = e.seller_sku
+                    WHERE a.shop_id = p.shop_id
+                      AND a.parent_asin = %s
+                      AND a.parent_seller_sku = %s
+                      AND a.ASIN = p.asin
+                      AND a.seller_sku = p.seller_sku
+                      AND e.follow_up = 'YES_FOLLOW_UP'
+                  )
+              )
+            GROUP BY t.placement
+        """, (shop_id, days, parent_asin, parent_seller_sku))
+
+        if not rows:
+            return None
+
+        total_cost = 0
+        tos = {"cost": 0, "sale": 0, "clicks": 0}
+        ros = {"cost": 0, "sale": 0, "clicks": 0}
+        for r in rows:
+            placement_type = str(r.get("placement", "")).upper()
+            cost = _float(r.get("cost", 0)) or 0
+            sale = _float(r.get("sale", 0)) or 0
+            clicks = _float(r.get("clicks", 0)) or 0
+            total_cost += cost
+            if "TOS" in placement_type:
+                tos["cost"] += cost
+                tos["sale"] += sale
+                tos["clicks"] += clicks
+            else:
+                ros["cost"] += cost
+                ros["sale"] += sale
+                ros["clicks"] += clicks
+
+        result = {}
+        if tos["sale"]:
+            result["placement_tos_acos"] = tos["cost"] / tos["sale"] * 100
+        if tos["clicks"]:
+            result["placement_tos_cpc"] = tos["cost"] / tos["clicks"]
+        if ros["sale"]:
+            result["placement_ros_acos"] = ros["cost"] / ros["sale"] * 100
+        if ros["clicks"]:
+            result["placement_ros_cpc"] = ros["cost"] / ros["clicks"]
+        if total_cost:
+            result["placement_tos_spend_ratio"] = tos["cost"] / total_cost * 100
+            result["placement_ros_spend_ratio"] = ros["cost"] / total_cost * 100
+
+        return result
+
+    async def _fetch_ad_keywords(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
+                                  days: int = 7) -> list[dict]:
+        """获取关键词级广告报告"""
+        if not parent_asin or not parent_seller_sku:
+            return []
+
+        rows = await self._query("""
+            SELECT daak.keyword_text, daak.match_type,
+                   SUM(COALESCE(daak.clicks,0)) AS clicks,
+                   SUM(COALESCE(daak.cost,0)) AS cost,
+                   SUM(COALESCE(daak.impressions,0)) AS impressions,
+                   SUM(COALESCE(daak.sale,0)) AS sale,
+                   SUM(COALESCE(daak.units_order,0)) AS units_order,
+                   AVG(daak.keyword_bid) AS keyword_bid
+            FROM dwd_amazon_ad_keyword_report daak
+            INNER JOIN dwd_amazon_ad_product daap
+                ON daap.campaign_id = daak.campaign_id
+               AND daap.shop_id = daak.shop_id
+            WHERE daak.keyword_text IS NOT NULL
+              AND daak.campaign_status = 'ENABLED'
+              AND daak.keyword_status = 'ENABLED'
+              AND daap.shop_id = %s
+              AND daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+              AND EXISTS (
+                SELECT 1
+                FROM dwd_whp_amazon_listing_general a
+                INNER JOIN dwd_whp_az_extend e
+                  ON a.shop_id = e.shop_id AND a.asin = e.asin AND a.seller_sku = e.seller_sku
+                WHERE a.shop_id = daap.shop_id
+                  AND a.parent_asin = %s
+                  AND a.parent_seller_sku = %s
+                  AND a.asin = daap.asin
+                  AND a.seller_sku = daap.seller_sku
+                  AND e.follow_up = 'YES_FOLLOW_UP'
+              )
+            GROUP BY daak.keyword_text, daak.match_type
+            ORDER BY SUM(COALESCE(daak.cost,0)) DESC
+            LIMIT 200
+        """, (shop_id, days, parent_asin, parent_seller_sku))
+
+        for r in rows:
+            cost = _float(r.get("cost"))
+            sale = _float(r.get("sale"))
+            clicks = _float(r.get("clicks"))
+            orders = _float(r.get("units_order"))
+            r["acos"] = (cost / sale * 100) if sale else None
+            r["cvr"] = (orders / clicks * 100) if clicks else None
+
+        return rows
+
+    async def _fetch_natural_rankings(self, parent_asin: str, parent_seller_sku: str,
+                                       shop_id: int) -> list[dict]:
+        """获取关键词自然排名"""
+        rows = await self._query("""
+            SELECT t1.keyword, t1.craw_nature_rank, t1.craw_nature_rank_position,
+                   t1.craw_sp_rank, t1.craw_sp_rank_position, t1.craw_time,
+                   t1.near_craw_nature_rank, t1.near_craw_nature_rank_position,
+                   t1.near_craw_sp_rank
+            FROM dwd_amazon_asin_keyword_library t1
+            WHERE t1.craw_nature_rank IS NOT NULL
+              AND t1.craw_time >= NOW() - INTERVAL 7 DAY
+              AND t1.asin IN (
+                  SELECT a.asin
+                  FROM dwd_whp_amazon_listing_general a
+                  INNER JOIN dwd_whp_az_extend e
+                      ON a.shop_id = e.shop_id AND a.asin = e.asin
+                      AND a.seller_sku = e.seller_sku
+                      AND e.follow_up = 'YES_FOLLOW_UP'
+                  WHERE a.parent_asin = %s
+                    AND a.parent_seller_sku = %s
+                    AND a.shop_id = %s
+              )
+            ORDER BY t1.keyword ASC, t1.craw_nature_rank ASC
+        """, (parent_asin, parent_seller_sku, shop_id))
+
+        seen = set()
+        result = []
+        for r in rows:
+            kw = r.get("keyword")
+            if kw and kw not in seen:
+                seen.add(kw)
+                result.append(r)
+        return result
+
+    async def _fetch_competitors(self, parent_asin: str, shop_id: int) -> list[dict]:
+        """获取直接竞品列表"""
+        rows = await self._query("""
+            SELECT p.asin, p.title, p.price, p.asin_star, p.reviews_num,
+                   p.ratings_num, p.top_category_rank, p.brand,
+                   p.az_color, p.az_size, p.fabric_type_value, p.variant_num
+            FROM dwd_amazon_listing_competitor_asin_group g
+            INNER JOIN dwd_amazon_listing_competitor_asin_group_relation r
+                ON g.id = r.group_id
+            INNER JOIN dwd_az_cw_asin_prod_info p
+                ON p.asin = r.competitor_asin AND p.site_code = r.site_code
+            WHERE g.parent_asin = %s
+              AND g.shop_id = %s
+              AND g.group_name = 'AI直接竞品组'
+            LIMIT 20
+        """, (parent_asin, shop_id))
+
+        return rows
+
+    async def _fetch_flow_keywords(self, parent_asin: str, shop_id: int) -> list[dict]:
+        """获取Listing流量关键词"""
+        rows = await self._query("""
+            SELECT a.keyword, c.searches, c.searches_rank,
+                   c.top_click_ratio, c.top_convert_ratio
+            FROM dwd_amazon_listing_flow_keyword_us a
+            LEFT JOIN dwd_amazon_precise_keyword_library c
+                ON a.site_code = c.site_code AND a.keyword = c.keyword
+            WHERE a.shop_id = %s
+              AND a.parent_asin = %s
+              AND (a.del_status IS NULL OR a.del_status = 'VALID')
+            ORDER BY c.searches DESC
+            LIMIT 100
+        """, (shop_id, parent_asin))
+
+        return rows
+
+    async def _fetch_gross_profit(self, parent_asin: str, parent_seller_sku: str, days: int = 7) -> dict | None:
+        """从 dwd_az_asin_gross_profit 拉取销售额/广告/毛利/库存（仅跟进中 ASIN）"""
+        if not parent_asin or not parent_seller_sku:
+            return None
+
+        row = await self._query_one("""
+            SELECT SUM(COALESCE(daagp.order_sale_amount, 0)) AS total_sales,
+                   SUM(COALESCE(daagp.ad_cost_amount, 0)) AS total_ad_cost,
+                   SUM(COALESCE(daagp.order_num, 0)) AS total_orders,
+                   SUM(COALESCE(daagp.ad_sale_num, 0)) AS ad_orders,
+                   SUM(COALESCE(daagp.gross_profit_amount_proportion
+                       * daagp.order_sale_amount, 0))
+                       / NULLIF(SUM(COALESCE(daagp.order_sale_amount, 0)), 0) AS margin,
+                   COALESCE(
+                       (SELECT SUM(COALESCE(can_sale_num, 0))
+                        FROM dwd_az_asin_gross_profit
+                        WHERE parent_asin = %s
+                          AND parent_seller_sku = %s
+                          AND statistics_data_time = (
+                              SELECT MAX(statistics_data_time)
+                              FROM dwd_az_asin_gross_profit
+                              WHERE parent_asin = %s
+                                AND parent_seller_sku = %s
+                                AND statistics_data_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                          )
+                       ), 0
+                   ) AS stock
+            FROM dwd_az_asin_gross_profit daagp
+            WHERE daagp.parent_asin = %s
+              AND daagp.parent_seller_sku = %s
+              AND daagp.statistics_data_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+              AND EXISTS (
+                  SELECT 1
+                  FROM dwd_whp_amazon_listing_general a
+                  INNER JOIN dwd_whp_az_extend e
+                      ON a.shop_id = e.shop_id AND a.asin = e.asin
+                      AND a.seller_sku = e.seller_sku
+                      AND e.follow_up = 'YES_FOLLOW_UP'
+                  WHERE a.parent_asin = daagp.parent_asin
+                    AND a.parent_seller_sku = daagp.parent_seller_sku
+                    AND a.asin = daagp.asin
+                    AND a.seller_sku = daagp.seller_sku
+                    AND a.shop_id = daagp.shop_id
+              )
+        """, (parent_asin, parent_seller_sku,
+              parent_asin, parent_seller_sku, days,
+              parent_asin, parent_seller_sku, days))
+
+        if row:
+            return row
+        return None
+
+    async def _fetch_trend_data(self, parent_asin: str, parent_seller_sku: str,
+                                days: int = 7) -> list[dict]:
+        """按日聚合趋势数据"""
+        if not parent_asin or not parent_seller_sku:
+            return []
+
+        rows = await self._query("""
+            SELECT
+                DATE_FORMAT(statistics_data_time, '%%m-%%d') AS date,
+                SUM(COALESCE(order_num, 0)) AS orders,
+                SUM(COALESCE(ad_sale_num, 0)) AS ad_orders,
+                SUM(COALESCE(ad_cost_amount, 0)) AS spend,
+                SUM(COALESCE(ad_sale_money, 0)) AS ad_sales,
+                SUM(COALESCE(ad_click, 0)) AS clicks,
+                SUM(COALESCE(ad_impressions, 0)) AS impressions
+            FROM dwd_az_asin_gross_profit
+            WHERE parent_asin = %s
+              AND parent_seller_sku = %s
+              AND statistics_data_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            GROUP BY statistics_data_time
+            ORDER BY statistics_data_time ASC
+        """, (parent_asin, parent_seller_sku, days))
+        return rows
+
+
+# ── 辅助函数 ─────────────────────────────────────────────
+
+def _float(v) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int(v) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 敏感信息 — 环境配置
+.env
+*.local.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 数据文件
+*.xlsx
+*.csv
+data/source/csv_output/
+
+# 运行时
+*.log
+agent_checkpoints.db
+
+# 运营配置（运行时生成，按 ASIN 隔离，不提交）
+ad-direction-agent/config/
+
+# 子项目内已有的 .gitignore
+ad-direction-agent/.gitignore
+ad-purpose-agent/.idea/.gitignore
+
+# Claude Code
+.claude/
+
+# SQL 模板（本地参考，不提交）
+ad-direction-agent/sql/
+
+# 多 Key 文件（敏感，不提交）
+ad-direction-agent/api_keys.txt
+
+# 数据血缘 + 架构文档（本地参考，不提交）
+ad-direction-agent/data/
+ad-direction-agent/docs/
+
+# P1 废弃文件（不推送）
+ad-purpose-agent/__pycache__/
