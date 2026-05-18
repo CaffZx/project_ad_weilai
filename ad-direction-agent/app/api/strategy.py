@@ -23,7 +23,7 @@ async def strategy_options(
     Agent 只提供选项，不推荐。单一维度各选项互斥。
     若已有长期配置则自动预填。
     """
-    return await orchestrator.get_strategy_options(req.get("asin", ""))
+    return await orchestrator.get_strategy_options(req.get("asin", ""), days=req.get("days", 7))
 
 
 @router.post("/strategy/confirm", response_model=StrategyConfirmResponse)

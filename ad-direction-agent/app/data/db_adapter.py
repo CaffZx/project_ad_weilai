@@ -169,7 +169,7 @@ class DbAdapter(DataSourceAdapter):
                           if self._should_fetch("META_AD_PLACEMENT", meta_filter) else None)
         kw_task = (self._fetch_ad_keywords(parent_asin, parent_seller_sku, shop_id, days=days)
                    if self._should_fetch("META_KW_AD", meta_filter) else None)
-        nat_task = (self._fetch_natural_rankings(parent_asin, parent_seller_sku, shop_id)
+        nat_task = (self._fetch_natural_rankings(parent_asin, parent_seller_sku, shop_id, days=days)
                     if (self._should_fetch("META_KW_COMPETITOR_RANK", meta_filter)
                         or self._should_fetch("META_KW_SUB_ASIN_RANK", meta_filter)) else None)
         comp_task = (self._fetch_competitors(parent_asin, shop_id)
@@ -704,7 +704,7 @@ class DbAdapter(DataSourceAdapter):
         return rows
 
     async def _fetch_natural_rankings(self, parent_asin: str, parent_seller_sku: str,
-                                       shop_id: int) -> list[dict]:
+                                       shop_id: int, days: int = 7) -> list[dict]:
         """获取关键词自然排名（每个 keyword 取排名最好的子 ASIN）"""
         rows = await self._query("""
             SELECT t1.keyword, t1.craw_nature_rank, t1.craw_nature_rank_position,
@@ -713,7 +713,7 @@ class DbAdapter(DataSourceAdapter):
                    t1.near_craw_sp_rank
             FROM dwd_amazon_asin_keyword_library t1
             WHERE t1.craw_nature_rank IS NOT NULL
-              AND t1.craw_time >= NOW() - INTERVAL 7 DAY
+              AND t1.craw_time >= NOW() - INTERVAL %s DAY
               AND t1.asin IN (
                   SELECT a.asin
                   FROM dwd_whp_amazon_listing_general a
@@ -726,7 +726,7 @@ class DbAdapter(DataSourceAdapter):
                     AND a.shop_id = %s
               )
             ORDER BY t1.keyword ASC, t1.craw_nature_rank ASC
-        """, (parent_asin, parent_seller_sku, shop_id))
+        """, (days, parent_asin, parent_seller_sku, shop_id))
 
         # 每个 keyword 取排名最好的那条（ORDER BY rank ASC 的第一条）
         seen = set()

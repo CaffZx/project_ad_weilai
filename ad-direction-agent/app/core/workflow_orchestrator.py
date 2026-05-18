@@ -98,61 +98,65 @@ class WorkflowOrchestrator:
         self.decision_gen = decision_generator or DecisionPackageGenerator()
         # 数据缓存（TTL 4小时，支持强制刷新）
         self._cache_lock = asyncio.Lock()
-        self._data_cache: dict[str, CacheEntry] = {}
-        self._data_tasks: dict[str, asyncio.Task] = {}
+        self._data_cache: dict[tuple, CacheEntry] = {}
+        self._data_tasks: dict[tuple, asyncio.Task] = {}
 
     # ── 数据缓存机制 ───────────────────────────────────────
 
-    async def _preload_data(self, asin: str):
+    async def _preload_data(self, asin: str, days: int = 7):
         """后台预加载 ASIN 数据，不阻塞当前请求"""
+        key = (asin, days)
         async with self._cache_lock:
-            if asin in self._data_cache:
-                entry = self._data_cache[asin]
+            if key in self._data_cache:
+                entry = self._data_cache[key]
                 if time.time() - entry.timestamp < CACHE_TTL:
                     return
-            if asin in self._data_tasks:
+            if key in self._data_tasks:
                 return
-        task = asyncio.create_task(self._do_preload(asin))
-        self._data_tasks[asin] = task
+        task = asyncio.create_task(self._do_preload(asin, days=days))
+        self._data_tasks[key] = task
 
-    async def _do_preload(self, asin: str):
+    async def _do_preload(self, asin: str, days: int = 7):
         try:
-            data = await self.aggregator.fetch(asin)
-            self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+            data = await self.aggregator.fetch(asin, days=days)
+            self._data_cache[(asin, days)] = CacheEntry(data=data, timestamp=time.time())
         except Exception as e:
             logger.error("后台数据预加载失败 [%s]: %s", asin, e)
         finally:
-            self._data_tasks.pop(asin, None)
+            self._data_tasks.pop((asin, days), None)
 
     async def _ensure_data(self, asin: str, refresh: bool = False,
-                            meta_filter: list[str] | None = None) -> ASINData:
+                            meta_filter: list[str] | None = None,
+                            days: int = 7) -> ASINData:
         """获取 ASIN 数据
 
         meta_filter 非空时跳过缓存直接按需查询。
         refresh=True 时跳过缓存，强制从数据库重新查询。
         正常模式下检查 TTL，缓存未过期则直接返回。
         """
+        key = (asin, days)
+
         # 0) 选择性查询：跳过缓存，只查指定维度
         if meta_filter:
-            return await self.aggregator.fetch(asin, meta_filter=meta_filter)
+            return await self.aggregator.fetch(asin, meta_filter=meta_filter, days=days)
 
         # 1) 强制刷新：清除旧缓存 → 重新查 DB → 写入新缓存
         if refresh:
             async with self._cache_lock:
-                if asin in self._data_tasks:
-                    self._data_tasks[asin].cancel()
-                    del self._data_tasks[asin]
-                self._data_cache.pop(asin, None)
+                if key in self._data_tasks:
+                    self._data_tasks[key].cancel()
+                    del self._data_tasks[key]
+                self._data_cache.pop(key, None)
             logger.info("诊断刷新: 缓存已清除, 重新查询 %s", asin)
-            data = await self.aggregator.fetch(asin)
+            data = await self.aggregator.fetch(asin, days=days)
             async with self._cache_lock:
-                self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+                self._data_cache[key] = CacheEntry(data=data, timestamp=time.time())
             return data
 
         # 2) TTL 检查
         async with self._cache_lock:
-            if asin in self._data_cache:
-                entry = self._data_cache[asin]
+            if key in self._data_cache:
+                entry = self._data_cache[key]
                 if time.time() - entry.timestamp < CACHE_TTL:
                     return entry.data
                 logger.info("Cache expired for %s (%.0fs old)", asin, time.time() - entry.timestamp)
@@ -160,32 +164,32 @@ class WorkflowOrchestrator:
         # 3) 等待进行中的预加载
         task = None
         async with self._cache_lock:
-            if asin in self._data_tasks:
-                task = self._data_tasks[asin]
+            if key in self._data_tasks:
+                task = self._data_tasks[key]
         if task:
             try:
                 await task
             except Exception:
                 pass
             async with self._cache_lock:
-                if asin in self._data_cache:
-                    return self._data_cache[asin].data
+                if key in self._data_cache:
+                    return self._data_cache[key].data
 
         # 4) 缓存未命中或过期：直接查 → 写入
-        data = await self.aggregator.fetch(asin)
+        data = await self.aggregator.fetch(asin, days=days)
         async with self._cache_lock:
-            self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+            self._data_cache[key] = CacheEntry(data=data, timestamp=time.time())
         return data
 
     # ── Layer 1.1 战略层 ─────────────────────────────────
 
-    async def get_strategy_options(self, asin: str) -> StrategyOptionsResponse:
+    async def get_strategy_options(self, asin: str, days: int = 7) -> StrategyOptionsResponse:
         """返回三维度选项（静态配置，无 DB 查询）
 
         数据预加载在后台触发，不阻塞用户操作。
         """
         # 后台预加载数据（用户选战略时数据已在加载）
-        await self._preload_data(asin)
+        await self._preload_data(asin, days=days)
 
         layer_config = settings.layer_options_config or {}
         strategy_cfg = layer_config.get("strategy", {})
@@ -214,12 +218,14 @@ class WorkflowOrchestrator:
             } if current else None,
             data_ok=True,
             missing_fields=[],
+            days=days,
         )
 
-    async def confirm_strategy(self, req: StrategyConfirmRequest) -> StrategyConfirmResponse:
+    async def confirm_strategy(self, req: StrategyConfirmRequest,
+                                 days: int = 7) -> StrategyConfirmResponse:
         """保存战略层选择并持久化"""
         # 校验 ASIN 是否存在，防止无效 ASIN 创建垃圾 config 目录
-        data = await self._ensure_data(req.asin)
+        data = await self._ensure_data(req.asin, days=days)
         if data.data_missing:
             return StrategyConfirmResponse(
                 asin=req.asin,
@@ -243,7 +249,7 @@ class WorkflowOrchestrator:
 
     # ── Layer 1.2 策略层 ─────────────────────────────────
 
-    async def get_tactics_options(self, asin: str) -> TacticsOptionsResponse:
+    async def get_tactics_options(self, asin: str, days: int = 7) -> TacticsOptionsResponse:
         """返回策略选项
 
         首次访问（无 keyword_analysis 缓存）：调用 purpose-agent LLM，产出推荐 + 关键词分类
@@ -268,12 +274,20 @@ class WorkflowOrchestrator:
 
         if strategy_saved:
             wf = self.state.get_workflow_state(asin)
-            has_kw_cache = wf.get("keyword_analysis") is not None
+            # 按 days 维度读取 keyword_analysis（兼容旧格式）
+            kw_raw = wf.get("keyword_analysis")
+            if isinstance(kw_raw, list):
+                kw_cache = kw_raw  # 旧格式：直接 list
+            elif isinstance(kw_raw, dict):
+                kw_cache = kw_raw.get(str(days))
+            else:
+                kw_cache = None
+            has_kw_cache = kw_cache is not None
 
             if has_kw_cache:
                 # 回访：跳过 LLM，从 state 读 AI 分类，仅刷新 DB 排名字段
-                data = await self._ensure_data(asin)
-                ai_kw_map = {a.get("word", ""): a for a in wf["keyword_analysis"]}
+                data = await self._ensure_data(asin, days=days)
+                ai_kw_map = {a.get("word", ""): a for a in kw_cache}
                 merged_kws = []
                 for kw in data.keywords[:20]:
                     ai = ai_kw_map.get(kw.keyword, {})
@@ -286,7 +300,11 @@ class WorkflowOrchestrator:
                         "strategy_type": ai.get("strategy_type", ""),
                         "action": ai.get("action", ""),
                     })
-                wf["keyword_analysis"] = merged_kws
+                # 按 days 维度存储
+                if isinstance(wf.get("keyword_analysis"), dict):
+                    wf["keyword_analysis"][str(days)] = merged_kws
+                else:
+                    wf["keyword_analysis"] = {str(days): merged_kws}
                 self.state.set_workflow_state(asin, wf)
                 recommendations = {
                     "ad_purposes": long_term.get("ad_purposes", []),
@@ -296,12 +314,13 @@ class WorkflowOrchestrator:
                 # 首次访问：调用 purpose-agent LLM
                 try:
                     from app.llm.purpose_adapter import recommend_tactics_from_purpose
-                    data = await self._ensure_data(asin)
+                    data = await self._ensure_data(asin, days=days)
                     rec = await recommend_tactics_from_purpose(
                         data=data,
                         position=strategy_context.product_level,
                         stage=strategy_context.product_stage,
                         season=strategy_context.season_stage,
+                        days=days,
                     )
                     if "error" in rec:
                         raise ValueError(rec["error"])
@@ -325,8 +344,10 @@ class WorkflowOrchestrator:
                             "strategy_type": ai.get("strategy_type", ""),
                             "action": ai.get("action", ""),
                         })
-                    wf["keyword_analysis"] = merged_kws
-                    wf["target_scores"] = rec.get("target_scores", [])
+                    wf["keyword_analysis"] = {str(days): merged_kws}
+                    ts = wf.get("target_scores") or {}
+                    ts[str(days)] = rec.get("target_scores", [])
+                    wf["target_scores"] = ts
                     self.state.set_workflow_state(asin, wf)
                 except Exception as e:
                     logger.warning("策略层 purpose-agent 推荐失败 [%s]: %s", asin, e)
@@ -341,8 +362,10 @@ class WorkflowOrchestrator:
                                 "rank_change_14d": kw.rank_change_14d or 0,
                                 "strategy_type": "", "action": "",
                             })
-                        wf["keyword_analysis"] = fallback_kws
-                        wf["target_scores"] = []
+                        wf["keyword_analysis"] = {str(days): fallback_kws}
+                        ts = wf.get("target_scores") or {}
+                        ts[str(days)] = []
+                        wf["target_scores"] = ts
                         self.state.set_workflow_state(asin, wf)
 
         dimensions = []
@@ -361,8 +384,14 @@ class WorkflowOrchestrator:
 
         current = self.state.get_long_term_config(asin)
 
-        # 读取保存的 AI 诊断附加数据
+        # 读取保存的 AI 诊断附加数据（按 days 维度）
         wf = self.state.get_workflow_state(asin)
+        ts = wf.get("target_scores", [])
+        if isinstance(ts, dict):
+            ts = ts.get(str(days), [])
+        ka = wf.get("keyword_analysis", [])
+        if isinstance(ka, dict):
+            ka = ka.get(str(days), [])
         return TacticsOptionsResponse(
             asin=asin,
             dimensions=dimensions,
@@ -371,17 +400,17 @@ class WorkflowOrchestrator:
                 "ad_purposes": current.get("ad_purposes"),
                 "keyword_types": current.get("keyword_types"),
             } if current else None,
-            target_scores=wf.get("target_scores", []),
-            keyword_analysis=wf.get("keyword_analysis", []),
+            target_scores=ts,
+            keyword_analysis=ka,
         )
 
-    async def get_tactics_recommendations(self, asin: str) -> dict:
+    async def get_tactics_recommendations(self, asin: str, days: int = 7) -> dict:
         """强制 AI 重新推荐策略选项（不保存，仅返回推荐结果）
 
         由前端「AI 重新推荐」按钮触发，调用 purpose-agent。
         """
         long_term = self.state.get_long_term_config(asin)
-        data = await self._ensure_data(asin)
+        data = await self._ensure_data(asin, days=days)
 
         from app.llm.purpose_adapter import recommend_tactics_from_purpose
         rec = await recommend_tactics_from_purpose(
@@ -389,17 +418,24 @@ class WorkflowOrchestrator:
             position=long_term.get("product_level", "腰部"),
             stage=long_term.get("product_stage", "推进期"),
             season=long_term.get("season_stage", "淡季"),
+            days=days,
         )
 
         # purpose-agent 失败时不清空已有缓存
         if "error" in rec:
             wf = self.state.get_workflow_state(asin)
+            ka = wf.get("keyword_analysis", [])
+            if isinstance(ka, dict):
+                ka = ka.get(str(days), [])
+            ts = wf.get("target_scores", [])
+            if isinstance(ts, dict):
+                ts = ts.get(str(days), [])
             return {
                 "asin": asin,
                 "dimensions": [],
                 "reasoning": "",
-                "keyword_analysis": wf.get("keyword_analysis", []),
-                "target_scores": wf.get("target_scores", []),
+                "keyword_analysis": ka,
+                "target_scores": ts,
                 "error": rec["error"],
             }
 
@@ -433,8 +469,10 @@ class WorkflowOrchestrator:
                 "action": ai.get("action", ""),
             })
         wf = self.state.get_workflow_state(asin)
-        wf["keyword_analysis"] = merged_kws
-        wf["target_scores"] = rec.get("target_scores", [])
+        wf["keyword_analysis"] = {str(days): merged_kws}
+        ts = wf.get("target_scores") or {}
+        ts[str(days)] = rec.get("target_scores", [])
+        wf["target_scores"] = ts
         self.state.set_workflow_state(asin, wf)
 
         return {
@@ -461,7 +499,8 @@ class WorkflowOrchestrator:
 
     # ── Layer 1.3 诊断层 ─────────────────────────────────
 
-    async def get_diagnosis(self, asin: str, refresh: bool = False) -> DiagnosisResponse:
+    async def get_diagnosis(self, asin: str, refresh: bool = False,
+                              days: int = 7) -> DiagnosisResponse:
         """返回只读诊断数据
 
         无缓存 → 全量查，不触发二次按需查
@@ -469,22 +508,23 @@ class WorkflowOrchestrator:
         刷新   → 缓存快照做场景检测 → 一次按需查询
         """
         long_term = self.state.get_long_term_config(asin)
+        key = (asin, days)
         async with self._cache_lock:
-            cached_entry = self._data_cache.get(asin)
+            cached_entry = self._data_cache.get(key)
 
         if not cached_entry:
-            data = await self._ensure_data(asin)
+            data = await self._ensure_data(asin, days=days)
             if _is_valid_data(data):
                 async with self._cache_lock:
-                    self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+                    self._data_cache[key] = CacheEntry(data=data, timestamp=time.time())
         elif not refresh:
             data = cached_entry.data
             if not _is_valid_data(data):
                 logger.warning("诊断缓存无效，降级全量查询 [%s]", asin)
-                data = await self._ensure_data(asin)
+                data = await self._ensure_data(asin, days=days)
                 if _is_valid_data(data):
                     async with self._cache_lock:
-                        self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+                        self._data_cache[key] = CacheEntry(data=data, timestamp=time.time())
         else:
             snapshot = cached_entry.data
 
@@ -515,11 +555,11 @@ class WorkflowOrchestrator:
 
         if refresh and cached_entry:
             async with self._cache_lock:
-                self._data_cache.pop(asin, None)
-            data = await self.aggregator.fetch(asin, meta_filter=meta_ids)
+                self._data_cache.pop(key, None)
+            data = await self.aggregator.fetch(asin, meta_filter=meta_ids, days=days)
             if _is_valid_data(data):
                 async with self._cache_lock:
-                    self._data_cache[asin] = CacheEntry(data=data, timestamp=time.time())
+                    self._data_cache[key] = CacheEntry(data=data, timestamp=time.time())
 
         # 告警信号
         alerts = []
@@ -540,7 +580,9 @@ class WorkflowOrchestrator:
         # 关键词监控表 — 合并 AI 分类结果
         wf = self.state.get_workflow_state(asin)
         strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
-        if not wf.get("keyword_analysis") and strategy_saved:
+        ka_raw = wf.get("keyword_analysis")
+        ka_current = ka_raw.get(str(days)) if isinstance(ka_raw, dict) else ka_raw
+        if not ka_current and strategy_saved:
             # 回访已有策略的 ASIN 时，独立获取关键词 AI 分类
             try:
                 from app.llm.purpose_adapter import recommend_tactics_from_purpose
@@ -549,14 +591,20 @@ class WorkflowOrchestrator:
                     position=long_term.get("product_level", "腰部"),
                     stage=long_term.get("product_stage", "推进期"),
                     season=long_term.get("season_stage", "淡季"),
+                    days=days,
                 )
                 if "error" not in rec:
-                    wf["keyword_analysis"] = rec.get("keyword_analysis", [])
+                    if isinstance(ka_raw, dict):
+                        ka_raw[str(days)] = rec.get("keyword_analysis", [])
+                    else:
+                        ka_raw = {str(days): rec.get("keyword_analysis", [])}
+                    wf["keyword_analysis"] = ka_raw
                     self.state.set_workflow_state(asin, wf)
             except Exception as e:
                 logger.warning("诊断层关键词 AI 分类失败 [%s]: %s", asin, e)
         ai_kw_map = {}
-        for ak in wf.get("keyword_analysis", []):
+        ka_final = ka_raw.get(str(days)) if isinstance(ka_raw, dict) else ka_raw
+        for ak in (ka_final or []):
             ai_kw_map[ak.get("word", "")] = ak
         keyword_list = []
         for kw in data.keywords[:20]:
@@ -604,9 +652,9 @@ class WorkflowOrchestrator:
 
     # ── Layer 1.4 执行层 ─────────────────────────────────
 
-    async def get_execution_options(self, asin: str) -> ExecutionOptionsResponse:
+    async def get_execution_options(self, asin: str, days: int = 7) -> ExecutionOptionsResponse:
         """返回方向选项 + 评分 + LLM推荐（从缓存取）"""
-        data = await self._ensure_data(asin)
+        data = await self._ensure_data(asin, days=days)
         long_term = self.state.get_long_term_config(asin)
 
         # 将战略/策略字段注入ASINData，供Recommender使用
@@ -703,7 +751,7 @@ class WorkflowOrchestrator:
 
     # ── P3 上游推荐方法 ──────────────────────────────────
 
-    async def get_target_acos_recommendation(self, asin: str):
+    async def get_target_acos_recommendation(self, asin: str, days: int = 7):
         """P3 Feature 1: 目标 ACOS 推荐 — 优先返回手动设定值（每日5:00过期），否则走算法"""
         manual = self.state.get_target_acos_override(asin)
 
@@ -712,7 +760,7 @@ class WorkflowOrchestrator:
             return recommender.recommend_manual(asin, manual)
 
         long_term = self.state.get_long_term_config(asin)
-        data = await self._ensure_data(asin)
+        data = await self._ensure_data(asin, days=days)
         if long_term:
             data.product_stage = long_term.get("product_stage")
             data.product_level = long_term.get("product_level")
@@ -732,7 +780,7 @@ class WorkflowOrchestrator:
         """清除手动设定的目标 ACOS"""
         return self.state.clear_target_acos_override(asin)
 
-    async def get_budget_bid_recommendation(self, asin: str):
+    async def get_budget_bid_recommendation(self, asin: str, days: int = 7):
         """P3 Feature 2: 预算和 Bid 推荐 — 优先返回手动设定值，否则走算法"""
         long_term = self.state.get_long_term_config(asin)
         manual = long_term.get("daily_budget_override") if long_term else None
@@ -741,7 +789,7 @@ class WorkflowOrchestrator:
             recommender = BudgetBidRecommender()
             return recommender.recommend_manual(asin, manual)
 
-        data = await self._ensure_data(asin)
+        data = await self._ensure_data(asin, days=days)
         if long_term:
             data.product_stage = long_term.get("product_stage")
             data.season_stage = long_term.get("season_stage")
@@ -766,7 +814,8 @@ class WorkflowOrchestrator:
 
     # ── P3 统一推荐（LLM 驱动）─────────────────────────────
 
-    async def get_unified_recommendation(self, asin: str, refresh: bool = False):
+    async def get_unified_recommendation(self, asin: str, refresh: bool = False,
+                                           days: int = 7):
         """P3 统一推荐：手动覆盖 > LLM > 缓存 > 算法降级"""
         long_term = self.state.get_long_term_config(asin)
 
@@ -806,7 +855,7 @@ class WorkflowOrchestrator:
                 return cached
 
         # 2. 加载数据（refresh 时一并刷新数据缓存，避免 DB 瞬时故障的脏缓存）
-        data = await self._ensure_data(asin, refresh=refresh)
+        data = await self._ensure_data(asin, refresh=refresh, days=days)
         long_term = self.state.get_long_term_config(asin)
 
         strategy = {
@@ -829,11 +878,11 @@ class WorkflowOrchestrator:
             data_summary["CPC"] = f"${data.ad_data.cpc:.2f}" if data.ad_data.cpc else "N/A"
             data_summary["CTR"] = f"{data.ad_data.ctr:.1f}%" if data.ad_data.ctr else "N/A"
             data_summary["CVR"] = f"{data.ad_data.cvr:.1f}%" if data.ad_data.cvr else "N/A"
-            data_summary["日均花费"] = f"${data.ad_data.spend/7:.2f}" if data.ad_data.spend else "N/A"
+            data_summary["日均花费"] = f"${data.ad_data.spend/days:.2f}" if data.ad_data.spend else "N/A"
             data_summary["日预算(活动合计)"] = f"${data.ad_data.daily_budget:.2f}" if data.ad_data.daily_budget else "N/A"
             spend = data.ad_data.spend or 0
             budget = data.ad_data.daily_budget or 1
-            data_summary["花费率"] = f"{spend/7/budget*100:.0f}%" if budget > 0 else "N/A"
+            data_summary["花费率"] = f"{spend/days/budget*100:.0f}%" if budget > 0 else "N/A"
         if data.margin:
             data_summary["毛利率"] = f"{data.margin*100:.1f}%"
         if data.natural_order_ratio:
@@ -869,6 +918,7 @@ class WorkflowOrchestrator:
                 history=history,
                 current_acos_target=manual_acos,
                 current_daily_budget=manual_budget,
+                days=days,
             ), timeout=LLM_TIMEOUT)
             # 组装为标准响应
             ta_raw = llm_result.get("target_acos", {})
@@ -933,9 +983,9 @@ class WorkflowOrchestrator:
 
     # ── Layer 1.5 校验 + 报告 ────────────────────────────
 
-    async def run_validation_and_report(self, asin: str) -> dict:
+    async def run_validation_and_report(self, asin: str, days: int = 7) -> dict:
         """运行校验+确认+LLM报告，返回完整结果（从缓存取）"""
-        data = await self._ensure_data(asin)
+        data = await self._ensure_data(asin, days=days)
         long_term = self.state.get_long_term_config(asin)
         wf_state = self.state.get_workflow_state(asin)
 
@@ -995,6 +1045,7 @@ class WorkflowOrchestrator:
             decisions=decisions,
             strategy=strategy,
             tactics=tactics,
+            days=days,
         )
 
         # 查询路由

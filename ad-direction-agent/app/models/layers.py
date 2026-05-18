@@ -101,6 +101,7 @@ class StrategyOptionsResponse(BaseModel):
     current_selection: dict | None = None  # 从long_term_config加载 {product_level, product_stage, season_stage}
     data_ok: bool = True
     missing_fields: list[str] = []
+    days: int = 7
 
 
 class StrategyConfirmRequest(BaseModel):
@@ -207,6 +208,7 @@ class ExecutionSelectResponse(BaseModel):
 class TargetAcosRequest(BaseModel):
     """目标 ACOS 推荐请求"""
     asin: str
+    days: int = 7
 
 
 class TargetAcosStep(BaseModel):
@@ -239,6 +241,7 @@ class TargetAcosOverrideRequest(BaseModel):
 class BudgetBidRequest(BaseModel):
     """预算/Bid 推荐请求"""
     asin: str
+    days: int = 7
 
 
 class BudgetRecommendationDetail(BaseModel):
@@ -283,6 +286,7 @@ class UnifiedRecommendRequest(BaseModel):
     """P3 统一推荐请求"""
     asin: str
     refresh: bool = False  # True = 跳过缓存，强制 LLM
+    days: int = 7
 
 
 class TargetAcosResult(BaseModel):
@@ -328,6 +332,7 @@ class WizardStateResponse(BaseModel):
     execution: ExecutionSelectRequest | None = None
     long_term_config_exists: bool = False
     last_updated: str = ""
+    days: int = 7
 
 
 # ── 长期配置 ───────────────────────────────────────────────

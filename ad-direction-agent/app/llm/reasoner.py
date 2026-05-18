@@ -293,7 +293,7 @@ P3_RECOMMEND_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家
 （以上JSON中的所有数值和文本均为格式示例，请根据实际输入数据计算并填充真实值，请根据你实际的分析建议填充文本，不要被格式示例内的内容误导。）
 
 ## 字段语义说明
-- budget_bid.current: **日均实际花费**（≈近7天花费÷7），不是活动预算上限。从诊断数据中的"日均花费"字段取值。
+- budget_bid.current: **日均实际花费**（≈总花费÷天数），不是活动预算上限。从诊断数据中的"日均花费"字段取值。
 - budget_bid.suggested: 建议调整后的日均花费目标值
 - target_acos.recommended_target: 建议的ACOS目标百分比
 
@@ -344,7 +344,8 @@ class LLMReasoner:
                        validations: dict, decisions: dict,
                        asin: str,
                        strategy: dict | None = None,
-                       tactics: dict | None = None) -> str:
+                       tactics: dict | None = None,
+                       days: int = 7) -> str:
         """将结构化数据组装为 LLM 可读的上下文文本"""
         parts = []
 
@@ -371,7 +372,7 @@ class LLMReasoner:
             parts.append("")
 
         # ASIN 基本信息（仅标量字段）
-        parts.append("## ASIN 基本信息")
+        parts.append(f"## ASIN 基本信息（数据窗口: {days}天）")
         if data_summary:
             lines = []
             for k, v in data_summary.items():
@@ -652,6 +653,7 @@ class LLMReasoner:
         history: list[dict],
         current_acos_target: int | None = None,
         current_daily_budget: float | None = None,
+        days: int = 7,
     ) -> dict:
         """P3 统一推荐：LLM 同时给出目标 ACOS 和预算/Bid 建议"""
         parts = [
@@ -678,7 +680,7 @@ class LLMReasoner:
             parts.append("")
 
         parts.extend([
-            "## 诊断数据",
+            f"## 诊断数据（数据窗口: {days}天）",
         ])
         for k, v in data_summary.items():
             if v is not None:
@@ -737,6 +739,7 @@ class LLMReasoner:
         decisions: dict,
         strategy: dict | None = None,
         tactics: dict | None = None,
+        days: int = 7,
     ) -> dict:
         """综合分析入口（增强版，接收战略+策略上下文）"""
         context = self._build_context(
@@ -747,6 +750,7 @@ class LLMReasoner:
             asin=asin,
             strategy=strategy,
             tactics=tactics,
+            days=days,
         )
 
         messages = [

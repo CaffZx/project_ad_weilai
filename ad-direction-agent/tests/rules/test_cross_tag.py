@@ -21,8 +21,8 @@ def harvest_asin(standard_asin):
 
 @pytest.fixture
 def clearance_asin(standard_asin):
-    """清货中/淘汰 ASIN"""
-    standard_asin.product_stage = "清货中/淘汰"
+    """清货期 ASIN"""
+    standard_asin.product_stage = "清货期"
     standard_asin.ad_purpose = "排名型"
     return standard_asin
 

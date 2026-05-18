@@ -484,9 +484,17 @@ body {
     <!-- ASIN 段 -->
     <div class="card">
       <div class="card-title" style="margin-bottom:8px">分析 ASIN</div>
-      <div class="flex gap-2">
+      <div class="flex gap-2" style="align-items:center">
         <input id="asinInput" type="text" placeholder="输入 ASIN" autocomplete="off"
                class="input flex-1" style="min-width:0">
+        <select id="daysSelect" onchange="onDaysChange(this.value)"
+                style="border:1.5px solid var(--border);border-radius:var(--radius-ctl);
+                       padding:8px 10px;font-size:13px;background:var(--card-bg);
+                       color:var(--foreground);cursor:pointer;width:90px;flex-shrink:0">
+          <option value="7">7天</option>
+          <option value="14">14天</option>
+          <option value="30">30天</option>
+        </select>
         <button onclick="loadAll()" id="btnStart" class="btn btn-primary">
           加载分析
         </button>
@@ -718,6 +726,7 @@ body {
 // ═══════════════ 全局变量 ═══════════════
 const API = window.location.origin + '/api/v1/agent/ad-direction';
 let asin = '';
+let days = 7;
 let sec1Confirmed = false;
 let sec2Confirmed = false;
 let diagnosisLoaded = false;
@@ -974,6 +983,8 @@ function show(id) { const el = $(id); if (el) el.classList.remove('hidden'); }
 function hide(id) { const el = $(id); if (el) el.classList.add('hidden'); }
 function err(id, msg) { const e = $(id); e.textContent = msg; e.classList.remove('hidden'); }
 
+function onDaysChange(v) { days = parseInt(v); }
+
 // ═══════════════ API 调用 ═══════════════
 async function callAPI(path, body, timeout = 90, method = 'POST') {
   const ctrl = new AbortController();
@@ -1039,7 +1050,6 @@ async function loadAll() {
   startBtn.disabled = true;
   startBtn.textContent = '⏳ 加载中...';
 
-
   // 重置状态
   sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
   ['tab1','tab2','tab3','tab4'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
@@ -1085,7 +1095,7 @@ async function loadAll() {
 async function loadStrategy() {
   show('sec1Loader');
   setHTML('strategyContent', '');
-  const data = await callAPI('/strategy/options', { asin });
+  const data = await callAPI('/strategy/options', { asin, days });
 
   if (!data.data_ok) {
     hide('sec1Loader');
@@ -1175,7 +1185,7 @@ function refreshStrategyContext() {
 async function loadTactics() {
   show('sec2Loader');
   hide('btnTactics'); hide('btnRefreshRec');
-  const data = await callAPI('/tactics/options', { asin });
+  const data = await callAPI('/tactics/options', { asin, days });
 
   // 缓存 AI 推荐值供反馈使用
   _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
@@ -1279,7 +1289,7 @@ async function confirmTactics() {
 async function refreshTacticsRecommendations() {
   show('tacticsRecLoader');
   try {
-    const data = await callAPI('/tactics/recommend', { asin });
+    const data = await callAPI('/tactics/recommend', { asin, days });
     data.dimensions.forEach(dim => {
       const recs = dim.recommendations || [];
       qsa(`input[data-dim="${dim.id}"]`).forEach(cb => {
@@ -1366,7 +1376,7 @@ function enableTabsForReturnVisit() {
 // ═══════════════ 诊断层 → Tab2 ═══════════════
 async function loadDiagnosis(refresh = false) {
   if (refresh) show('diagRefreshLoader');
-  const data = await callAPI('/diagnosis', { asin, refresh });
+  const data = await callAPI('/diagnosis', { asin, refresh, days });
   renderDiagnosis(data);
   diagnosisLoaded = true;
   setTabEnabled('tab4', true);
@@ -1462,7 +1472,7 @@ async function refreshDiagnosis() {
   status.textContent = '正在清除服务器缓存...';
   status.style.cssText = 'color:var(--primary);background:var(--primary-bg);border:1px solid #BFDBFE;border-radius:var(--radius-ctl);padding:10px 14px';
   try {
-    const data = await callAPI('/diagnosis', { asin, refresh: true });
+    const data = await callAPI('/diagnosis', { asin, refresh: true, days });
     status.textContent = '数据已返回，正在渲染...';
     renderDiagnosis(data);
     status.textContent = `✓ 缓存已清除，已从数据库获取最新数据 — ${new Date().toLocaleTimeString()}`;
@@ -1476,7 +1486,7 @@ async function refreshDiagnosis() {
 // ═══════════════ P3 → Tab3 ═══════════════
 async function loadP3Rec() {
   try {
-    const data = await callAPI('/execution/recommend', { asin, refresh: false });
+    const data = await callAPI('/execution/recommend', { asin, refresh: false, days });
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
@@ -1494,7 +1504,7 @@ async function refreshP3() {
   show('p3Loader');
   $('btnRefreshP3').disabled = true;
   try {
-    const data = await callAPI('/execution/recommend', { asin, refresh: true });
+    const data = await callAPI('/execution/recommend', { asin, refresh: true, days });
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
@@ -1708,7 +1718,7 @@ function cnPri(p) { return PRI_CN[p] || p; }
 
 // ═══════════════ 执行方向 → Tab4 ═══════════════
 async function loadExecution() {
-  const data = await callAPI('/execution/options', { asin });
+  const data = await callAPI('/execution/options', { asin, days });
 
   // 缓存 AI 推荐方向供反馈使用
   _lastExecAiDirs = data.recommended_directions || [];
@@ -1758,7 +1768,7 @@ async function generateReport() {
   $('btnGenerate').disabled = true;
   $('btnGenerate').textContent = '生成中...';
   try {
-    const data = await callAPI('/wizard/report', { asin });
+    const data = await callAPI('/wizard/report', { asin, days });
     renderReport(data);
   } catch(e) {
     err('errSec4', '报告生成失败: ' + e.message);

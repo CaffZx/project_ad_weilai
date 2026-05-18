@@ -23,7 +23,7 @@ async def tactics_options(
     Agent 基于战略层选择 + 诊断数据推荐广告目的和关键词类型。
     选项非互斥，可多选。已有长期配置则自动预填。
     """
-    return await orchestrator.get_tactics_options(req.get("asin", ""))
+    return await orchestrator.get_tactics_options(req.get("asin", ""), days=req.get("days", 7))
 
 
 @router.post("/tactics/recommend")
@@ -32,7 +32,7 @@ async def tactics_recommend(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """强制 AI 重新推荐策略选项（不保存，仅返回推荐结果）"""
-    return await orchestrator.get_tactics_recommendations(req.get("asin", ""))
+    return await orchestrator.get_tactics_recommendations(req.get("asin", ""), days=req.get("days", 7))
 
 
 @router.post("/tactics/confirm", response_model=TacticsConfirmResponse)

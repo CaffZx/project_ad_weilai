@@ -21,4 +21,5 @@ async def diagnosis(
     return await orchestrator.get_diagnosis(
         asin=req.get("asin", ""),
         refresh=req.get("refresh", False),
+        days=req.get("days", 7),
     )

@@ -113,7 +113,7 @@ allowed_purposes = ["盈利型", "转化型"]
 
 [cross_tag.broad_keyword_stage]
 description = "Broad 大词需要产品阶段不是测试阶段"
-disallowed_stages = ["测试"]
+disallowed_stages = ["测试", "测试期"]
 
 [cross_tag.inventory_warning_directions]
 description = "库存预警时允许的广告方向"

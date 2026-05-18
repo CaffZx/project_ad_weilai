@@ -34,4 +34,4 @@ async def wizard_report(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """Layer 1.5 — 运行校验+确认+LLM报告"""
-    return await orchestrator.run_validation_and_report(req.get("asin", ""))
+    return await orchestrator.run_validation_and_report(req.get("asin", ""), days=req.get("days", 7))

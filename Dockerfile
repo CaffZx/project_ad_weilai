@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r ad-direction-agent/requirements.txt -i https:/
 RUN pip install --no-cache-dir -r ad-purpose-agent/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 7. 开放 API 端口（对应 .env 里的 8080）
-EXPOSE 8080
+EXPOSE 8010
 
 # 8. 启动主程序
 CMD ["python", "ad-direction-agent/start_server.py"]

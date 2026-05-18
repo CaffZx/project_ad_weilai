@@ -31,7 +31,7 @@ async def execution_options(
     Agent 基于上游战略+策略+诊断信息推荐广告方向。
     各方向非互斥，可多选。不持久化为长期配置。
     """
-    return await orchestrator.get_execution_options(req.get("asin", ""))
+    return await orchestrator.get_execution_options(req.get("asin", ""), days=req.get("days", 7))
 
 
 @router.post("/execution/select", response_model=ExecutionSelectResponse)
@@ -56,7 +56,7 @@ async def target_acos_recommendation(
     基于产品阶段、广告目的、毛利率、ACOS趋势、自然单占比的7步规则链。
     纯算法驱动，不依赖LLM。输出5%粒度的ACOS目标值（≥5%且<40%）。
     """
-    return await orchestrator.get_target_acos_recommendation(req.asin)
+    return await orchestrator.get_target_acos_recommendation(req.asin, days=req.days)
 
 
 @router.post("/execution/budget-bid", response_model=BudgetBidRecommendation)
@@ -69,7 +69,7 @@ async def budget_bid_recommendation(
     基于产品阶段、淡旺季、花费率、关键词Bid/CPC偏差、历史调整记录的5步规则链。
     纯算法驱动，不依赖LLM。
     """
-    return await orchestrator.get_budget_bid_recommendation(req.asin)
+    return await orchestrator.get_budget_bid_recommendation(req.asin, days=req.days)
 
 
 # ── P3 运营手动覆盖端点 ─────────────────────────────────
@@ -129,4 +129,4 @@ async def unified_recommendation(
     - refresh=true 强制跳过缓存重新推荐
     - LLM 失败时降级为算法推荐
     """
-    return await orchestrator.get_unified_recommendation(req.asin, refresh=req.refresh)
+    return await orchestrator.get_unified_recommendation(req.asin, refresh=req.refresh, days=req.days)
