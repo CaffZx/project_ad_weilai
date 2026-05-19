@@ -56,6 +56,7 @@ body {
 }
 .topbar-title { font-size: 15px; font-weight: 600; color: var(--foreground); display: flex; align-items: center; gap: 6px; }
 .topbar-badge { font-size: 10px; background: var(--primary-light); color: var(--primary); padding: 1px 7px; border-radius: 9999px; font-weight: 600; }
+.version-pill { font-size: 10px; background: linear-gradient(135deg,#E0E7FF,#DDD6FE); color: #5B21B6; padding: 2px 8px; border-radius: 9999px; font-weight: 600; letter-spacing: 0.3px; }
 .topbar-status { font-size: 12px; color: var(--muted-fg); display: flex; align-items: center; gap: 6px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #9CA3AF; }
 .status-dot.online { background: #22C55E; }
@@ -222,7 +223,7 @@ body {
 .score-value { font-weight: 700; }
 /* 评分理由弹窗 */
 .reason-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,.3); z-index: 200; display: flex; align-items: center; justify-content: center; animation: fi .15s ease-out; }
-.reason-popup { background: var(--card-bg); border-radius: var(--radius-card); padding: 20px 24px; max-width: 520px; width: 90%; box-shadow: 0 16px 48px rgba(0,0,0,.15); }
+.reason-popup { background: var(--card-bg); border-radius: var(--radius-card); padding: 20px 24px; max-width: 420px; width: 90%; box-shadow: 0 16px 48px rgba(0,0,0,.15); }
 .reason-popup h4 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
 .reason-popup p { font-size: 13px; line-height: 1.6; color: var(--foreground); margin: 0 0 16px; }
 .reason-popup .btn-close { font-size: 12px; }
@@ -461,12 +462,34 @@ body {
 .feedback-success { font-size: 12px; color: var(--success); font-weight: 500; display: flex; align-items: center; gap: 4px; }
 .feedback-err { font-size: 11px; color: var(--danger); }
 .feedback-counter { font-size: 10px; background: var(--primary); color: #fff; border-radius: 9999px; padding: 0 5px; min-width: 16px; text-align: center; line-height: 16px; }
+/* 公告弹窗 */
+.announce-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+.announce-dialog { background: var(--card-bg); border-radius: var(--radius-dlg); width: 580px; max-width: 92vw; max-height: 75vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,.18); }
+.announce-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; font-weight: 600; font-size: 15px; }
+.announce-select { padding: 10px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.announce-select select { border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 6px 10px; font-size: 13px; background: var(--card-bg); color: var(--foreground); cursor: pointer; }
+.announce-body { padding: 16px 20px 20px; overflow-y: auto; flex: 1; font-size: 13px; line-height: 1.7; color: var(--foreground); }
+.announce-body h1,.announce-body h2,.announce-body h3 { margin-top: 12px; margin-bottom: 6px; }
+.announce-body h1 { font-size: 17px; }
+.announce-body h2 { font-size: 15px; }
+.announce-body h3 { font-size: 14px; }
+.announce-body ul,.announce-body ol { padding-left: 18px; margin: 6px 0; }
+.announce-body li { margin: 3px 0; }
+.announce-body code { background: var(--primary-bg); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.announce-body blockquote { border-left: 3px solid var(--primary); margin: 6px 0; padding: 4px 12px; color: var(--muted-fg); }
+.announce-body table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+.announce-body th,.announce-body td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; }
+.announce-body th { background: var(--primary-bg); font-weight: 600; }
+.announce-body strong { color: var(--primary-dark, #1d4ed8); }
+.announce-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; }
+.announce-empty { text-align: center; padding: 40px; color: var(--muted-fg); font-size: 13px; }
 </style>
 </head>
 <body>
 <div class="topbar">
-  <div class="topbar-title">广告辅助决策Agent</div>
+  <div class="topbar-title">广告辅助决策Agent <span class="version-pill">v2.3</span></div>
   <div class="topbar-status">
+    <button onclick="openAnnouncements()" id="btnAnnounce" class="btn btn-secondary btn-sm" title="版本公告" style="margin-right:4px">📢</button>
     <span id="statusDot" class="status-dot"></span>
     <span id="statusText">检测中</span>
     <button onclick="openFeedback()" id="btnFeedback" class="btn btn-secondary btn-sm" style="margin-left:8px;position:relative">
@@ -532,6 +555,7 @@ body {
         <button onclick="refreshTacticsRecommendations()" id="btnRefreshRec" class="btn btn-amber btn-sm hidden">AI 重新推荐</button>
       </div>
       <span id="tacticsRecLoader" class="hidden loading-text" style="margin-top:4px"><span class="spinner"></span>AI 重新推荐中...</span>
+      <span id="tacticsRecErr" class="hidden" style="color:var(--danger);font-size:12px;margin-top:4px;display:block"></span>
       <p id="errSec2" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
     </div>
 
@@ -596,8 +620,8 @@ body {
           <div class="tbl-wrapper" style="max-height:400px;overflow-y:auto">
             <table class="tbl">
               <thead><tr>
-                <th>关键词</th><th style="text-align:right">自身坑位</th>
-                <th style="text-align:right">14天变化</th><th>类型</th><th>投放建议</th>
+                <th>关键词</th><th style="text-align:right">自然搜索排名位</th>
+                <th style="text-align:right">距上一次爬虫排名变化</th><th>类型</th><th>投放建议</th>
               </tr></thead>
               <tbody id="tacticsKwBody"></tbody>
             </table>
@@ -730,6 +754,7 @@ let days = 7;
 let sec1Confirmed = false;
 let sec2Confirmed = false;
 let diagnosisLoaded = false;
+let _trendData = [];
 const tabState = { tab1: false, tab2: false, tab3: false, tab4: false };
 let activeTab = null;
 window._p3data = null;
@@ -1064,6 +1089,7 @@ async function loadAll() {
   setHTML('diagMetrics', '');
   setHTML('alertSignals', '');
   setHTML('diagTrendChart', '');
+  _trendData = [];
   setHTML('diagRefreshStatus', '');
   hide('diagRefreshStatus');
   setHTML('p3AcosColumn', ''); setHTML('p3BudgetColumn', '');
@@ -1315,7 +1341,11 @@ async function refreshTacticsRecommendations() {
     // 刷新关键词监控表
     const kws = data.keyword_analysis || [];
     if (kws.length > 0) { renderKeywordTable(kws); }
-  } catch (e) { console.warn('AI 重新推荐失败:', e.message); }
+  } catch (e) {
+    console.warn('AI 重新推荐失败:', e.message);
+    const msg = $('tacticsRecErr');
+    if (msg) { msg.textContent = 'AI 重新推荐失败: ' + e.message; show('tacticsRecErr'); }
+  }
   hide('tacticsRecLoader');
 }
 
@@ -1345,16 +1375,20 @@ function renderKeywordTable(kws) {
   let html = '';
   kws.forEach(kw => {
     const rank = kw.rank != null ? `第 ${kw.rank} 位` : (kw.near_rank != null ? '<span style="color:var(--danger);font-weight:700">已掉榜</span>' : '<span style="color:var(--warning);font-weight:700">未入榜</span>');
-    const chg = kw.rank_change_14d || kw.rank_change || 0;
-    let chgHtml = kw.rank == null ? '<span style="color:var(--muted-fg)">—</span>'
-      : chg >= 5 ? `<span style="color:var(--success);font-weight:700">↑${chg} 快速上升</span>`
-      : chg >= 1 ? `<span style="color:var(--success);font-weight:500">↑${chg} 缓慢上升</span>`
-      : chg <= -5 ? `<span style="color:var(--danger);font-weight:700">↓${Math.abs(chg)} 快速下滑</span>`
-      : chg <= -1 ? `<span style="color:var(--danger);font-weight:500">↓${Math.abs(chg)} 轻微下滑</span>`
-      : '<span style="color:var(--muted-fg)">— 持平</span>';
+    const nearChg = kw.rank_change || kw.rank_change_14d || 0;
+    const weekChg = kw.rank_change_7d;
+    function _chgSpan(v) {
+      if (v == null) return '<span style="color:var(--muted-fg)">—</span>';
+      if (v >= 5) return `<span style="color:var(--success);font-weight:700">↑${v}</span>`;
+      if (v >= 1) return `<span style="color:var(--success);font-weight:500">↑${v}</span>`;
+      if (v <= -5) return `<span style="color:var(--danger);font-weight:700">↓${Math.abs(v)}</span>`;
+      if (v <= -1) return `<span style="color:var(--danger);font-weight:500">↓${Math.abs(v)}</span>`;
+      return `<span style="color:var(--muted-fg)">—</span>`;
+    }
+    let chgHtml = kw.rank == null ? '<span style="color:var(--muted-fg)">— / —</span>' : `${_chgSpan(nearChg)} / ${_chgSpan(weekChg)}`;
     const st = kw.strategy_type || '';
     const stBadge = st ? `<span class="badge ${stColorMap[st]||'badge-gray'}">${st} ${stCnMap[st]||''}</span>` : '<span style="color:var(--muted-fg)">—</span>';
-    html += `<tr><td style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${kw.word||kw.keyword||'?'}</td><td style="text-align:right;font-size:12px;font-weight:600">${rank}</td><td style="text-align:right;font-size:11px">${chgHtml}</td><td>${stBadge}</td><td style="font-size:11px;color:var(--muted-fg);max-width:160px">${renderExpandableAction(kw.action||'暂无建议')}</td></tr>`;
+    html += `<tr><td style="max-width:120px;word-break:break-all;font-size:12px">${kw.word||kw.keyword||'?'}</td><td style="text-align:right;font-size:12px;font-weight:600">${rank}</td><td style="text-align:right;font-size:11px">${chgHtml}</td><td>${stBadge}</td><td style="font-size:11px;color:var(--muted-fg);max-width:160px">${renderExpandableAction(kw.action||'暂无建议')}</td></tr>`;
   });
   setHTML('tacticsKwBody', html);
 }
@@ -1430,35 +1464,65 @@ function renderDiagnosis(data) {
   setHTML('diagMetrics', metricsHtml);
 
   // 趋势图
-  const trend = data.trend_data || [];
+  _trendData = data.trend_data || [];
+  renderTrendChart();
+}
+
+// ═══════════════ 趋势图渲染 ═══════════════
+const TREND_FIELDS = [
+  { key: 'acos', label: 'ACOS', color: '#F97316', unit: '%' },
+  { key: 'cvr', label: 'CVR', color: '#3B82F6', unit: '%' },
+  { key: 'ctr', label: 'CTR', color: '#22C55E', unit: '%' },
+  { key: 'cpc', label: 'CPC', color: '#8B5CF6', unit: '$' },
+  { key: 'nor', label: '自然单占比', color: '#06B6D4', unit: '%' },
+  { key: 'spend', label: '每日花费', color: '#EF4444', unit: '$' },
+];
+
+function renderTrendChart() {
   const chartDom = $('diagTrendChart');
-  if (trend.length > 0 && typeof echarts !== 'undefined') {
-    // 先 dispose 旧实例
-    if (chartDom._echart) { chartDom._echart.dispose(); chartDom._echart = null; }
-    const chart = echarts.init(chartDom);
-    chartDom._echart = chart;
-    const dates = trend.map(t => t.date);
-    const acosData = trend.map(t => t.acos != null ? parseFloat(t.acos) : null);
-    const cvrData = trend.map(t => t.cvr != null ? parseFloat(t.cvr) : null);
-    chart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: ['ACOS','CVR'], textStyle: { fontSize: 11 } },
-      grid: { left: 45, right: 45, top: 30, bottom: 25 },
-      xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
-      yAxis: [
-        { type: 'value', name: '%', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#E2E8F0' } } },
-        { type: 'value', name: '%', axisLabel: { fontSize: 10 } }
-      ],
-      series: [
-        { name: 'ACOS', type: 'line', data: acosData, smooth: true, symbol: 'circle', symbolSize: 4,
-          lineStyle: { color: '#F97316', width: 1.5 }, itemStyle: { color: '#F97316' } },
-        { name: 'CVR', type: 'line', yAxisIndex: 1, data: cvrData, smooth: true, symbol: 'circle', symbolSize: 4,
-          lineStyle: { color: '#3B82F6', width: 1.5 }, itemStyle: { color: '#3B82F6' } }
-      ]
-    }, true);
-  } else if (trend.length === 0) {
-    setHTML('diagTrendChart', '<div style="text-align:center;padding:40px;color:var(--muted-fg);font-size:12px">趋势数据不足</div>');
+  if (!chartDom) return;
+  if (chartDom._echart) { chartDom._echart.dispose(); chartDom._echart = null; }
+  if (_trendData.length === 0 || typeof echarts === 'undefined') {
+    chartDom.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted-fg);font-size:12px">趋势数据不足</div>';
+    return;
   }
+  const chart = echarts.init(chartDom);
+  chartDom._echart = chart;
+  const dates = _trendData.map(t => t.date);
+  const series = [];
+
+  TREND_FIELDS.forEach(f => {
+    let data;
+    if (f.key === 'nor') {
+      data = _trendData.map(t => {
+        if (t.orders != null && t.ad_orders != null && t.orders > 0) {
+          return parseFloat(((t.orders - t.ad_orders) / t.orders * 100).toFixed(1));
+        }
+        return null;
+      });
+    } else {
+      data = _trendData.map(t => t[f.key] != null ? parseFloat(t[f.key]) : null);
+    }
+    series.push({
+      name: f.label, type: 'line', data,
+      yAxisIndex: f.unit === '$' ? 1 : 0,
+      smooth: true, symbol: 'circle', symbolSize: 4,
+      lineStyle: { color: f.color, width: 1.5 },
+      itemStyle: { color: f.color }
+    });
+  });
+
+  chart.setOption({
+    tooltip: { trigger: 'axis' },
+    legend: { data: TREND_FIELDS.map(f => f.label), textStyle: { fontSize: 10 } },
+    grid: { left: 55, right: 55, top: 30, bottom: 25 },
+    xAxis: { type: 'category', data: dates, axisLabel: { fontSize: 10 } },
+    yAxis: [
+      { type: 'value', name: '%', axisLabel: { fontSize: 10 }, splitLine: { lineStyle: { type: 'dashed', color: '#E2E8F0' } } },
+      { type: 'value', name: '$', axisLabel: { fontSize: 10 } }
+    ],
+    series
+  }, true);
 }
 
 async function refreshDiagnosis() {
@@ -1582,7 +1646,7 @@ function renderP3(data) {
       <div style="max-height:120px;overflow-y:auto;margin-top:4px">` +
       bb.bid_adjustments.slice(0,5).map(a =>
         `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--surface);font-size:10px">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">${a.keyword}</span>
+          <span style="word-break:break-all;max-width:130px">${a.keyword}</span>
           <span>&dollar;${a.current_bid.toFixed(2)} &rarr; <b style="color:${a.direction==='decrease'?'var(--danger)':'var(--success)'}">&dollar;${a.suggested_bid.toFixed(2)}</b></span>
         </div>`).join('') +
       `</div></details>`;
@@ -1842,7 +1906,7 @@ function showReasonPopup(el) {
   overlay.className = 'reason-overlay';
   overlay.innerHTML = `<div class="reason-popup">
     <h4>${title} — AI 推荐理由</h4>
-    <div style="font-size:13px;line-height:1.7;color:var(--foreground);max-height:400px;overflow-y:auto">${reason.replace(/\n/g,'<br>')}</div>
+    <div style="font-size:13px;line-height:1.5;color:var(--foreground);max-height:400px;overflow-y:auto">${reason.replace(/\n/g,'<br><br>')}</div>
     <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-secondary btn-sm btn-close" onclick="this.closest('.reason-overlay').remove()">关闭</button>
     </div></div>`;
@@ -2051,6 +2115,72 @@ async function submitFeedback() {
     $('fbError').textContent = '网络错误: ' + e.message;
     $('btnFbSubmit').disabled = false;
     $('btnFbSubmit').textContent = '提交反馈';
+  }
+}
+
+// ═══════════════ 版本公告 ═══════════════
+async function openAnnouncements() {
+  // 移除已有弹窗
+  const old = $('announceModal');
+  if (old) old.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'announceModal';
+  overlay.className = 'announce-overlay';
+  overlay.innerHTML = `<div class="announce-dialog">
+    <div class="announce-header">
+      <span>📢 版本公告</span>
+      <button onclick="$('announceModal').remove()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--muted-fg);line-height:1">&times;</button>
+    </div>
+    <div class="announce-select">
+      <label style="font-size:13px;color:var(--muted-fg)">版本:</label>
+      <select id="announceVerSelect" onchange="loadAnnounceContent(this.value)">
+        <option value="">加载中...</option>
+      </select>
+    </div>
+    <div class="announce-body" id="announceBody">
+      <div class="announce-empty">加载中...</div>
+    </div>
+    <div class="announce-footer">
+      <button onclick="$('announceModal').remove()" class="btn btn-secondary btn-sm">我已知晓</button>
+    </div>
+  </div>`;
+  // 点击遮罩关闭
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+
+  let list = [];
+  try {
+    const r = await fetch(`${API}/announcements`);
+    if (r.ok) list = await r.json();
+  } catch(e) { /* 无公告 */ }
+
+  const sel = $('announceVerSelect');
+  sel.innerHTML = '';
+  if (list.length === 0) {
+    sel.innerHTML = '<option>暂无公告</option>';
+    $('announceBody').innerHTML = '<div class="announce-empty">暂无版本公告</div>';
+    return;
+  }
+  list.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = item.filename;
+    opt.textContent = item.version;
+    sel.appendChild(opt);
+  });
+  loadAnnounceContent(list[0].filename);
+}
+
+async function loadAnnounceContent(filename) {
+  const body = $('announceBody');
+  body.innerHTML = '<div class="announce-empty">加载中...</div>';
+  try {
+    const r = await fetch(`/announcements/${filename}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const md = await r.text();
+    body.innerHTML = marked.parse(md);
+  } catch(e) {
+    body.innerHTML = `<div class="announce-empty">加载失败: ${e.message}</div>`;
   }
 }
 </script>

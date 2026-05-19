@@ -297,6 +297,7 @@ class WorkflowOrchestrator:
                         "near_rank": kw.near_natural_rank,
                         "rank_change": kw.rank_change_14d or 0,
                         "rank_change_14d": kw.rank_change_14d or 0,
+                        "rank_change_7d": kw.rank_change_7d,
                         "strategy_type": ai.get("strategy_type", ""),
                         "action": ai.get("action", ""),
                     })
@@ -341,13 +342,16 @@ class WorkflowOrchestrator:
                             "near_rank": kw.near_natural_rank,
                             "rank_change": kw.rank_change_14d or 0,
                             "rank_change_14d": kw.rank_change_14d or 0,
+                            "rank_change_7d": kw.rank_change_7d,
                             "strategy_type": ai.get("strategy_type", ""),
                             "action": ai.get("action", ""),
                         })
                     wf["keyword_analysis"] = {str(days): merged_kws}
-                    ts = wf.get("target_scores") or {}
-                    ts[str(days)] = rec.get("target_scores", [])
-                    wf["target_scores"] = ts
+                    new_scores = rec.get("target_scores") or []
+                    if new_scores:
+                        ts = wf.get("target_scores") or {}
+                        ts[str(days)] = new_scores
+                        wf["target_scores"] = ts
                     self.state.set_workflow_state(asin, wf)
                 except Exception as e:
                     logger.warning("策略层 purpose-agent 推荐失败 [%s]: %s", asin, e)
@@ -360,12 +364,10 @@ class WorkflowOrchestrator:
                                 "near_rank": kw.near_natural_rank,
                                 "rank_change": kw.rank_change_14d or 0,
                                 "rank_change_14d": kw.rank_change_14d or 0,
+                                "rank_change_7d": kw.rank_change_7d,
                                 "strategy_type": "", "action": "",
                             })
                         wf["keyword_analysis"] = {str(days): fallback_kws}
-                        ts = wf.get("target_scores") or {}
-                        ts[str(days)] = []
-                        wf["target_scores"] = ts
                         self.state.set_workflow_state(asin, wf)
 
         dimensions = []
@@ -465,15 +467,18 @@ class WorkflowOrchestrator:
                 "near_rank": kw.near_natural_rank,
                 "rank_change": kw.rank_change_14d or 0,
                 "rank_change_14d": kw.rank_change_14d or 0,
+                "rank_change_7d": kw.rank_change_7d,
                 "strategy_type": ai.get("strategy_type", ""),
                 "action": ai.get("action", ""),
             })
         wf = self.state.get_workflow_state(asin)
         wf["keyword_analysis"] = {str(days): merged_kws}
-        ts = wf.get("target_scores") or {}
-        ts[str(days)] = rec.get("target_scores", [])
-        wf["target_scores"] = ts
-        self.state.set_workflow_state(asin, wf)
+        new_scores = rec.get("target_scores") or []
+        if new_scores:
+            ts = wf.get("target_scores") or {}
+            ts[str(days)] = new_scores
+            wf["target_scores"] = ts
+            self.state.set_workflow_state(asin, wf)
 
         return {
             "asin": asin,
@@ -615,6 +620,7 @@ class WorkflowOrchestrator:
                 "near_natural_rank": kw.near_natural_rank,
                 "sp_rank": kw.sp_rank,
                 "rank_change_14d": kw.rank_change_14d,
+                "rank_change_7d": kw.rank_change_7d,
                 "spend": kw.spend,
                 "acos": kw.acos,
                 "cvr": kw.cvr,
@@ -626,7 +632,8 @@ class WorkflowOrchestrator:
         # 趋势数据
         trend_list = [
             {"date": tp.date, "acos": tp.acos, "cvr": tp.cvr,
-             "ctr": tp.ctr, "cpc": tp.cpc, "orders": tp.orders, "spend": tp.spend}
+             "ctr": tp.ctr, "cpc": tp.cpc, "orders": tp.orders,
+             "ad_orders": tp.ad_orders, "spend": tp.spend}
             for tp in data.trend
         ] if data.trend else []
 

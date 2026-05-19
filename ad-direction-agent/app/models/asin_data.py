@@ -57,6 +57,7 @@ class KeywordData(BaseModel):
     near_natural_rank: Optional[int] = None
     sp_rank: Optional[int] = None
     rank_change_14d: Optional[int] = None
+    rank_change_7d: Optional[int] = None
     is_manual: bool = True
     match_type: str = ""  # BROAD / EXACT / PHRASE
 
@@ -80,6 +81,7 @@ class TrendPoint(BaseModel):
     ctr: Optional[float] = None
     cpc: Optional[float] = None
     orders: Optional[int] = None
+    ad_orders: Optional[int] = None
     spend: Optional[float] = None
 
 

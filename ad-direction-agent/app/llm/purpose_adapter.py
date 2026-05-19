@@ -65,6 +65,7 @@ def build_metrics_from_asin_data(data, days: int = 7) -> dict:
             "sp_rank": kw.sp_rank or 0,
             "rank_change": kw.rank_change_14d or 0,
             "rank_change_14d": kw.rank_change_14d or 0,
+            "rank_change_7d": kw.rank_change_7d,
         }
         for kw in data.keywords[:20]
     ]

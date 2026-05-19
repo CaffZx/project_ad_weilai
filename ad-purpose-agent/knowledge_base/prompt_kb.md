@@ -267,69 +267,32 @@
 ## 📝 强制输出格式 (严格 JSON)
 
 1. **"targets"**：数组，包含录取目标英文 (Traffic, Conversion, Ranking, Profit, Clearance)，按优先级排序
-2. **"chart_metrics"**：数组，挑选最能反映近期波动的 2-3 个指标：["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"]
-3. **"html_report"**：纯 HTML 字符串。禁止展示算数过程。必须融合平替女装业务术语。
-4. **"summary"**：1-2 句核心观察
-5. **"final_action"**：要点式行动建议
+2. **"target_scores"**：数组，ALL 5 targets with scores and detailed reasons. Format example:
+   ```json
+   {
+     "target": "Traffic",
+     "score": 30,
+     "reason": "【决策依据】产品处于推进期头部，自然流量占比[自然单占比]%，曝光已充足。{days}日平均CPC $[CPC] 超过单均毛利 $[毛利]，触碰引流型强制排除红线（CPC > 单均毛利）。\n【建议】不推荐在当前阶段开启引流型广告。核心精准词已进首页，应把预算集中在转化和排名防守上。\n【后续关注】若CPC降至 $[阈值] 以下，或自然单占比跌破[阈值]%，需重新评估引流需求。"}}"
+   }
+   ```
 
-**【HTML 排版模板】(必须严格使用此结构)**
-<div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-    
-    <div style="background-color: #f8fafc; padding: 12px; border-radius: 8px; margin-bottom: 16px;">
-        <b style="color: #475569;">📊 核心战报与趋势洞察</b><br>
-        <span style="font-size: 13px;">
-        ▸ <b>产品状态：</b> [产品定位] | [产品阶段] | [淡旺季] → 战略基调：[1句话总结当前该做什么]<br>
-        ▸ <b>转化与价格：</b> 净CVR [CVR]% → [优秀/极差] | 定价 $[价格] (竞品 $[竞品价]) → [优势/偏高/持平]<br>
-        ▸ <b>风险与库存：</b> 退货率 [退货率]% | 可售 [天数] 天 → [健康/告急]<br>
-        ▸ <b>近期波动：</b> [1句话尖锐分析走势，结合阶段和淡旺季给出判断]
-        </span>
-    </div>
+   **reason 字段必须包含三段（用 【】 标注），缺一不可：**
+   - **【决策依据】**：评估该方向的核心依据。遵循以下原则：
+     (a) 优先看趋势数据：近N日每日数据的走势（改善/恶化/持平）比静态聚合值更重要。如"近7日ACOS从[某日日期]的[X]%逐日降至[某日日期]的[Y]%"与"7日平均ACOS [Z]%但始终不变"是完全不同的判断。
+     (b) 趋势判断后，再用静态聚合值（窗口平均值）作为辅助印证。
+     (c) 引用的每一个指标都必须带时间窗口和口径（某日当天值 or N日平均值）。写"7日平均ACOS [X]%"而非"ACOS [X]%"。引用具体日期值时写"[5月17日]当天CVR [X]%"或"近7日CVR从[某日日期]的[X]%攀升至[某日日期]的[Y]%"而非"CVR在改善"。引用窗口均值时写"7日平均CPC $[X]"而非"CPC $[X]"。禁止丢失窗口和口径。以上 `[]` 内均为占位符，应替换为当前ASIN的实际数据。禁止丢失窗口和口径。
+     (d) 只引用真正决定该分数的1-2个核心指标，禁止堆砌次要数据。
+   - **【建议】**：基于决策依据给出 1-2 句具体操作建议。说明做什么、为什么，不需要说明怎么做。
+   - **【后续关注】**：指出后续需要监控的 1-2 个关键指标或条件变化，说明在什么情况下应重新调整该方向的推荐强度。
 
-    <div style="margin-bottom: 16px; border-left: 4px solid #3b82f6; padding-left: 12px;">
-        <b style="font-size: 15px; color: #1e3a8a;">引流型 (新增扩词/推进曝光)</b><br>
-        <span style="color: #4b5563; font-size: 13px;">
-            <b>评分[X]分 ([强推 / 可用 / 不推荐])</b>，[结合当前阶段和定位解释原因]
-        </span>
-        <ul style="margin-top: 4px; margin-bottom: 0; padding-left: 18px; font-size: 13px; color: #374151;">
-            <li>[如果推荐，给具体动作；如果不推荐，写明原因如"当前阶段为收割期，不需要引流"]</li>
-        </ul>
-    </div>
-
-    <div style="margin-bottom: 16px; border-left: 4px solid #10b981; padding-left: 12px;">
-        <b style="font-size: 15px; color: #065f46;">转化型 (优化转化/收割利润)</b><br>
-        <span style="color: #4b5563; font-size: 13px;">
-            <b>评分[X]分 ([强推 / 可用 / 不推荐])</b>，[结合当前阶段和ACOS容忍度解释原因]
-        </span>
-        <ul style="margin-top: 4px; margin-bottom: 0; padding-left: 18px; font-size: 13px; color: #374151;">
-            <li>[如果推荐给具体动作；如果不推荐说明原因]</li>
-        </ul>
-    </div>
-
-    <div style="margin-bottom: 16px; border-left: 4px solid #f59e0b; padding-left: 12px;">
-        <b style="font-size: 15px; color: #b45309;">排名型 (推进自然位)</b><br>
-        <span style="color: #4b5563; font-size: 13px;">
-            <b>[推荐 / 不推荐]</b>，[结合自然单占比和核心词排名解释原因]
-        </span>
-        <ul style="margin-top: 4px; margin-bottom: 0; padding-left: 18px; font-size: 13px; color: #374151;">
-            <li>[如果推荐给具体动作；如果不推荐说明原因]</li>
-        </ul>
-    </div>
-
-    <div style="margin-bottom: 16px; border-left: 4px solid #6366f1; padding-left: 12px;">
-        <b style="font-size: 15px; color: #4338ca;">盈利型 (优化ACOS/防守平衡)</b><br>
-        <span style="color: #4b5563; font-size: 13px;">
-            <b>[推荐 / 不推荐]</b>，[结合ACOS和阶段解释原因]
-        </span>
-        <ul style="margin-top: 4px; margin-bottom: 0; padding-left: 18px; font-size: 13px; color: #374151;">
-            <li>[如果推荐给具体动作；如果不推荐说明原因]</li>
-        </ul>
-    </div>
-</div>
+3. **"chart_metrics"**：数组，挑选最能反映近期波动的 2-3 个指标：["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"]
+4. **"keyword_analysis"**：同前，不变。
 
 🚨 CRITICAL INSTRUCTION: 
 1. Output STRICTLY in JSON format. Do not use Markdown backticks.
-2. 用中文输出所有内容（html_report, summary, final_action, keyword_analysis 中的 action）。
+2. 用中文输出所有内容。
 3. 模型本身的判断力是重要资产——规则提供框架和红线，具体评分和推荐强度由你综合数据灵活判断。
-4. 禁止机械套用规则。数据有矛盾时，用你的专业判断权衡，并在 html_report 中说明权衡理由。
-5. 必须评估全部四个方向，即使某些方向不推荐也要给出评估原因。
+4. 禁止机械套用规则。数据有矛盾时，用你的专业判断权衡，并在 reason 中说明权衡理由。
+5. **必须评估全部五个目标（Traffic / Conversion / Ranking / Profit / Clearance）。推荐的目标要说明理由和后续动作；不推荐的目标同样必须给出详细理由，说明为什么不推荐（如触碰红线、数据不支持、阶段不适配等），禁止简单写"不适用"或"不推荐"就结束。每个目标的 reason 都要严格遵循三段格式。**
 6. keyword_analysis 中每个关键词的 action 必须基于其趋势（无排名数据/快速上升/缓慢上升/持平/轻微下滑/快速下滑）给出差异化中文建议。
+7. 评分分值区间：≥85=强推，70-84=推荐，50-69=可用，30-49=不推荐，<30=强制排除。

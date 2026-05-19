@@ -76,6 +76,14 @@ app.include_router(feedback_router, prefix=API_PREFIX, tags=["反馈"])
 from app.api.chat import router as chat_router
 app.include_router(chat_router, prefix=API_PREFIX, tags=["AI对话"])
 
+# 版本公告
+from app.api.announcements import router as announce_router
+app.include_router(announce_router, prefix=API_PREFIX, tags=["公告"])
+
+ANNOUNCE_DIR = Path(__file__).resolve().parent.parent.parent / "docs" / "announcements"
+if ANNOUNCE_DIR.exists():
+    app.mount("/announcements", StaticFiles(directory=str(ANNOUNCE_DIR)), name="announcements")
+
 
 @app.get("/health")
 async def health():

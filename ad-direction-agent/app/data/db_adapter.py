@@ -362,10 +362,11 @@ class DbAdapter(DataSourceAdapter):
             data.trend.append(TrendPoint(
                 date=str(row.get("date", "")),
                 acos=round(row_spend / row_ad_sales * 100, 1) if row_ad_sales else None,
-                cvr=round(row_orders / row_clicks * 100, 1) if row_clicks else None,
+                cvr=round(row_ad_orders / row_clicks * 100, 1) if row_clicks else None,
                 ctr=round(row_clicks / row_impressions * 100, 1) if row_impressions else None,
                 cpc=round(row_spend / row_clicks, 2) if row_clicks else None,
                 orders=int(row_orders),
+                ad_orders=int(row_ad_orders),
                 spend=round(row_spend, 2),
             ))
 

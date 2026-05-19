@@ -1,4 +1,4 @@
-# 亚马逊广告关键词类型 · 场景知识库 v1.2
+# 亚马逊广告关键词类型 · 场景知识库 v1.3
 
 ## 角色与适用范围
 
@@ -70,6 +70,17 @@
 - **NL1**: 急需曝光的新品 → 长尾词总量太小撑不起曝光
 - **NL2**: 冲排名阶段 → 长尾词对自然排名提升作用有限
 - **NL3**: 旺季爆发期 → 光靠长尾词吃不下旺季流量
+- **NL4**: 核心品名 + 性别/通用限定词 → 不算长尾词
+
+  **典型误判案例**：
+  | 词例 | 错误判定 | 正确判定 | 原因 |
+  |------|---------|---------|------|
+  | `beard trimmer for men` | Long-tail | Broad | 就是类目核心大词 + 性别限定，搜索量大、意图泛 |
+  | `women dresses` | Long-tail | Broad | 核心品名 + 人群限定，仍然是泛词 |
+  | `swimsuit women` | Long-tail | Broad | 同上 |
+  | `leggings for women` | Long-tail | Broad | 同上 |
+
+  **判定规则**：当一个词的核心部分是类目名/产品名本身（如 trimmer/dress/swimsuit/leggings），后面的修饰词仅为性别（men/women）、通用范围（for sale/cheap/online/new/2026）时，不判定为 Long-tail，应判定为 Broad。这类词的搜索量接近类目大词，转化意图远不如带材质/场景/风格/平替指向的真正长尾词。
 
 ### 长尾词的"寄生"属性（平替特别认知）
 用户搜索路径：
@@ -206,5 +217,5 @@
 当同一个词可能属于多个类型时，按以下优先级判定：
 1. **Custom 优先**：如果运营已在Custom词池中指定，以Custom为准
 2. **Brand > Competitor**：含品牌名的词归Brand，非品牌名的竞品验证词归Competitor
-3. **Long-tail > Broad**：含3+修饰词且意图明确的归Long-tail，即使搜索量大
+3. **Long-tail > Broad**：含3+修饰词且意图明确的归Long-tail，即使搜索量大。⚠️ 例外：核心品名 + 性别/通用限定词不算长尾（见 NL4）
 4. **Broad = 兜底**：以上都不匹配的泛词归Broad

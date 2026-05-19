@@ -300,6 +300,7 @@ def _build_top_keywords(keywords, ranked_limit: int = 10, unranked_limit: int = 
             "word": kw.keyword, "rank": kw.natural_rank,
             "near_rank": kw.near_natural_rank, "spend": round(kw.spend, 1),
             "rank_change": kw.rank_change_14d,
+            "rank_change_7d": kw.rank_change_7d,
         })
     for kw in unranked[:unranked_limit]:
         result.append({
