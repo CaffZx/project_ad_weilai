@@ -1,6 +1,7 @@
 services:
   mysql-state:
     image: mysql:8.0
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: ad_agent_state
@@ -18,6 +19,7 @@ services:
 
   redis-cache:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -28,18 +30,18 @@ services:
 
   ad-direction-agent:
     build: .
-    ports:
-      - "8010:8010"
+    restart: unless-stopped
+    network_mode: host
     env_file:
       - ad-direction-agent/.env
     environment:
       STATE_BACKEND: mysql
-      STATE_DB_HOST: mysql-state
-      STATE_DB_PORT: 3306
+      STATE_DB_HOST: 127.0.0.1
+      STATE_DB_PORT: 3307
       STATE_DB_USER: ad_agent
       STATE_DB_PASS: ad_agent_pass
       STATE_DB_DATABASE: ad_agent_state
-      REDIS_URL: redis://redis-cache:6379/0
+      REDIS_URL: redis://127.0.0.1:6379/0
       REDIS_ENABLED: "true"
     depends_on:
       mysql-state:
