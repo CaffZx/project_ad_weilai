@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "广告方向决策子智能体"
-    app_version: str = "2.4.0"
+    app_version: str = "2.5.0"
     debug: bool = True
 
     host: str = "0.0.0.0"
