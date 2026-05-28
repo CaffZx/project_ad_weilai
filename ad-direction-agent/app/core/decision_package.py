@@ -14,6 +14,20 @@ class DecisionPackageGenerator:
     3. 组装最终决策包
     """
 
+    @staticmethod
+    def _is_harvest_like(data: ASINData) -> bool:
+        stage = data.product_stage or ""
+        return stage in ("收割利润期", "维持期")
+
+    @staticmethod
+    def _is_peak_end(data: ASINData) -> bool:
+        return (data.season_stage or "") == "旺季末期"
+
+    @staticmethod
+    def _best_natural_rank(data: ASINData) -> int | None:
+        ranked = [kw.natural_rank for kw in data.keywords if kw.natural_rank is not None]
+        return min(ranked) if ranked else None
+
     def generate(
         self,
         data: ASINData,
@@ -27,35 +41,50 @@ class DecisionPackageGenerator:
         tasks = []
         top_n = sub_options.get("top_keywords_count", 3)
         budget_ratio = sub_options.get("budget_ratio", 20)
+        best_rank = self._best_natural_rank(data)
+        harvest = self._is_harvest_like(data)
+        rising = []
 
-        rising = sorted(
-            [kw for kw in data.keywords if (kw.rank_change_14d or 0) >= 5],
-            key=lambda kw: kw.rank_change_14d or 0,
-            reverse=True,
-        )[:top_n]
-
-        if rising:
-            kw_list = "、".join(f"{kw.keyword}(↑{kw.rank_change_14d}位)" for kw in rising)
+        if harvest or (best_rank is not None and best_rank <= 5):
             tasks.append(Task(
-                priority="high",
-                action=f"增加 TOP {top_n} 上升词预算",
-                details=f"重点关注词: {kw_list}，预算倾斜 {budget_ratio}%",
-                estimated_impact=f"预计日增 {top_n*2}-{top_n*5} 点击",
+                priority="medium",
+                action="暂停大规模预算倾斜推自然位",
+                details=(
+                    f"核心词已在 TOP {best_rank or '?'}，收割/维持期以效率为先；"
+                    "仅监控自然位，不新增倾斜预算"
+                ),
+                estimated_impact="避免低效花费，保护利润率",
             ))
+        else:
+            rising = sorted(
+                [kw for kw in data.keywords if (kw.rank_change_14d or 0) >= 5],
+                key=lambda kw: kw.rank_change_14d or 0,
+                reverse=True,
+            )[:top_n]
+
+            if rising:
+                kw_list = "、".join(f"{kw.keyword}(↑{kw.rank_change_14d}位)" for kw in rising)
+                tasks.append(Task(
+                    priority="high",
+                    action=f"增加 TOP {top_n} 上升词预算",
+                    details=f"重点关注词: {kw_list}，预算倾斜 {budget_ratio}%",
+                    estimated_impact=f"预计日增 {top_n*2}-{top_n*5} 点击",
+                ))
 
         tasks.append(Task(
             priority="medium",
             action="监控核心词自然位变化",
-            details="重点关注 14 天内自然位变化趋势，若连续下滑则回滚预算",
+            details="重点关注 14 天内自然位变化趋势，若连续下滑再评估是否加预算",
             estimated_impact="确保推自然位策略有效",
         ))
 
-        tasks.append(Task(
-            priority="low",
-            action="检查 TOS 位置占比变化",
-            details="TOS 占比控制在 40% 以下，若超出则调整 Bid",
-            estimated_impact="控制广告花费结构",
-        ))
+        if not harvest:
+            tasks.append(Task(
+                priority="low",
+                action="检查 TOS 位置占比变化",
+                details="TOS 占比控制在 40% 以下，若超出则调整 Bid",
+                estimated_impact="控制广告花费结构",
+            ))
 
         return DecisionPackage(
             direction="推进自然位",
@@ -71,6 +100,13 @@ class DecisionPackageGenerator:
         sources = sub_options.get("sources", ["search_term_report"])
         target_count = sub_options.get("target_count", 5)
         tasks = []
+        peak_end = self._is_peak_end(data)
+        harvest = self._is_harvest_like(data)
+
+        batch = target_count
+        if peak_end or harvest:
+            target_count = min(target_count, 10)
+            batch = 5 if peak_end else min(8, target_count)
 
         source_labels = {
             "search_term_report": "搜索词报告",
@@ -80,11 +116,37 @@ class DecisionPackageGenerator:
         }
         selected = [source_labels.get(s, s) for s in sources]
 
+        action = (
+            f"小批量测试扩词（首批 {batch} 个）"
+            if (peak_end or harvest)
+            else f"从{''.join(selected)}提取新词加入手动广告"
+        )
+        cand = getattr(data, "expand_keyword_candidates", None) or []
+        cand_names = [
+            (c.get("keyword") if isinstance(c, dict) else str(c))
+            for c in cand
+            if (c.get("keyword") if isinstance(c, dict) else c)
+        ]
+        if cand_names:
+            listed = "、".join(f"「{n}」" for n in cand_names)
+            details = (
+                f"从搜索词报告筛选高转化未收录词（共 {len(cand_names)} 个，须全部试投或择优）：{listed}；"
+                f"首批加入 {batch} 个，ACOS 目标 30%，7 天超 40% 则暂停"
+                if (peak_end or harvest)
+                else f"候选词：{listed}；计划新增 {target_count} 个"
+            )
+        else:
+            details = (
+                f"从搜索词报告等来源筛选高转化词，首批加入 {batch} 个；"
+                f"ACOS 目标 30%，7 天超 40% 则暂停"
+                if (peak_end or harvest)
+                else f"计划新增 {target_count} 个关键词"
+            )
         tasks.append(Task(
-            priority="high",
-            action=f"从{''.join(selected)}提取新词加入手动广告",
-            details=f"计划新增 {target_count} 个关键词，",
-            estimated_impact=f"预计日增 {target_count*1}-{target_count*3} 点击",
+            priority="high" if not harvest else "medium",
+            action=action,
+            details=details,
+            estimated_impact=f"预计日增 {batch if (peak_end or harvest) else target_count} 级点击，可控试错",
         ))
 
         if "competitor_listing" in sources:

@@ -1,6 +1,7 @@
 """默认推荐算法 — 计算 4 个方向的适配度评分 + P3 上游推荐"""
 
 from app.config.settings import settings
+from app.core.metrics_ops_language import format_keyword_acos_change, period_labels
 from app.models.asin_data import ASINData
 from app.models.decision import DirectionScore, DataSummary, RecommendResponse
 from app.models.layers import (
@@ -16,210 +17,532 @@ class Recommender:
     """广告方向推荐器
 
     基于 ASIN 数据对 4 个方向分别评分 (0-100)，选出最优推荐。
-    评分逻辑: 每个方向检查若干关键指标，加权计算适配度。
+    评分参数来自 thresholds.toml [scoring]；阶段/淡旺季在 recommend() 末尾修正。
     """
 
+    ELIGIBLE_MIN_SCORE = 40
+    RECOMMENDED_MIN_SCORE = 70
+
+    def __init__(self):
+        self._scoring = settings.thresholds_config.get("scoring", {})
+
+    def _cfg(self, section: str) -> dict:
+        return self._scoring.get(section, {})
+
+    @staticmethod
+    def _best_natural_rank(data: ASINData) -> int | None:
+        ranked = [kw.natural_rank for kw in data.keywords if kw.natural_rank is not None]
+        return min(ranked) if ranked else None
+
+    @staticmethod
+    def _trend_judge(trend_fact: str | None, judgment: str) -> str:
+        """运营可读：根据…趋势/变化，判断…"""
+        if trend_fact:
+            return f"根据{trend_fact}，{judgment}"
+        return judgment
+
+    @classmethod
+    def _asin_trend_facts(cls, data: ASINData) -> list[str]:
+        if not data.trend or len(data.trend) < 2:
+            return []
+        points = data.trend[:-1] if len(data.trend) > 2 else list(data.trend)
+        facts: list[str] = []
+        acos_vals = [(p.date, p.acos) for p in points if p.acos is not None]
+        if len(acos_vals) >= 2:
+            d0, a0 = acos_vals[0]
+            d1, a1 = acos_vals[-1]
+            n = len(acos_vals)
+            if a1 > a0 + 2:
+                facts.append(f"近{n}日ACOS由{a0}%升至{a1}%（{d0}→{d1}）")
+            elif a1 < a0 - 2:
+                facts.append(f"近{n}日ACOS由{a0}%降至{a1}%（{d0}→{d1}）")
+            else:
+                facts.append(f"近{n}日ACOS基本持平（约{a1}%）")
+        cvr_vals = [(p.date, p.cvr) for p in points if p.cvr is not None]
+        if len(cvr_vals) >= 2:
+            d0, c0 = cvr_vals[0]
+            d1, c1 = cvr_vals[-1]
+            n = len(cvr_vals)
+            if c1 > c0 + 2:
+                facts.append(f"近{n}日CVR由{c0}%升至{c1}%（{d0}→{d1}）")
+            elif c1 < c0 - 2:
+                facts.append(f"近{n}日CVR由{c0}%降至{c1}%（{d0}→{d1}）")
+        return facts
+
+    @classmethod
+    def _kw_acos_worsening_fact(cls, data: ASINData) -> str | None:
+        worsening = [
+            kw for kw in data.keywords
+            if kw.acos_recent is not None and kw.acos_prior is not None
+            and kw.acos_recent > kw.acos_prior + 5
+        ]
+        if not worsening:
+            return None
+        kw = max(worsening, key=lambda k: (k.acos_recent or 0) - (k.acos_prior or 0))
+        days = 7
+        _, _, _, recent_label, _ = period_labels(days)
+        acos_part = format_keyword_acos_change(
+            days, kw.acos, kw.acos_prior, kw.acos_recent, "ACOS上升"
+        )
+        if acos_part:
+            return f"词「{kw.keyword}」{acos_part}"
+        return (
+            f"词「{kw.keyword}」{recent_label}ACOS由{kw.acos_prior:.0f}%升至{kw.acos_recent:.0f}%"
+        )
+
+    @staticmethod
+    def _suitability_level(score: int) -> str:
+        if score >= Recommender.RECOMMENDED_MIN_SCORE:
+            return "recommended"
+        if score >= Recommender.ELIGIBLE_MIN_SCORE:
+            return "available"
+        return "not_recommended"
+
+    @staticmethod
+    def _clamp_score(score: int) -> int:
+        return max(0, min(100, score))
+
+    def _finalize(self, direction_id: str, label: str, score: int, reasons: list[str],
+                  default_sub_options: dict) -> DirectionScore:
+        score = self._clamp_score(score)
+        if not reasons:
+            reasons.append("当前数据不支撑该方向")
+        level = self._suitability_level(score)
+        return DirectionScore(
+            id=direction_id,
+            label=label,
+            suitability_score=score,
+            suitability=level,
+            reason="；".join(reasons),
+            default_sub_options=default_sub_options,
+        )
+
+    def _apply_context_adjustments(self, data: ASINData, scores: list[DirectionScore]) -> list[DirectionScore]:
+        """按产品阶段、淡旺季对分数做后处理修正（不向运营展示加减分细节）"""
+        stage_adj = self._scoring.get("stage_adjustment", {}).get(data.product_stage or "", {})
+        season_adj = self._scoring.get("season_adjustment", {}).get(data.season_stage or "", {})
+        adjusted = []
+        for s in scores:
+            delta = int(stage_adj.get(s.id, 0)) + int(season_adj.get(s.id, 0))
+            new_score = self._clamp_score(s.suitability_score + delta)
+            adjusted.append(DirectionScore(
+                id=s.id,
+                label=s.label,
+                suitability_score=new_score,
+                suitability=self._suitability_level(new_score),
+                reason=s.reason,
+                default_sub_options=s.default_sub_options,
+            ))
+        return adjusted
+
+    def _compose_display_reason(self, s: DirectionScore, data: ASINData) -> str:
+        """将评分结果转为运营可读的一句话说明"""
+        explainers = {
+            "push_natural": self._explain_push_natural,
+            "expand_keywords": self._explain_expand_keywords,
+            "optimize_acos": self._explain_optimize_acos,
+            "balance_maintain": self._explain_balance_maintain,
+        }
+        # 结论由卡片徽章展示，正文只保留依据要点（分号分隔，前端拆行）
+        return explainers.get(s.id, lambda _d, _s: "请结合数据判断")(data, s)
+
+    def _with_display_reason(self, s: DirectionScore, data: ASINData) -> DirectionScore:
+        updated = s.model_copy()
+        updated.reason = self._compose_display_reason(s, data)
+        return updated
+
+    def _explain_push_natural(self, data: ASINData, s: DirectionScore) -> str:
+        best = self._best_natural_rank(data)
+        nor = data.natural_order_ratio
+        stage = data.product_stage or ""
+        trends = self._asin_trend_facts(data)
+        acos_trend = trends[0] if trends else None
+        if s.suitability == "not_recommended":
+            parts = []
+            if best is not None and best <= 5:
+                parts.append(self._trend_judge(
+                    f"核心词自然位稳定在约第{best}名",
+                    "判断再加大广告推自然位边际收益有限",
+                ))
+            if nor is not None and nor >= 70:
+                parts.append(self._trend_judge(
+                    f"自然单占比约{nor:.0f}%",
+                    "判断广告对推自然位的拉动价值有限",
+                ))
+            if acos_trend and "升" in acos_trend:
+                parts.append(self._trend_judge(acos_trend, "判断宜先控 ACOS 而非继续推自然位"))
+            if stage in ("收割利润期", "维持期"):
+                parts.append(self._trend_judge(
+                    "当前处于收割/维持阶段",
+                    "判断应以控成本、守排名为主",
+                ))
+            return "；".join(parts) if parts else "根据当前数据，判断暂不适合将推自然位作为主方向"
+        rising = sorted(
+            [kw for kw in data.keywords if (kw.rank_change_14d or 0) >= 3],
+            key=lambda k: k.rank_change_14d or 0,
+            reverse=True,
+        )
+        if rising:
+            kw = rising[0]
+            return self._trend_judge(
+                f"词「{kw.keyword}」近14日排名上升{kw.rank_change_14d}位",
+                "判断可适度倾斜预算推进自然位",
+            )
+        if best and best > 5:
+            return self._trend_judge(
+                f"核心词自然位约第{best}名",
+                "判断仍有上升空间，可小范围测试推自然位",
+            )
+        return self._trend_judge(acos_trend, "判断部分词具备推自然位基础，宜小预算试投") if acos_trend else "根据关键词排名变化，判断可小范围测试推自然位"
+
+    def _explain_expand_keywords(self, data: ASINData, s: DirectionScore) -> str:
+        avail = data.available_new_keywords or 0
+        stage = data.product_stage or ""
+        season = data.season_stage or ""
+        acos = data.ad_data.acos if data.ad_data and data.ad_data.acos is not None else None
+        trends = self._asin_trend_facts(data)
+        if s.suitability == "not_recommended":
+            return self._trend_judge(
+                trends[0] if trends else "在投词承载力或新词机会不足",
+                "判断暂不适合将扩词作为主方向",
+            )
+        parts = []
+        if avail >= 2:
+            parts.append(self._trend_judge(
+                f"搜索词报告约有{avail}个高转化词尚未收录",
+                "判断具备扩词空间",
+            ))
+        if acos is not None and acos < 30:
+            parts.append(self._trend_judge(
+                f"在投词整体 ACOS 约{acos:.0f}%",
+                "判断现有词较健康，可承载少量新词",
+            ))
+        cvr_up = next((t for t in trends if "CVR" in t and "升" in t), None)
+        if season == "旺季末期":
+            parts.append(self._trend_judge(
+                cvr_up or "旺季尾声流量趋缓",
+                "判断宜小批量试词并设 ACOS 上限，不宜大规模上新",
+            ))
+        elif stage in ("收割利润期", "维持期"):
+            parts.append(self._trend_judge(
+                "收割/维持阶段",
+                "判断扩词宜 5～10 个一批、观察 7 天再放量",
+            ))
+        elif s.suitability == "recommended":
+            parts.append(self._trend_judge(
+                cvr_up or trends[0] if trends else "转化效率尚可",
+                "判断可作为本期重点方向之一",
+            ))
+        else:
+            parts.append(self._trend_judge(
+                trends[0] if trends else "整体指标平稳",
+                "判断可作为备选，与控 ACOS、维持稳定搭配",
+            ))
+        return "；".join(parts) if parts else "根据搜索词与 ACOS 走势，判断可评估是否扩词"
+
+    def _explain_optimize_acos(self, data: ASINData, s: DirectionScore) -> str:
+        acos = data.ad_data.acos if data.ad_data and data.ad_data.acos is not None else None
+        over = [kw for kw in data.keywords if kw.acos is not None and kw.acos > 40]
+        wasteful = [kw for kw in data.keywords if kw.orders == 0 and kw.spend >= 15]
+        stage = data.product_stage or ""
+        trends = self._asin_trend_facts(data)
+        kw_bad = self._kw_acos_worsening_fact(data)
+        parts = []
+        acos_rising = next((t for t in trends if "ACOS" in t and "升" in t), None)
+        if acos_rising:
+            parts.append(self._trend_judge(acos_rising, "判断账户效率承压，需优化 ACOS"))
+        elif acos is not None and acos > 25:
+            parts.append(self._trend_judge(
+                f"账户 ACOS 约{acos:.0f}%",
+                "判断仍有优化空间",
+            ))
+        if kw_bad:
+            parts.append(self._trend_judge(kw_bad, "判断应优先否词或降价"))
+        elif over:
+            parts.append(self._trend_judge(
+                f"{len(over)}个在投词 ACOS 超过40%",
+                "判断建议否词或降价",
+            ))
+        if wasteful:
+            parts.append(self._trend_judge(
+                f"{len(wasteful)}个词高花费零转化",
+                "判断建议优先清理无效花费",
+            ))
+        if stage in ("收割利润期", "维持期") and s.suitability != "not_recommended":
+            parts.append(self._trend_judge(
+                "收割/维持阶段",
+                "判断适合通过优化 ACOS 保住利润",
+            ))
+        if not parts:
+            return self._trend_judge(
+                trends[0] if trends else "ACOS 指标",
+                "判断处于合理区间，可按日常节奏微调",
+            )
+        return "；".join(parts)
+
+    def _explain_balance_maintain(self, data: ASINData, s: DirectionScore) -> str:
+        acos = data.ad_data.acos if data.ad_data and data.ad_data.acos is not None else None
+        best = self._best_natural_rank(data)
+        stage = data.product_stage or ""
+        season = data.season_stage or ""
+        trends = self._asin_trend_facts(data)
+        acos_flat = next((t for t in trends if "ACOS" in t and ("持平" in t or "降" in t)), None)
+        parts = []
+        if acos_flat:
+            parts.append(self._trend_judge(acos_flat, "判断整体表现稳定，适合维持策略"))
+        elif acos is not None and acos <= 25:
+            parts.append(self._trend_judge(
+                f"ACOS 约{acos:.0f}%在目标内",
+                "判断适合维持现有投放结构",
+            ))
+        if best is not None and best <= 5:
+            parts.append(self._trend_judge(
+                f"核心词自然位约第{best}名",
+                "判断排名稳固，宜守不宜大动",
+            ))
+        if data.signals and data.signals.inventory_qty and data.signals.inventory_qty > 50:
+            parts.append(self._trend_judge(
+                f"库存约{int(data.signals.inventory_qty)}件充足",
+                "判断无库存压力，可维持投放",
+            ))
+        if season == "旺季末期":
+            parts.append(self._trend_judge(
+                "旺季尾声",
+                "判断宜控预算、稳指标，避免激进调整",
+            ))
+        elif stage in ("收割利润期", "维持期"):
+            parts.append(self._trend_judge(
+                "收割/维持阶段",
+                "判断以守住排名和利润为主，小幅微调即可",
+            ))
+        if s.suitability == "recommended" and not parts:
+            parts.append(self._trend_judge(
+                trends[0] if trends else "近期指标平稳",
+                "判断适合作为本期主方向",
+            ))
+        return "；".join(parts) if parts else self._trend_judge(
+            trends[0] if trends else "近期数据",
+            "判断以监控为主、按需微调",
+        )
+
+    @staticmethod
+    def get_eligible_ids(scores: list[DirectionScore]) -> list[str]:
+        return [s.id for s in scores if s.suitability_score >= Recommender.ELIGIBLE_MIN_SCORE]
+
+    @staticmethod
+    def filter_recommended(
+        recommended: list[str],
+        eligible_ids: list[str],
+        scores: list[DirectionScore],
+    ) -> list[str]:
+        filtered = [d for d in recommended if d in eligible_ids]
+        if filtered:
+            return filtered
+        if not eligible_ids:
+            return ["balance_maintain"]
+        score_by_id = {s.id: s.suitability_score for s in scores}
+        return sorted(eligible_ids, key=lambda d: score_by_id.get(d, 0), reverse=True)[:2]
+
     def _score_push_natural(self, data: ASINData) -> DirectionScore:
+        cfg = self._cfg("push_natural")
         score = 0
         reasons = []
-
         has_keywords = len(data.keywords) > 0
+        rising_th = cfg.get("rising_rank_threshold", 3)
 
         if not has_keywords:
             reasons.append("数据缺失：无关键词排名数据，无法评估自然位推进机会")
 
-        # 有上升词或优质位词 +10~30
         if has_keywords:
-            rising = [kw for kw in data.keywords if (kw.rank_change_14d or 0) >= 3]
+            rising = [kw for kw in data.keywords if (kw.rank_change_14d or 0) >= rising_th]
             well_pos = [kw for kw in data.keywords if kw.natural_rank is not None and kw.natural_rank <= 20]
             candidates = len(set(kw.keyword for kw in rising + well_pos))
-            score += min(candidates * 8, 30)
-            if candidates >= 2:
+            score += min(candidates * cfg.get("candidate_points_each", 8), cfg.get("candidate_points_max", 30))
+            if candidates >= cfg.get("ad_driven_min_count", 2):
                 reasons.append(f"{candidates} 个词有推自然位基础（上升或优质位）")
 
-        # 广告依赖词（ACOS好但自然位差）→ 推自然位有直接价值 +20
-        if has_keywords:
             ad_driven = [
                 kw for kw in data.keywords
                 if kw.acos is not None and kw.acos <= 30
                 and kw.natural_rank is not None and kw.natural_rank > 20
                 and kw.spend >= 50
             ]
-            if len(ad_driven) >= 2:
-                score += 20
+            if len(ad_driven) >= cfg.get("ad_driven_min_count", 2):
+                score += cfg.get("ad_driven_points", 20)
                 reasons.append(f"{len(ad_driven)} 个广告依赖词可通过推自然位降低广告成本")
 
-        # 核心排名有空间 +15
-        if has_keywords:
-            ranked = [kw for kw in data.keywords if kw.natural_rank is not None]
-            if ranked:
-                best = min(kw.natural_rank for kw in ranked)
-                if best > 5:
-                    score += 15
+            best = self._best_natural_rank(data)
+            if best is not None:
+                if best > cfg.get("rank_space_threshold", 5):
+                    score += cfg.get("rank_space_points", 15)
                     reasons.append(f"核心词自然位 (TOP {best}) 有上升空间")
-                else:
-                    score -= 10
-                    reasons.append("核心词已进首页前列")
+                elif best <= cfg.get("top_rank_strong_penalty_threshold", 5):
+                    score -= cfg.get("top_rank_strong_penalty", 25)
+                    reasons.append(f"核心词已进首页前列 (TOP {best})，推自然位边际收益低")
+                    cap = cfg.get("top_rank_score_cap", 35)
+                    if score > cap:
+                        score = cap
 
-        if not reasons:
-            reasons.append("当前数据不支撑该方向")
+        if data.natural_order_ratio is not None and data.natural_order_ratio >= cfg.get("natural_order_ratio_high", 70):
+            score -= cfg.get("natural_order_ratio_penalty", 15)
+            reasons.append(f"自然单占比 {data.natural_order_ratio:.0f}% 较高，广告推自然位优先级下降")
 
-        level = "recommended" if score >= 70 else ("available" if score >= 40 else "not_recommended")
-        return DirectionScore(
-            id="push_natural",
-            label="推进自然位",
-            suitability_score=score,
-            suitability=level,
-            reason="；".join(reasons),
-            default_sub_options={"top_keywords_count": 3, "budget_ratio": 20},
+        return self._finalize(
+            "push_natural", "推进自然位", score, reasons,
+            {"top_keywords_count": 3, "budget_ratio": 20},
         )
 
     def _score_expand_keywords(self, data: ASINData) -> DirectionScore:
+        cfg = self._cfg("expand_keywords")
         score = 0
         reasons = []
-
         has_keywords = len(data.keywords) > 0
-
-        # 有可用新词 +30
         avail = data.available_new_keywords or 0
-        score += min(avail * 10, 30)
+
+        score += min(avail * cfg.get("avail_points_per", 2), cfg.get("avail_points_max", 25))
         if avail >= 2:
             reasons.append(f"有 {avail} 个高转化未收录词")
+        if avail >= cfg.get("many_new_keywords_threshold", 20):
+            score += cfg.get("many_new_keywords_bonus", 10)
+            reasons.append("可用新词数量充足，具备扩词储备")
 
-        # 覆盖率低 +20
         kw_count = data.keyword_count or len(data.keywords)
-        if kw_count > 0 and kw_count < 10:
-            score += 20
+        if kw_count > 0 and kw_count < cfg.get("low_coverage_threshold", 10):
+            score += cfg.get("low_coverage_points", 20)
             reasons.append(f"当前仅 {kw_count} 个词，覆盖率偏低")
-        elif kw_count >= 20:
-            score -= 10
-            reasons.append("覆盖率已充足")
+        elif kw_count >= cfg.get("sufficient_coverage_threshold", 20):
+            score -= cfg.get("sufficient_coverage_penalty", 5)
+            reasons.append("覆盖率已充足（仍可按需小批量测试新词）")
 
-        # 现有词 ACOS 健康 +15
         if has_keywords:
             existing = [kw for kw in data.keywords if kw.acos is not None]
             if existing:
                 avg_acos = sum(kw.acos for kw in existing) / len(existing)
-                if avg_acos < 30:
-                    score += 15
+                if avg_acos < cfg.get("healthy_acos_threshold", 30):
+                    score += cfg.get("healthy_acos_points", 15)
                     reasons.append(f"现有词 ACOS 健康 ({avg_acos:.0f}%)")
 
         if not has_keywords and avail == 0:
             reasons.append("数据缺失：无关键词数据和可用新词数据，无法评估扩词机会")
 
-        # 不是 盈利型 目的 +10
         if data.ad_purpose != "盈利型":
-            score += 10
+            score += cfg.get("non_profit_points", 10)
 
-        if not reasons:
-            reasons.append("当前数据不支撑该方向")
-
-        level = "recommended" if score >= 70 else ("available" if score >= 40 else "not_recommended")
-        return DirectionScore(
-            id="expand_keywords",
-            label="新增扩词",
-            suitability_score=score,
-            suitability=level,
-            reason="；".join(reasons),
-            default_sub_options={"sources": ["search_term_report", "auto_campaign"], "target_count": 5},
+        return self._finalize(
+            "expand_keywords", "新增扩词", score, reasons,
+            {"sources": ["search_term_report", "auto_campaign"], "target_count": 5},
         )
 
     def _score_optimize_acos(self, data: ASINData) -> DirectionScore:
+        cfg = self._cfg("optimize_acos")
         score = 0
         reasons = []
+        over_th = cfg.get("over_keyword_acos_threshold", 40)
+        over = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
+        wasteful = [
+            kw for kw in data.keywords
+            if kw.orders == 0 and kw.spend >= cfg.get("wasteful_min_spend", 15)
+        ]
 
-        # ACOS 高 +30
-        if data.ad_data and data.ad_data.acos is not None:
-            acos = data.ad_data.acos
-            if acos > 30:
-                score += 30
-                reasons.append(f"ACOS {acos:.0f}% 偏高需优化")
-            elif acos < 20:
-                score -= 10
-                reasons.append(f"ACOS {acos:.0f}% 已较低")
+        account_acos = data.ad_data.acos if data.ad_data and data.ad_data.acos is not None else None
+        if account_acos is not None:
+            if account_acos > cfg.get("account_acos_high_threshold", 30):
+                score += cfg.get("account_acos_high_points", 30)
+                reasons.append(f"账户 ACOS {account_acos:.0f}% 偏高需优化")
+            elif account_acos < cfg.get("account_acos_low_threshold", 20) and not over:
+                score -= cfg.get("account_acos_low_penalty", 5)
+                reasons.append(f"账户 ACOS {account_acos:.0f}% 已较低")
+            elif account_acos < cfg.get("account_acos_low_threshold", 20) and over:
+                score += cfg.get("word_level_focus_bonus", 15)
+                reasons.append(f"账户 ACOS {account_acos:.0f}% 健康，但存在词级效率问题需优化")
 
-        # 有超标词 +25
-        over = [kw for kw in data.keywords if kw.acos is not None and kw.acos > 40]
         if over:
-            score += min(len(over) * 8, 25)
-            reasons.append(f"{len(over)} 个词 ACOS > 40%")
+            score += min(len(over) * cfg.get("over_keyword_points_each", 8), cfg.get("over_keyword_points_max", 25))
+            reasons.append(f"{len(over)} 个词 ACOS > {over_th}%")
 
-        # 有高花费零转化词 +20
-        wasteful = [kw for kw in data.keywords if kw.orders == 0 and kw.spend >= 15]
         if wasteful:
-            score += 20
+            score += cfg.get("wasteful_points", 20)
             reasons.append(f"{len(wasteful)} 个高花费零转化词")
 
-        # 有 Bid 调整空间 +10
-        adjustable = [kw for kw in data.keywords if kw.bid and kw.clicks > 0 and kw.bid > (kw.spend / kw.clicks) * 1.5]
+        adjustable = [
+            kw for kw in data.keywords
+            if kw.bid and kw.clicks > 0 and kw.bid > (kw.spend / kw.clicks) * 1.5
+        ]
         if adjustable:
-            score += 10
+            score += cfg.get("bid_space_points", 10)
+            reasons.append(f"{len(adjustable)} 个词存在 Bid 下调空间")
 
-        level = "recommended" if score >= 70 else ("available" if score >= 40 else "not_recommended")
-        return DirectionScore(
-            id="optimize_acos",
-            label="优化 ACOS",
-            suitability_score=score,
-            suitability=level,
-            reason="；".join(reasons) if reasons else "当前 ACOS 在合理范围",
-            default_sub_options={"methods": ["negative_keywords", "reduce_bid"], "acos_threshold": 40, "cvr_threshold": 3},
+        if not reasons:
+            reasons.append("当前 ACOS 在合理范围")
+
+        return self._finalize(
+            "optimize_acos", "优化 ACOS", score, reasons,
+            {"methods": ["negative_keywords", "reduce_bid"], "acos_threshold": 40, "cvr_threshold": 3},
         )
 
     def _score_balance_maintain(self, data: ASINData) -> DirectionScore:
-        score = 50
+        cfg = self._cfg("balance_maintain")
+        score = cfg.get("base_score", 50)
         reasons = []
+        over_th = cfg.get("high_acos_keyword_threshold", 40)
 
-        # ACOS 健康度（检查绝对值；acos_7d 无数据源，跳过波动对比）
-        if data.ad_data and data.ad_data.acos is not None and data.ad_data.acos <= 25:
-            score += 10
-            reasons.append("ACOS 在目标范围内")
+        if data.ad_data and data.ad_data.acos is not None:
+            if data.ad_data.acos <= cfg.get("healthy_acos_threshold", 25):
+                score += cfg.get("healthy_acos_points", 10)
+                reasons.append("ACOS 在目标范围内")
 
-        # 无异常信号 +15（库存充足）
-        if data.signals and data.signals.inventory_qty is not None and data.signals.inventory_qty > 50:
-            score += 10
-            reasons.append("库存充足")
-        elif data.signals and data.signals.inventory_qty is not None and data.signals.inventory_qty > 0:
-            score += 5
-            reasons.append("有库存")
+        if data.signals and data.signals.inventory_qty is not None:
+            if data.signals.inventory_qty > cfg.get("inventory_high_qty", 50):
+                score += cfg.get("inventory_high_points", 10)
+                reasons.append("库存充足")
+            elif data.signals.inventory_qty > 0:
+                score += 5
+                reasons.append("有库存")
 
-        # 排名稳定 +5
         ranked = [kw for kw in data.keywords if kw.natural_rank is not None]
         if len(ranked) >= 3:
-            unstable = [kw for kw in data.keywords if kw.rank_change_14d is not None and abs(kw.rank_change_14d) >= 5]
+            unstable = [
+                kw for kw in data.keywords
+                if kw.rank_change_14d is not None and abs(kw.rank_change_14d) >= 5
+            ]
             if not unstable:
-                score += 5
+                score += cfg.get("rank_stable_points", 5)
                 reasons.append("关键词排名稳定")
 
-        # 有明确的扩词或优化机会 → 减分
-        if data.available_new_keywords and data.available_new_keywords >= 2:
-            score -= 15
+        best = self._best_natural_rank(data)
+        stage = data.product_stage or ""
+        harvest_like = stage in ("收割利润期", "维持期")
+        if best is not None and best <= 5 and not harvest_like:
+            score += 8
+            reasons.append("核心排名稳固，适合维持策略")
+        elif best is not None and best <= 5 and harvest_like:
+            score += 4
+            reasons.append("核心排名稳固，收割期以维持效率为主")
+
+        avail = data.available_new_keywords or 0
+        high_acos = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
+        if avail >= 2 and not harvest_like:
+            score -= cfg.get("expand_opportunity_penalty", 10)
             reasons.append("有扩词机会未利用")
-        high_acos = [kw for kw in data.keywords if kw.acos is not None and kw.acos > 40]
-        if len(high_acos) >= 2:
-            score -= 10
-            reasons.append(f"{len(high_acos)} 个词 ACOS > 40%，有优化空间")
+        if len(high_acos) >= cfg.get("high_acos_min_keywords", 2) and not harvest_like:
+            score -= cfg.get("high_acos_penalty", 8)
+            reasons.append(f"{len(high_acos)} 个词 ACOS > {over_th}%，有优化空间")
 
-        if not reasons:
-            reasons.append("当前数据状态一般")
-
-        level = "recommended" if score >= 70 else ("available" if score >= 40 else "not_recommended")
-        return DirectionScore(
-            id="balance_maintain",
-            label="平衡维持",
-            suitability_score=score,
-            suitability=level,
-            reason="；".join(reasons),
-            default_sub_options={"acos_tolerance": 5},
+        return self._finalize(
+            "balance_maintain", "平衡维持", score, reasons,
+            {"acos_tolerance": 5},
         )
 
     def recommend(self, data: ASINData) -> RecommendResponse:
-        """为 ASIN 计算推荐方向"""
+        """为 ASIN 计算推荐方向（含阶段/淡旺季修正）"""
         scores = [
             self._score_push_natural(data),
             self._score_expand_keywords(data),
             self._score_optimize_acos(data),
             self._score_balance_maintain(data),
         ]
+        scores = self._apply_context_adjustments(data, scores)
+        scores = [self._with_display_reason(s, data) for s in scores]
 
         # 找到最高分方向
         best = max(scores, key=lambda s: s.suitability_score)
@@ -409,10 +732,10 @@ class TargetAcosRecommender:
                     result=f"调整-{penalty}%，当前 {target:.0f}%",
                 ))
 
-        # Step 6: Relative change constraint — 非清货/测试期，相对变化 ≤ 40%
+        # Step 6: Relative change constraint — 非测试期，相对变化 ≤ 40%
         stage = data.product_stage or "推进期"
         current_acos = data.ad_data.acos if data.ad_data and data.ad_data.acos else None
-        if current_acos is not None and current_acos > 0 and stage not in ("清货期", "测试期"):
+        if current_acos is not None and current_acos > 0 and stage not in ("测试期",):
             rel_change = abs(target - current_acos) / current_acos
             if rel_change > 0.40:
                 max_deviation = current_acos * 0.40

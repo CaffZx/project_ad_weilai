@@ -1,21 +1,26 @@
-"""启动脚本 — 端口冲突检测后启动 Uvicorn
+"""启动脚本 — 一键启动所有服务
 
 步骤:
-  1. 检查目标端口是否被占用
-  2. 如被占用，打印警告并退出（需手动处理）
+  1. [可选] 启动 Docker 基础设施（MySQL + Redis）
+  2. 检查目标端口是否被占用
   3. 启动 uvicorn
 
 用法:
-  python start_server.py --port 8010 --reload
-  python start_server.py --port 8010 --data-source mock
+  python start_server.py                        # 仅启动 Python 服务（默认）
+  python start_server.py --with-infra           # 一键启动：Docker 基础设施 + Python 服务
+  python start_server.py --with-infra --all     # 完整 Docker Compose（含 agent 容器）
   python start_server.py --port 8010 --no-reload
+  python start_server.py --data-source mock
 """
 
 import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def find_pid_by_port(port: int) -> list[str]:
@@ -41,6 +46,79 @@ def find_pid_by_port(port: int) -> list[str]:
     return results
 
 
+def docker_compose_up(services: list[str] | None = None) -> bool:
+    """启动 Docker Compose 服务，返回是否成功"""
+    compose_file = PROJECT_ROOT / "docker-compose.yml"
+    if not compose_file.exists():
+        print(f"[SKIP] docker-compose.yml 未找到: {compose_file}")
+        return False
+
+    cmd = ["docker", "compose", "-f", str(compose_file), "up", "-d", "--wait"]
+    if services:
+        cmd.extend(services)
+    else:
+        # 等待 healthcheck 通过（--wait 需要 Docker Compose v2）
+        pass
+
+    print(f"[+] 启动 Docker 基础设施...")
+    print(f"    {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"[OK] Docker 服务已就绪")
+            if result.stdout.strip():
+                print(result.stdout.strip())
+            return True
+        # --wait 可能不支持，降级为手动等待
+        if "unknown flag" in result.stderr.lower() or result.returncode != 0:
+            # 重试不带 --wait
+            cmd_no_wait = [c for c in cmd if c != "--wait"]
+            print(f"    (降级) {' '.join(cmd_no_wait)}")
+            result2 = subprocess.run(cmd_no_wait, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+            if result2.returncode == 0:
+                print(f"[OK] Docker 服务已启动，等待健康检查...")
+                _wait_docker_healthy(services)
+                return True
+            print(f"[ERR] Docker Compose 失败:\n{result2.stderr}")
+            return False
+        print(f"[ERR] Docker Compose 失败:\n{result.stderr}")
+        return False
+    except FileNotFoundError:
+        print("[SKIP] Docker 未安装或不在 PATH 中")
+        return False
+
+
+def _wait_docker_healthy(services: list[str] | None = None, timeout: int = 60):
+    """轮询等待 Docker 服务 healthy"""
+    compose_file = PROJECT_ROOT / "docker-compose.yml"
+    svc_list = services or []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(compose_file), "ps", "--format", "json"],
+            cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            healthy = True
+            for line in result.stdout.strip().split("\n"):
+                try:
+                    import json
+                    svc = json.loads(line)
+                    name = svc.get("Service", "")
+                    if svc_list and name not in svc_list:
+                        continue
+                    if svc.get("Health") not in ("healthy", ""):
+                        healthy = False
+                        break
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            if healthy:
+                print("[OK] 所有服务健康检查通过")
+                return
+        time.sleep(2)
+    print("[WARN] 等待健康检查超时，继续启动...")
+
+
 def check_port(port: int) -> bool:
     """检查端口是否空闲，被占用则打印信息返回 False"""
     pids = find_pid_by_port(port)
@@ -56,13 +134,13 @@ def check_port(port: int) -> bool:
 
 def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None):
     """启动 uvicorn 服务"""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = str(PROJECT_ROOT / "ad-direction-agent")
 
     env = os.environ.copy()
     if data_source:
         env["DATA_SOURCE"] = data_source
-    # PYTHONPATH: purpose-adapter 跨项目依赖
-    purpose_dir = str(Path(script_dir).parent / "ad-purpose-agent")
+    # PYTHONPATH: purpose-agent 跨项目依赖
+    purpose_dir = str(PROJECT_ROOT / "ad-purpose-agent")
     existing_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{purpose_dir}{os.pathsep}{existing_path}" if existing_path else purpose_dir
 
@@ -70,6 +148,7 @@ def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None):
     cmd = (
         f"uvicorn app.main:app "
         f"--host {host} --port {port} "
+        f"--log-level info "
         f"{reload_flag}"
     ).strip()
 
@@ -101,8 +180,24 @@ def main():
     parser.add_argument("--no-reload", dest="reload", action="store_false", help="关闭热重载")
     parser.add_argument("--data-source", choices=["db", "mock", "csv"],
                         default=None, help="数据源 (默认取 settings.py 中的配置)")
+    parser.add_argument("--with-infra", action="store_true", default=False,
+                        help="启动前先拉起 Docker 基础设施（MySQL + Redis）")
+    parser.add_argument("--all", action="store_true", default=False,
+                        help="完整 docker compose up（包含 agent 容器，跳过本地 uvicorn）")
 
     args = parser.parse_args()
+
+    if args.all:
+        print("[+] 完整 Docker Compose 模式")
+        subprocess.run(
+            ["docker", "compose", "-f", str(PROJECT_ROOT / "docker-compose.yml"), "up", "-d"],
+            cwd=str(PROJECT_ROOT),
+        )
+        return
+
+    if args.with_infra:
+        if not docker_compose_up(["mysql-state", "redis-cache"]):
+            print("[WARN] Docker 基础设施启动失败，继续尝试启动 Python 服务...")
 
     if not check_port(args.port):
         sys.exit(1)

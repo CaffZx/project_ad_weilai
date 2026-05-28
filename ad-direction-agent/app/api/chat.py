@@ -7,18 +7,20 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.llm.client import deepseek_client
+from app.llm.kb_loader import kb
 
 router = APIRouter()
 
-CHAT_SYSTEM_PROMPT = """你是一个 Amazon 广告优化助手。用户正在查看广告数据面板，以下是当前页面的数据上下文：
+CHAT_SYSTEM_PROMPT = """你是 Amazon 广告优化助手。
 
+## 业务术语与标签体系（理解用户提问时参考）
+{kb_content}
+
+## 当前页面数据上下文
 {context}
 
-请基于这些数据回答用户的问题。要求：
-- 回答简洁、有针对性，直接给出可操作的建议
-- 引用具体数据指标来支撑你的分析
-- 如果数据不足以回答，明确说明需要哪些额外信息
-- 使用中文回答"""
+回答要求：简洁、可操作、引用具体指标；不足时说明缺失；中文。
+"""
 
 
 class ChatRequest(BaseModel):
@@ -30,7 +32,9 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def chat_stream(req: ChatRequest):
     context_str = json.dumps(req.context, ensure_ascii=False, indent=2)
-    system_prompt = CHAT_SYSTEM_PROMPT.format(context=context_str)
+    system_prompt = CHAT_SYSTEM_PROMPT.format(
+        kb_content=kb.build("chat"), context=context_str
+    )
 
     messages = [
         {"role": "system", "content": system_prompt},

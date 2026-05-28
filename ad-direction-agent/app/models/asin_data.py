@@ -58,6 +58,13 @@ class KeywordData(BaseModel):
     sp_rank: Optional[int] = None
     rank_change_14d: Optional[int] = None
     rank_change_7d: Optional[int] = None
+    # 时间窗对比：近半窗 vs 前半窗（用于趋势选词）
+    acos_recent: Optional[float] = None
+    acos_prior: Optional[float] = None
+    spend_recent: Optional[float] = None
+    spend_prior: Optional[float] = None
+    orders_recent: Optional[int] = None
+    orders_prior: Optional[int] = None
     is_manual: bool = True
     match_type: str = ""  # BROAD / EXACT / PHRASE
 
@@ -94,7 +101,6 @@ class SpecialSignals(BaseModel):
     has_coupon: Optional[bool] = None
     has_lightning_deal: Optional[bool] = None
     listing_modified_recently: Optional[bool] = None
-    clearance_urgent: Optional[bool] = None
     threat_score: Optional[float] = None
     inventory_qty: Optional[int] = None
 
@@ -138,6 +144,7 @@ class ASINData(BaseModel):
     keywords: list[KeywordData] = Field(default_factory=list)
     keyword_count: Optional[int] = None
     available_new_keywords: Optional[int] = None
+    expand_keyword_candidates: list[dict] = Field(default_factory=list)
 
     # 竞品数据
     competitors: list[CompetitorData] = Field(default_factory=list)
@@ -164,6 +171,8 @@ class ASINData(BaseModel):
     data_missing: bool = False
     missing_fields: list[str] = Field(default_factory=list)
     stale_fields: list[str] = Field(default_factory=list)
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"  # fresh | partial | stale_cache
 
     # 趋势数据
     trend: list[TrendPoint] = Field(default_factory=list)

@@ -359,5 +359,10 @@ class StateManager:
         return self.set_workflow_state(asin, {"current_layer": "strategy", "layers_completed": []})
 
 
-# 全局单例
-state_manager = StateManager()
+def _default_state_manager():
+    from app.persistence.state_factory import get_state_manager
+    return get_state_manager()
+
+
+# 全局单例（按 STATE_BACKEND 选择 JSON / MySQL）
+state_manager = _default_state_manager()

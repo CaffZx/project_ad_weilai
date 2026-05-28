@@ -1,0 +1,52 @@
+services:
+  mysql-state:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: ad_agent_state
+      MYSQL_USER: ad_agent
+      MYSQL_PASSWORD: ad_agent_pass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_state_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis-cache:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ad-direction-agent:
+    build: .
+    ports:
+      - "8010:8010"
+    env_file:
+      - ad-direction-agent/.env
+    environment:
+      STATE_BACKEND: mysql
+      STATE_DB_HOST: mysql-state
+      STATE_DB_PORT: 3306
+      STATE_DB_USER: ad_agent
+      STATE_DB_PASS: ad_agent_pass
+      STATE_DB_DATABASE: ad_agent_state
+      REDIS_URL: redis://redis-cache:6379/0
+      REDIS_ENABLED: "true"
+    depends_on:
+      mysql-state:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+    command: ["python", "ad-direction-agent/start_server.py", "--port", "8010", "--no-reload"]
+
+volumes:
+  mysql_state_data:

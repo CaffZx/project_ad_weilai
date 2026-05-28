@@ -26,6 +26,34 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+async def startup():
+    import logging
+
+    log_dir = Path(__file__).resolve().parent.parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(log_dir / "server.log", encoding="utf-8"),
+            ],
+        )
+
+    from app.persistence.migrate_json_to_mysql import migrate_json_to_mysql
+
+    n = migrate_json_to_mysql()
+    if n:
+        logging.getLogger(__name__).info("JSON → MySQL 迁移完成: %d ASIN", n)
+
+    if settings.skills_enabled:
+        from app.skills.validate import validate_all_skills
+
+        validate_all_skills()
+
+
 @app.on_event("shutdown")
 async def shutdown():
     from app.llm.client import deepseek_client
@@ -40,13 +68,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册 API 路由 — 旧端点（legacy）
-from app.api.recommend import router as recommend_router
-from app.api.validate import router as validate_router
-from app.api.confirm import router as confirm_router
 from app.api.llm import router as llm_router
 
-# 注册 API 路由 — 新四层工作流
+# 四层工作流 API
 from app.api.strategy import router as strategy_router
 from app.api.tactics import router as tactics_router
 from app.api.diagnosis import router as diagnosis_router
@@ -55,12 +79,8 @@ from app.api.wizard import router as wizard_router
 from app.api.long_term_config import router as lt_config_router
 
 API_PREFIX = "/api/v1/agent/ad-direction"
-app.include_router(recommend_router, prefix=API_PREFIX, tags=["推荐(legacy)"])
-app.include_router(validate_router, prefix=API_PREFIX, tags=["校验(legacy)"])
-app.include_router(confirm_router, prefix=API_PREFIX, tags=["确认(legacy)"])
 app.include_router(llm_router, prefix=API_PREFIX, tags=["LLM"])
 
-# 新工作流端点
 app.include_router(strategy_router, prefix=API_PREFIX, tags=["1.1 战略层"])
 app.include_router(tactics_router, prefix=API_PREFIX, tags=["1.2 策略层"])
 app.include_router(diagnosis_router, prefix=API_PREFIX, tags=["1.3 诊断层"])

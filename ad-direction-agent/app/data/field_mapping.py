@@ -75,7 +75,6 @@ DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "has_coupon": ("signals", "has_coupon"),
     "has_lightning_deal": ("signals", "has_lightning_deal"),
     "listing_modified_recently": ("signals", "listing_modified_recently"),
-    "clearance_urgent": ("signals", "clearance_urgent"),
     "threat_score": ("signals", "threat_score"),
     # 年度/供应链
     "annual_sales_target": ("annual_sales_target",),
@@ -120,7 +119,7 @@ DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
 # 用于将CSV中的数据标签转换为系统枚举值（两者已对齐，此为正向映射）
 VALUE_MAP: dict[tuple[str, ...], dict[str, str]] = {
     ("product_level",): {"头部": "头部", "腰部": "腰部", "长尾": "长尾"},
-    ("product_stage",): {"测试期":"测试期","推进期":"推进期","收割利润期":"收割利润期","维持期":"维持期","清货期":"清货期","测试":"测试期","推进":"推进期","收割":"收割利润期","维持":"维持期","清货":"清货期"},
+    ("product_stage",): {"测试期":"测试期","推进期":"推进期","收割利润期":"收割利润期","维持期":"维持期","测试":"测试期","推进":"推进期","收割":"收割利润期","维持":"维持期"},
     ("season_stage",): {"淡季": "淡季", "旺季准备": "旺季准备", "大旺季": "大旺季", "旺季末期": "旺季末期"},
 }
 
@@ -313,6 +312,15 @@ def _build_top_keywords(keywords, ranked_limit: int = 10, unranked_limit: int = 
 
 # ── ASINData → Project1 兼容扁平 dict ───────────────────
 
+def _orders_from_trend(data: ASINData) -> tuple[int, int]:
+    """从趋势序列汇总订单（广告汇总表失败时的兜底）。"""
+    if not data.trend:
+        return 0, 0
+    total = int(sum(tp.orders or 0 for tp in data.trend))
+    ad_total = int(sum(tp.ad_orders or 0 for tp in data.trend))
+    return total, ad_total
+
+
 def asin_data_to_metrics(data: ASINData, days: int = 7) -> dict:
     """将 ASINData 展平为 Project1 兼容的扁平 metrics dict
 
@@ -320,13 +328,19 @@ def asin_data_to_metrics(data: ASINData, days: int = 7) -> dict:
     所有百分数 → 小数，字段名使用 Project1 命名。
     """
     ad = data.ad_data
+    trend_orders, trend_ad_orders = _orders_from_trend(data)
+    total_orders = (ad.orders if ad and ad.orders else None) or trend_orders or 0
+    ad_orders = (int(ad.orders) if ad and ad.orders else None) or trend_ad_orders or 0
+    total_spend = (ad.spend if ad else None) or (
+        sum(tp.spend or 0 for tp in data.trend) if data.trend else 0
+    )
     return {
-        "total_orders": ad.orders or 0,
-        "ad_orders": int(ad.orders or 0) if ad.orders else 0,
-        "total_spend": ad.spend or 0,
-        "total_ad_sales": ad.sales or 0,
-        "total_clicks": ad.clicks or 0,
-        "total_impressions": ad.impressions or 0,
+        "total_orders": total_orders,
+        "ad_orders": ad_orders,
+        "total_spend": total_spend or 0,
+        "total_ad_sales": (ad.sales if ad else None) or 0,
+        "total_clicks": (ad.clicks if ad else None) or 0,
+        "total_impressions": (ad.impressions if ad else None) or 0,
         "avg_acos": (ad.acos / 100) if ad.acos else 0,
         "cpc": ad.cpc or 0,
         "ctr": (ad.ctr / 100) if ad.ctr else 0,
@@ -339,7 +353,7 @@ def asin_data_to_metrics(data: ASINData, days: int = 7) -> dict:
         "total_ratings": data.review_count or 0,
         "analysis_days": days,
         "unit_gross_profit": (data.margin or 0) * (data.price or 0),
-        "total_profit": (data.margin or 0) * (data.price or 0) * (ad.orders or 0),
+        "total_profit": (data.margin or 0) * (data.price or 0) * total_orders,
         "avg_nature_rank": min(
             (kw.natural_rank for kw in data.keywords if kw.natural_rank), default=None
         ),

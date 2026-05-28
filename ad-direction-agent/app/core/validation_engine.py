@@ -10,6 +10,7 @@ import logging
 from app.rules import get_registry, get_rules_by_direction
 from app.config.settings import settings
 from app.models.asin_data import ASINData
+from app.core.validation_ops import enrich_validation_item
 from app.models.validation import ValidationItem, ValidationResult, DataCompleteness
 
 logger = logging.getLogger(__name__)
@@ -54,14 +55,14 @@ class ValidationEngine:
 
                 result = await rule.execute(**kwargs)
                 if result is not None:
-                    items.append(result)
+                    items.append(enrich_validation_item(result))
             except Exception as e:
                 logger.exception("规则 [%s] 执行异常: %s", rule.rule_id, e)
-                items.append(ValidationItem(
+                items.append(enrich_validation_item(ValidationItem(
                     rule_id=rule.rule_id,
                     level="confirmed",
-                    message=f"规则 {rule.rule_id} 执行异常，跳过: {e}",
-                ))
+                    message=f"该项检查暂时无法完成，已跳过：{e}",
+                )))
 
         # 补充数据完整性信息
         completeness = DataCompleteness(

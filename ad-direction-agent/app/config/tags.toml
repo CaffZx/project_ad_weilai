@@ -141,8 +141,3 @@ description = "库存预警时只能选平衡维持或优化ACOS"
 condition = "special_scenario == 'inventory_warning'"
 level = "suggest_optimize"
 
-[[ad_direction.directions.constraints]]
-id = "clearance_restriction"
-description = "清仓急迫时广告目的只能是Profit"
-condition = "special_scenario == 'clearance_urgent'"
-level = "force_correct"

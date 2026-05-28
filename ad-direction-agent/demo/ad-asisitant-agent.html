@@ -229,14 +229,27 @@ body {
 .reason-popup .btn-close { font-size: 12px; }
 
 /* ═══════════════ 方向卡片 ═══════════════ */
-.dir-card { border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 10px 12px;
-  cursor: pointer; transition: all var(--transition-ctl); position: relative; }
+.dir-card { border: 1.5px solid var(--border); border-radius: var(--radius-ctl); padding: 12px 14px;
+  cursor: pointer; transition: all var(--transition-ctl); position: relative; display: flex; flex-direction: column; gap: 8px; }
 .dir-card:hover { border-color: #93C5FD; }
 .dir-card.selected { border-color: var(--primary); background: var(--primary-bg); }
 .dir-card.recommended { border-color: #FCD34D; background: var(--warning-bg); }
 .dir-card.selected.recommended { border-color: #8B5CF6; background: #F5F3FF; }
+.dir-card.dir-suit-recommended { border-left: 3px solid #10B981; }
+.dir-card.dir-suit-available { border-left: 3px solid #3B82F6; }
+.dir-card.dir-suit-not_recommended { border-left: 3px solid #9CA3AF; }
+.dir-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.dir-card-title { font-weight: 600; font-size: 13px; color: var(--foreground); }
 .dir-color { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.dir-score { font-size: 10px; padding: 1px 6px; border-radius: 9999px; font-weight: 600; }
+.dir-score { font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600; }
+.dir-reason-wrap { margin-top: 2px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.dir-reason-list { margin: 0; padding: 0; list-style: none; }
+.dir-reason-item { position: relative; padding-left: 12px; margin-bottom: 7px; font-size: 12px; line-height: 1.55; color: var(--muted-fg); }
+.dir-reason-item:last-child { margin-bottom: 0; }
+.dir-reason-item::before { content: ''; position: absolute; left: 0; top: 8px; width: 5px; height: 5px; border-radius: 50%; background: #94A3B8; }
+.dir-card.dir-suit-recommended .dir-reason-item::before { background: #10B981; }
+.dir-card.dir-suit-available .dir-reason-item::before { background: #3B82F6; }
+.dir-reason-single { font-size: 12px; line-height: 1.55; color: var(--muted-fg); margin: 0; }
 
 /* ═══════════════ 校验项 ═══════════════ */
 .val-item { padding: 8px 12px; border-radius: 4px; margin-bottom: 4px; font-size: 12px; }
@@ -264,7 +277,27 @@ body {
 
 /* ═══════════════ AI 推荐面板 + 报告 ═══════════════ */
 .ai-panel { background: var(--primary-bg); border-left: 3px solid var(--primary); padding: 10px 14px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; font-size: 12px; color: var(--primary); margin-bottom: 8px; }
-.ai-reasoning { background: #F5F3FF; border-left: 3px solid #8B5CF6; padding: 10px 14px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; font-size: 12px; color: #5B21B6; margin-top: 8px; }
+.ai-reasoning { background: #F5F3FF; border-left: 3px solid #8B5CF6; padding: 14px 16px; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; font-size: 12px; color: #374151; margin-top: 10px; line-height: 1.65; }
+.ai-sec-block { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px dashed #DDD6FE; }
+.ai-sec-block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+.ai-sec-hd { display: block; font-size: 13px; font-weight: 600; color: #5B21B6; margin-bottom: 8px; letter-spacing: 0.02em; }
+.ai-sec-body { color: #374151; }
+.ai-sec-p { margin: 0 0 8px 0; }
+.ai-sec-p:last-child { margin-bottom: 0; }
+.ai-bullet { margin: 6px 0 6px 4px; padding-left: 8px; line-height: 1.6; }
+.ai-bullet-mark { color: #7C3AED; font-weight: 600; margin-right: 4px; }
+.ai-judge-line { margin-bottom: 8px; padding-left: 10px; border-left: 2px solid #DDD6FE; }
+.ai-judge-line .ai-trend-part { color: #5B21B6; font-weight: 500; }
+.ai-analysis-block { line-height: 1.65; font-size: 12px; color: var(--foreground); }
+.ai-report-overall { padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid #E5E7EB; }
+.ai-report-overall-label { font-size: 11px; font-weight: 600; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+.ai-dir-block { border-left: 4px solid var(--primary); padding: 12px 14px 14px; margin-top: 16px; background: #fff; border-radius: 0 var(--radius-ctl) var(--radius-ctl) 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.ai-dir-block .ai-dir-title-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 14px; margin: -12px -14px 14px; border-radius: 2px 2px 0 0; }
+.ai-dir-block .ai-dir-name { font-size: 16px; font-weight: 700; color: var(--foreground); }
+.ai-dir-block .ai-dir-score { font-size: 12px; font-weight: 600; color: var(--muted-fg); padding: 3px 10px; background: rgba(255,255,255,.85); border-radius: 999px; border: 1px solid rgba(0,0,0,.08); }
+.ai-dir-content { line-height: 1.65; }
+.ai-overall-body .ai-overall-p { margin: 0 0 10px; line-height: 1.75; font-size: 13px; color: var(--foreground); }
+.ai-overall-body .ai-overall-p:last-child { margin-bottom: 0; }
 
 /* ═══════════════ 加载 ═══════════════ */
 .spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .5s linear infinite; display: inline-block; }
@@ -487,7 +520,7 @@ body {
 </head>
 <body>
 <div class="topbar">
-  <div class="topbar-title">广告辅助决策Agent <span class="version-pill">v2.3</span></div>
+  <div class="topbar-title">广告辅助决策Agent <span class="version-pill">v2.4</span></div>
   <div class="topbar-status">
     <button onclick="openAnnouncements()" id="btnAnnounce" class="btn btn-secondary btn-sm" title="版本公告" style="margin-right:4px">📢</button>
     <span id="statusDot" class="status-dot"></span>
@@ -611,6 +644,7 @@ body {
 
       <!-- Tab1 面板 — 策略推荐 -->
       <div class="tab-panel" id="panel-tab1">
+        <div id="dataStatusTab1" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:8px 12px;margin-bottom:8px;background:#FEF3C7;border:1px solid #FCD34D;color:#92400E"></div>
         <div class="card">
           <div class="card-title">广告目的评分</div>
           <div id="targetScoreCards" class="grid" style="grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px"></div>
@@ -631,6 +665,7 @@ body {
 
       <!-- Tab2 面板 — 诊断 -->
       <div class="tab-panel" id="panel-tab2">
+        <div id="dataStatusTab2" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:8px 12px;margin-bottom:8px;background:#FEF3C7;border:1px solid #FCD34D;color:#92400E"></div>
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <span id="diagRefreshLoader" class="hidden loading-text"><span class="spinner"></span>刷新中...</span>
@@ -646,6 +681,7 @@ body {
 
       <!-- Tab3 面板 — 目标ACOS与预算 -->
       <div class="tab-panel" id="panel-tab3">
+        <div id="dataStatusTab3" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:8px 12px;margin-bottom:8px;background:#FEF3C7;border:1px solid #FCD34D;color:#92400E"></div>
         <!-- 共享头部 -->
         <div class="flex items-center justify-between" style="margin-bottom:10px">
           <div class="flex items-center gap-2">
@@ -680,13 +716,12 @@ body {
           </div>
           <p id="errSec4" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
         </div>
-        <!-- 下半段：校验报告（初始隐藏） -->
+        <!-- 下半段：AI 报告（初始隐藏） -->
         <div id="reportArea" class="hidden" style="display:flex;flex-direction:column;gap:10px">
           <div class="card" style="background:var(--primary-bg)">
-            <div class="card-title">AI 综合分析</div>
+            <div class="card-title">后续动作推荐（AI）</div>
             <div id="reportAnalysis" style="font-size:12px"></div>
           </div>
-          <div id="reportValidations" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"></div>
         </div>
       </div>
 
@@ -749,6 +784,15 @@ body {
 <script>
 // ═══════════════ 全局变量 ═══════════════
 const API = window.location.origin + '/api/v1/agent/ad-direction';
+/** 前端 HTTP 超时（秒）。仅改此处即可全局调节 */
+const API_TIMEOUT = {
+  default: 90,    // 战略 options/confirm
+  fetch: 180,     // MCP 多工具 + 策略层 purpose-agent LLM，并行拉数时取最慢一条
+  tactics: 240,   // /tactics/options、/tactics/recommend（最重）
+  refresh: 240,   // 诊断 refresh=true（可能 Doris 全量回落）
+  report: 180,    // 向导评估报告（LLM）
+  quick: 30,      // override、反馈
+};
 let asin = '';
 let days = 7;
 let sec1Confirmed = false;
@@ -1008,10 +1052,50 @@ function show(id) { const el = $(id); if (el) el.classList.remove('hidden'); }
 function hide(id) { const el = $(id); if (el) el.classList.add('hidden'); }
 function err(id, msg) { const e = $(id); e.textContent = msg; e.classList.remove('hidden'); }
 
+/** 安全销毁 ECharts，避免 innerHTML 清空后 dispose 触发 removeChild(null) */
+function disposeEchart(dom) {
+  if (!dom || !dom._echart) return;
+  try {
+    if (typeof dom._echart.isDisposed === 'function' && dom._echart.isDisposed()) {
+      dom._echart = null;
+      return;
+    }
+    dom._echart.dispose();
+  } catch (_) { /* DOM 已被替换，忽略 */ }
+  dom._echart = null;
+}
+
+function clearTrendChart() {
+  const dom = $('diagTrendChart');
+  if (!dom) return;
+  disposeEchart(dom);
+  dom.innerHTML = '';
+}
+
 function onDaysChange(v) { days = parseInt(v); }
 
+function renderDataStatusBanner(data, elId) {
+  const el = $(elId);
+  if (!el) return;
+  const pf = data && data.partial_failures;
+  const fresh = data && data.data_freshness;
+  if (!pf || !pf.length) { hide(elId); return; }
+  const hasEmpty = pf.some(x => String(x).includes(':empty'));
+  const hasTimeout = pf.some(x => /timeout|fail/i.test(String(x)) && !String(x).includes(':empty'));
+  let hint = '数据可能不完整。';
+  if (hasEmpty && !hasTimeout) {
+    hint = '部分报表 MCP 无数据且数仓补数后仍为空；请核对店铺、日期窗口或 MCP_KEYWORD_MATCH_TYPES。';
+  } else if (hasEmpty && hasTimeout) {
+    hint = '部分维度超时或 MCP/数仓均无数据；可调整日期或 match_type 后重试。';
+  } else if (fresh === 'partial' || hasTimeout) {
+    hint = '部分数据维度拉取超时，已尝试数仓补数；可稍后点刷新重试。';
+  }
+  el.textContent = `⚠ ${hint} 失败项: ${pf.slice(0, 4).join('；')}${pf.length > 4 ? '…' : ''}`;
+  show(elId);
+}
+
 // ═══════════════ API 调用 ═══════════════
-async function callAPI(path, body, timeout = 90, method = 'POST') {
+async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST') {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeout*1000);
   try {
@@ -1021,7 +1105,16 @@ async function callAPI(path, body, timeout = 90, method = 'POST') {
     if (!r.ok) { const txt = await r.text(); throw new Error(`HTTP ${r.status}: ${txt.slice(0,200)}`); }
     return await r.json();
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`请求超时(${timeout}秒)`);
+    if (e.name === 'AbortError') {
+      throw new Error(`请求超时（${timeout} 秒）：后端仍在拉 MCP/数仓或 AI 分析，请稍后重试；开发可在 Demo 顶部调大 API_TIMEOUT`);
+    }
+    const msg = (e && e.message) ? String(e.message) : '';
+    if (msg === 'Failed to fetch' || e instanceof TypeError) {
+      throw new Error(
+        '无法连接后端（Failed to fetch）：请确认已启动服务，并用浏览器打开 ' +
+        window.location.origin + '/demo/ad-asisitant-agent.html（不要直接双击 html 文件）'
+      );
+    }
     throw e;
   } finally { clearTimeout(t); }
 }
@@ -1055,7 +1148,9 @@ function switchTab(tabId) {
   // resize ECharts when switching to Tab2 (chart persists across tab switches)
   if (tabId === 'tab2') {
     const dom = $('diagTrendChart');
-    if (dom && dom._echart) dom._echart.resize();
+    try {
+      if (dom && dom._echart) dom._echart.resize();
+    } catch (_) { /* 图表容器已重建时忽略 */ }
   }
 }
 
@@ -1064,6 +1159,42 @@ function showMainContent() {
   const mc = $('mainContent');
   mc.style.display = 'flex';
   mc.classList.remove('hidden');
+}
+
+const MAIN_EMPTY_DEFAULT = '输入 ASIN 并点击「加载分析」开始';
+const MAIN_EMPTY_NEED_STRATEGY = '请在左侧完成「战略层」三项选择并点击「保存」，再查看右侧分析';
+const PANEL_LOADING_HTML = '<div class="loading-text" style="padding:24px;text-align:center"><span class="spinner"></span> 加载中...</div>';
+
+function resetMainEmptyDefault() {
+  setMainEmptyMessage(MAIN_EMPTY_DEFAULT);
+}
+
+function setMainEmptyMessage(msg) {
+  show('mainEmpty');
+  const mc = $('mainContent');
+  mc.style.display = 'none';
+  mc.classList.add('hidden');
+  $('mainEmpty').textContent = msg;
+}
+
+function setPanelLoadingPlaceholders() {
+  setHTML('diagMetrics', PANEL_LOADING_HTML);
+  setHTML('alertSignals', '');
+  clearTrendChart();
+  setHTML('p3AcosColumn', PANEL_LOADING_HTML);
+  setHTML('p3BudgetColumn', PANEL_LOADING_HTML);
+  setHTML('execDirections', PANEL_LOADING_HTML);
+  hide('aiReasoningExec');
+  hide('p3Reasoning');
+  hide('p3Warnings');
+}
+
+/** 右侧 Tab2–4：先占位，串行拉数减轻 MCP 并发，避免同时打满网关 */
+async function loadMainInsightPanels() {
+  setPanelLoadingPlaceholders();
+  await loadDiagnosis(false);
+  await loadP3Rec();
+  await loadExecution();
 }
 
 // ═══════════════ 主加载 ═══════════════
@@ -1088,7 +1219,7 @@ async function loadAll() {
   setHTML('execDirections', '');
   setHTML('diagMetrics', '');
   setHTML('alertSignals', '');
-  setHTML('diagTrendChart', '');
+  clearTrendChart();
   _trendData = [];
   setHTML('diagRefreshStatus', '');
   hide('diagRefreshStatus');
@@ -1103,13 +1234,25 @@ async function loadAll() {
   const mc = $('mainContent');
   mc.style.display = 'none';
   mc.classList.add('hidden');
-  show('mainEmpty');
-  $('mainEmpty').textContent = '加载中...';
+  setMainEmptyMessage('正在加载配置与数据…');
 
   try {
-    await Promise.all([loadStrategy(), loadTactics()]);
+    const strat = await loadStrategy();
+    if (!strat.ok) {
+      resetMainEmptyDefault();
+      return;
+    }
+    const tact = await loadTactics();
+    if (!tact.ok) {
+      resetMainEmptyDefault();
+      return;
+    }
+    if (!tact.returnVisit) {
+      setMainEmptyMessage(MAIN_EMPTY_NEED_STRATEGY);
+    }
   } catch (e) {
     err('errGlobal', e.message);
+    resetMainEmptyDefault();
   } finally {
     startBtn.disabled = false;
     startBtn.textContent = '加载分析';
@@ -1121,14 +1264,25 @@ async function loadAll() {
 async function loadStrategy() {
   show('sec1Loader');
   setHTML('strategyContent', '');
-  const data = await callAPI('/strategy/options', { asin, days });
-
-  if (!data.data_ok) {
+  hide('btnStrategy');
+  let data;
+  try {
+    data = await callAPI('/strategy/options', { asin, days });
+  } catch (e) {
     hide('sec1Loader');
-    const is404 = data.missing_fields && data.missing_fields.includes('asin_not_found');
+    throw e;
+  }
+
+  if (!data || !data.data_ok) {
+    hide('sec1Loader');
+    const is404 = data && data.missing_fields && data.missing_fields.includes('asin_not_found');
     err('errGlobal', is404 ? `ASIN "${asin}" 不存在于数据源中` : `ASIN "${asin}" 数据不完整`);
-    $('btnStart').disabled = false;
-    return;
+    return { ok: false };
+  }
+  if (!Array.isArray(data.dimensions) || data.dimensions.length === 0) {
+    hide('sec1Loader');
+    err('errGlobal', '战略层选项未加载，请稍后重试');
+    return { ok: false };
   }
   hide('errGlobal');
 
@@ -1155,6 +1309,7 @@ async function loadStrategy() {
   setHTML('strategyContent', html);
   show('btnStrategy');
   hide('sec1Loader');
+  return { ok: true, data };
 }
 
 let _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
@@ -1173,18 +1328,31 @@ async function confirmStrategy() {
   try {
     const res = await callAPI('/strategy/confirm', { asin, product_level:p, product_stage:ps, season_stage:ss });
     if (!res.accepted) {
-      err('errSec1', 'ASIN 不存在于数据源，请检查后重试');
+      const msg = res.reject_reason === 'asin_not_found'
+        ? 'ASIN 不存在于数据源，请检查后重试'
+        : res.reject_reason === 'context_error'
+          ? '无法解析商品上下文：请确认本机能连上 Doris（.env 中 DB_HOST 或 MCP_DB_HOST），或配置 MCP_DEFAULT_PARENT_SELLER_SKU'
+          : res.reject_reason === 'data_unavailable'
+            ? '数据源暂不可用（MCP 拉数失败），请稍后重试或联系管理员'
+            : '保存失败，请稍后重试';
+      err('errSec1', msg);
       btn.disabled = false; btn.textContent = '保存';
       return;
     }
     show('sec1Done'); sec1Confirmed = true;
     refreshStrategyContext();
-    await loadTactics();
+    const tact = await loadTactics();
+    if (!tact.ok) {
+      btn.disabled = false;
+      btn.textContent = '保存';
+      return;
+    }
     setTabEnabled('tab1', true);
-    showMainContent();
-    switchTab('tab1');
-    if (sec2Confirmed) {
-      enableTabsForReturnVisit();
+    if (tact.returnVisit) {
+      // loadTactics 内已拉取右侧数据并 showMainContent
+    } else {
+      showMainContent();
+      switchTab('tab1');
     }
     btn.disabled = false; btn.textContent = '保存';
   } catch (e) {
@@ -1210,8 +1378,24 @@ function refreshStrategyContext() {
 // ═══════════════ 策略层 ═══════════════
 async function loadTactics() {
   show('sec2Loader');
-  hide('btnTactics'); hide('btnRefreshRec');
-  const data = await callAPI('/tactics/options', { asin, days });
+  hide('btnTactics');
+  hide('btnRefreshRec');
+  setHTML('tacticsContent', '');
+  setHTML('targetScoreCards', '');
+  setHTML('tacticsKwBody', '');
+  $('tacticsKwCount').textContent = '0';
+  let data;
+  try {
+    data = await callAPI('/tactics/options', { asin, days }, API_TIMEOUT.tactics);
+  } catch (e) {
+    hide('sec2Loader');
+    throw e;
+  }
+  if (!data || !Array.isArray(data.dimensions) || data.dimensions.length === 0) {
+    hide('sec2Loader');
+    err('errGlobal', '策略层数据未返回，请确认已保存战略层后重试');
+    return { ok: false };
+  }
 
   // 缓存 AI 推荐值供反馈使用
   _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
@@ -1269,12 +1453,19 @@ async function loadTactics() {
   }
 
   hide('sec2Loader');
+  renderDataStatusBanner(data, 'dataStatusTab1');
 
-  // 回访：有缓存 → 解锁 Tab2/3/4
-  if (prefilled && sec1Confirmed) {
+  const returnVisit = !!(prefilled && sec1Confirmed);
+  if (returnVisit) {
     sec2Confirmed = true;
-    enableTabsForReturnVisit();
+    try {
+      await enableTabsForReturnVisit();
+    } catch (e) {
+      err('errGlobal', e.message || String(e));
+      return { ok: false };
+    }
   }
+  return { ok: true, data, returnVisit };
 }
 
 async function confirmTactics() {
@@ -1306,16 +1497,22 @@ async function confirmTactics() {
   // 显示左侧 P3 输入区
   show('cardP3Override');
 
-  // 触发级联加载
-  loadP3Rec();
-  loadDiagnosis();
-  loadExecution();
+  setTabEnabled('tab4', false);
+  showMainContent();
+  if (!activeTab) switchTab('tab1');
+  try {
+    await loadMainInsightPanels();
+    setTabEnabled('tab4', true);
+  } catch (e) {
+    err('errGlobal', '分析数据加载失败: ' + (e.message || e));
+    return;
+  }
 }
 
 async function refreshTacticsRecommendations() {
   show('tacticsRecLoader');
   try {
-    const data = await callAPI('/tactics/recommend', { asin, days });
+    const data = await callAPI('/tactics/recommend', { asin, days }, API_TIMEOUT.tactics);
     data.dimensions.forEach(dim => {
       const recs = dim.recommendations || [];
       qsa(`input[data-dim="${dim.id}"]`).forEach(cb => {
@@ -1393,24 +1590,28 @@ function renderKeywordTable(kws) {
   setHTML('tacticsKwBody', html);
 }
 
-// ═══════════════ 回访模式：一次性解锁全部 Tab ═══════════════
-function enableTabsForReturnVisit() {
+// ═══════════════ 回访模式：数据就绪后再展示右侧 ═══════════════
+async function enableTabsForReturnVisit() {
   setTabEnabled('tab1', true);
   setTabEnabled('tab2', true);
   setTabEnabled('tab3', true);
-  setTabEnabled('tab4', true);
+  setTabEnabled('tab4', false);
   show('cardP3Override');
   showMainContent();
   switchTab('tab1');
-  loadDiagnosis();
-  loadP3Rec();
-  loadExecution();
+  await loadMainInsightPanels();
+  setTabEnabled('tab4', true);
 }
 
 // ═══════════════ 诊断层 → Tab2 ═══════════════
 async function loadDiagnosis(refresh = false) {
   if (refresh) show('diagRefreshLoader');
-  const data = await callAPI('/diagnosis', { asin, refresh, days });
+  else if (!$('diagMetrics').innerHTML.includes('spinner')) {
+    setHTML('diagMetrics', PANEL_LOADING_HTML);
+    setHTML('alertSignals', '');
+    clearTrendChart();
+  }
+  const data = await callAPI('/diagnosis', { asin, refresh, days }, API_TIMEOUT.fetch);
   renderDiagnosis(data);
   diagnosisLoaded = true;
   setTabEnabled('tab4', true);
@@ -1418,6 +1619,7 @@ async function loadDiagnosis(refresh = false) {
 }
 
 function renderDiagnosis(data) {
+  renderDataStatusBanner(data, 'dataStatusTab2');
   // 上下文
   if (data.strategy_context) {
     const s = data.strategy_context;
@@ -1481,7 +1683,8 @@ const TREND_FIELDS = [
 function renderTrendChart() {
   const chartDom = $('diagTrendChart');
   if (!chartDom) return;
-  if (chartDom._echart) { chartDom._echart.dispose(); chartDom._echart = null; }
+  disposeEchart(chartDom);
+  chartDom.innerHTML = '';
   if (_trendData.length === 0 || typeof echarts === 'undefined') {
     chartDom.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted-fg);font-size:12px">趋势数据不足</div>';
     return;
@@ -1528,15 +1731,13 @@ function renderTrendChart() {
 async function refreshDiagnosis() {
   setHTML('diagMetrics', '');
   setHTML('alertSignals', '');
-  const cd = $('diagTrendChart');
-  if (cd && cd._echart) { cd._echart.dispose(); cd._echart = null; }
-  setHTML('diagTrendChart', '');
+  clearTrendChart();
   show('diagRefreshStatus');
   const status = $('diagRefreshStatus');
   status.textContent = '正在清除服务器缓存...';
   status.style.cssText = 'color:var(--primary);background:var(--primary-bg);border:1px solid #BFDBFE;border-radius:var(--radius-ctl);padding:10px 14px';
   try {
-    const data = await callAPI('/diagnosis', { asin, refresh: true, days });
+    const data = await callAPI('/diagnosis', { asin, refresh: true, days }, API_TIMEOUT.refresh);
     status.textContent = '数据已返回，正在渲染...';
     renderDiagnosis(data);
     status.textContent = `✓ 缓存已清除，已从数据库获取最新数据 — ${new Date().toLocaleTimeString()}`;
@@ -1550,7 +1751,11 @@ async function refreshDiagnosis() {
 // ═══════════════ P3 → Tab3 ═══════════════
 async function loadP3Rec() {
   try {
-    const data = await callAPI('/execution/recommend', { asin, refresh: false, days });
+    if (!$('p3AcosColumn').innerHTML.includes('spinner')) {
+      setHTML('p3AcosColumn', PANEL_LOADING_HTML);
+      setHTML('p3BudgetColumn', PANEL_LOADING_HTML);
+    }
+    const data = await callAPI('/execution/recommend', { asin, refresh: false, days }, API_TIMEOUT.fetch);
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
@@ -1568,7 +1773,7 @@ async function refreshP3() {
   show('p3Loader');
   $('btnRefreshP3').disabled = true;
   try {
-    const data = await callAPI('/execution/recommend', { asin, refresh: true, days });
+    const data = await callAPI('/execution/recommend', { asin, refresh: true, days }, API_TIMEOUT.fetch);
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
@@ -1584,6 +1789,7 @@ async function refreshP3() {
 }
 
 function renderP3(data) {
+  renderDataStatusBanner(data, 'dataStatusTab3');
   const ta = data.target_acos, bb = data.budget_bid;
   const fc = data.from_cache;
   if (fc) show('p3CacheBadge'); else hide('p3CacheBadge');
@@ -1613,7 +1819,7 @@ function renderP3(data) {
     </div>`;
   }
   if (ta.reasoning) {
-    acosHtml += `<div style="font-size:11px;color:${taManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${taManual?'var(--border)':'#DDD6FE'}">${ta.reasoning}</div>`;
+    acosHtml += `<div style="font-size:11px;color:${taManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${taManual?'var(--border)':'#DDD6FE'}">${(ta.reasoning||'').replace(/\n/g,'<br>')}</div>`;
   }
   acosHtml += '</div>';
   setHTML('p3AcosColumn', acosHtml);
@@ -1639,7 +1845,7 @@ function renderP3(data) {
     </div>`;
   }
   if (bb.reason) {
-    budgetHtml += `<div style="font-size:11px;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}">${bb.reason}</div>`;
+    budgetHtml += `<div style="font-size:11px;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}">${(bb.reason||'').replace(/\n/g,'<br>')}</div>`;
   }
   if (bb.bid_adjustments && bb.bid_adjustments.length > 0) {
     budgetHtml += `<details style="font-size:11px;margin-top:8px;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}"><summary>关键词 Bid 调整 (${bb.bid_adjustments.length}条)</summary>
@@ -1657,7 +1863,7 @@ function renderP3(data) {
   hide('p3Loader');
 
   // 共享推理 + 警告
-  if (data.overall_reasoning) { show('p3Reasoning'); setHTML('p3Reasoning', data.overall_reasoning); }
+  if (data.overall_reasoning) { show('p3Reasoning'); setHTML('p3Reasoning', formatAiSections(data.overall_reasoning)); }
   else hide('p3Reasoning');
   if (data.risk_warnings && data.risk_warnings.length) { show('p3Warnings'); setHTML('p3Warnings', '⚠ ' + data.risk_warnings.join('；')); }
   else hide('p3Warnings');
@@ -1692,7 +1898,7 @@ async function saveP3AcosLeft() {
   if (isNaN(val) || val < 5 || val > 100) { $('p3AcosLeftStatus').textContent = '请输入 5-100'; $('p3AcosLeftStatus').style.color = 'var(--danger)'; show('p3AcosLeftStatus'); return; }
   btn.disabled = true; btn.textContent = '⏳ 保存中';
   try {
-    await callAPI('/execution/target-acos/override', { asin, value: val });
+    await callAPI('/execution/target-acos/override', { asin, value: val }, API_TIMEOUT.quick);
     if (window._p3data && window._p3data.target_acos) {
       window._p3data.target_acos.manual_override = true;
     }
@@ -1714,7 +1920,7 @@ async function saveP3BudgetLeft() {
   if (isNaN(val) || val <= 0) { $('p3BudgetLeftStatus').textContent = '请输入大于0的数值'; $('p3BudgetLeftStatus').style.color = 'var(--danger)'; show('p3BudgetLeftStatus'); return; }
   btn.disabled = true; btn.textContent = '⏳ 保存中';
   try {
-    await callAPI('/execution/budget-bid/override', { asin, value: val });
+    await callAPI('/execution/budget-bid/override', { asin, value: val }, API_TIMEOUT.quick);
     if (window._p3data && window._p3data.budget_bid) {
       window._p3data.budget_bid.manual_override = true;
     }
@@ -1732,7 +1938,7 @@ async function saveP3BudgetLeft() {
 
 
 async function clearP3Acos() {
-  await callAPI('/execution/target-acos/override', { asin }, 30, 'DELETE');
+  await callAPI('/execution/target-acos/override', { asin }, API_TIMEOUT.quick, 'DELETE');
   if (window._p3data && window._p3data.target_acos) {
     window._p3data.target_acos.manual_override = false;
     const aiVal = window._p3data.target_acos.recommended_target;
@@ -1751,7 +1957,7 @@ async function clearP3Acos() {
 }
 
 async function clearP3Budget() {
-  await callAPI('/execution/budget-bid/override', { asin }, 30, 'DELETE');
+  await callAPI('/execution/budget-bid/override', { asin }, API_TIMEOUT.quick, 'DELETE');
   if (window._p3data && window._p3data.budget_bid) {
     window._p3data.budget_bid.manual_override = false;
     const aiVal = window._p3data.budget_bid.suggested;
@@ -1770,9 +1976,9 @@ async function clearP3Budget() {
 }
 
 // ═══════════════ 英文→中文翻译映射 ═══════════════
-const DIR_CN = { push_natural:'推自然排名', expand_keywords:'新增扩词', optimize_acos:'优化ACOS', balance_maintain:'平衡维持' };
-const SUIT_CN = { recommended:'推荐', available:'可选', not_recommended:'不推荐' };
-const LEVEL_CN = { force_correct:'强制修正', suggest_optimize:'建议优化', confirmed:'已确认' };
+const DIR_CN = { push_natural:'推进自然位', expand_keywords:'新增扩词', optimize_acos:'优化ACOS', balance_maintain:'平衡维持' };
+const SUIT_CN = { recommended:'建议采用', available:'可考虑', not_recommended:'暂不建议' };
+const LEVEL_CN = { force_correct:'需立即处理', suggest_optimize:'需关注', confirmed:'检查通过' };
 const PRI_CN = { high:'高', medium:'中', low:'低' };
 
 function cnDir(dirId) { return DIR_CN[dirId] || dirId; }
@@ -1780,9 +1986,187 @@ function cnSuit(s) { return SUIT_CN[s] || s; }
 function cnLevel(l) { return LEVEL_CN[l] || l; }
 function cnPri(p) { return PRI_CN[p] || p; }
 
+/** 将含【决策依据】【建议】【后续关注】的文本格式化为 HTML */
+function formatAiInline(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/；/g, '；<br>')
+    .replace(/。(?!\s*<)/g, '。<br>')
+    .replace(/<br>\s*<br>\s*<br>/g, '<br><br>');
+}
+
+/** 【决策依据】专格式：按「根据…判断…」分条，突出趋势与判断 */
+function formatDecisionBasisBody(body) {
+  if (!body) return '';
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let chunks = esc(body.trim()).replace(/\r\n/g, '\n').split(/\n+/).filter(Boolean);
+  if (chunks.length === 1 && (chunks[0].match(/根据/g) || []).length > 1) {
+    chunks = chunks[0].split(/(?=根据)/).map(s => s.trim()).filter(Boolean);
+  }
+  return chunks.map(line => {
+    const j = line.indexOf('判断');
+    if (j > 0 && line.indexOf('根据') >= 0) {
+      const trend = line.slice(0, j).trim();
+      const rest = line.slice(j).trim();
+      return `<p class="ai-sec-p ai-judge-line"><span class="ai-trend-part">${trend}</span> ${formatAiInline(rest)}</p>`;
+    }
+    return `<p class="ai-sec-p ai-judge-line">${formatAiInline(line)}</p>`;
+  }).join('');
+}
+
+function formatAiSectionBody(body) {
+  if (!body) return '';
+  const lines = body.trim().replace(/\r\n/g, '\n').split(/\n+/);
+  const parts = [];
+  lines.forEach(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    if (trimmed.startsWith('•')) {
+      parts.push(`<p class="ai-bullet"><span class="ai-bullet-mark">•</span> ${formatAiInline(trimmed.slice(1).trim())}</p>`);
+      return;
+    }
+    const subs = trimmed.split(/\s*•\s+/);
+    if (subs.length > 1) {
+      if (subs[0]) parts.push(`<p class="ai-sec-p">${formatAiInline(subs[0])}</p>`);
+      for (let i = 1; i < subs.length; i++) {
+        parts.push(`<p class="ai-bullet"><span class="ai-bullet-mark">•</span> ${formatAiInline(subs[i])}</p>`);
+      }
+    } else {
+      parts.push(`<p class="ai-sec-p">${formatAiInline(trimmed)}</p>`);
+    }
+  });
+  return parts.join('') || `<p class="ai-sec-p">${formatAiInline(body)}</p>`;
+}
+
+/** 去掉 BM-3 confirmed 等内部编号（前端兜底，与后端 humanize_ops_text 一致） */
+function sanitizeOpsDisplayText(text) {
+  if (!text) return '';
+  let t = String(text);
+  const rule = /(?:PN|KE|OA|BM|PX|CROSS)-?\d+(?:\s*(?:confirmed|suggest_optimize|force_correct))?(?:提示|说明|检查)?/gi;
+  const ruleInParen = /[（(]\s*(?:PN|KE|OA|BM|PX|CROSS)-?\d+(?:\s+(?:confirmed|suggest_optimize|force_correct))?\s*[）)]/gi;
+  t = t.replace(ruleInParen, '').replace(rule, '');
+  t = t.replace(/\b(?:confirmed|suggest_optimize|force_correct)\b/gi, '');
+  t = t.replace(/[（(]\s*[）)]/g, '').replace(/\(\s*\)/g, '');
+  t = t.replace(/半窗/g, '近期下半段').replace(/全窗/g, '统计周期内');
+  t = t.replace(/，\s*，/g, '，').replace(/；\s*；/g, '；');
+  return t.trim();
+}
+
+/** 综合概览：不分段，连贯描述当前状态 */
+function formatOverallSummary(text) {
+  if (!text) return '';
+  let raw = sanitizeOpsDisplayText(String(text).trim());
+  const chunks = [];
+  ['【决策依据】', '【建议】', '【后续关注】', '【分析与建议】'].forEach(h => {
+    const re = new RegExp(h.replace(/[[\]]/g, c => '\\' + c) + '\\s*([\\s\\S]*?)(?=\\s*【|$)');
+    const m = raw.match(re);
+    if (m && m[1].trim()) chunks.push(m[1].trim().replace(/【[^】]+】/g, ''));
+  });
+  if (!chunks.length) {
+    raw = raw.replace(/【[^】]+】\s*/g, '');
+    chunks.push(raw);
+  }
+  const paras = chunks.join('\n\n').split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+  if (paras.length <= 1) {
+    const one = paras[0] || raw.replace(/\s+/g, ' ');
+    return `<p class="ai-overall-p">${formatAiInline(one)}</p>`;
+  }
+  return paras.map(p => `<p class="ai-overall-p">${formatAiInline(p)}</p>`).join('');
+}
+
+/** 分方向：合并决策依据+建议为【分析与建议】 */
+function normalizeDirectionBody(text) {
+  let t = String(text || '').trim();
+  if (t.includes('【分析与建议】')) return t;
+  if (!t.includes('【决策依据】')) return t;
+  const basis = (t.match(/【决策依据】\s*([\s\S]*?)(?=【建议】|【后续关注】|$)/) || [])[1] || '';
+  const sugg = (t.match(/【建议】\s*([\s\S]*?)(?=【后续关注】|$)/) || [])[1] || '';
+  const follow = (t.match(/【后续关注】\s*([\s\S]*)/) || [])[1] || '';
+  const merged = [basis.trim(), sugg.trim()].filter(Boolean).join('\n');
+  t = '【分析与建议】\n' + merged;
+  if (follow.trim()) t += '\n\n【后续关注】\n' + follow.trim();
+  return t;
+}
+
+function formatAnalysisAdviceBody(body) {
+  if (!body) return '';
+  const lines = body.trim().replace(/\r\n/g, '\n').split(/\n+/).filter(Boolean);
+  return lines.map(line => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('•')) {
+      return `<p class="ai-bullet"><span class="ai-bullet-mark">•</span> ${formatAiInline(trimmed.slice(1).trim())}</p>`;
+    }
+    if (trimmed.indexOf('根据') >= 0 && trimmed.indexOf('判断') > 0) {
+      const j = trimmed.indexOf('判断');
+      const trend = trimmed.slice(0, j).trim();
+      const rest = trimmed.slice(j).trim();
+      return `<p class="ai-sec-p ai-judge-line"><span class="ai-trend-part">${formatAiInline(trend)}</span> ${formatAiInline(rest)}</p>`;
+    }
+    return `<p class="ai-sec-p">${formatAiInline(trimmed)}</p>`;
+  }).join('');
+}
+
+function formatDirectionReportBody(text) {
+  return formatAiSections(normalizeDirectionBody(sanitizeOpsDisplayText(text)));
+}
+
+function formatAiSections(text) {
+  if (!text) return '';
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const headers = ['【分析与建议】','【决策依据】','【建议】','【后续关注】','【综合判断】','【执行节奏】','【风险提示】'];
+  let t = esc(String(text).trim());
+  headers.forEach(h => {
+    const re = new RegExp(`\\s*${h.replace(/[[\]]/g, c => '\\' + c)}`, 'g');
+    t = t.replace(re, `\n\n${h}\n`);
+  });
+  const pieces = t.split(/(【[^】]+】)/).filter(s => s && s.trim());
+  let html = '';
+  for (let i = 0; i < pieces.length; i++) {
+    const seg = pieces[i].trim();
+    if (/^【[^】]+】$/.test(seg)) {
+      let body = '';
+      if (i + 1 < pieces.length && !/^【/.test(pieces[i + 1])) {
+        body = pieces[++i].trim();
+      }
+      const bodyHtml = (seg === '【决策依据】' || seg === '【分析与建议】')
+        ? (seg === '【分析与建议】' ? formatAnalysisAdviceBody(body) : formatDecisionBasisBody(body))
+        : formatAiSectionBody(body);
+      html += `<div class="ai-sec-block"><span class="ai-sec-hd">${seg}</span><div class="ai-sec-body">${bodyHtml}</div></div>`;
+    } else if (!html) {
+      html += `<div class="ai-sec-body">${formatAiSectionBody(seg)}</div>`;
+    }
+  }
+  if (!html) html = `<div class="ai-sec-body">${formatAiSectionBody(t)}</div>`;
+  return html;
+}
+
+/** 方向卡片说明：去重前缀、按分号拆要点并换行 */
+function formatDirReason(reason) {
+  if (!reason) return '';
+  let body = sanitizeOpsDisplayText(String(reason).trim());
+  ['建议优先：', '可考虑：', '暂不建议：'].forEach(p => {
+    if (body.startsWith(p)) body = body.slice(p.length).trim();
+  });
+  const points = body.split(/；/).map(s => s.trim()).filter(Boolean);
+  if (points.length <= 1) {
+    return `<div class="dir-reason-single">${formatAiInline(body)}</div>`;
+  }
+  return '<ul class="dir-reason-list">' + points.map(pt =>
+    `<li class="dir-reason-item">${formatAiInline(pt)}</li>`
+  ).join('') + '</ul>';
+}
+
 // ═══════════════ 执行方向 → Tab4 ═══════════════
 async function loadExecution() {
-  const data = await callAPI('/execution/options', { asin, days });
+  if (!$('execDirections').innerHTML.includes('spinner')) {
+    setHTML('execDirections', PANEL_LOADING_HTML);
+    hide('aiReasoningExec');
+  }
+  const data = await callAPI('/execution/options', { asin, days }, API_TIMEOUT.fetch);
+  if (!data || !Array.isArray(data.directions)) {
+    setHTML('execDirections', '<div style="padding:16px;color:var(--muted-fg);font-size:12px">暂无方向推荐数据</div>');
+    return;
+  }
 
   // 缓存 AI 推荐方向供反馈使用
   _lastExecAiDirs = data.recommended_directions || [];
@@ -1792,22 +2176,29 @@ async function loadExecution() {
   data.directions.forEach(d => {
     const c = colors[d.id]||'#6B7280';
     const rc = d.recommended ? 'recommended' : '';
-    html += `<div class="dir-card ${rc}" id="dirc_${d.id}" onclick="togDir('${d.id}')" data-selected="${d.recommended?'true':'false'}">
-        <div style="flex:1;min-width:0">
-          <div class="flex items-center gap-2" style="flex-wrap:wrap;margin-bottom:4px">
-            <span class="dir-color" style="background:${c}"></span>
-            <span style="font-weight:600;font-size:13px">${cnDir(d.id)}</span>
-            <span class="badge dir-score ${d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray'}">${d.suitability_score}分 ${cnSuit(d.suitability)}</span>
-            ${d.recommended?'<span class="badge badge-amber" style="font-size:10px">AI推荐</span>':''}
-          </div>
-          <p style="font-size:11px;color:var(--muted-fg);margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.reason||''}</p>
+    const defaultSel = d.recommended && d.suitability_score >= 40;
+    const title = d.label || cnDir(d.id);
+    const scoreBadge = d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray';
+    const aiBadge = d.suitability !== 'recommended' && d.recommended && d.suitability_score >= 40
+      ? '<span class="badge badge-amber" style="font-size:10px">AI建议</span>' : '';
+    const suitCls = d.suitability ? `dir-suit-${d.suitability}` : '';
+    html += `<div class="dir-card ${rc} ${suitCls}" id="dirc_${d.id}" onclick="togDir('${d.id}')" data-selected="${defaultSel?'true':'false'}">
+        <div class="dir-card-head">
+          <span class="dir-color" style="background:${c}"></span>
+          <span class="dir-card-title">${title}</span>
+          <span class="badge dir-score ${scoreBadge}">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</span>
+          ${aiBadge}
         </div>
+        <div class="dir-reason-wrap">${formatDirReason(d.reason)}</div>
     </div>`;
   });
   setHTML('execDirections', html);
 
-  if (data.recommendation_summary) { show('aiReasoningExec'); setHTML('aiReasoningExec', data.recommendation_summary); }
-  else hide('aiReasoningExec');
+  if (data.recommendation_summary) {
+    show('aiReasoningExec');
+    setHTML('aiReasoningExec', formatAiSections(sanitizeOpsDisplayText(data.recommendation_summary)));
+    $('aiReasoningExec').className = 'ai-reasoning';
+  } else hide('aiReasoningExec');
 }
 
 function togDir(id) {
@@ -1832,7 +2223,7 @@ async function generateReport() {
   $('btnGenerate').disabled = true;
   $('btnGenerate').textContent = '生成中...';
   try {
-    const data = await callAPI('/wizard/report', { asin, days });
+    const data = await callAPI('/wizard/report', { asin, days }, API_TIMEOUT.report);
     renderReport(data);
   } catch(e) {
     err('errSec4', '报告生成失败: ' + e.message);
@@ -1842,55 +2233,55 @@ async function generateReport() {
 }
 
 function renderReport(data) {
-  const dirs = data.directions || [];
   const analysis = data.analysis || {};
-  const validations = data.validations || {};
-  const decisions = data.decisions || {};
+  const scoreByLabel = {};
+  (data.directions || []).forEach(d => {
+    const label = d.label || cnDir(d.id);
+    scoreByLabel[label] = Math.round(d.suitability_score);
+  });
 
-  // AI 综合分析
+  // 后续动作推荐（AI）（三段式）
   let analysisHtml = '';
-  if (analysis.overall_analysis) analysisHtml += `<p style="font-size:12px;margin-bottom:8px">${analysis.overall_analysis}</p>`;
-  if (analysis.direction_analyses) analysis.direction_analyses.forEach(da => {
-    analysisHtml += `<div style="border-left:3px solid var(--primary);padding:4px 10px;margin-top:6px">
-      <p style="font-size:12px;font-weight:600">${da.direction||''}</p>
-      <p style="font-size:11px;color:var(--muted-fg)">${da.analysis||''}</p>`;
-    if (da.suggestions) da.suggestions.forEach(s => analysisHtml += `<p style="font-size:11px;color:var(--muted-fg);margin-top:2px">• ${s}</p>`);
-    analysisHtml += '</div>';
-  });
-  if (analysis.action_priorities) {
-    const pc = {'高':'badge-red','中':'badge-amber','低':'badge-blue'};
-    analysis.action_priorities.forEach(a => analysisHtml += `<div style="display:flex;align-items:center;gap:6px;margin-top:4px;font-size:11px"><span class="badge ${pc[a.priority]||'badge-gray'}">${a.priority}</span><span>${a.action}</span><span style="color:var(--muted-fg);font-size:10px">${a.expected_impact||''}</span></div>`);
-  }
-  if (analysis.risk_warnings) analysis.risk_warnings.forEach(w => analysisHtml += `<p style="font-size:11px;color:var(--danger);margin-top:4px">! ${w}</p>`);
-  setHTML('reportAnalysis', analysisHtml);
-
-  // 校验项 + 决策（按方向嵌套）
   const ec = {push_natural:'#3B82F6',expand_keywords:'#8B5CF6',optimize_acos:'#F97316',balance_maintain:'#14B8A6'};
-  const dirKeys = Object.keys(validations).length > 0 ? Object.keys(validations) : Object.keys(decisions);
-  let valHtml = '';
-  dirKeys.forEach(dir => {
-    const v = validations[dir] || {};
-    const d = (decisions[dir]||{}).decision_package || {};
-    const items = v.items || [];
-    const tasks = d.tasks || [];
-	    valHtml += `<div class="card" style="border-left-width:3px;border-left-style:solid;border-left-color:${ec[dir]||'#ccc'}"><div class="card-title" style="font-size:12px">${cnDir(dir)}</div>`;
-	    items.forEach(it => {
-	      const lc = {force_correct:'val-force',suggest_optimize:'val-suggest',confirmed:'val-confirmed'};
-	      valHtml += `<div class="val-item ${lc[it.level]||'val-confirmed'}">
-	        <div style="display:flex;align-items:center;gap:6px"><span style="font-size:10px;font-family:monospace;color:var(--muted-fg)">${it.rule_id}</span><span class="badge ${it.level==='force_correct'?'badge-red':it.level==='suggest_optimize'?'badge-amber':'badge-green'}" style="font-size:10px">${cnLevel(it.level)}</span></div>
-	        <p style="margin:4px 0 0;font-size:12px">${it.message||''}</p></div>`;
-	    });
-	    tasks.forEach(t => {
-	      const pc = {high:'task-high',medium:'task-medium',low:'task-low'};
-	      valHtml += `<div class="task-item ${pc[t.priority]||'task-low'}">
-	        <span class="badge ${t.priority==='high'?'badge-red':t.priority==='medium'?'badge-amber':'badge-blue'}" style="font-size:10px">${cnPri(t.priority)}</span>
-	        <span style="font-size:12px;margin-left:4px">${t.action}</span>${t.details?`<p style="font-size:10px;color:var(--muted-fg);margin:2px 0 0">${t.details}</p>`:''}${t.estimated_impact?`<p style="font-size:10px;color:var(--muted-fg);margin:1px 0 0">${t.estimated_impact}</p>`:''}
-	      </div>`;
-	    });
-    valHtml += '</div>';
+  const dirBg = {
+    push_natural: { bg: '#EFF6FF', border: '#3B82F6' },
+    expand_keywords: { bg: '#F5F3FF', border: '#8B5CF6' },
+    optimize_acos: { bg: '#FFF7ED', border: '#F97316' },
+    balance_maintain: { bg: '#ECFDF5', border: '#14B8A6' }
+  };
+  if (analysis.overall_analysis) {
+    analysisHtml += `<div class="ai-report-overall">
+      <div class="ai-report-overall-label">当前状态</div>
+      <div class="ai-overall-body">${formatOverallSummary(analysis.overall_analysis)}</div>
+    </div>`;
+  }
+  const dirList = [...(analysis.direction_analyses || [])].sort((a, b) =>
+    (scoreByLabel[b.direction] || 0) - (scoreByLabel[a.direction] || 0)
+  );
+  dirList.forEach(da => {
+    const dirKey = Object.keys(DIR_CN).find(k => DIR_CN[k] === da.direction) || da.direction;
+    const border = ec[dirKey] || 'var(--primary)';
+    const title = da.direction || cnDir(dirKey);
+    const score = scoreByLabel[title];
+    let body = da.analysis || da.reasoning || '';
+    if (da.suggestions && da.suggestions.length && body.indexOf('【建议】') < 0 && body.indexOf('【分析与建议】') < 0) {
+      body = normalizeDirectionBody(body);
+      body += '\n' + da.suggestions.map(s => '• ' + s).join('\n');
+    }
+    const scoreHtml = score != null && !isNaN(score)
+      ? `<span class="ai-dir-score">${score}分</span>` : '';
+    const theme = dirBg[dirKey] || { bg: '#F9FAFB', border };
+    analysisHtml += `<div class="ai-dir-block" style="border-left-color:${border}">
+      <div class="ai-dir-title-bar" style="background:${theme.bg};border-bottom:2px solid ${theme.border}">
+        <span class="ai-dir-name">${title}</span>${scoreHtml}
+      </div>
+      <div class="ai-dir-content">${formatDirectionReportBody(body)}</div>
+    </div>`;
   });
-  $('reportValidations').style.gridTemplateColumns = `repeat(${Math.min(dirKeys.length, 2)}, 1fr)`;
-  setHTML('reportValidations', valHtml);
+  if (analysis.skip_directions_note) {
+    analysisHtml += `<p style="font-size:11px;color:var(--muted-fg);margin-top:10px">${formatAiSections(analysis.skip_directions_note)}</p>`;
+  }
+  setHTML('reportAnalysis', analysisHtml);
 
   show('reportArea');
   $('reportArea').style.display = 'flex';
@@ -2006,7 +2397,7 @@ function closeFeedback() {
 
 function _fbBuildTable() {
   const modules = window._feedbackModules;
-  const dirCn = {'push_natural':'推自然排名','expand_keywords':'新增扩词','optimize_acos':'优化ACOS','balance_maintain':'平衡维持'};
+  const dirCn = {'push_natural':'推进自然位','expand_keywords':'新增扩词','optimize_acos':'优化ACOS','balance_maintain':'平衡维持'};
 
   function formatVal(v) {
     if (v == null) return '';
@@ -2098,7 +2489,7 @@ async function submitFeedback() {
   $('btnFbSubmit').textContent = '提交中...';
 
   try {
-    const res = await callAPI('/feedback', payload, 30);
+    const res = await callAPI('/feedback', payload, API_TIMEOUT.quick);
     if (res.ok) {
       show('fbSuccess');
       hide('fbError');

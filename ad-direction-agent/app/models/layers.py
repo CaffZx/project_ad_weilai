@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 class ProductLevel(StrEnum):
     TOP = "头部"       # 核心爆款
     MID = "腰部"       # 主力款/腰部产品
-    TAIL = "长尾"      # 长尾/清货款
+    TAIL = "长尾"      # 长尾产品
 
 
 class ProductStage(StrEnum):
@@ -25,7 +25,6 @@ class ProductStage(StrEnum):
     GROW = "推进期"           # 增长推进/冲刺
     HARVEST = "收割利润期"    # 达成预期
     MAINTAIN = "维持期"       # 超预期维持
-    CLEARANCE = "清货期"      # 清库存/退市
 
 
 # 旧值 → 新值映射，用于 DB 存量数据和 long_term_config 旧值的透明转换
@@ -35,13 +34,11 @@ STAGE_OLD_TO_NEW: dict[str, str] = {
     "进展期": "推进期", "冲刺期": "推进期",
     "达成期": "收割利润期",
     "超预期": "维持期",
-    "清货中/淘汰": "清货期",
     # 5 值旧系统 → 当前
     "测试": "测试期",
     "推进": "推进期",
     "收割": "收割利润期",
     "维持": "维持期",
-    "清货": "清货期",
 }
 
 
@@ -57,7 +54,6 @@ class AdPurpose(StrEnum):
     CONVERSION = "转化型"
     RANKING = "排名型"
     PROFIT = "盈利型"
-    CLEARANCE = "清货型"
 
 
 class KeywordType(StrEnum):
@@ -102,6 +98,8 @@ class StrategyOptionsResponse(BaseModel):
     data_ok: bool = True
     missing_fields: list[str] = []
     days: int = 7
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"
 
 
 class StrategyConfirmRequest(BaseModel):
@@ -117,6 +115,7 @@ class StrategyConfirmResponse(BaseModel):
     accepted: bool
     config_saved: bool
     next_layer: str = "tactics"
+    reject_reason: str | None = None
 
 
 # ── Layer 1.2 策略层 请求/响应 ─────────────────────────────
@@ -130,6 +129,8 @@ class TacticsOptionsResponse(BaseModel):
     current_selection: dict | None = None
     target_scores: list[dict] = Field(default_factory=list)  # P1 广告目的评分卡片
     keyword_analysis: list[dict] = Field(default_factory=list)  # P1 关键词AI分类
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"
 
 
 class TacticsConfirmRequest(BaseModel):
@@ -161,6 +162,8 @@ class DiagnosisResponse(BaseModel):
     query_plan: list[dict] = Field(default_factory=list)  # 本次使用的元脚本清单
     keywords: list[dict] = Field(default_factory=list)  # 逐词监控表
     trend_data: list[dict] = Field(default_factory=list)  # 30天趋势数据
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"
 
 
 # ── Layer 1.4 执行层 请求/响应 ─────────────────────────────
@@ -317,6 +320,8 @@ class UnifiedRecommendResponse(BaseModel):
     risk_warnings: list[str] = Field(default_factory=list)
     from_cache: bool = False
     cached_until: str = ""  # ISO timestamp
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"
 
 
 # ── 向导状态 ───────────────────────────────────────────────

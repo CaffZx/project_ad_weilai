@@ -1,3 +1,8 @@
+import os
+
+# 测试收集阶段避免模块级 DataAggregator 连接真实 DB
+os.environ.setdefault("DATA_SOURCE", "mock")
+
 import pytest
 from app.data.mock import MockAdapter
 from app.models.asin_data import ASINData

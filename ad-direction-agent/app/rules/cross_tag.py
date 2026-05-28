@@ -49,28 +49,6 @@ async def harvest_stage_ad_purpose(data: ASINData, thresholds: dict) -> Validati
 
 
 @validation_rule(
-    rule_id="CROSS-3",
-    direction="cross_tag",
-    priority=0,
-    description="清货阶段广告目的只能是 盈利 或 清货型",
-)
-async def clearance_ad_purpose(data: ASINData, thresholds: dict) -> ValidationItem | None:
-    if data.product_stage != "清货期":
-        return None
-
-    allowed = ["盈利型", "清货型"]
-    if data.ad_purpose not in allowed:
-        return ValidationItem(
-            rule_id="CROSS-3",
-            level="force_correct",
-            message="清货阶段广告目的只能是 盈利（保本）或 清货型（砍预算），不能继续投入推广",
-            evidence=Evidence(current_value=data.ad_purpose or "", threshold=", ".join(allowed)),
-            suggestion="盈利 或 清货型",
-        )
-    return None
-
-
-@validation_rule(
     rule_id="CROSS-4",
     direction="cross_tag",
     priority=0,
@@ -99,7 +77,7 @@ async def broad_keyword_stage_check(data: ASINData, thresholds: dict) -> Validat
 )
 async def direction_ad_purpose_check(data: ASINData, thresholds: dict) -> ValidationItem | None:
     """expand_keywords 方向不能配 Profit 目的"""
-    # 这个校验在 validate.py 中由调用方传入 direction
+    # direction 由 validation_engine 调用方传入
     # 此处只做基于 data 字段的通用检查
     return None
 
@@ -121,13 +99,6 @@ async def special_scenario_constraints(data: ASINData, thresholds: dict) -> Vali
             level="suggest_optimize",
             message=f"库存仅 {inv_days:.0f} 天 < 14，广告方向应选「平衡维持」或「优化 ACOS」",
             evidence=Evidence(current_value=inv_days, threshold=14),
-        )
-
-    if data.signals.clearance_urgent:
-        return ValidationItem(
-            rule_id="CROSS-6",
-            level="force_correct",
-            message="清仓急迫状态，广告目的只能是 盈利，预算类型只能是固定金额（低预算）",
         )
 
     return None
@@ -173,26 +144,6 @@ async def harvest_core_product_profit(data: ASINData, thresholds: dict) -> Valid
             message=f"{data.product_stage}{data.product_level}产品建议包含「盈利型」广告目的，优先利润而非继续投入",
             evidence=Evidence(current_value=data.ad_purpose or "", threshold="盈利型"),
             suggestion="添加 盈利 广告目的",
-        )
-    return None
-
-
-@validation_rule(
-    rule_id="CROSS-9",
-    direction="cross_tag",
-    priority=0,
-    description="清货阶段+头部品矛盾检查",
-)
-async def clearance_p0_conflict(data: ASINData, thresholds: dict) -> ValidationItem | None:
-    if data.product_stage != "清货期":
-        return None
-    if data.product_level == "头部":
-        return ValidationItem(
-            rule_id="CROSS-9",
-            level="force_correct",
-            message="清货阶段产品不应标记为 头部（核心爆款），头部定位与清库存策略矛盾，建议降级为 长尾",
-            evidence=Evidence(current_value=data.product_level, threshold="长尾"),
-            suggestion="将产品定位调整为 长尾",
         )
     return None
 

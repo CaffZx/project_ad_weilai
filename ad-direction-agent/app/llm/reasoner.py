@@ -8,256 +8,160 @@
 
 import json
 import logging
+import re
 
+from app.core.metrics_ops_language import format_keyword_acos_change, humanize_ops_text, period_labels
+from app.core.validation_ops import format_validation_item_ops
 from app.llm.client import DeepSeekClient
+from app.llm.kb_loader import kb
+
+# 运营正文禁止出现的规则编号 / 内部等级词
+_RULE_ID_PATTERN = re.compile(
+    r"\b(?:PN|KE|OA|BM|PX|CROSS)[-_]?\d+\b",
+    re.IGNORECASE,
+)
+_INTERNAL_LEVEL_PATTERN = re.compile(
+    r"\b(?:confirmed|suggest_optimize|force_correct)\b",
+    re.IGNORECASE,
+)
+
+OPS_WRITING_RULES = """
+## 运营文案硬性要求（面向人的字段）
+
+1. **叙事结构**：先写**趋势/变化**（近N天整体、后X天与前Y天对比、排名变化），再写**判断**。标准句式：「根据{趋势描述}，判断{结论}」。
+2. **禁止**在正文出现：规则编号（KE-1、BM-4、PN-1、OA-1 及「BM-4提示」等）、**半窗/全窗/近半窗**、英文等级、门禁/eligible、**方向评分数值**。
+3. 可引用数据结论，须改写成运营语言，不得照搬带编号的校验行。
+4. 引用数值须带时间窗口（7日平均、5月13日当天、近3日 vs 前4日）。
+"""
+
+REASONING_DECISION_RULES = """
+## reasoning 中【决策依据】专规（浅蓝综合分析，最重要）
+
+【决策依据】须写 **3～5 条**，每条独立一行（\\n 分隔），且**每条必须**同时包含「根据」与「判断」：
+
+格式：根据 + {趋势或变化，含时间/窗口} + ， + 判断 + {结论}
+
+合格示例（勿照搬数值）：
+- 根据近7日ACOS由22%升至27%、CVR由32%降至23%的趋势，判断效率边际走弱但仍可控。
+- 根据核心词自然位稳定在约第3名、自然单占比约75%，判断推自然位性价比低，不宜作为主方向。
+- 根据3个在投词ACOS超40%且最近几天ACOS持续上升，判断应优先优化ACOS。
+- 根据76个高转化词未收录、在投词ACOS约28%可承载，判断旺季末期宜小批量试扩词并设ACOS上限。
+
+不合格示例（禁止）：
+- 产品处于收割利润期、旺季末期。（无趋势、无判断）
+- 近4日ACOS在27-32%间波动 / ACOS在26.9%-31.8%之间波动。（区间罗列，须写「从…变化至…」或引用 daily_trend_text）
+- 平衡维持82分最高，扩词55分。（罗列评分，非趋势判断）
+- 整体ACOS约28%。（静态裸数值）
+- 段外重复裸指标行（如单独一行「ACOS在…%-…%之间波动」）
+
+【建议】【后续关注】：可分条写动作；条件句写清阈值。
+"""
 
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家（广告投手），擅长分析 ASIN 广告数据并提供可执行的优化建议。
-
-你的任务是基于系统提供的结构化分析数据，生成一份简洁、精准的广告方向综合分析报告。
+_ANALYZE_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家（广告投手），擅长分析 ASIN 广告数据并提供可执行的优化建议。
 
 重要：所有输出内容必须使用中文，禁止出现英文单词。方向ID仅用于内部字段传递，报告中涉及方向名称时必须用中文。
 
-## 背景知识：4 个广告方向定义
-
-| 方向 | 适用场景 | 核心目标 |
-|------|----------|----------|
-| 推进自然位 | 上升词多、广告依赖词突出、核心位未进首页 | 倾斜预算推自然排名 |
-| 新增扩词 | 关键词覆盖少、有高转化未收录词、现有词 ACOS 健康 | 拓展关键词覆盖 |
-| 优化ACOS | ACOS 超标、有高花费零转化词、有 Bid 下调空间 | 降低 ACOS 提升效率 |
-| 平衡维持 | 指标稳定、无异常信号、排名稳固 | 维持现状微调 |
-
-## 全部校验规则（18 条）
-
-### 推进自然位（PN-1 ~ PN-5）
-
-- **PN-1 上升/优质词检测**: 检查 rank_change_14d ≥ 3 或 natural_rank ≤ 20 的词是否 ≥ 2 个。≥ 2 → confirmed，否则 suggest_optimize
-- **PN-2 预算倾斜**: 检查子选项 budget_ratio 是否 > 50%。> 50% → suggest_optimize
-- **PN-3 广告依赖词**: 检查有无 ACOS ≤ 30% 但自然位 > 20、花费 ≥ 50 的词。有 → confirmed（可推自然位降低广告依赖）
-- **PN-4 上升词 ACOS**: 上升词中是否有 ACOS > 35% 的。有 → suggest_optimize（先优化再推）
-- **PN-5 核心排名**: 最佳自然位 ≥ 5 → confirmed（有上升空间），已进 TOP 5 → suggest_optimize
-
-### 新增扩词（KE-1 ~ KE-4）
-
-- **KE-1 可用新词**: available_new_keywords ≥ 2 → confirmed，否则 suggest_optimize
-- **KE-2 覆盖率**: keyword_count < 10 → confirmed（偏低可扩），否则 suggest_optimize
-- **KE-3 现有词健康度**: 现有词平均 ACOS < ACOS目标×1.2 → confirmed（可承载新词）
-- **KE-4 新增数量合理性**: 子选项 target_count > 15 → force_correct；> 推荐值2倍 → suggest_optimize
-
-### 优化 ACOS（OA-1 ~ OA-4）
-
-- **OA-1 ACOS 超标**: 关键词 ACOS ≥ 50% → force_correct；30%~50% → suggest_optimize；均 < 30% → confirmed
-- **OA-2 高花费零转化**: 存在 spend ≥ 15 且 orders=0 的词 → force_correct
-- **OA-3 Bid 空间**: 有 bid > 实际CPC×1.5 的词 → confirmed（有下调空间）
-- **OA-4 否定词机会**: 有 impressions ≥ 500 且 clicks>0 且 orders=0 的词 → confirmed
-
-### 平衡维持（BM-1 ~ BM-5）
-
-- **BM-1 波动检测**: ACOS 波动 > 15% 或销量波动 > 15% → suggest_optimize；无7d数据时检查14d ACOS 绝对值
-- **BM-2 异常信号**: 库存为 0 或竞品价格低于我方 20% 以上 → suggest_optimize
-- **BM-3 参数合理性**: ACOS 超出目标 [25×0.5, 25×1.2] 范围 → suggest_optimize
-- **BM-4 排名稳定**: 有词 rank_change_14d ≥ 5 → suggest_optimize；数据不足时检查自然位覆盖率
-- **BM-5 子选项阈值**: acos_tolerance < 3 或 > 20 → suggest_optimize
-
-### 标签联动约束
-
-- 测试阶段 product_stage 不得为 盈利 → force_correct
-- 清货阶段 product_stage 下 ad_purpose 不能为 排名型 → force_correct
-- 测试阶段使用 Broad 大词 → force_correct
-
-## 方向评分逻辑（Recommender）
-
-系统已给出 4 方向的适配度评分（0-100），你不需要重新计算，但需要理解评分逻辑以便给出有洞察的分析：
-
-- **推进自然位**: 上升/优质词数×8（上限30）+ 广告依赖词≥2（+20）+ 核心未进前5（+15）- 已进前5（-10）
-- **新增扩词**: 可用新词×10（上限30）+ 覆盖<10词（+20）+ 平均ACOS健康（+15）+ 非盈利目的（+10）
-- **优化ACOS**: ACOS>30（+30）+ 超标词×8（上限25）+ 零转化词（+20）+ Bid空间（+10）
-- **平衡维持**: 基值50 + ACOS波动<10%（+15）+ ACOS在目标内（+10）+ 库存充足（+10）+ 排名稳定（+5）- 扩词机会（-15）- 超标词（-10）
-
-分级规则：≥70 → recommended；40~69 → available；<40 → not_recommended
-
-## 产品阶段与策略影响
-
-- **测试**: 优先 引流型/排名型，不宜 盈利型，不宜 Broad 大词
-- **推进**: 可推自然位、扩词，ACOS容忍度可适当放宽
-- **收割/维持**: 优先 盈利/平衡维持，关注 ACOS 效率
-- **清货**: 清库存导向，不宜大幅投入广告
+## 业务知识（必须严格遵循）
+{kb_content}
 
 ## 输出格式要求
 
-请严格按照以下 JSON 格式输出，不要包含任何 markdown 代码块标记：
+请严格按照以下 JSON 格式输出，不要包含任何 markdown 代码块标记。
+
+**overall_analysis（综合概览）**：用 **3～5 句连贯段落** 概括当前 ASIN 广告整体状态（阶段、核心指标、近几日趋势、主要矛盾与方向取舍），**禁止**使用【决策依据】【建议】【后续关注】等分段标题，禁止分条罗列方向评分。
+
+**direction_analyses[].analysis（分方向后续动作）**：使用 **两段**，用【】标注：
+
+1. **【分析与建议】**：先写 1～3 条「根据…趋势/数据，判断…」；再写可执行动作（多条用「• 」换行）。禁止 PN/BM/OA 等规则编号。
+2. **【后续关注】**：1～3 条监控条件（含阈值）。
+
+扩词方向：若上下文提供 `expand_keyword_candidates`（≤10 个），在【分析与建议】中**必须逐个列出全部英文词**，禁止用「等」省略。
 
 {
-  "overall_analysis": "整体评估，100-200字，概括ASIN健康度、核心问题、推荐方向",
+  "overall_analysis": "当前处于收割利润期、旺季末期，核心词自然位约第3、自然单约75%。近7日ACOS约28%且近4日从30.4%升至31.8%，CVR略降。有2个词ACOS≥50%需优化，另有76个高转化词未收录。综合宜以平衡维持为主，辅以优化ACOS与小批量试词。",
   "direction_analyses": [
     {
-      "direction": "方向ID",
-      "analysis": "该方向的分析，50-100字，结合规则结果和业务背景",
-      "suggestions": ["具体建议1，参照规则内置的建议模板"]
-    }
+      "direction": "新增扩词",
+      "analysis": "【分析与建议】\\n根据…判断…\\n• 试投词须全部列出：「tights sheer」、「plus size fishnet」…\\n\\n【后续关注】\\n若7日ACOS超40%则暂停…"
+    }}
   ],
-  "action_priorities": [
-    {
-      "action": "行动描述",
-      "priority": "高/中/低",
-      "expected_impact": "预期效果"
-    }
-  ],
-  "risk_warnings": ["基于规则结果和产品阶段的风险提示"]
-}
+  "action_priorities": [],
+  "risk_warnings": [],
+  "skip_directions_note": "可选：对未选但评分较高的方向一句说明，无则空字符串"
+}}
+
+- direction 字段必须使用**中文方向名**（推进自然位、新增扩词、优化ACOS、平衡维持），禁止用 push_natural 等 ID
+- action_priorities、risk_warnings 若无独立内容可留空数组，要点已写入上述三段时勿重复罗列
+
+## 时间维度与趋势判断（选词与决策的核心）
+
+用户消息会提供：
+- **ASIN 日趋势**（`daily_trend_text`）：近 N 日 ACOS/CVR/CPC/订单/花费逐日变化。最近一天可能不完整，分析时以较早的完整日为准。
+- **关键词分段对比**：高花费词带有「近N天整体」与「前X天→后Y天」的 ACOS、花费、订单及趋势标签（如 ACOS明显改善）。
+
+**你必须：**
+1. **优先依据趋势方向**做判断（改善 / 恶化 / 持平），再引用近N天整体指标作佐证；禁止只写静态 ACOS/CVR 而不说明变化方向。
+2. **禁止**在输出中使用「半窗」「全窗」「BM-4」等内部术语；引用检查项时只写中文名称（如「排名稳定性」），禁止写规则编号。
+3. **禁止**仅用「ACOS在 X%-Y% 之间波动」描述趋势；必须引用 `daily_trend_text` 中的「近N日ACOS从…变化至…」或「近7天整体…后4天由…降至…」。
+4. 引用指标须带**时间窗口与口径**，例如：「近7天ACOS从5月13日的31.9%降至5月17日的21.3%」「该词近7天整体ACOS 45%，但后4天已由 28% 降至 22%（明显改善）」。
+5. 选词举例、否定/加价建议必须来自上下文中的关键词列表，并说明**为何基于其趋势**采取该动作。
+6. `keyword_trend_watch` 中的词为趋势异动重点，在分析中应优先讨论。
 
 ## 分析原则
-- 基于数据说话，不要泛泛而谈
-- 建议要具体、可执行，参照规则内置的建议模板
+- 基于**趋势 + 判断**叙事，不要泛泛而谈
+- 建议要具体、可执行，用运营能直接执行的中文
 - 指出矛盾点（如推进自然位 vs 优化ACOS 的权衡）
-- 注意产品阶段对策略的影响，不同阶段侧重点不同
-- 结合多条规则的叠加结果判断优先级（force_correct > suggest_optimize > confirmed）"""
+
+## 方向范围约束
+- 用户消息会提供 `selected_directions`（运营已选方向）：`direction_analyses` **仅**输出这些方向，每个一条，不得展开未选方向
+- 未选方向若有重要风险，最多在 `overall_analysis` 或 `skip_directions_note` 用一句话说明
+- `suggestions` 应**补充**决策包中已有任务，勿与 tasks 列表矛盾重复；勿复述任务编号或规则编号
+- `action_priorities` 应对齐决策包任务优先级，可细化但勿推翻数据结论""" + OPS_WRITING_RULES
 
 
-TACTICS_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家。基于产品的战略定位和诊断数据，为运营人员推荐广告策略（广告目的 + 关键词类型）。
-
-重要：所有输出内容必须使用中文，禁止出现英文单词。广告目的ID仅用于 ad_purposes 字段值（这些是内部标识不可改），reasoning 文本中必须用中文。
-
-## 广告目的（可多选）
-
-| 目的 | 适用场景 |
-|------|----------|
-| 引流型 | 需要曝光和流量、新品/冷启动、旺季准备引流 |
-| 转化 | 有基础数据、Listing已优化、需要提升转化率 |
-| 排名型 | 推进阶段产品、需要提升自然排名、核心词未进首页 |
-| 盈利 | 收割/维持阶段、ACOS控制优先、盈利导向 |
-| 清货型 | 清货阶段、库存积压、砍预算快速清库存 |
-
-## 关键词类型（可多选，受广告目的影响）
-
-| 类型 | 适用场景 | 关联目的 |
-|------|----------|----------|
-| 大词 | 需要大量曝光、预算充足 | 引流型 |
-| 长尾词 | 精准转化、ACOS控制 | 转化型, 盈利型 |
-| 竞品词 | 截流竞品、提升市场份额 | 引流型, 排名型 |
-| 品牌词 | 防守自有流量、防止截流 | 转化型, 盈利型 |
-| 自定义 | 运营有特定关键词策略 | 各目的 |
-
-## 推荐逻辑
-
-1. 产品阶段主导广告目的：
-   - 测试 → 引流型 + 排名型 为主
-   - 推进 → 排名型 + 转化型 为主
-   - 收割/维持 → 转化型 + 盈利型 为主
-   - 清货 → 清货型 或 转化型 + 盈利型 快速清库存
-
-2. 淡旺季调整：
-   - 旺季准备 → 需提前1-2周布局 卡位
-   - 大旺季 → 引流 最大化曝光
-   - 淡季 → 控制预算，盈利优先
-
-3. 产品定位调整：
-   - 头部品 → 各阶段均可多选，防守为主
-   - 腰部品 → 平衡投入产出
-   - 长尾品 → 控制成本，长尾词+精准转化为主
-
-4. 广告目的影响关键词类型选择：
-   - 引流型 → 大词、竞品词
-   - 转化型 → 长尾词、品牌词
-   - 排名型 → 大词、长尾词（精准卡位）
-   - 盈利型 → 长尾词、品牌词
-
-## 输出格式
-
-请严格按照以下JSON格式输出，不要包含markdown代码块：
-
-{
-  "ad_purposes": ["引流型", "排名型"],
-  "keyword_types": ["长尾词", "竞品词"],
-  "reasoning": "基于当前产品处于推进+旺季准备，建议以排名型和引流型为主要目的，配合长尾词精准卡位和竞品词截流...",
-  "tips": ["测试阶段不宜选盈利", "测试阶段不宜选大词", "大词需注意ACOS控制"]
-}"""
+def _build_analyze_system_prompt() -> str:
+    return _ANALYZE_TASK_PROMPT.replace("{kb_content}", kb.build("analyze_report"))
 
 
-EXECUTION_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家。基于产品的战略定位、广告策略和诊断数据，为运营人员推荐广告执行方向。
+_EXECUTION_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和用户消息中的诊断数据，推荐广告执行方向。
 
 重要：所有自由文本输出（reasoning、conflict_notes等）必须使用中文，禁止出现英文。方向ID仅用于 recommended_directions/priority_order 字段值（这些是内部标识不可改），但在推理文本中一律用中文方向名。
 
-## 四个执行方向
+## 业务知识（必须严格遵循）
+{kb_content}
 
-| 方向 | 适用场景 | 核心动作 |
-|------|----------|----------|
-| 推进自然位 | 上升词多、广告依赖词突出、核心位未进首页 | 倾斜预算推自然排名 |
-| 新增扩词 | 关键词覆盖少、有高转化未收录词、现有词ACOS健康 | 拓展关键词覆盖 |
-| 优化ACOS | ACOS超标、有高花费零转化词 | 降低ACOS提升效率 |
-| 平衡维持 | 指标稳定、无异常信号 | 维持现状微调 |
-
-## 推荐逻辑
-
-1. 策略层（广告目的）→ 执行方向映射：
-   - 选了 排名型 → 推进自然位 应被优先考虑
-   - 选了 引流型 → 新增扩词 应被优先考虑
-   - 选了 转化/盈利 → 优化ACOS, 平衡维持 应被优先考虑
-
-2. 战略层 → 执行方向约束：
-   - 测试 → 不适合 平衡维持（尚无稳定基线）
-   - 推进 → 推进自然位 + 新增扩词 优先
-   - 收割/维持 → 优化ACOS + 平衡维持 优先
-   - 清货 → 不适合 新增扩词（不应拓新）
-   - 旺季准备 → 新增扩词 为旺季储备流量
-   - 淡季 → 平衡维持 + 优化ACOS 控制成本
-
-3. 诊断数据 → 执行方向可行性：
-   - ACOS > 30% → 优化ACOS 优先级提升
-   - 可用新词 ≥ 2 → 新增扩词 可行
-   - 核心词未进首页 → 推进自然位 可行
-   - 数据稳定无异常 → 平衡维持 可行
-
-4. 各方向之间非互斥，可多选，但要指出优先级和潜在矛盾（如 推进自然位 和 优化ACOS 可能冲突）
+## 硬性约束（来自用户消息）
+- recommended_directions 必须 ⊆ eligible_directions
+- reasoning 引用规则时只复述检查项中文名，禁止 PN/BM/OA 等内部编号
+""" + OPS_WRITING_RULES + REASONING_DECISION_RULES + """
 
 ## 输出格式
 
 请严格按照以下JSON格式输出，不要包含markdown代码块：
 
 {
-  "recommended_directions": ["push_natural", "expand_keywords"],
-  "reasoning": "产品处于推进+旺季准备，且有上升词和广告依赖词，建议优先推进自然位和新增扩词...",
-  "priority_order": ["push_natural", "expand_keywords", "optimize_acos", "balance_maintain"],
-  "conflict_notes": "推进自然位可能短暂拉高ACOS，与优化ACOS存在矛盾，建议设置ACOS容忍上限"
-}"""
+  "recommended_directions": ["balance_maintain", "optimize_acos", "expand_keywords"],
+  "reasoning": "【决策依据】\\n根据近7日ACOS由22%升至27%、CVR由32%降至23%的趋势，判断效率走弱但仍处于收割期可接受区间。\\n根据核心词自然位约第3名、自然单占比约75%，判断推自然位边际价值低，不宜作为主方向。\\n根据3个在投词ACOS超40%且花费集中，判断应优先否词或降价以控ACOS。\\n根据76个高转化词未收录、在投词整体ACOS约28%，判断可小批量试扩词但须设30%上限。\\n\\n【建议】\\n• 以平衡维持为主，维持现有结构守住排名与利润。\\n• 优化ACOS：处理超标词，整体控制在30%以内。\\n• 小批量试词5～10个，7日观察再放量。\\n\\n【后续关注】\\n若近7日ACOS持续高于35%或扩词批次7日ACOS超40%，需收紧或暂停对应动作。",
+  "priority_order": ["balance_maintain", "optimize_acos", "expand_keywords", "push_natural"],
+  "conflict_notes": ""
+}}
+
+reasoning 必须含【决策依据】【建议】【后续关注】三段；【决策依据】每条独立一行且为「根据…，判断…」句式。"""
 
 
-P3_RECOMMEND_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家。基于产品的完整诊断数据和历史操作记录，同时给出目标ACOS和预算/Bid推荐。
+def _build_execution_system_prompt() -> str:
+    return _EXECUTION_TASK_PROMPT.replace("{kb_content}", kb.build("execution_direction"))
+
+
+_P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和诊断数据，同时给出目标ACOS和预算/Bid推荐。
 
 重要：所有输出内容必须使用中文，禁止出现英文单词。数值字段使用英文key是内部格式需要。
 
-## 你的决策依据
-
-### 1. 战略与策略上下文
-- 产品阶段决定了投入力度：测试→谨慎；推进→积极；收割/维持→注重效率；清货→以清库存优先
-- 广告目的影响ACOS容忍度：引流型/排名型可放宽；转化型/盈利型需收紧
-- 淡旺季影响预算：旺季准备→提前加预算布局；大旺季→最大化曝光；淡季→控制预算
-
-### 2. 诊断数据
-- 当前ACOS、精准ACOS、非精准ACOS、TACOS
-- CPC、CTR、CVR
-- 自然单占比（高→广告ACOS可放宽；低→需保守）
-- 日均销量、毛利率、库存量
-- ACOS趋势（近期是在改善还是恶化）
-- 花费率（实际花费/预算）——高→建议增加预算；低→可缩减
-
-### 3. 关键词级数据
-- Top关键词的bid vs 实际CPC：bid远高于CPC→建议降bid；bid低于CPC且ACOS健康→可提bid
-- 各关键词的ACOS、CVR表现
-- 精准vs非精准投放的效率对比
-
-### 4. 历史调整记录
-- 最近7天运营手动设定的目标ACOS值和日预算值
-- 如果历史中有多次调整，说明运营在试探，建议综合趋势给出方向
-- 如果最近的调整刚刚生效（1-2天内），建议不要大幅偏离，渐进调整
-
-### 5. 当前生效设定（运营手动覆盖）
-- 用户 prompt 中可能包含「当前生效设定」章节，这是运营已手动配置并正在使用的值
-- 如果当前设定值合理（与诊断数据匹配），应建议维持现有设定，reasoning 中说明"当前设定合理，无需调整"
-- 如果当前设定值与诊断数据存在明显偏差（如目标ACOS远高于或远低于合理范围），应给出调整建议并解释原因
-- 严禁忽略当前设定直接给出一个全新值——你的推荐应基于当前设定进行微调或确认
+## 业务知识（必须严格遵循）
+{kb_content}
 
 ## 输出格式
 
@@ -266,7 +170,7 @@ P3_RECOMMEND_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家
 {
   "target_acos": {
     "recommended_target": 25,
-    "reasoning": "基于产品处于收割阶段+盈利目的+当前ACOS 28%，建议目标ACOS 25%...",
+    "reasoning": "【决策依据】\\n- 当前ACOS 33.6%，TACOS 15.2%，毛利率 28.5%。TACOS < 毛利率，广告整体盈利。\\n- 精准ACOS偏高(42.1%)，主要拖累来自triangle bikini(ACOS 48%)和string bikini(ACOS 41%)。\\n- 自然单占比68.7%，收紧ACOS对自然流量影响有限。\\n- 趋势方向：近7天ACOS从48.3%持续降至36.2%，处于改善通道。\\n- 当前推进期+排名型为主，ACOS容忍度可适度放宽。\\n\\n【建议】\\n目标ACOS推荐25%，留有改善空间同时不冲击现有流量结构。建议分两步调整：先到30%观察3天，CVR未明显下降后再收紧至25%。\\n\\n【后续关注】\\n- 监控CVR是否随ACOS收紧而下降，若跌破8%则放宽至30%\\n- 重点监控triangle bikini和string bikini的ACOS变化，若单个词ACOS降至35%以下可进一步收紧整体目标",
     "confidence": "high"
   },
   "budget_bid": {
@@ -274,53 +178,62 @@ P3_RECOMMEND_SYSTEM_PROMPT = """你是一个资深的亚马逊广告运营专家
     "suggested": 80.0,
     "direction": "increase",
     "magnitude_pct": 21.5,
-    "reason": "当前花费率85%偏高，且处于推进阶段，建议适当增加预算...",
+    "reason": "【决策依据】\\n- 当前日均花费$65.8，日预算$100，花费率65.8%，预算未吃紧。\\n- 花费最高的词：triangle bikini($36.2/天, ACOS 48%)，string bikini($20.0/天, ACOS 41%)。\\n- 趋势：近7天花费从$87逐步降至$65，不是因为预算不足而是因为部分词ACOS过高被系统自然压低。\\n- 当前推进期+旺季准备，适度加预算抢流量是合理的。\\n\\n【建议】\\n建议日预算调整为$80(+21.5%)。增量集中分配给black bikini set(ACOS 28%, CVR 12.5%)和black string bikini(ACOS 18%, CVR 15%)等高效率词，不分配给triangle bikini等高ACOS词。\\n\\n【后续关注】\\n- 加预算后监控整体ACOS是否上升，若超过40%则停止增量\\n- 监控black bikini set的ACOS和CVR，若效率下降则重新分配预算",
     "bid_adjustments": [
       {
-        "keyword": "fishnet stockings",
+        "keyword": "triangle bikini",
         "current_bid": 0.85,
         "suggested_bid": 0.65,
         "direction": "decrease",
         "magnitude_pct": 23.5,
-        "reason": "Bid远高于实际CPC($0.42)，有下调空间"
+        "reason": "Bid $0.85远超实际CPC $0.42，ACOS 48%偏高，有$0.20以上下调空间"
       }
     ]
   },
-  "overall_reasoning": "综合评估，该ASIN处于收割阶段，建议收紧ACOS目标至25%，同时适度增加预算以维持排名...",
-  "risk_warnings": ["精准ACOS 36%偏高，需重点优化精准投放", "库存仅15天，注意补货节奏"]
+  "overall_reasoning": "【综合判断】\\nACOS目标和预算建议需联动：收紧ACOS降低低效花费，加预算把释放出的花费转移到高效率词上，在效率不崩的前提下抢旺季排名。\\n\\n【执行节奏】\\n建议先降triangle bikini的Bid（立即可做），观察3天整体ACOS变化后，再决定是否加预算。加预算和收紧ACOS不建议同一天操作，避免数据波动难以归因。\\n\\n【风险提示】\\n- 精准ACOS 42%偏高，若精准位持续低效建议减少TOS投放比例\\n- 旺季CPC可能上涨，需预留预算弹性空间",
+  "risk_warnings": ["精准ACOS 42%偏高，需重点优化精准投放", "旺季CPC可能上涨，预留预算弹性"]
 }
 
-（以上JSON中的所有数值和文本均为格式示例，请根据实际输入数据计算并填充真实值，请根据你实际的分析建议填充文本，不要被格式示例内的内容误导。）
+（以上所有文本均为格式示例，请根据实际输入数据计算填充真实值。reasoning / reason / overall_reasoning 中不要照搬示例格式内的具体数值。）
 
 ## 字段语义说明
-- budget_bid.current: **日均实际花费**（≈总花费÷天数），不是活动预算上限。从诊断数据中的"日均花费"字段取值。
-- budget_bid.suggested: 建议调整后的日均花费目标值
-- target_acos.recommended_target: 建议的ACOS目标百分比
+- budget_bid.current: **日均实际花费**（≈总花费÷天数）。从诊断数据中的"日均花费"字段取值。
+- budget_bid.suggested: 建议的日均花费目标值。基于"日均花费"的当前水平 + 趋势 + 阶段策略给出。
+- target_acos.recommended_target: 建议的ACOS目标百分比（精度到1%，如23%而非25%）
+- 关键词数据中 spend 字段: 该词在 {days} 天窗口内的总计花费，除以天数才是日均花费。
 
-## 约束规则
-- 目标ACOS必须 ≥ 5% 且 ≤ 100%，精度到 1%（如 23% 而非 25%）
-- 硬约束：除非产品阶段为"清货期"或"测试期"，目标ACOS相对于当前ACOS的相对变化幅度不超过 ±40%
-  - 相对变化 = |推荐值 - 当前值| / 当前值 × 100%
-  - 例：当前ACOS 40%，推荐 20% → 相对变化 50%（违规，应调整为 ≥24%）
-- 软约束：目标ACOS大幅偏离当前值会造成广告数据剧烈波动（流量断崖、排名骤降），
-  即使是合规范围内的调整，也应遵循渐进原则，避免一次性跨越过大
+## 硬性数值约束（P3 专用，TODO 待 KB 补充后迁移）
+- 目标ACOS必须 ≥ 5% 且 ≤ 100%，精度到 1%
+- 硬约束：除非产品阶段为"测试期"，目标ACOS相对于当前ACOS的相对变化幅度不超过 ±40%（TODO: 待 KB 补充 ACOS 目标变化约束后迁移）
 - 预算建议幅度单次不超过 ±30%
 - Bid调整建议不超过 ±25%
 - 如果数据不足以支撑判断，confidence设为"low"并在reasoning中说明
 - 最多推荐5个关键词的Bid调整
+- ⚠️ 你推荐的高效词、低效词、Bid调整词必须全部来自"关键词级数据"列表中的实际关键词，禁止编造不存在于列表中的词名
 
-## reasoning 文案要求（面向运营人员）
-- 禁止在 reasoning 中提及任何内部约束规则词汇（如"硬约束""相对变化""合规范围""违规"等），
-  这些是系统内部规则，运营不需要也不应该看到。用自然语言表达你的判断即可。
-- 运营人员衡量广告健康度的核心指标是 TACOS（广告花费/总销售额），而非 ACOS。
-  TACOS < 毛利率 才代表广告在盈利。ACOS 只看广告部分，自然单贡献不在其中。
-  在 reasoning 中判断推荐值时，应引用 TACOS 而非单纯对比 ACOS 和毛利率。
-- reasoning 应当具体、有说服力，包含以下要素：
-  1. 当前状态判断（阶段+目的+数据表现，一句话概括）
-  2. 为什么推荐这个值（结合自然单占比、趋势、库存等至少 2 个维度）
-  3. 调整节奏建议（一步到位还是分步走）
-  文案长度建议 80-150 字，避免泛泛而谈。
+## reasoning / reason / overall_reasoning 文案要求（面向运营人员）
+- 禁止提及任何内部约束规则词汇（如"硬约束""相对变化""合规""违规"等），用自然语言表达
+- TACOS < 毛利率 才代表广告在盈利。引用TACOS而非单纯对比ACOS和毛利率
+- reasoning 和 reason 必须包含三段（用【】标注，\\n 分隔），缺一不可：
+  1. **【决策依据】**：列出导致该推荐值的决定性数据指标。必须引用具体数值。禁止泛泛而谈。引用的是真正影响决策的 2-4 个核心指标，不是罗列所有数据。
+     ⚠️ 每一个引用的指标必须带时间窗口和口径，禁止只写裸数值。正确写法：
+     - "{days}日平均ACOS 33.6%"、“{days}日平均CVR 11.1%”、“{days}日平均CPC $0.53”
+     - 引用趋势变化时："近{days}日ACOS从[5月12日]的48.3%逐日降至[5月17日]的36.2%"
+     - 引用某日当天值时："[5月17日]当天CVR 43.3%"
+     - 引用关键词花费时："black bikini set {days}天总花费$238.50"
+     禁止写"ACOS 33.6%"、"花费$62"等不带窗口和口径的裸数值。
+  2. **【建议】**：给出具体推荐值和理由。说明做什么、为什么是这个数值，是否需要分步调整。如有当前手动设定值需对比说明。
+  3. **【后续关注】**：指出需要监控的 1-3 个关键指标或条件变化，说明在什么情况下应重新调整。
+- overall_reasoning 必须包含三段：
+  1. **【综合判断】**：ACOS和预算联动逻辑
+  2. **【执行节奏】**：分步顺序建议
+  3. **【风险提示】**：2-3条关注点
+- 不设字数限制，决策依据部分必须引用具体数值，禁止泛泛而谈。
 """
+
+
+def _build_p3_system_prompt() -> str:
+    return _P3_TASK_PROMPT.replace("{kb_content}", kb.build("p3_recommend"))
 
 
 class LLMReasoner:
@@ -340,20 +253,399 @@ class LLMReasoner:
             raw = m.group(1).strip()
         return _json.loads(raw)
 
+    _DIR_CN = {
+        "push_natural": "推进自然位",
+        "expand_keywords": "新增扩词",
+        "optimize_acos": "优化ACOS",
+        "balance_maintain": "平衡维持",
+    }
+
+    @classmethod
+    def _dir_label(cls, direction: str) -> str:
+        return cls._DIR_CN.get(direction, direction)
+
+    @staticmethod
+    def _strip_direction_score_lines(text: str) -> str:
+        """删除整行方向评分类叙述，避免残留碎片破坏分段"""
+        kept: list[str] = []
+        score_line = re.compile(
+            r"(?:平衡维持|新增扩词|优化\s*ACOS|推进自然位|推自然位).{0,20}?\d+\s*分",
+            re.I,
+        )
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                kept.append(line)
+                continue
+            if score_line.search(s) and (s.count("分") >= 2 or re.search(r"\d+\s*分\s*(?:最高|最低)", s)):
+                continue
+            if re.fullmatch(r"[。；,，\s]+", s):
+                continue
+            kept.append(line)
+        return "\n".join(kept)
+
+    @staticmethod
+    def _sanitize_ops_text(text: str) -> str:
+        """去掉规则编号、内部等级词等运营不应看到的内容（保留换行结构）"""
+        if not text:
+            return text
+        t = humanize_ops_text(_RULE_ID_PATTERN.sub("", text))
+        t = re.sub(
+            r"\b(?:PN|KE|OA|BM|CROSS)-?\d+\s*"
+            r"(?:确认|强制修正|强制优化|强制|建议优化|已确认|需处理|需关注)?\s*",
+            "",
+            t,
+            flags=re.I,
+        )
+        t = _INTERNAL_LEVEL_PATTERN.sub("", t)
+        t = re.sub(r"\[(?:confirmed|suggest_optimize|force_correct)\]\s*", "", t, flags=re.I)
+        t = re.sub(r"规则校验|校验规则|门禁|eligible|ineligible", "", t, flags=re.I)
+        t = LLMReasoner._strip_direction_score_lines(t)
+        t = re.sub(
+            r"(?:平衡维持|新增扩词|优化\s*ACOS|推进自然位|推自然位)[^\n。；]{0,16}?\d+\s*分[^。\n；]*",
+            "",
+            t,
+            flags=re.I,
+        )
+        t = re.sub(r"\d+\s*分(?:最高|最低)?[，,、]?\s*", "", t)
+        t = re.sub(r"[ \t]{2,}", " ", t)
+        t = re.sub(r"；\s*；", "；", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return humanize_ops_text(t.strip())  # strip_rule_jargon + 半窗/全窗
+
+    @staticmethod
+    def _extract_trend_highlights(trend_hint: str | None) -> dict:
+        """从 daily_trend_text 解析 ACOS/CVR 趋势叙事，供区间句改写"""
+        if not trend_hint:
+            return {}
+        highlights: dict[str, str] = {}
+        summary_m = re.search(r"趋势摘要:\s*([^\n]+)", trend_hint)
+        if summary_m:
+            for part in re.split(r"[；;]", summary_m.group(1)):
+                part = part.strip()
+                if "ACOS" in part.upper() or "acos" in part.lower():
+                    highlights["acos_narrative"] = part
+                if "CVR" in part.upper():
+                    highlights["cvr_narrative"] = part
+        acos_m = re.search(
+            r"近\d+日ACOS从[^\n；]+?变化至[^\n；%]+%",
+            trend_hint,
+            re.I,
+        )
+        if acos_m:
+            highlights.setdefault("acos_narrative", acos_m.group(0))
+        cvr_m = re.search(
+            r"近\d+日CVR从[^\n；]+?变化至[^\n；%]+%",
+            trend_hint,
+            re.I,
+        )
+        if cvr_m:
+            highlights.setdefault("cvr_narrative", cvr_m.group(0))
+        return highlights
+
+    @classmethod
+    def _rewrite_static_metrics(cls, clause: str, highlights: dict) -> str:
+        """将区间波动描述改写为日趋势叙事（若有 daily_trend）"""
+        clause = clause.strip()
+        if not clause:
+            return clause
+
+        acos_range_pat = (
+            r"(近?\d*日?)ACOS在[\d.]+%?\s*[-~至到]\s*[\d.]+%?\s*之间(?:波动)?"
+        )
+        if re.search(acos_range_pat, clause, re.I):
+            if highlights.get("acos_narrative"):
+                clause = re.sub(
+                    acos_range_pat,
+                    highlights["acos_narrative"],
+                    clause,
+                    count=1,
+                    flags=re.I,
+                )
+            else:
+                m = re.search(
+                    r"ACOS在([\d.]+)%?\s*[-~至到]\s*([\d.]+)%?",
+                    clause,
+                    re.I,
+                )
+                if m:
+                    lo, hi = float(m.group(1)), float(m.group(2))
+                    trend_word = "略收窄" if hi > lo else "略扩大"
+                    repl = f"近几日ACOS在{lo}%-{hi}%区间波动{trend_word}"
+                    clause = re.sub(acos_range_pat, repl, clause, count=1, flags=re.I)
+
+        cvr_range_pat = r"CVR在[\d.]+%?\s*[-~至到]\s*[\d.]+%?\s*之间(?:波动)?"
+        if re.search(cvr_range_pat, clause, re.I):
+            if highlights.get("cvr_narrative"):
+                clause = re.sub(
+                    cvr_range_pat,
+                    highlights["cvr_narrative"],
+                    clause,
+                    count=1,
+                    flags=re.I,
+                )
+
+        if (
+            re.search(r"ACOS在[\d.]+.*之间|CVR在[\d.]+.*之间", clause, re.I)
+            and "判断" not in clause
+            and not re.search(r"从.+?至|升至|降至|变化至", clause)
+        ):
+            parts = [highlights[k] for k in ("acos_narrative", "cvr_narrative") if highlights.get(k)]
+            if parts:
+                return "，".join(parts)
+        return clause
+
+    @classmethod
+    def _remove_duplicate_metric_lines(cls, text: str, basis_lines: list[str]) -> str:
+        """删除段外、与决策依据重复的裸区间指标行"""
+        if "【建议】" not in text or not basis_lines:
+            return text
+        head, tail = text.split("【建议】", 1)
+        basis_blob = " ".join(basis_lines)
+        kept: list[str] = []
+        for line in head.split("\n"):
+            s = line.strip()
+            if not s or s.startswith("【") or "判断" in s:
+                kept.append(line)
+                continue
+            if re.search(r"ACOS在[\d.]+.*之间|CVR在[\d.]+.*之间", s, re.I):
+                if len(s) < 100 and (
+                    s in basis_blob
+                    or any(s[:20] in bl for bl in basis_lines)
+                ):
+                    continue
+            kept.append(line)
+        return "\n".join(kept) + "【建议】" + tail
+
+    @classmethod
+    def _sort_direction_analyses(
+        cls, analyses: list[dict], scores: list[dict]
+    ) -> list[dict]:
+        """报告区分方向块按适配度得分降序"""
+        if not analyses or not scores:
+            return analyses
+        score_by_label: dict[str, float] = {}
+        for s in scores:
+            label = s.get("label") or cls._dir_label(s.get("id", ""))
+            sc = float(s.get("suitability_score", 0))
+            score_by_label[label] = sc
+            if s.get("id"):
+                score_by_label[s["id"]] = sc
+        return sorted(
+            analyses,
+            key=lambda da: -score_by_label.get(da.get("direction", ""), 0),
+        )
+
+    @classmethod
+    def _split_basis_clauses(cls, block: str) -> list[str]:
+        """将决策依据段落拆成可独立判断的短句"""
+        block = block.strip()
+        if not block:
+            return []
+        if "根据" in block and "判断" in block:
+            return [block]
+        out: list[str] = []
+        for sent in re.split(r"(?<=[。；])", block):
+            sent = sent.strip().rstrip("。；")
+            if not sent or re.fullmatch(r"[。；,，\s]+", sent):
+                continue
+            if len(sent) > 45 and "，" in sent:
+                parts = re.split(r"，(?=有\d+个|同时有|且近)", sent)
+                if len(parts) > 1:
+                    out.extend(p.strip() for p in parts if p.strip())
+                    continue
+            out.append(sent)
+        return out
+
+    @classmethod
+    def _to_judge_line(cls, clause: str, highlights: dict | None = None) -> str:
+        """单句改写成「根据…，判断…」"""
+        clause = cls._rewrite_static_metrics(clause, highlights or {})
+        clause = clause.strip().rstrip("。；")
+        if not clause:
+            return ""
+        if "根据" in clause and "判断" in clause:
+            return clause if clause.startswith("根据") else f"根据{clause.lstrip('根据')}"
+        body = clause.lstrip("根据").strip()
+        if re.search(r"从.+?至|升至|降至|变化至", body):
+            if re.search(r"(超\d+%|ACOS超|未收录|恶化)", body):
+                return f"根据{body}，判断应优先优化ACOS或小批量试词"
+            return f"根据{body}，判断效率趋势已明确，宜结合阶段安排投放节奏"
+        if re.search(r"(未收录|高转化词)", body):
+            return f"根据{body}，判断旺季末期宜小批量试扩词并设ACOS上限，避免大规模放量"
+        if re.search(r"(超\d+%|ACOS超|零转化|恶化|超标)", body):
+            return f"根据{body}，判断应优先否词或降价，将整体ACOS控制在30%以内"
+        if re.search(r"(近\d+日|波动|升|降|由.+?至|升至|降至)", body):
+            return f"根据{body}，判断效率边际波动但仍可控，宜以维持结构为主并盯住ACOS"
+        if re.search(r"(收割|旺季末期|旺季)", body):
+            if re.search(r"(自然位|第\d+名|前列|自然单)", body):
+                return f"根据{body}，判断推自然位边际价值低，宜以平衡维持守住排名与利润"
+            return f"根据{body}，判断处于收割/旺季末期，宜稳健运营、控制扩词规模"
+        if re.search(r"(自然位|自然单|第\d+名|前列)", body):
+            return f"根据{body}，判断排名与流量结构较稳，宜维持现有投放结构"
+        return f"根据{body}，判断需纳入本期策略考量"
+
+    @staticmethod
+    def _compact_overall_analysis(text: str) -> str:
+        """综合概览：去掉分段标题，合并为连贯状态摘要"""
+        if not text or "【" not in text:
+            return (text or "").strip()
+        chunks: list[str] = []
+        for hdr in ("【决策依据】", "【建议】", "【后续关注】", "【分析与建议】"):
+            m = re.search(rf"{re.escape(hdr)}\s*(.*?)(?=\s*【|$)", text, re.S)
+            if m and m.group(1).strip():
+                chunks.append(re.sub(r"\s+", " ", m.group(1).strip()))
+        if chunks:
+            return "\n\n".join(chunks) if len(chunks) > 1 else chunks[0]
+        return re.sub(r"【[^】]+】\s*", "", text).strip()
+
+    @classmethod
+    def _polish_advice_body(cls, body: str, highlights: dict) -> str:
+        """润色【分析与建议】正文：判断句 trend 化，保留 • 列表"""
+        body = cls._sanitize_ops_text(body)
+        out: list[str] = []
+        for block in re.split(r"\n+", body):
+            block = block.strip()
+            if not block:
+                continue
+            if block.startswith("•"):
+                out.append(block)
+                continue
+            if re.search(r"(?:平衡维持|新增扩词|优化\s*ACOS|推进自然位).{0,12}?\d+\s*分", block):
+                continue
+            for clause in cls._split_basis_clauses(block):
+                line = cls._to_judge_line(clause, highlights)
+                if line:
+                    out.append(line)
+        return "\n".join(out) if out else body.strip()
+
+    @classmethod
+    def _polish_sectioned_text(cls, text: str, trend_hint: str | None = None) -> str:
+        """三段式文案：决策依据趋势化 + 去评分 + 去重"""
+        if not text:
+            return cls._sanitize_ops_text(text)
+
+        highlights = cls._extract_trend_highlights(trend_hint)
+
+        if "【分析与建议】" in text:
+            m = re.search(r"(【分析与建议】\s*)(.*?)(\s*【后续关注】)", text, re.S)
+            if m:
+                new_body = cls._polish_advice_body(m.group(2), highlights)
+                tail = cls._sanitize_ops_text(text[m.start(3):])
+                return text[: m.start(1)] + m.group(1) + new_body + "\n\n" + tail.lstrip()
+            return cls._sanitize_ops_text(text)
+
+        if "【决策依据】" not in text:
+            return cls._sanitize_ops_text(text)
+
+        m = re.search(r"(【决策依据】\s*)(.*?)(\s*【建议】)", text, re.S)
+        if not m:
+            return cls._sanitize_ops_text(text)
+
+        new_basis = cls._polish_advice_body(m.group(2), highlights)
+        tail = cls._sanitize_ops_text(text[m.start(3):])
+        result = text[: m.start(1)] + m.group(1) + new_basis + "\n\n" + tail.lstrip()
+        return cls._remove_duplicate_metric_lines(result, new_basis.split("\n"))
+
+    @classmethod
+    def _polish_direction_analysis(cls, text: str, trend_hint: str | None = None) -> str:
+        """分方向报告：合并【决策依据】+【建议】为【分析与建议】后 polish"""
+        if not text:
+            return text
+        text = cls._sanitize_ops_text(text)
+        if "【分析与建议】" not in text:
+            basis_m = re.search(
+                r"【决策依据】\s*(.*?)(?=\s*【建议】|\s*【后续关注】|$)", text, re.S
+            )
+            sugg_m = re.search(r"【建议】\s*(.*?)(?=\s*【后续关注】|$)", text, re.S)
+            follow_m = re.search(r"【后续关注】\s*(.*)", text, re.S)
+            merged: list[str] = []
+            if basis_m and basis_m.group(1).strip():
+                merged.append(basis_m.group(1).strip())
+            if sugg_m and sugg_m.group(1).strip():
+                merged.append(sugg_m.group(1).strip())
+            follow = follow_m.group(1).strip() if follow_m else ""
+            body = "\n".join(merged)
+            text = f"【分析与建议】\n{body}"
+            if follow:
+                text += f"\n\n【后续关注】\n{follow}"
+        return cls._polish_sectioned_text(text, trend_hint)
+
+    @classmethod
+    def _polish_exec_reasoning(cls, text: str, trend_hint: str | None = None) -> str:
+        return cls._polish_sectioned_text(text, trend_hint)
+
+    @classmethod
+    def _sanitize_analysis(cls, result: dict) -> dict:
+        if result.get("overall_analysis"):
+            result["overall_analysis"] = cls._sanitize_ops_text(result["overall_analysis"])
+        if result.get("skip_directions_note"):
+            result["skip_directions_note"] = cls._sanitize_ops_text(result["skip_directions_note"])
+        for da in result.get("direction_analyses") or []:
+            if da.get("analysis"):
+                da["analysis"] = cls._sanitize_ops_text(da["analysis"])
+            if da.get("reasoning"):
+                da["reasoning"] = cls._sanitize_ops_text(da["reasoning"])
+        return result
+
+    @staticmethod
+    def _merge_suggestions_into_analysis(analysis: str, suggestions: list) -> str:
+        if not suggestions:
+            return analysis
+        bullets = "\n".join(f"• {s}" for s in suggestions if s)
+        if not bullets:
+            return analysis
+        if "【建议】" in analysis:
+            return f"{analysis.rstrip()}\n{bullets}"
+        if analysis.strip():
+            return f"{analysis.rstrip()}\n\n【建议】\n{bullets}"
+        return f"【建议】\n{bullets}"
+
+    @classmethod
+    def _normalize_analysis_output(cls, result: dict) -> dict:
+        """合并旧版 suggestions 字段，统一方向中文名"""
+        for da in result.get("direction_analyses") or []:
+            raw_dir = da.get("direction") or ""
+            da["direction"] = cls._DIR_CN.get(raw_dir, raw_dir)
+            body = da.get("analysis") or da.get("reasoning") or ""
+            da["analysis"] = cls._merge_suggestions_into_analysis(
+                body, da.get("suggestions") or []
+            )
+        return result
+
     def _build_context(self, data_summary: dict, scores: list[dict],
                        validations: dict, decisions: dict,
                        asin: str,
                        strategy: dict | None = None,
                        tactics: dict | None = None,
-                       days: int = 7) -> str:
+                       days: int = 7,
+                       selected_directions: list[str] | None = None,
+                       eligible_directions: list[str] | None = None) -> str:
         """将结构化数据组装为 LLM 可读的上下文文本"""
         parts = []
+        dir_labels = {
+            "push_natural": "推进自然位",
+            "expand_keywords": "新增扩词",
+            "optimize_acos": "优化ACOS",
+            "balance_maintain": "平衡维持",
+        }
+
+        if selected_directions is not None:
+            labels = [dir_labels.get(d, d) for d in selected_directions]
+            parts.append("## 运营已选方向（direction_analyses 仅分析这些）")
+            parts.append(f"  {labels}")
+            parts.append("")
+        if eligible_directions is not None:
+            parts.append("## 规则可推荐方向（评分≥40）")
+            parts.append(f"  {[dir_labels.get(d, d) for d in eligible_directions]}")
+            parts.append("")
 
         # 结构化字段列表（不进入基础信息循环）
         STRUCTURED_KEYS = {
             "high_acos_keywords", "rising_keywords", "wasteful_keywords",
-            "top_cvr_keywords", "competitor_summary", "placement_comparison",
-            "data_completeness",
+            "top_cvr_keywords", "keyword_trend_watch", "daily_trend", "daily_trend_text",
+            "expand_keyword_candidates", "competitor_summary", "placement_comparison",
+            "data_completeness", "analysis_days",
         }
 
         # 战略层上下文
@@ -381,41 +673,81 @@ class LLMReasoner:
                 lines.append(f"  - {k}: {v}")
             parts.append("\n".join(lines))
 
-        # ── 关键词级洞察 ──
+        # ── ASIN 日趋势 ──
+        if data_summary.get("daily_trend_text"):
+            parts.append(f"\n## ASIN 日趋势（近{days}天，分析时请优先看趋势方向）")
+            parts.append(data_summary["daily_trend_text"])
+
+        # ── 关键词级洞察（含时间窗对比）──
+        def _kw_trend_line(kw: dict) -> str:
+            seg = [f"[{kw.get('match_type', '')}] {kw.get('keyword', '?')}"]
+            _, _, window_label, _, _ = period_labels(days)
+            spend_key = f"spend_{days}d"
+            if kw.get(spend_key) is not None:
+                seg.append(f"{window_label}花费 ${kw[spend_key]}")
+            half = max(1, days // 2)
+            ap = kw.get(f"acos前{days - half}日")
+            ar = kw.get(f"acos近{half}日")
+            acos_line = format_keyword_acos_change(
+                days, kw.get("acos"), ap, ar, kw.get("acos_trend")
+            )
+            if acos_line:
+                seg.append(acos_line)
+            elif kw.get("acos") is not None:
+                seg.append(f"{window_label}整体ACOS {kw['acos']}%")
+            if kw.get("rank_trend"):
+                rc = kw.get("rank_change_14d")
+                nr = kw.get("natural_rank")
+                seg.append(f"{kw['rank_trend']}" + (f"，14日升{rc}位，现第{nr}名" if rc and nr else ""))
+            if kw.get("orders") is not None:
+                seg.append(f"订单 {kw['orders']}单")
+            return "  - " + "；".join(seg)
+
+        if data_summary.get("keyword_trend_watch"):
+            parts.append("\n## 趋势异动词 TOP5（优先结合趋势判断）")
+            for kw in data_summary["keyword_trend_watch"]:
+                parts.append(_kw_trend_line(kw))
+
         if data_summary.get("high_acos_keywords"):
             parts.append("\n## 高ACOS关键词 TOP5")
             for kw in data_summary["high_acos_keywords"]:
-                parts.append(
-                    f"  - [{kw['match_type']}] {kw['keyword']}: "
-                    f"ACOS {kw['acos']}%, 花费 ${kw['spend']}, 订单 {kw['orders']}单"
-                )
+                parts.append(_kw_trend_line(kw))
 
         if data_summary.get("rising_keywords"):
-            parts.append("\n## 上升关键词 TOP5（排名正向变化）")
+            parts.append("\n## 上升关键词 TOP5")
             for kw in data_summary["rising_keywords"]:
-                rank_info = f"当前第{kw['natural_rank']}位" if kw.get("natural_rank") else "排名未知"
-                acos_info = f"ACOS {kw['acos']}%" if kw.get("acos") else ""
-                parts.append(
-                    f"  - {kw['keyword']}: 上升{kw['rank_change']}位, {rank_info}"
-                    f"{', ' + acos_info if acos_info else ''}"
-                )
+                parts.append(_kw_trend_line(kw))
 
         if data_summary.get("wasteful_keywords"):
-            parts.append("\n## 高花费零转化词（需关注）")
+            parts.append("\n## 高花费零转化词")
             for kw in data_summary["wasteful_keywords"]:
-                parts.append(
-                    f"  - [{kw['match_type']}] {kw['keyword']}: "
-                    f"花费 ${kw['spend']}, 曝光 {kw['impressions']}, 订单 0"
-                )
+                parts.append(_kw_trend_line(kw))
 
         if data_summary.get("top_cvr_keywords"):
-            parts.append("\n## 高转化关键词 TOP5")
+            parts.append("\n## 高转化在投词 TOP10")
             for kw in data_summary["top_cvr_keywords"]:
-                acos_info = f"ACOS {kw['acos']}%" if kw.get("acos") else "ACOS 无数据"
-                parts.append(
-                    f"  - {kw['keyword']}: CVR {kw['cvr']}%, "
-                    f"{acos_info}, {kw['orders']}单"
-                )
+                parts.append(_kw_trend_line(kw))
+
+        expand_cands = data_summary.get("expand_keyword_candidates") or []
+        if expand_cands:
+            parts.append(
+                f"\n## 待扩词候选（高转化未收录，共 {len(expand_cands)} 个；"
+                "≤10 个时须在输出中**全部列出**英文词，禁止用「等」省略）"
+            )
+            for item in expand_cands:
+                if isinstance(item, dict):
+                    kw = item.get("keyword", "?")
+                    cr = item.get("convert_ratio")
+                    sr = item.get("searches")
+                    extra = []
+                    if cr is not None:
+                        extra.append(f"转化比{cr}")
+                    if sr is not None:
+                        extra.append(f"搜索量{sr}")
+                    suffix = f" ({', '.join(extra)})" if extra else ""
+                    parts.append(f"  - 「{kw}」{suffix}")
+                else:
+                    parts.append(f"  - 「{item}」")
 
         # ── 竞品摘要 ──
         comp = data_summary.get("competitor_summary")
@@ -457,24 +789,24 @@ class LLMReasoner:
             if s.get("reason"):
                 parts.append(f"    理由: {s['reason']}")
 
-        # 规则校验结果
-        parts.append("\n## 规则校验结果")
-        dir_labels = {"push_natural": "推进自然位", "expand_keywords": "新增扩词", "optimize_acos": "优化ACOS", "balance_maintain": "平衡维持"}
-        for direction, result in validations.items():
+        # 数据结论（供内部分析，输出禁止引用编号）
+        parts.append("\n## 数据结论参考（已转为运营语言，引用时勿写 PN/BM/OA 等编号）")
+        val_dirs = selected_directions if selected_directions else list(validations.keys())
+        for direction in val_dirs:
+            result = validations.get(direction, {})
             items = (result or {}).get("items", []) or []
             if not items:
                 continue
             parts.append(f"\n### {dir_labels.get(direction, direction)}")
             for item in items:
-                level = item.get("level", "?")
-                rid = item.get("rule_id", "?")
-                msg = item.get("message", "?")
-                parts.append(f"  [{level}] {rid}: {msg}")
+                msg = item.get("display_message") or format_validation_item_ops(item)
+                parts.append(f"  - {msg}")
 
         # 决策任务
-        parts.append("\n## 决策执行任务")
-        dir_labels = {"push_natural": "推进自然位", "expand_keywords": "新增扩词", "optimize_acos": "优化ACOS", "balance_maintain": "平衡维持"}
-        for direction, result in decisions.items():
+        parts.append("\n## 决策执行任务（LLM suggestions 应在此基础上补充，勿矛盾）")
+        dec_dirs = selected_directions if selected_directions else list(decisions.keys())
+        for direction in dec_dirs:
+            result = decisions.get(direction, {})
             pkg = (result or {}).get("decision_package", {}) or {}
             tasks = pkg.get("tasks", []) or []
             if not tasks:
@@ -490,105 +822,6 @@ class LLMReasoner:
 
         return "\n".join(parts)
 
-    async def recommend_tactics(
-        self,
-        asin: str,
-        data_summary: dict,
-        strategy: dict,
-    ) -> dict:
-        """基于战略层选择 + 诊断数据，推荐广告目的和关键词类型"""
-        STRUCTURED_KEYS = {
-            "high_acos_keywords", "rising_keywords", "wasteful_keywords",
-            "top_cvr_keywords", "competitor_summary", "placement_comparison",
-            "data_completeness",
-        }
-
-        context_parts = [
-            "## 战略层选择",
-            f"  - 产品定位: {strategy.get('product_level', '?')}",
-            f"  - 产品阶段: {strategy.get('product_stage', '?')}",
-            f"  - 淡旺季: {strategy.get('season_stage', '?')}",
-            "",
-            "## 诊断数据摘要",
-        ]
-        for k, v in data_summary.items():
-            if k in STRUCTURED_KEYS:
-                continue
-            context_parts.append(f"  - {k}: {v}")
-
-        # 关键词级洞察（精简版）
-        if data_summary.get("high_acos_keywords"):
-            context_parts.append("\n### 高ACOS关键词")
-            for kw in data_summary["high_acos_keywords"][:3]:
-                context_parts.append(f"  - {kw['keyword']}: ACOS {kw['acos']}%")
-        if data_summary.get("rising_keywords"):
-            context_parts.append("\n### 上升关键词")
-            for kw in data_summary["rising_keywords"][:3]:
-                context_parts.append(f"  - {kw['keyword']}: 上升{kw['rank_change']}位")
-        if data_summary.get("competitor_summary"):
-            comp = data_summary["competitor_summary"]
-            context_parts.append(f"\n### 竞品: {comp.get('competitor_count', '?')}个, "
-                                 f"价格{comp.get('price_range', '?')}")
-
-        messages = [
-            {"role": "system", "content": TACTICS_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"请为 ASIN ({asin}) 推荐广告策略（广告目的 + 关键词类型）。\n\n"
-                + "\n".join(context_parts)
-            )},
-        ]
-
-        try:
-            raw = await self.client.chat(
-                messages=messages,
-                temperature=0.3,
-                response_format={"type": "json_object"},
-            )
-            return self._parse_json(raw)
-        except Exception as e:
-            logger.warning("LLM 策略推荐失败，使用规则降级: %s", e)
-            return self._fallback_tactics(data_summary, strategy)
-
-    def _fallback_tactics(self, data_summary: dict, strategy: dict) -> dict:
-        """规则降级：不依赖LLM的策略推荐"""
-        stage = strategy.get("product_stage", "")
-        season = strategy.get("season_stage", "")
-
-        purposes = []
-        if stage in ("测试期", "起步期", "测试"):
-            purposes = ["引流型", "排名型"]
-        elif stage in ("推进期", "进展期", "冲刺期", "推进"):
-            purposes = ["排名型", "转化型"]
-        elif stage in ("收割利润期", "达成期", "超预期", "收割", "维持", "维持期"):
-            purposes = ["转化型", "盈利型"]
-        elif stage in ("清货期", "清货中/淘汰", "清货"):
-            purposes = ["转化型", "盈利型"]
-        else:
-            purposes = ["引流型", "转化型"]
-
-        if season in ("大旺季", "旺季准备"):
-            if "引流型" not in purposes:
-                purposes.insert(0, "引流型")
-        elif season == "淡季":
-            purposes = [p for p in purposes if p != "引流型"] or ["盈利型"]
-
-        keyword_types = []
-        if "引流型" in purposes:
-            keyword_types.append("大词")
-        if "排名型" in purposes:
-            keyword_types.extend(["长尾词", "竞品词"])
-        if "转化型" in purposes or "盈利型" in purposes:
-            keyword_types.append("长尾词")
-        if "品牌词" not in keyword_types:
-            keyword_types.append("品牌词")
-
-        return {
-            "ad_purposes": purposes,
-            "keyword_types": list(set(keyword_types)),
-            "reasoning": "(规则降级推荐) 基于产品阶段和淡旺季自动推导",
-            "tips": [],
-        }
-
     async def recommend_execution(
         self,
         asin: str,
@@ -596,8 +829,24 @@ class LLMReasoner:
         strategy: dict,
         tactics: dict,
         scores: list[dict],
+        eligible_directions: list[str] | None = None,
+        ineligible_directions: list[dict] | None = None,
     ) -> dict:
-        """基于全上下文推荐执行方向"""
+        """基于全上下文推荐执行方向（仅在 eligible 范围内）"""
+        min_score = 40
+        if eligible_directions is None:
+            eligible_directions = [
+                s["id"] for s in scores
+                if s.get("suitability_score", 0) >= min_score
+            ]
+        if ineligible_directions is None:
+            ineligible_directions = [
+                {"id": s["id"], "label": s.get("label", s["id"]),
+                 "score": s.get("suitability_score"), "reason": s.get("reason", "")}
+                for s in scores
+                if s.get("id") not in eligible_directions
+            ]
+
         context_parts = [
             "## 战略层",
             f"  - 产品定位: {strategy.get('product_level', '?')}",
@@ -608,16 +857,50 @@ class LLMReasoner:
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
             f"  - 关键词类型: {tactics.get('keyword_types', [])}",
             "",
-            "## 方向评分",
+            "## 可推荐方向（eligible，仅可从中选择）",
+            f"  {eligible_directions}",
+            "",
+            "## 禁止推荐方向（ineligible）",
         ]
+        for item in ineligible_directions:
+            context_parts.append(
+                f"  - {item.get('label', item.get('id'))}: "
+                f"{item.get('score')}分 — {item.get('reason', '')}"
+            )
+        context_parts.extend([
+            "",
+            "## 方向评分（内部排序用，reasoning 正文禁止写「82分」等，须用趋势+判断说明优先级）",
+        ])
         for s in scores:
             context_parts.append(
                 f"  - {s.get('label', s.get('id', '?'))}: "
-                f"{s.get('suitability_score', '?')}分 ({s.get('suitability', '?')})"
+                f"{s.get('suitability_score', '?')}分 ({s.get('suitability', '?')}) — {s.get('reason', '')}"
             )
 
+        win_days = int(data_summary.get("analysis_days") or 7)
+        if data_summary.get("daily_trend_text"):
+            context_parts.extend([
+                "",
+                f"## ASIN 日趋势（近{win_days}天，reasoning 的【决策依据】须优先引用趋势）",
+                data_summary["daily_trend_text"],
+            ])
+        watch = data_summary.get("keyword_trend_watch") or []
+        if watch:
+            context_parts.append("\n## 关键词趋势异动 TOP（须结合 acos_trend/rank_trend 判断）")
+            half = max(1, win_days // 2)
+            for kw in watch[:5]:
+                line = f"  - {kw.get('keyword')}: {kw.get('rank_trend', '')}"
+                ap = kw.get(f"acos前{win_days - half}日")
+                ar = kw.get(f"acos近{half}日")
+                acos_line = format_keyword_acos_change(
+                    win_days, kw.get("acos"), ap, ar, kw.get("acos_trend")
+                )
+                if acos_line:
+                    line += f", {acos_line}"
+                context_parts.append(line)
+
         messages = [
-            {"role": "system", "content": EXECUTION_SYSTEM_PROMPT},
+            {"role": "system", "content": _build_execution_system_prompt()},
             {"role": "user", "content": (
                 f"请为 ASIN ({asin}) 推荐广告执行方向。\n\n"
                 + "\n".join(context_parts)
@@ -630,15 +913,41 @@ class LLMReasoner:
                 temperature=0.3,
                 response_format={"type": "json_object"},
             )
-            return self._parse_json(raw)
+            parsed = self._parse_json(raw)
+            if parsed.get("reasoning"):
+                parsed["reasoning"] = humanize_ops_text(
+                    self._polish_sectioned_text(
+                        parsed["reasoning"],
+                        (data_summary or {}).get("daily_trend_text"),
+                    )
+                )
+            if parsed.get("conflict_notes"):
+                parsed["conflict_notes"] = self._sanitize_ops_text(parsed["conflict_notes"])
+            if parsed.get("reasoning") and "【决策依据】" not in parsed["reasoning"]:
+                labels = [
+                    self._dir_label(d) for d in parsed.get("recommended_directions", [])
+                ]
+                parsed["reasoning"] = (
+                    f"【决策依据】基于适配度评分与产品阶段，可推荐方向包括："
+                    f"{'、'.join(labels) or '见卡片评分'}。\n\n"
+                    f"【建议】{parsed['reasoning']}\n\n"
+                    "【后续关注】生成完整报告后结合校验规则复核。"
+                )
+            return parsed
         except Exception as e:
             logger.warning("LLM 执行推荐失败，使用评分降级: %s", e)
-            # 降级：选评分最高的方向
             top = sorted(scores, key=lambda s: s.get("suitability_score", 0), reverse=True)
-            recommended = [s["id"] for s in top if s.get("suitability_score", 0) >= 40][:2]
+            recommended = [s["id"] for s in top if s["id"] in eligible_directions][:2]
+            labels = [self._dir_label(d) for d in recommended]
             return {
-                "recommended_directions": recommended or ["balance_maintain"],
-                "reasoning": "(规则降级) 基于适配度评分排序推荐",
+                "recommended_directions": recommended or (
+                    eligible_directions[:1] if eligible_directions else ["balance_maintain"]
+                ),
+                "reasoning": (
+                    "【决策依据】LLM 暂不可用，已按规则评分在可推荐方向内排序。\n\n"
+                    f"【建议】优先考虑：{'、'.join(labels) or '平衡维持'}。\n\n"
+                    "【后续关注】服务恢复后可重新加载方向推荐以获取完整分析。"
+                ),
                 "priority_order": [s["id"] for s in top],
                 "conflict_notes": "",
             }
@@ -654,6 +963,7 @@ class LLMReasoner:
         current_acos_target: int | None = None,
         current_daily_budget: float | None = None,
         days: int = 7,
+        trend_text: str = "",
     ) -> dict:
         """P3 统一推荐：LLM 同时给出目标 ACOS 和预算/Bid 建议"""
         parts = [
@@ -687,8 +997,13 @@ class LLMReasoner:
                 parts.append(f"  - {k}: {v}")
         parts.append("")
 
+        if trend_text:
+            parts.append(f"## 每日趋势数据（近{days}天，逐日变化）")
+            parts.append(trend_text)
+            parts.append("")
+
         if keyword_details:
-            parts.append("## 关键词级数据（Top关键词）")
+            parts.append(f"## 关键词级数据（Top关键词，以下 spend 均为{days}天总计）")
             for kw in keyword_details[:10]:
                 parts.append(
                     f"  - {kw.get('keyword', '?')}: bid=${kw.get('bid',0):.2f}, "
@@ -710,7 +1025,7 @@ class LLMReasoner:
             parts.append("## 历史调整记录\n  （无历史记录）\n")
 
         messages = [
-            {"role": "system", "content": P3_RECOMMEND_SYSTEM_PROMPT},
+            {"role": "system", "content": _build_p3_system_prompt()},
             {"role": "user", "content": (
                 f"请为 ASIN ({asin}) 同时给出目标ACOS和预算/Bid推荐。\n\n"
                 + "\n".join(parts)
@@ -740,6 +1055,8 @@ class LLMReasoner:
         strategy: dict | None = None,
         tactics: dict | None = None,
         days: int = 7,
+        selected_directions: list[str] | None = None,
+        eligible_directions: list[str] | None = None,
     ) -> dict:
         """综合分析入口（增强版，接收战略+策略上下文）"""
         context = self._build_context(
@@ -751,10 +1068,12 @@ class LLMReasoner:
             strategy=strategy,
             tactics=tactics,
             days=days,
+            selected_directions=selected_directions,
+            eligible_directions=eligible_directions,
         )
 
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _build_analyze_system_prompt()},
             {"role": "user", "content": (
                 f"请分析以下 ASIN ({asin}) 的广告数据，生成综合分析报告。\n\n"
                 f"{context}"
@@ -767,19 +1086,55 @@ class LLMReasoner:
                 temperature=0.3,
                 response_format={"type": "json_object"},
             )
-            result = self._parse_json(raw)
+            result = self._sanitize_analysis(
+                self._normalize_analysis_output(self._parse_json(raw))
+            )
         except Exception as e:
             logger.warning("LLM 分析失败，返回降级结果: %s", e)
             result = {
-                "overall_analysis": f"LLM 分析暂不可用（{e}），请稍后重试。",
+                "overall_analysis": (
+                    f"【决策依据】LLM 分析暂不可用（{e}）。\n\n"
+                    "【建议】请稍后重试生成报告。\n\n"
+                    "【后续关注】服务恢复后重新生成评估报告。"
+                ),
                 "direction_analyses": [],
                 "action_priorities": [],
-                "risk_warnings": ["LLM 服务异常"],
+                "risk_warnings": [],
             }
 
         result.setdefault("direction_analyses", [])
         result.setdefault("action_priorities", [])
         result.setdefault("risk_warnings", [])
+        result.setdefault("skip_directions_note", "")
+
+        if selected_directions:
+            allowed_labels = {
+                self._dir_label(d) for d in selected_directions
+            } | set(selected_directions)
+            result["direction_analyses"] = [
+                da for da in result.get("direction_analyses", [])
+                if da.get("direction") in allowed_labels
+            ]
+
+        trend_hint = (data_summary or {}).get("daily_trend_text")
+        if result.get("overall_analysis"):
+            raw_overall = self._sanitize_ops_text(result["overall_analysis"])
+            result["overall_analysis"] = humanize_ops_text(
+                self._compact_overall_analysis(raw_overall)
+            )
+        for da in result.get("direction_analyses") or []:
+            body = da.get("analysis") or da.get("reasoning") or ""
+            if body:
+                da["analysis"] = humanize_ops_text(
+                    self._polish_direction_analysis(body, trend_hint)
+                )
+        result["direction_analyses"] = self._sort_direction_analyses(
+            result.get("direction_analyses") or [], scores or []
+        )
+        if result.get("skip_directions_note"):
+            result["skip_directions_note"] = humanize_ops_text(
+                self._sanitize_ops_text(result["skip_directions_note"])
+            )
         return result
 
 

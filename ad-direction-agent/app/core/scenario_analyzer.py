@@ -1,14 +1,13 @@
 """场景分析器 — 根据产品阶段+广告目的+信号检测场景，输出北极星指标看板
 
-场景定义（8种，按优先级排列）:
-  1. ACOS告急  — ACOS>40% 覆盖其他场景（清货除外）
-  2. 清仓甩货  — 清货或库存积压
-  3. 新品冷启动 — 测试 + 引流/卡位
-  4. 快速起量  — 推进 + 引流
-  5. 推自然排名 — 推进 + 卡位
-  6. 盈利收割  — 收割/维持 + 盈利
-  7. 稳定转化  — 收割/维持 + 转化
-  8. 默认      — 无匹配
+场景定义（7种，按优先级排列）:
+  1. ACOS告急  — ACOS>40%
+  2. 新品冷启动 — 测试 + 引流/卡位
+  3. 快速起量  — 推进 + 引流
+  4. 推自然排名 — 推进 + 卡位
+  5. 盈利收割  — 收割/维持 + 盈利
+  6. 稳定转化  — 收割/维持 + 转化
+  7. 默认      — 无匹配
 """
 
 from app.models.asin_data import ASINData
@@ -18,13 +17,12 @@ from app.models.asin_data import ASINData
 
 SCENARIOS = [
     {"id": "acos_crisis", "name": "ACOS 告急", "priority": 1},
-    {"id": "clearance", "name": "清仓甩货", "priority": 2},
-    {"id": "cold_start", "name": "新品冷启动", "priority": 3},
-    {"id": "rapid_growth", "name": "快速起量", "priority": 4},
-    {"id": "push_ranking", "name": "推自然排名", "priority": 5},
-    {"id": "profit_harvest", "name": "盈利收割", "priority": 6},
-    {"id": "stable_conversion", "name": "稳定转化", "priority": 7},
-    {"id": "default", "name": "综合看板", "priority": 8},
+    {"id": "cold_start", "name": "新品冷启动", "priority": 2},
+    {"id": "rapid_growth", "name": "快速起量", "priority": 3},
+    {"id": "push_ranking", "name": "推自然排名", "priority": 4},
+    {"id": "profit_harvest", "name": "盈利收割", "priority": 5},
+    {"id": "stable_conversion", "name": "稳定转化", "priority": 6},
+    {"id": "default", "name": "综合看板", "priority": 7},
 ]
 
 # 各场景的北极星指标定义 — 与数据血缘可用字段对齐
@@ -69,13 +67,6 @@ METRIC_DEFS = {
         ("natural_order_ratio", "自然订单占比", "%", {"warning": 40}),
         ("avg_daily_sales_30d", "日均销量", "单", {}),
         ("tacos", "TACOS", "%", {"warning": 20}),
-    ],
-    "clearance": [
-        ("inventory_qty", "库存量", "件", {"danger": 0, "warning": 100}),
-        ("avg_daily_sales_30d", "日均销量", "单", {"warning": 10}),
-        ("acos", "ACOS", "%", {"warning": 40}),
-        ("margin", "毛利率", "%", {"danger": 0, "warning": 10}),
-        ("tacos", "TACOS", "%", {"warning": 25}),
     ],
     "acos_crisis": [
         ("acos", "ACOS", "%", {"danger": 50, "warning": 40}),
@@ -185,48 +176,42 @@ def detect_scenario(data: ASINData, product_stage: str | None = None, ad_purpose
     """检测当前属于哪个场景
 
     优先级:
-    1. ACOS>40% → ACOS告急（除非是清货中/淘汰）
-    2. 清货中/淘汰 或 库存为0 → 清仓甩货
-    3. 测试期/起步期 + 引流/卡位 → 新品冷启动
-    4. 进展期/冲刺期 + 引流 → 快速起量
-    5. 进展期/冲刺期 + 卡位 → 推自然排名
-    6. 达成期/超预期 + 盈利 → 盈利收割
-    7. 达成期/超预期 + 转化 → 稳定转化
-    8. → 默认
+    1. ACOS>40% → ACOS告急
+    2. 测试期/起步期 + 引流/卡位 → 新品冷启动
+    3. 进展期/冲刺期 + 引流 → 快速起量
+    4. 进展期/冲刺期 + 卡位 → 推自然排名
+    5. 达成期/超预期 + 盈利 → 盈利收割
+    6. 达成期/超预期 + 转化 → 稳定转化
+    7. → 默认
     """
     acos = data.ad_data.acos if data.ad_data else None
-    inv_qty = data.signals.inventory_qty if data.signals else 0
     purposes = ad_purposes or []
 
     # Priority 1: ACOS告急
-    if acos is not None and acos > 40 and product_stage != "清货期":
+    if acos is not None and acos > 40:
         return {"id": "acos_crisis", "name": "ACOS 告急", "trigger": f"ACOS {acos:.0f}% > 40%"}
 
-    # Priority 2: 清仓甩货
-    if product_stage == "清货期" or (inv_qty is not None and inv_qty == 0):
-        return {"id": "clearance", "name": "清仓甩货", "trigger": f"{'清货期' if product_stage == '清货期' else '库存为0'}"}
-
-    # Priority 3: 新品冷启动
+    # Priority 2: 新品冷启动
     if product_stage == "测试期" and ("引流型" in purposes or "排名型" in purposes):
         return {"id": "cold_start", "name": "新品冷启动", "trigger": f"{product_stage} + {'/'.join(purposes)}"}
 
-    # Priority 4: 快速起量
+    # Priority 3: 快速起量
     if product_stage == "推进期" and "引流型" in purposes:
         return {"id": "rapid_growth", "name": "快速起量", "trigger": f"{product_stage} + 引流型"}
 
-    # Priority 5: 推自然排名
+    # Priority 4: 推自然排名
     if product_stage == "推进期" and "排名型" in purposes:
         return {"id": "push_ranking", "name": "推自然排名", "trigger": f"{product_stage} + 排名型"}
 
-    # Priority 6: 盈利收割
+    # Priority 5: 盈利收割
     if product_stage in ("收割利润期", "维持期") and "盈利型" in purposes:
         return {"id": "profit_harvest", "name": "盈利收割", "trigger": f"{product_stage} + 盈利型"}
 
-    # Priority 7: 稳定转化
+    # Priority 6: 稳定转化
     if product_stage in ("收割利润期", "维持期") and "转化型" in purposes:
         return {"id": "stable_conversion", "name": "稳定转化", "trigger": f"{product_stage} + 转化型"}
 
-    # Priority 8: 默认
+    # Priority 7: 默认
     return {"id": "default", "name": "综合看板", "trigger": "无特殊匹配"}
 
 

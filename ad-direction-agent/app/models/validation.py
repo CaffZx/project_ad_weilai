@@ -18,6 +18,7 @@ class ValidationItem(BaseModel):
     rule_id: str
     level: ValidationLevel
     message: str
+    display_message: str = ""
     evidence: Evidence | None = None
     suggestion: Any = None
     data_missing: bool = False

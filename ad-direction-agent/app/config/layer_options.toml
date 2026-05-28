@@ -18,7 +18,7 @@ description = "有稳定销量和利润贡献，具备上升潜力，需要持�
 [[strategy.product_level.options]]
 id = "长尾"
 label = "长尾"
-description = "低销量或即将清货，控制广告成本为主"
+description = "低销量或长尾产品，控制广告成本为主"
 
 [strategy.product_stage]
 label = "产品阶段"
@@ -43,11 +43,6 @@ description = "达成预期目标，重点控制利润和ACOS，追求盈利最�
 id = "维持期"
 label = "维持期"
 description = "超预期表现，维持当前稳定状态，精细化调控"
-
-[[strategy.product_stage.options]]
-id = "清货期"
-label = "清货期"
-description = "库存积压或准备退市，以清库存为主要目标"
 
 [strategy.season_stage]
 label = "淡旺季阶段"
@@ -98,11 +93,6 @@ description = "以提升关键词自然排名为主要目标，适合推进期�
 id = "盈利型"
 label = "盈利型"
 description = "以控制ACOS和利润最大化为主要目标，适合达成期/超预期产品"
-
-[[tactics.ad_purposes.options]]
-id = "清货型"
-label = "清货型"
-description = "砍预算快速清库存，适合清货中/淘汰阶段产品"
 
 [tactics.keyword_types]
 label = "目标关键词类型"

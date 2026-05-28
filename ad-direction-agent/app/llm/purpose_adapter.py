@@ -41,8 +41,10 @@ def build_metrics_from_asin_data(data, days: int = 7) -> dict:
         metrics["avg_acos"] = 0
         metrics["ctr"] = 0
 
-    metrics["total_orders"] = ad.orders if ad else 0
-    metrics["ad_orders"] = ad.orders if ad else 0
+    trend_orders = sum(tp.orders or 0 for tp in data.trend) if data.trend else 0
+    trend_ad_orders = sum(tp.ad_orders or 0 for tp in data.trend) if data.trend else 0
+    metrics["total_orders"] = (ad.orders if ad and ad.orders else None) or trend_orders or 0
+    metrics["ad_orders"] = (ad.orders if ad and ad.orders else None) or trend_ad_orders or 0
     metrics["natural_order_ratio"] = (data.natural_order_ratio / 100) if data.natural_order_ratio else 0
     metrics["net_cvr"] = (ad.cvr / 100) if ad and ad.cvr else 0
     metrics["refund_rate"] = (data.refund_rate / 100) if data.refund_rate else 0
@@ -114,13 +116,16 @@ async def recommend_tactics_from_purpose(
     # 竞品价格
     competitor_price = data.competitor_price_p50
 
-    # 库存天数
+    # 库存天数（库存为 0 但有订单时，不强行报 0 天断货，交给 LLM 看订单数据）
     orders_total = int(metrics.get("total_orders") or 0)
     stock_days = None
     if orders_total > 0:
         daily_orders = orders_total / float(days)
         inv = int(metrics.get("total_inventory", 0))
-        stock_days = int(inv / daily_orders) if daily_orders > 0 else None
+        if inv > 0 and daily_orders > 0:
+            stock_days = max(1, int(inv / daily_orders))
+        elif inv <= 0:
+            stock_days = None
 
     try:
         result = await determine_ad_targets_from_metrics(
@@ -141,10 +146,19 @@ async def recommend_tactics_from_purpose(
     # 映射 targets（English → Chinese）
     target_map = {
         "Traffic": "引流型", "Conversion": "转化型", "Ranking": "排名型",
-        "Profit": "盈利型", "Clearance": "清货型",
+        "Profit": "盈利型",
     }
+
+    def _extract_target(t):
+        if isinstance(t, str):
+            return t
+        if isinstance(t, dict):
+            return t.get("target", "") or t.get("name", "") or ""
+        return str(t)
+
     result["ad_purposes"] = [
-        target_map.get(t, t) for t in result.get("targets", [])
+        target_map.get(_extract_target(t), _extract_target(t))
+        for t in result.get("targets", [])
     ]
 
     # 聚合 keyword_analysis 中的 strategy_type → keyword_types

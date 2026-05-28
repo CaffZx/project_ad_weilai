@@ -11,12 +11,14 @@ from pymysql.cursors import DictCursor
 
 from app.config.settings import settings
 from app.data.base import DataSourceAdapter
+from app.data.db_sql_helpers import ListingContext, build_in_clause
 from app.data.template_registry import list_all
 from app.models.asin_data import ASINData, AdData, KeywordData, CompetitorData, SpecialSignals, TrendPoint
 
 logger = logging.getLogger(__name__)
 
-FETCH_TIMEOUT = 50  # DB 查询硬超时（略大于 read_timeout=30）
+def _fetch_timeout() -> float:
+    return max(30.0, float(getattr(settings, "db_fetch_timeout", 75.0)))
 SLOW_QUERY_THRESHOLD = 5  # 慢查询告警阈值（秒）
 
 # ── 元脚本 → DbAdapter 方法映射 ──────────────────────
@@ -40,9 +42,11 @@ class DbAdapter(DataSourceAdapter):
     """
 
     def __init__(self):
+        read_timeout = int(_fetch_timeout()) + 5
         self._pool = PooledDB(
             creator=pymysql,
-            mincached=8, maxcached=10, maxconnections=20,
+            # mincached=0：避免启动时批量建连；DB 不可达时不会拖垮进程初始化
+            mincached=0, maxcached=10, maxconnections=20,
             maxusage=1000,
             ping=1,
             host=settings.db_host,
@@ -52,7 +56,7 @@ class DbAdapter(DataSourceAdapter):
             database=settings.db_database,
             cursorclass=DictCursor,
             connect_timeout=10,
-            read_timeout=30,
+            read_timeout=read_timeout,
         )
         self._query_sem = asyncio.Semaphore(8)
         self._warmup()
@@ -69,7 +73,14 @@ class DbAdapter(DataSourceAdapter):
 
     # ── 查询基础 ─────────────────────────────────────────
 
-    async def _query(self, sql: str, params: tuple = ()) -> list[dict]:
+    async def _query(
+        self,
+        sql: str,
+        params: tuple = (),
+        *,
+        timeout: float | None = None,
+        label: str = "",
+    ) -> list[dict]:
         """执行查询，返回字典列表。每次从池获取独立连接，整段在同一线程完成。"""
         def _do_query():
             conn = self._pool.connection()
@@ -101,23 +112,33 @@ class DbAdapter(DataSourceAdapter):
                 if not closed:
                     conn.close()
 
+        timeout_s = timeout if timeout is not None else _fetch_timeout()
         t0 = time.monotonic()
         async with self._query_sem:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(_do_query),
-                    timeout=FETCH_TIMEOUT,
+                    timeout=timeout_s,
                 )
                 elapsed = time.monotonic() - t0
                 if elapsed > SLOW_QUERY_THRESHOLD:
-                    logger.warning("慢查询 %.2fs: %s", elapsed, sql[:200])
+                    tag = f"[{label}] " if label else ""
+                    logger.warning("%s慢查询 %.2fs rows=%s: %s", tag, elapsed, len(result), sql[:200])
                 return result
             except asyncio.TimeoutError:
-                logger.error("DB 查询超时 (%ds): %s...", FETCH_TIMEOUT, sql[:120])
+                tag = f"[{label}] " if label else ""
+                logger.error("%sDB 查询超时 (%.0fs): %s...", tag, timeout_s, sql[:120])
                 raise
 
-    async def _query_one(self, sql: str, params: tuple = ()) -> dict | None:
-        rows = await self._query(sql, params)
+    async def _query_one(
+        self,
+        sql: str,
+        params: tuple = (),
+        *,
+        timeout: float | None = None,
+        label: str = "",
+    ) -> dict | None:
+        rows = await self._query(sql, params, timeout=timeout, label=label)
         return rows[0] if rows else None
 
     # ── 入口 ─────────────────────────────────────────────
@@ -159,22 +180,23 @@ class DbAdapter(DataSourceAdapter):
         if not listing:
             return ASINData(asin=parent_asin, data_missing=True, missing_fields=["asin_not_found"])
 
-        shop_id = listing["shop_id"]
-        parent_seller_sku = listing.get("parent_seller_sku") or ""
+        listing_ctx = ListingContext.from_listing_row(listing)
+        shop_id = listing_ctx.shop_id
+        parent_seller_sku = listing_ctx.parent_seller_sku
 
         # 按 meta_filter 选择性执行各维度查询
-        ad_task = (self._fetch_ad_summary(parent_asin, parent_seller_sku, shop_id, days=days)
+        ad_task = (self._fetch_ad_summary(listing_ctx, days=days)
                    if self._should_fetch("META_AD_PRODUCT", meta_filter) else None)
-        placement_task = (self._fetch_placement_summary(parent_asin, parent_seller_sku, shop_id, days=days)
+        placement_task = (self._fetch_placement_summary(listing_ctx, days=days)
                           if self._should_fetch("META_AD_PLACEMENT", meta_filter) else None)
-        kw_task = (self._fetch_ad_keywords(parent_asin, parent_seller_sku, shop_id, days=days)
+        kw_task = (self._fetch_ad_keywords(listing_ctx, days=days)
                    if self._should_fetch("META_KW_AD", meta_filter) else None)
-        nat_task = (self._fetch_natural_rankings(parent_asin, parent_seller_sku, shop_id, days=days)
+        nat_task = (self._fetch_natural_rankings(listing_ctx, days=days)
                     if (self._should_fetch("META_KW_COMPETITOR_RANK", meta_filter)
                         or self._should_fetch("META_KW_SUB_ASIN_RANK", meta_filter)) else None)
         comp_task = (self._fetch_competitors(parent_asin, shop_id)
                      if self._should_fetch("META_COMPETITOR", meta_filter) else None)
-        flow_task = (self._fetch_flow_keywords(parent_asin, shop_id)
+        flow_task = (self._fetch_flow_keywords(listing_ctx)
                      if self._should_fetch("META_FLOW_KEYWORD", meta_filter) else None)
         profit_task = self._fetch_gross_profit(parent_asin, parent_seller_sku, days=days)
         trend_task = (self._fetch_trend_data(parent_asin, parent_seller_sku, days=days)
@@ -323,10 +345,43 @@ class DbAdapter(DataSourceAdapter):
 
         data.keyword_count = len(data.keywords)
 
+        # 高花费词：补充近/前半窗 ACOS、花费（趋势选词）
+        if data.keywords and kw_task is not None:
+            top_by_spend = sorted(data.keywords, key=lambda k: k.spend or 0, reverse=True)[:40]
+            kw_texts = [k.keyword for k in top_by_spend if k.keyword]
+            try:
+                splits = await self._fetch_keyword_period_splits(
+                    listing_ctx, kw_texts, days=days,
+                )
+                for kd in top_by_spend:
+                    sp = splits.get(kd.keyword) or {}
+                    kd.acos_recent = sp.get("acos_recent")
+                    kd.acos_prior = sp.get("acos_prior")
+                    kd.spend_recent = sp.get("spend_recent")
+                    kd.spend_prior = sp.get("spend_prior")
+                    kd.orders_recent = sp.get("orders_recent")
+                    kd.orders_prior = sp.get("orders_prior")
+            except Exception as e:
+                logger.warning("关键词时间窗拆分查询失败: %s", e)
+
         # 可用新词
         ad_keywords_set = {kw.get("keyword_text") for kw in keywords}
         new_kws = [fk for fk in flow_kws if fk.get("keyword") not in ad_keywords_set]
         data.available_new_keywords = len(new_kws)
+        new_kws_ranked = sorted(
+            new_kws,
+            key=lambda fk: (_float(fk.get("top_convert_ratio")) or 0, _float(fk.get("searches")) or 0),
+            reverse=True,
+        )[:10]
+        data.expand_keyword_candidates = [
+            {
+                "keyword": fk.get("keyword"),
+                "searches": _int(fk.get("searches")),
+                "convert_ratio": _float(fk.get("top_convert_ratio")),
+            }
+            for fk in new_kws_ranked
+            if fk.get("keyword")
+        ]
 
         # 竞品数据
         for comp in competitors_list:
@@ -373,6 +428,51 @@ class DbAdapter(DataSourceAdapter):
         return data
 
     # ── 查询方法 ──────────────────────────────────────────
+
+    async def resolve_mcp_context(
+        self,
+        asin: str,
+        shop_account: str | None = None,
+    ) -> dict | None:
+        """从 listing 表解析 MCP 工具所需上下文（parent_seller_sku / 店铺 / 父 ASIN）。
+
+        支持传入父 ASIN 或子 ASIN；优先匹配 parent_asin，与 _resolve_and_fetch_listing 排序一致。
+        """
+        hint = (shop_account or settings.mcp_default_shop_account or "").strip()
+        params: list = [asin, asin, asin]
+        shop_clause = ""
+        if hint:
+            shop_clause = "AND s.account = %s"
+            params.append(hint)
+        rows = await self._query(
+            f"""
+            SELECT a.parent_asin,
+                   a.parent_seller_sku,
+                   a.shop_id,
+                   s.account AS shop_account
+            FROM dwd_whp_amazon_listing_general a
+            JOIN dwd_shop s ON a.shop_id = s.id
+            WHERE (a.parent_asin = %s OR a.asin = %s)
+              AND a.parent_seller_sku IS NOT NULL
+              AND a.parent_seller_sku != ''
+              {shop_clause}
+            ORDER BY
+              CASE WHEN a.parent_asin = %s THEN 0 ELSE 1 END,
+              a.product_price IS NOT NULL DESC,
+              a.product_price ASC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "parent_asin": str(row.get("parent_asin") or asin),
+            "parent_seller_sku": str(row.get("parent_seller_sku") or ""),
+            "shop_account": str(row.get("shop_account") or hint),
+            "shop_id": row.get("shop_id"),
+        }
 
     async def _resolve_and_fetch_listing(self, parent_asin: str) -> dict | None:
         """一次查询获取 ASIN context（shop_id/account/sku）+ 所有子 ASIN listing 数据。
@@ -427,6 +527,12 @@ class DbAdapter(DataSourceAdapter):
         # 以第一个子 ASIN 为基准，浅拷贝父级共享字段
         main = dict(children[0])
         main["child_asins"] = [(c["asin"], c["seller_sku"]) for c in children]
+        main["child_asins_follow_up"] = [
+            c["asin"] for c in children
+            if c.get("asin") and c.get("follow_up") == "YES_FOLLOW_UP"
+        ]
+        if not main["child_asins_follow_up"]:
+            main["child_asins_follow_up"] = [p[0] for p in main["child_asins"] if p[0]]
         # shop_id / parent_seller_sku 从首行提取（同一 parent_asin 下所有行一致）
         main["shop_id"] = children[0].get("shop_id")
 
@@ -494,17 +600,18 @@ class DbAdapter(DataSourceAdapter):
 
         return main
 
-    async def _fetch_ad_summary(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
-                                 days: int = 7) -> dict | None:
+    async def _fetch_ad_summary(self, listing_ctx: ListingContext, days: int = 7) -> dict | None:
         """汇总广告商品级报告 — metrics 和 campaign_budget 拆为两个并行查询"""
-        if not parent_asin or not parent_seller_sku:
+        if not listing_ctx.parent_asin or not listing_ctx.parent_seller_sku:
+            return None
+        if not listing_ctx.child_asins:
             return None
 
-        details_params = (shop_id, days, parent_asin, parent_seller_sku)
-        budget_params = (shop_id, days, shop_id, parent_asin)
+        in_sql, in_params = build_in_clause("t.asin", listing_ctx.child_asins)
+        details_params = (listing_ctx.shop_id, days, *in_params)
+        budget_params = (listing_ctx.shop_id, days, *in_params)
 
-        # 两个查询独立，并行执行
-        metrics_task = asyncio.to_thread(self._do_query_one, """
+        metrics_sql = f"""
             SELECT SUM(COALESCE(t.cost,0)) AS cost,
                    SUM(COALESCE(t.sale,0)) AS sale,
                    SUM(COALESCE(t.clicks,0)) AS clicks,
@@ -514,34 +621,23 @@ class DbAdapter(DataSourceAdapter):
             WHERE t.shop_id = %s
               AND t.LOCAL_REPORT_TIME >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
               AND t.LOCAL_REPORT_TIME < CURDATE()
-              AND EXISTS (
-                SELECT 1
-                FROM dwd_whp_amazon_listing_general a
-                INNER JOIN dwd_whp_az_extend e
-                  ON a.shop_id = e.shop_id AND a.asin = e.asin AND a.seller_sku = e.seller_sku
-                WHERE a.shop_id = t.shop_id
-                  AND a.parent_asin = %s
-                  AND a.parent_seller_sku = %s
-                  AND a.asin = t.asin
-                  AND a.seller_sku = t.sku
-                  AND e.follow_up = 'YES_FOLLOW_UP'
-              )
-        """, details_params)
+              AND {in_sql}
+        """
 
-        budget_task = asyncio.to_thread(self._do_query_one, """
+        budget_sql = f"""
             SELECT SUM(cb) AS campaign_budget FROM (
                 SELECT DISTINCT campaign_id, campaign_budget AS cb
                 FROM dwd_amazon_ad_product_report_update
                 WHERE shop_id = %s
                   AND LOCAL_REPORT_TIME >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
                   AND LOCAL_REPORT_TIME < CURDATE()
-                  AND asin IN (
-                    SELECT a.asin FROM dwd_whp_amazon_listing_general a
-                    WHERE a.shop_id = %s AND a.parent_asin = %s
-                  )
+                  AND asin IN ({",".join(["%s"] * len(listing_ctx.child_asins))})
                   AND campaign_budget IS NOT NULL
             ) u
-        """, budget_params)
+        """
+
+        metrics_task = asyncio.to_thread(self._do_query_one, metrics_sql, details_params)
+        budget_task = asyncio.to_thread(self._do_query_one, budget_sql, budget_params)
 
         metrics, budget = await asyncio.gather(metrics_task, budget_task, return_exceptions=True)
 
@@ -575,17 +671,14 @@ class DbAdapter(DataSourceAdapter):
             "campaign_budget": _float(budget.get("campaign_budget")) if budget else None,
         }
 
-    async def _fetch_placement_summary(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
-                                        days: int = 7) -> dict | None:
-        """获取 placement 维度的广告位数据（TOS vs ROS）
-
-        通过 ad_product 表关联 CAMPAIGN_ID，只取启用中的广告活动。
-        placement 表更新频率较低（滞后 30-50 天），7 天窗口可能无数据。
-        """
-        if not parent_asin or not parent_seller_sku:
+    async def _fetch_placement_summary(self, listing_ctx: ListingContext, days: int = 7) -> dict | None:
+        """获取 placement 维度的广告位数据（TOS vs ROS）"""
+        if not listing_ctx.child_asins:
             return None
 
-        rows = await self._query("""
+        in_sql, in_params = build_in_clause("p.asin", listing_ctx.child_asins)
+        rows = await self._query(
+            f"""
             SELECT t.placement,
                    SUM(COALESCE(t.cost,0)) AS cost,
                    SUM(COALESCE(t.sale,0)) AS sale,
@@ -597,21 +690,14 @@ class DbAdapter(DataSourceAdapter):
                 ON t.CAMPAIGN_ID = p.CAMPAIGN_ID
                AND t.shop_id = p.shop_id
                AND p.state = 'enabled'
-            INNER JOIN dwd_whp_amazon_listing_general a
-                ON a.shop_id = p.shop_id
-               AND a.asin = p.asin
-               AND a.seller_sku = p.seller_sku
-            INNER JOIN dwd_whp_az_extend e
-                ON e.shop_id = a.shop_id
-               AND e.asin = a.asin
-               AND e.seller_sku = a.seller_sku
-               AND e.follow_up = 'YES_FOLLOW_UP'
             WHERE t.shop_id = %s
               AND t.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
-              AND a.parent_asin = %s
-              AND a.parent_seller_sku = %s
+              AND {in_sql}
             GROUP BY t.placement
-        """, (shop_id, days, parent_asin, parent_seller_sku))
+            """,
+            (listing_ctx.shop_id, days, *in_params),
+            label="placement_summary",
+        )
 
         if not rows:
             return None
@@ -653,13 +739,14 @@ class DbAdapter(DataSourceAdapter):
 
         return result
 
-    async def _fetch_ad_keywords(self, parent_asin: str, parent_seller_sku: str, shop_id: int,
-                                  days: int = 7) -> list[dict]:
+    async def _fetch_ad_keywords(self, listing_ctx: ListingContext, days: int = 7) -> list[dict]:
         """获取关键词级广告报告（campaign/keyword 状态过滤）"""
-        if not parent_asin or not parent_seller_sku:
+        if not listing_ctx.child_asins:
             return []
 
-        rows = await self._query("""
+        in_sql, in_params = build_in_clause("daap.asin", listing_ctx.child_asins)
+        rows = await self._query(
+            f"""
             SELECT daak.keyword_text, daak.match_type,
                    SUM(COALESCE(daak.clicks,0)) AS clicks,
                    SUM(COALESCE(daak.cost,0)) AS cost,
@@ -676,22 +763,14 @@ class DbAdapter(DataSourceAdapter):
               AND daak.keyword_status = 'ENABLED'
               AND daap.shop_id = %s
               AND daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
-              AND EXISTS (
-                SELECT 1
-                FROM dwd_whp_amazon_listing_general a
-                INNER JOIN dwd_whp_az_extend e
-                  ON a.shop_id = e.shop_id AND a.asin = e.asin AND a.seller_sku = e.seller_sku
-                WHERE a.shop_id = daap.shop_id
-                  AND a.parent_asin = %s
-                  AND a.parent_seller_sku = %s
-                  AND a.asin = daap.asin
-                  AND a.seller_sku = daap.seller_sku
-                  AND e.follow_up = 'YES_FOLLOW_UP'
-              )
+              AND {in_sql}
             GROUP BY daak.keyword_text, daak.match_type
             ORDER BY SUM(COALESCE(daak.cost,0)) DESC
             LIMIT 200
-        """, (shop_id, days, parent_asin, parent_seller_sku))
+            """,
+            (listing_ctx.shop_id, days, *in_params),
+            label="ad_keywords",
+        )
 
         # 计算每个关键词的ACOS和CVR
         for r in rows:
@@ -704,10 +783,76 @@ class DbAdapter(DataSourceAdapter):
 
         return rows
 
-    async def _fetch_natural_rankings(self, parent_asin: str, parent_seller_sku: str,
-                                       shop_id: int, days: int = 7) -> list[dict]:
+    async def _fetch_keyword_period_splits(
+        self,
+        listing_ctx: ListingContext,
+        keyword_texts: list[str],
+        days: int = 7,
+    ) -> dict[str, dict]:
+        """按时间窗拆分关键词广告指标：近半窗 vs 前半窗（供趋势选词）"""
+        if not keyword_texts or not listing_ctx.child_asins:
+            return {}
+        half = max(1, days // 2)
+        kw_ph = ",".join(["%s"] * len(keyword_texts))
+        in_sql, in_params = build_in_clause("daap.asin", listing_ctx.child_asins)
+        sql = f"""
+            SELECT daak.keyword_text,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.cost, 0) ELSE 0 END) AS cost_recent,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.sale, 0) ELSE 0 END) AS sale_recent,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.units_order, 0) ELSE 0 END) AS orders_recent,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                             AND daak.LOCAL_REPORT_TIME < DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.cost, 0) ELSE 0 END) AS cost_prior,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                             AND daak.LOCAL_REPORT_TIME < DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.sale, 0) ELSE 0 END) AS sale_prior,
+                   SUM(CASE WHEN daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                             AND daak.LOCAL_REPORT_TIME < DATE_SUB(NOW(), INTERVAL %s DAY)
+                            THEN COALESCE(daak.units_order, 0) ELSE 0 END) AS orders_prior
+            FROM dwd_amazon_ad_keyword_report daak
+            INNER JOIN dwd_amazon_ad_product daap
+                ON daap.campaign_id = daak.campaign_id AND daap.shop_id = daak.shop_id
+            WHERE daak.keyword_text IN ({kw_ph})
+              AND daak.campaign_status = 'ENABLED'
+              AND daak.keyword_status = 'ENABLED'
+              AND daap.shop_id = %s
+              AND daak.LOCAL_REPORT_TIME >= DATE_SUB(NOW(), INTERVAL %s DAY)
+              AND {in_sql}
+            GROUP BY daak.keyword_text
+        """
+        params = (
+            half, half, half,
+            days, half, days, half, days, half,
+            *keyword_texts,
+            listing_ctx.shop_id, days, *in_params,
+        )
+        rows = await self._query(sql, params, label="keyword_period_splits")
+        out: dict[str, dict] = {}
+        for r in rows:
+            kw = str(r.get("keyword_text", ""))
+            cr, sr = _float(r.get("cost_recent")), _float(r.get("sale_recent"))
+            cp, sp = _float(r.get("cost_prior")), _float(r.get("sale_prior"))
+            out[kw] = {
+                "acos_recent": round(cr / sr * 100, 1) if sr and sr > 0 and cr is not None else None,
+                "acos_prior": round(cp / sp * 100, 1) if sp and sp > 0 and cp is not None else None,
+                "spend_recent": round(cr, 2) if cr is not None else None,
+                "spend_prior": round(cp, 2) if cp is not None else None,
+                "orders_recent": _int(r.get("orders_recent")),
+                "orders_prior": _int(r.get("orders_prior")),
+            }
+        return out
+
+    async def _fetch_natural_rankings(self, listing_ctx: ListingContext, days: int = 7) -> list[dict]:
         """获取关键词自然排名（每个 keyword 取排名最好的子 ASIN）"""
-        rows = await self._query("""
+        if not listing_ctx.child_asins:
+            return []
+
+        in_sql, in_params = build_in_clause("t1.asin", listing_ctx.child_asins)
+        rows = await self._query(
+            f"""
             SELECT t1.keyword, t1.craw_nature_rank, t1.craw_nature_rank_position,
                    t1.craw_sp_rank, t1.craw_sp_rank_position, t1.craw_time,
                    t1.near_craw_nature_rank, t1.near_craw_nature_rank_position,
@@ -715,19 +860,12 @@ class DbAdapter(DataSourceAdapter):
             FROM dwd_amazon_asin_keyword_library t1
             WHERE t1.craw_nature_rank IS NOT NULL
               AND t1.craw_time >= NOW() - INTERVAL %s DAY
-              AND t1.asin IN (
-                  SELECT a.asin
-                  FROM dwd_whp_amazon_listing_general a
-                  INNER JOIN dwd_whp_az_extend e
-                      ON a.shop_id = e.shop_id AND a.asin = e.asin
-                      AND a.seller_sku = e.seller_sku
-                      AND e.follow_up = 'YES_FOLLOW_UP'
-                  WHERE a.parent_asin = %s
-                    AND a.parent_seller_sku = %s
-                    AND a.shop_id = %s
-              )
+              AND {in_sql}
             ORDER BY t1.keyword ASC, t1.craw_nature_rank ASC
-        """, (days, parent_asin, parent_seller_sku, shop_id))
+            """,
+            (days, *in_params),
+            label="natural_rankings",
+        )
 
         # 每个 keyword 取排名最好的那条（ORDER BY rank ASC 的第一条）
         seen = set()
@@ -758,9 +896,10 @@ class DbAdapter(DataSourceAdapter):
 
         return rows
 
-    async def _fetch_flow_keywords(self, parent_asin: str, shop_id: int) -> list[dict]:
-        """获取Listing流量关键词（美国站点为主）"""
-        rows = await self._query(f"""
+    async def _fetch_flow_keywords_legacy(self, listing_ctx: ListingContext) -> list[dict]:
+        """Legacy: single JOIN query (slow on large keyword library)."""
+        return await self._query(
+            """
             SELECT a.keyword, c.searches, c.searches_rank,
                    c.top_click_ratio, c.top_convert_ratio
             FROM dwd_amazon_listing_flow_keyword_us a
@@ -771,9 +910,92 @@ class DbAdapter(DataSourceAdapter):
               AND (a.del_status IS NULL OR a.del_status = 'VALID')
             ORDER BY c.searches DESC
             LIMIT 100
-        """, (shop_id, parent_asin))
+            """,
+            (listing_ctx.shop_id, listing_ctx.parent_asin),
+            label="flow_keywords.legacy",
+        )
 
-        return rows
+    async def _fetch_flow_keywords(self, listing_ctx: ListingContext) -> list[dict]:
+        """获取 Listing 流量关键词（两步查：先 flow 表，再 library 批量 IN）。"""
+        if getattr(settings, "db_use_legacy_flow_sql", False):
+            return await self._fetch_flow_keywords_legacy(listing_ctx)
+
+        timeout_s = float(getattr(settings, "db_flow_keyword_timeout", 25.0))
+        prefetch = int(getattr(settings, "db_flow_keyword_prefetch_limit", 150))
+        out_limit = int(getattr(settings, "db_flow_keyword_expand_limit", 100))
+
+        step_a = await self._query(
+            """
+            SELECT a.keyword, a.site_code
+            FROM dwd_amazon_listing_flow_keyword_us a
+            WHERE a.shop_id = %s
+              AND a.parent_asin = %s
+              AND (a.del_status IS NULL OR a.del_status = 'VALID')
+            LIMIT %s
+            """,
+            (listing_ctx.shop_id, listing_ctx.parent_asin, prefetch),
+            timeout=timeout_s,
+            label="flow_keywords.step_a",
+        )
+        if not step_a:
+            return []
+
+        site_code = step_a[0].get("site_code") or "Amazon_US"
+        keywords = list(dict.fromkeys(str(r["keyword"]) for r in step_a if r.get("keyword")))
+        lib_map: dict[str, dict] = {}
+
+        batch_size = 50
+        max_batches = 3
+        for i in range(0, min(len(keywords), batch_size * max_batches), batch_size):
+            batch = keywords[i : i + batch_size]
+            if not batch:
+                break
+            ph = ",".join(["%s"] * len(batch))
+            try:
+                lib_rows = await self._query(
+                    f"""
+                    SELECT c.keyword, c.searches, c.searches_rank,
+                           c.top_click_ratio, c.top_convert_ratio
+                    FROM dwd_amazon_precise_keyword_library c
+                    WHERE c.site_code = %s
+                      AND c.keyword IN ({ph})
+                    """,
+                    (site_code, *batch),
+                    timeout=timeout_s,
+                    label="flow_keywords.step_b",
+                )
+                for row in lib_rows:
+                    kw = str(row.get("keyword", ""))
+                    if kw:
+                        lib_map[kw] = row
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "flow_keywords step_b batch %d timeout, degrade to step_a only",
+                    i // batch_size + 1,
+                )
+                break
+            except Exception as e:  # noqa: BLE001
+                logger.warning("flow_keywords step_b failed: %s", e)
+                break
+
+        merged: list[dict] = []
+        for kw in keywords:
+            lib = lib_map.get(kw, {})
+            merged.append({
+                "keyword": kw,
+                "searches": lib.get("searches"),
+                "searches_rank": lib.get("searches_rank"),
+                "top_click_ratio": lib.get("top_click_ratio"),
+                "top_convert_ratio": lib.get("top_convert_ratio"),
+            })
+
+        def _sort_key(row: dict) -> tuple:
+            searches = _float(row.get("searches")) or 0
+            convert = _float(row.get("top_convert_ratio")) or 0
+            return (searches, convert)
+
+        merged.sort(key=_sort_key, reverse=True)
+        return merged[:out_limit]
 
     async def _fetch_gross_profit(self, parent_asin: str, parent_seller_sku: str, days: int = 7) -> dict | None:
         """从 dwd_az_asin_gross_profit 拉取销售额/广告/毛利/库存（仅跟进中 ASIN）。
@@ -849,7 +1071,21 @@ class DbAdapter(DataSourceAdapter):
         if not parent_asin or not parent_seller_sku:
             return []
 
-        rows = await self._query("""
+        max_row = await self._query_one(
+            """
+            SELECT MAX(statistics_data_time) AS max_time
+            FROM dwd_az_asin_gross_profit
+            WHERE parent_asin = %s AND parent_seller_sku = %s
+            """,
+            (parent_asin, parent_seller_sku),
+            label="trend_data.max_time",
+        )
+        max_time = max_row.get("max_time") if max_row else None
+        if not max_time:
+            return []
+
+        rows = await self._query(
+            """
             SELECT
                 DATE_FORMAT(statistics_data_time, '%%m-%%d') AS date,
                 SUM(COALESCE(order_num, 0)) AS orders,
@@ -862,9 +1098,13 @@ class DbAdapter(DataSourceAdapter):
             WHERE parent_asin = %s
               AND parent_seller_sku = %s
               AND statistics_data_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+              AND statistics_data_time <= %s
             GROUP BY statistics_data_time
             ORDER BY statistics_data_time ASC
-        """, (parent_asin, parent_seller_sku, days))
+            """,
+            (parent_asin, parent_seller_sku, days, max_time),
+            label="trend_data",
+        )
         return rows
 
     def _do_query_one(self, sql: str, params: tuple = ()) -> dict | None:

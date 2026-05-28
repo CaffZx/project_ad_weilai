@@ -32,15 +32,12 @@ BASE_META_SCRIPTS = [
 ]
 
 # ── 场景 → 扩展元脚本 ──────────────────────────────────
-# 8 个场景，每个场景需要哪些额外查询
+# 7 个场景，每个场景需要哪些额外查询
 # 注释说明: 为什么该场景需要这个数据
 SCENARIO_EXTENSIONS: dict[str, list[str]] = {
     "acos_crisis": [
         "META_AD_PLACEMENT",    # 拆解精准/非精准 ACOS 来源
         "META_AD_SEARCH_TERM",  # 识别低效搜索词
-    ],
-    "clearance": [
-        # 清仓场景仅需基础数据 + listing 库存
     ],
     "cold_start": [
         # 冷启动仅需基础数据 + listing 上架天数/销量

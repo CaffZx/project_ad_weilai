@@ -19,14 +19,6 @@ def harvest_asin(standard_asin):
     return standard_asin
 
 
-@pytest.fixture
-def clearance_asin(standard_asin):
-    """清货期 ASIN"""
-    standard_asin.product_stage = "清货期"
-    standard_asin.ad_purpose = "排名型"
-    return standard_asin
-
-
 @pytest.mark.asyncio
 async def test_cross_1_test_stage_force_correct(test_stage_asin):
     thresholds = settings.thresholds_config
@@ -41,14 +33,6 @@ async def test_cross_1_test_stage_pass(standard_asin):
     thresholds = settings.thresholds_config
     result = await cross_rules.test_stage_ad_purpose(standard_asin, thresholds)
     assert result is None
-
-
-@pytest.mark.asyncio
-async def test_cross_3_clearance_force_correct(clearance_asin):
-    thresholds = settings.thresholds_config
-    result = await cross_rules.clearance_ad_purpose(clearance_asin, thresholds)
-    assert result is not None
-    assert result.level == "force_correct"
 
 
 @pytest.mark.asyncio

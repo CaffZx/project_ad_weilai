@@ -19,6 +19,20 @@ from app.llm.key_pool import ApiKeyPool             # noqa: E402
 from app.llm.client import key_pool                 # noqa: E402
 
 
+_PURPOSE_OUTPUT_RULES = """## 输出要求
+
+你是亚马逊广告精算师。基于上述知识库规则和用户消息中的诊断数据，给出广告目的和关键词类型推荐。
+
+输出 JSON 格式：
+- `targets`: score >= 50 的目标数组，按 score 降序。无合格时返回 []。
+- `target_scores`: 全部 5 个目标（Traffic/Conversion/Ranking/Profit/Clearance），各含 score + reason。reason 必须三段：【决策依据】（趋势优先+窗口口径）【建议】【后续关注】。低分目标也须写完整三段，禁止写"不适用"。
+- `keyword_analysis`: 每个关键词的 strategy_type（Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
+- `chart_metrics`: 从 ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"] 中选 2-3 个最值得关注的。
+
+严禁违反知识库中的安全护栏规则。
+"""
+
+
 async def determine_ad_targets_from_metrics(
     metrics: dict, position: str, stage: str, season: str,
     days: int = 7, keywords: list | None = None,
@@ -46,7 +60,16 @@ async def determine_ad_targets_from_metrics(
             _stock_days = 999 if metrics.get("total_inventory", 0) > 0 else 0
 
     _keywords = keywords or metrics.get("top_keywords", [])
-    _trend = trend_history or []
+    _trend_lines: list[str] = []
+    for row in trend_history or []:
+        if not isinstance(row, dict):
+            continue
+        _trend_lines.append(
+            f"    - {row.get('date')}: orders={row.get('orders')}, ad_orders={row.get('ad_orders')}, "
+            f"spend={row.get('spend')}, acos={row.get('acos')}, cvr={row.get('cvr')}, "
+            f"ctr={row.get('ctr')}, cpc={row.get('cpc')}"
+        )
+    _trend = "\n".join(_trend_lines) if _trend_lines else "    (无日趋势数据)"
 
     # Build keyword trend string for AI prompt
     kw_trend_str = ""
@@ -106,6 +129,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 {kw_trend_str}
 
 [Last {days}d Daily Trend Data]
+(⚠️ Due to timezone differences and data capture windows, the LATEST day's data may be incomplete / partially captured. IGNORE the last day's data point when analyzing trends. Base your analysis on the earlier {days-1} days.)
 {_trend}
 
 [Core Instructions]
@@ -141,21 +165,10 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 Please output strictly in JSON format.
 """
 
-    kb_path = os.path.join(os.path.dirname(__file__), "knowledge_base", "prompt_kb.md")
-    kw_kb_path = os.path.join(os.path.dirname(__file__), "knowledge_base", "prompt_keyword_kb.md")
+    from app.llm.kb_loader import kb           # noqa: E402
 
-    try:
-        with open(kb_path, "r", encoding="utf-8") as f:
-            system_prompt = f.read()
-    except FileNotFoundError:
-        return {"error": f"Knowledge base file not found: {kb_path}"}
-
-    try:
-        with open(kw_kb_path, "r", encoding="utf-8") as f:
-            kw_kb = f.read()
-        system_prompt = system_prompt + "\n\n---\n\n" + kw_kb
-    except FileNotFoundError:
-        pass
+    # 替换旧 KB 为 docs/knowledge_base 切片
+    system_prompt = kb.build("purpose_tactics") + "\n\n---\n\n" + _PURPOSE_OUTPUT_RULES
 
     try:
         _t_llm_start = _time.time()
