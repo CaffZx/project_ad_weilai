@@ -1418,7 +1418,7 @@ async function loadTactics() {
 
   // 评分卡片 — 首次加载用 renderTargetScores
   const scores = data.target_scores || [];
-  if (scores.length > 0) renderTargetScores(scores); else setHTML('targetScoreCards', '');
+  if (scores.length > 0) renderTargetScores(scores); else renderTargetScoresEmpty(data.scoring_error || '');
 
   // 策略层多选下拉框
   let html = `<div style="display:flex;gap:10px">`;
@@ -1535,6 +1535,7 @@ async function refreshTacticsRecommendations() {
     // 刷新评分卡片
     const scores = data.target_scores || [];
     if (scores.length > 0) { renderTargetScores(scores); }
+    else { renderTargetScoresEmpty(data.scoring_error || ''); }
     // 刷新关键词监控表
     const kws = data.keyword_analysis || [];
     if (kws.length > 0) { renderKeywordTable(kws); }
@@ -1546,8 +1547,26 @@ async function refreshTacticsRecommendations() {
   hide('tacticsRecLoader');
 }
 
+function renderTargetScoresEmpty(errMsg) {
+  // 评分为空：区分「AI 失败可重试」与「尚未生成」，避免静默空白
+  const safe = (errMsg || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  if (safe) {
+    setHTML('targetScoreCards',
+      `<div class="score-empty" style="padding:16px;text-align:center;color:var(--muted-fg);font-size:13px;line-height:1.6">
+        ⚠️ AI 广告目的评分暂不可用<br>
+        <span style="font-size:12px;color:var(--danger)">${safe}</span><br>
+        可点击右上方「AI 重新推荐」重试（数据源/模型恢复后即可生成）
+      </div>`);
+  } else {
+    setHTML('targetScoreCards',
+      `<div class="score-empty" style="padding:16px;text-align:center;color:var(--muted-fg);font-size:13px">
+        AI 评分生成中或暂无数据，确认战略后自动加载
+      </div>`);
+  }
+}
+
 function renderTargetScores(scores) {
-  const targetMap = {Traffic:'引流型',Conversion:'转化型',Ranking:'排名型',Profit:'盈利型',Clearance:'清货型'};
+  const targetMap = {Traffic:'引流型',Conversion:'转化型',Ranking:'排名型',Profit:'盈利型'};
   let html = '';
   scores.forEach(s => {
     const sc = s.score || 0;

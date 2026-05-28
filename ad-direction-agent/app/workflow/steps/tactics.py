@@ -156,6 +156,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
     recommendations = {"ad_purposes": [], "keyword_types": []}
     reasoning = ""
     data = None
+    scoring_error = ""  # purpose-agent 失败时记录，透传前端用于提示重试
 
     if strategy_saved:
         wf = ctx.state.get_workflow_state(asin)
@@ -186,6 +187,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                     )
                 except Exception as e:
                     logger.warning("purpose-agent 重新评分失败 [%s]: %s", asin, e)
+                    scoring_error = f"AI 评分服务暂不可用：{e}"
                     recommendations = {
                         "ad_purposes": long_term.get("ad_purposes", []),
                         "keyword_types": long_term.get("keyword_types", []),
@@ -221,6 +223,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                 )
             except Exception as e:
                 logger.warning("策略层 purpose-agent 推荐失败 [%s]: %s", asin, e)
+                scoring_error = f"AI 评分服务暂不可用：{e}"
                 # LLM 失败时，用 DB 关键词填充 keyword_analysis（无 AI 分类）
                 if 'data' in dir() and data and not data.data_missing:
                     fallback_kws = []
@@ -278,6 +281,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
         } if current else None,
         target_scores=ts,
         keyword_analysis=ka,
+        scoring_error=scoring_error,
         **status,
     )
 

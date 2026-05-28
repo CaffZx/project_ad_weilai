@@ -48,7 +48,8 @@ class KnowledgeBase:
         "conversion": "转化型",
         "ranking": "排名型",
         "profit": "盈利型",
-        "clearance": "清货型",              # KB 有，config 暂无
+        # 注意：clearance/清货型 不是广告目的（清货是产品阶段 liquidating/清货期）。
+        # 不在此翻译，避免在广告目的语境中引入"清货型"。
         # season（KB 英文 → config 中文）
         "off_season": "淡季",
         "peak_preparation": "旺季准备",

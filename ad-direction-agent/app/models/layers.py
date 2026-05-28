@@ -129,6 +129,7 @@ class TacticsOptionsResponse(BaseModel):
     current_selection: dict | None = None
     target_scores: list[dict] = Field(default_factory=list)  # P1 广告目的评分卡片
     keyword_analysis: list[dict] = Field(default_factory=list)  # P1 关键词AI分类
+    scoring_error: str = ""  # AI 评分失败原因（purpose-agent 超时/不可达时非空，前端据此提示重试）
     partial_failures: list[str] = Field(default_factory=list)
     data_freshness: str = "fresh"
 

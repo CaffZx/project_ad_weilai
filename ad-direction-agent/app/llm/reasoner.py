@@ -86,12 +86,12 @@ _ANALYZE_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家（广
     {
       "direction": "新增扩词",
       "analysis": "【分析与建议】\\n根据…判断…\\n• 试投词须全部列出：「tights sheer」、「plus size fishnet」…\\n\\n【后续关注】\\n若7日ACOS超40%则暂停…"
-    }}
+    }
   ],
   "action_priorities": [],
   "risk_warnings": [],
   "skip_directions_note": "可选：对未选但评分较高的方向一句说明，无则空字符串"
-}}
+}
 
 - direction 字段必须使用**中文方向名**（推进自然位、新增扩词、优化ACOS、平衡维持），禁止用 push_natural 等 ID
 - action_priorities、risk_warnings 若无独立内容可留空数组，要点已写入上述三段时勿重复罗列
@@ -147,7 +147,7 @@ _EXECUTION_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。�
   "reasoning": "【决策依据】\\n根据近7日ACOS由22%升至27%、CVR由32%降至23%的趋势，判断效率走弱但仍处于收割期可接受区间。\\n根据核心词自然位约第3名、自然单占比约75%，判断推自然位边际价值低，不宜作为主方向。\\n根据3个在投词ACOS超40%且花费集中，判断应优先否词或降价以控ACOS。\\n根据76个高转化词未收录、在投词整体ACOS约28%，判断可小批量试扩词但须设30%上限。\\n\\n【建议】\\n• 以平衡维持为主，维持现有结构守住排名与利润。\\n• 优化ACOS：处理超标词，整体控制在30%以内。\\n• 小批量试词5～10个，7日观察再放量。\\n\\n【后续关注】\\n若近7日ACOS持续高于35%或扩词批次7日ACOS超40%，需收紧或暂停对应动作。",
   "priority_order": ["balance_maintain", "optimize_acos", "expand_keywords", "push_natural"],
   "conflict_notes": ""
-}}
+}
 
 reasoning 必须含【决策依据】【建议】【后续关注】三段；【决策依据】每条独立一行且为「根据…，判断…」句式。"""
 

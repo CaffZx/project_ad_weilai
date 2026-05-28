@@ -25,7 +25,7 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
 
 输出 JSON 格式：
 - `targets`: score >= 50 的目标数组，按 score 降序。无合格时返回 []。
-- `target_scores`: 全部 5 个目标（Traffic/Conversion/Ranking/Profit/Clearance），各含 score + reason。reason 必须三段：【决策依据】（趋势优先+窗口口径）【建议】【后续关注】。低分目标也须写完整三段，禁止写"不适用"。
+- `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 score + reason。reason 必须三段：【决策依据】（趋势优先+窗口口径）【建议】【后续关注】。低分目标也须写完整三段，禁止写"不适用"。清货属于产品阶段，不是广告目的，禁止输出 Clearance。
 - `keyword_analysis`: 每个关键词的 strategy_type（Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
 - `chart_metrics`: 从 ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"] 中选 2-3 个最值得关注的。
 
@@ -134,7 +134,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 
 [Core Instructions]
 1. `targets` array: ONLY targets with score >= 50. Sorted by score descending. If none qualify, return [].
-2. `target_scores` array: ALL 5 targets (Traffic/Conversion/Ranking/Profit/Clearance) with their scores and detailed reasons. Even for low-score or excluded targets, you MUST write a full three-section reason — do NOT write short dismissals like "不适用" or "不推荐". Explain WHY specifically. The `reason` field MUST contain three sections using 【】 markers:
+2. `target_scores` array: ALL 4 targets (Traffic/Conversion/Ranking/Profit) with their scores and detailed reasons. Do NOT output Clearance — clearance is a product stage, not an ad purpose. Even for low-score or excluded targets, you MUST write a full three-section reason — do NOT write short dismissals like "不适用" or "不推荐". Explain WHY specifically. The `reason` field MUST contain three sections using 【】 markers:
 
    【决策依据】— The most important part. Follow these rules:
 	     (a) PRIMARY: trending daily data (from [Last {days}d Daily Trend Data]). Look at whether each metric is improving, deteriorating, or flat over the {days}d window. The TREND direction matters more than the static aggregate. Example: a 7d avg ACOS of XX% that dropped from [Day1 ACOS] → [Day7 ACOS] over the week is very different from a flat XX% — the former suggests rapid improvement, the latter suggests stagnation.
