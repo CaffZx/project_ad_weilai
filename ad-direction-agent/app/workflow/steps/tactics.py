@@ -124,12 +124,11 @@ async def _run_purpose_and_cache(
     else:
         wf["keyword_analysis"] = {str(days): merged_kws}
     new_scores = rec.get("target_scores") or []
-    if new_scores:
-        ts = wf.get("target_scores") or {}
-        if not isinstance(ts, dict):
-            ts = {}
-        ts[str(days)] = new_scores
-        wf["target_scores"] = ts
+    ts = wf.get("target_scores") or {}
+    if not isinstance(ts, dict):
+        ts = {}
+    ts[str(days)] = new_scores
+    wf["target_scores"] = ts
     ctx.state.set_workflow_state(asin, wf)
     return recommendations, reasoning, merged_kws
 
@@ -255,12 +254,16 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
 
     # 读取保存的 AI 诊断附加数据（按 days 维度）
     wf = ctx.state.get_workflow_state(asin)
-    ts = wf.get("target_scores", [])
+    ts = wf.get("target_scores") or []
     if isinstance(ts, dict):
         ts = ts.get(str(days), [])
-    ka = wf.get("keyword_analysis", [])
+    elif not isinstance(ts, list):
+        ts = []
+    ka = wf.get("keyword_analysis") or []
     if isinstance(ka, dict):
         ka = ka.get(str(days), [])
+    elif not isinstance(ka, list):
+        ka = []
     status = data_status_fields(data) if data is not None else {
         "partial_failures": [],
         "data_freshness": "fresh",
@@ -304,12 +307,16 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
     # purpose-agent 失败时不清空已有缓存
     if "error" in rec:
         wf = ctx.state.get_workflow_state(asin)
-        ka = wf.get("keyword_analysis", [])
+        ka = wf.get("keyword_analysis") or []
         if isinstance(ka, dict):
             ka = ka.get(str(days), [])
-        ts = wf.get("target_scores", [])
+        elif not isinstance(ka, list):
+            ka = []
+        ts = wf.get("target_scores") or []
         if isinstance(ts, dict):
             ts = ts.get(str(days), [])
+        elif not isinstance(ts, list):
+            ts = []
         return {
             "asin": asin,
             "dimensions": [],
@@ -352,11 +359,12 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
     wf = ctx.state.get_workflow_state(asin)
     wf["keyword_analysis"] = {str(days): merged_kws}
     new_scores = rec.get("target_scores") or []
-    if new_scores:
-        ts = wf.get("target_scores") or {}
-        ts[str(days)] = new_scores
-        wf["target_scores"] = ts
-        ctx.state.set_workflow_state(asin, wf)
+    ts = wf.get("target_scores") or {}
+    if not isinstance(ts, dict):
+        ts = {}
+    ts[str(days)] = new_scores
+    wf["target_scores"] = ts
+    ctx.state.set_workflow_state(asin, wf)
 
     return {
         "asin": asin,
