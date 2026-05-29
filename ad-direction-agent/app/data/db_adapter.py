@@ -783,6 +783,131 @@ class DbAdapter(DataSourceAdapter):
 
         return rows
 
+    # ── Campaign 分析数据源 ─────────────────────────────
+
+    async def _fetch_campaign_context(self, listing_ctx: ListingContext) -> list[dict]:
+        """① Doris 轻量上下文查询 — 仅维度字段，不取指标。
+
+        返回: [{campaign_name, campaign_id, campaign_budget, campaign_status,
+                child_asin, seller_sku, keyword_text, match_type, keyword_bid}, ...]
+        """
+        if not listing_ctx.child_asins:
+            return []
+
+        in_sql, in_params = build_in_clause("daap.asin", listing_ctx.child_asins)
+        rows = await self._query(
+            f"""
+            SELECT daak.campaign_name, daak.campaign_id,
+                   daak.campaign_budget, daak.campaign_status,
+                   daap.asin AS child_asin, daap.seller_sku,
+                   daak.keyword_text, daak.match_type,
+                   AVG(daak.keyword_bid) AS keyword_bid
+            FROM dwd_amazon_ad_keyword_report daak
+            INNER JOIN dwd_amazon_ad_product daap
+                ON daap.campaign_id = daak.campaign_id
+               AND daap.shop_id = daak.shop_id
+            WHERE daap.shop_id = %s
+              AND daak.campaign_status = 'ENABLED'
+              AND daak.keyword_status = 'ENABLED'
+              AND daak.local_report_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+              AND {in_sql}
+            GROUP BY daak.campaign_name, daak.campaign_id,
+                     daak.campaign_budget, daak.campaign_status,
+                     daap.asin, daap.seller_sku,
+                     daak.keyword_text, daak.match_type
+            ORDER BY daak.campaign_name, daak.keyword_text
+            """,
+            (listing_ctx.shop_id, *in_params),
+            timeout=getattr(settings, "campaign_discovery_timeout", 90.0),
+            label="campaign_context",
+        )
+        return rows
+
+    async def _fetch_campaign_perf_from_db(
+        self, campaign_name: str, shop_id: int, days: int = 7,
+    ) -> dict | None:
+        """MCP product_report 回落 — 按 campaign_name 聚合指标。
+
+        返回: {cost, sale, clicks, impressions, orders, acos, cpc, ctr, cvr}
+        """
+        row = await self._query_one(
+            """
+            SELECT SUM(COALESCE(cost, 0)) AS cost,
+                   SUM(COALESCE(sale, 0)) AS sale,
+                   SUM(COALESCE(clicks, 0)) AS clicks,
+                   SUM(COALESCE(impressions, 0)) AS impressions,
+                   SUM(COALESCE(units_order, 0)) AS orders
+            FROM dwd_amazon_ad_keyword_report
+            WHERE campaign_name = %s
+              AND shop_id = %s
+              AND local_report_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            """,
+            (campaign_name, shop_id, days),
+            timeout=getattr(settings, "campaign_db_fallback_timeout", 60.0),
+            label="campaign_perf_fallback",
+        )
+        if not row:
+            return None
+        cost = float(row.get("cost") or 0)
+        sale = float(row.get("sale") or 0)
+        clicks = float(row.get("clicks") or 0)
+        impressions = float(row.get("impressions") or 0)
+        orders = float(row.get("orders") or 0)
+        return {
+            "cost": cost,
+            "sale": sale,
+            "clicks": int(clicks),
+            "impressions": int(impressions),
+            "orders": int(orders),
+            "acos": round(cost / sale * 100, 1) if sale else None,
+            "cpc": round(cost / clicks, 2) if clicks else None,
+            "ctr": round(clicks / impressions * 100, 1) if impressions else None,
+            "cvr": round(orders / clicks * 100, 1) if clicks else None,
+        }
+
+    async def _fetch_campaign_placement_from_db(
+        self, campaign_id: str, shop_id: int, days: int = 7,
+    ) -> dict[str, dict]:
+        """MCP placement_report 回落 — 按 campaign_id 查询，返回四桶聚合。
+
+        dwd_amazon_ad_placement_report_update 按 campaign_id 过滤，
+        GROUP BY placement 原值，不做 TOS/ROS 两桶合并。
+        """
+        rows = await self._query(
+            """
+            SELECT placement,
+                   SUM(COALESCE(cost, 0)) AS cost,
+                   SUM(COALESCE(sale, 0)) AS sale,
+                   SUM(COALESCE(clicks, 0)) AS clicks,
+                   SUM(COALESCE(impressions, 0)) AS impressions,
+                   SUM(COALESCE(units_order, 0)) AS units_order
+            FROM dwd_amazon_ad_placement_report_update
+            WHERE campaign_id = %s
+              AND shop_id = %s
+              AND local_report_time >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            GROUP BY placement
+            """,
+            (campaign_id, shop_id, days),
+            timeout=getattr(settings, "campaign_db_fallback_timeout", 60.0),
+            label="campaign_placement_fallback",
+        )
+        result: dict[str, dict] = {}
+        for r in rows:
+            placement = str(r.get("placement") or "")
+            cost = float(r.get("cost") or 0)
+            sale = float(r.get("sale") or 0)
+            clicks = float(r.get("clicks") or 0)
+            result[placement] = {
+                "cost": cost,
+                "sale": sale,
+                "clicks": int(clicks),
+                "impressions": int(float(r.get("impressions") or 0)),
+                "orders": int(float(r.get("units_order") or 0)),
+                "acos": round(cost / sale * 100, 1) if sale else None,
+                "cpc": round(cost / clicks, 2) if clicks else None,
+            }
+        return result
+
     async def _fetch_keyword_period_splits(
         self,
         listing_ctx: ListingContext,

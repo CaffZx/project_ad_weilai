@@ -32,6 +32,8 @@ from app.models.layers import (
     BudgetBidResult,
 )
 from app.workflow.context import WorkflowContext
+from app.workflow.data_contract import blocked_message
+from app.workflow.data_gate import ensure_data_for_llm, is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.helpers import (
     _is_valid_data,
@@ -49,7 +51,7 @@ LLM_TIMEOUT = 60
 
 async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int = 7) -> dict:
     """运行校验+确认+LLM报告，返回完整结果（从缓存取）"""
-    data = await ctx.ensure_data(asin, days=days)
+    data, verdict = await ensure_data_for_llm(ctx, "report", asin, days=days)
     long_term = ctx.state.get_long_term_config(asin)
     wf_state = ctx.state.get_workflow_state(asin)
 
@@ -97,25 +99,38 @@ async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int =
         "keyword_types": long_term.get("keyword_types", []),
     } if long_term else None
 
-    rpt_summary = build_data_summary(data, days=days)
+    rpt_summary = build_data_summary(data, days=days, verdict=verdict)
     manual_acos = ctx.state.get_target_acos_override(asin)
     if manual_acos is not None:
         rpt_summary["acos_target"] = manual_acos
     eligible_ids = ctx.recommender.get_eligible_ids(rec_response.directions)
-    analysis = sanitize_analysis_for_display(
-        await ctx.reasoner.analyze(
-            asin=asin,
-            data_summary=rpt_summary,
-            scores=[s.model_dump() for s in rec_response.directions],
-            validations=validations,
-            decisions=decisions,
-            strategy=strategy,
-            tactics=tactics,
-            days=days,
-            selected_directions=selected_dirs,
-            eligible_directions=eligible_ids,
+
+    if is_llm_blocked(verdict):
+        msg = blocked_message(verdict)
+        analysis = sanitize_analysis_for_display({
+            "overall_analysis": msg,
+            "direction_analyses": [],
+            "action_priorities": [],
+            "risk_warnings": ["核心数据不足，未生成 AI 综合分析"],
+            "skip_directions_note": "",
+            "llm_status": "blocked",
+        })
+    else:
+        analysis = sanitize_analysis_for_display(
+            await ctx.reasoner.analyze(
+                asin=asin,
+                data_summary=rpt_summary,
+                scores=[s.model_dump() for s in rec_response.directions],
+                validations=validations,
+                decisions=decisions,
+                strategy=strategy,
+                tactics=tactics,
+                days=days,
+                selected_directions=selected_dirs,
+                eligible_directions=eligible_ids,
+                missing_notice=rpt_summary.get("missing_notice"),
+            )
         )
-    )
 
     # 查询路由
     scenario = detect_scenario(
@@ -133,10 +148,8 @@ async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int =
         "analysis": analysis,
         "directions": [s.model_dump() for s in rec_response.directions],
         "data_summary": rpt_summary,
-        "data_completeness": {
-            "status": "missing" if data.data_missing else "complete",
-            "missing_fields": data.missing_fields,
-        },
+        "data_completeness": verdict.to_completeness_dict(),
+        "llm_status": verdict.status,
         "query_plan": query_plan,
     }
 

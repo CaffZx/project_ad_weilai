@@ -9,6 +9,8 @@ import pytest
 from app.data.db_adapter import build_in_clause
 from app.data.mcp_empty_reports import append_empty_report_failures, empty_report_tools
 from app.data.doris_fallback import apply_doris_fallback
+from app.data.fallback_merge import merge_db_fallback
+from app.data.mcp_normalizers import compute_natural_order_ratio
 from app.data.mcp_keyword_report import (
     expand_planned_tools,
     merge_keyword_report_payloads,
@@ -103,6 +105,25 @@ async def test_apply_doris_fallback_on_empty_mcp_keyword_report():
         )
     assert out.keyword_count == 1
     assert "mcp:ad_keyword_report:empty" not in pf
+
+
+def test_merge_db_fallback_copies_natural_order_ratio():
+    mcp_data = ASINData(asin="B0X", natural_order_ratio=None)
+    db_data = ASINData(asin="B0X", natural_order_ratio=68.5)
+    out = merge_db_fallback(
+        mcp_data, db_data, ["product_sales"], meta_ids=["META_TREND"],
+    )
+    assert out.natural_order_ratio == 68.5
+
+
+def test_compute_natural_order_ratio_from_trend_when_aggregate_zero():
+    trend = [
+        {"orders": 10, "ad_orders": 2},
+        {"orders": 10, "ad_orders": 3},
+    ]
+    nor = compute_natural_order_ratio(0, 0, trend)
+    assert nor is not None
+    assert abs(nor - 75.0) < 0.1
 
 
 def test_expand_planned_tools_keyword_match_types():

@@ -520,7 +520,7 @@ body {
 </head>
 <body>
 <div class="topbar">
-  <div class="topbar-title">广告辅助决策Agent <span class="version-pill">v2.5</span></div>
+  <div class="topbar-title">广告辅助决策Agent <span class="version-pill">v2.6</span></div>
   <div class="topbar-status">
     <button onclick="openAnnouncements()" id="btnAnnounce" class="btn btn-secondary btn-sm" title="版本公告" style="margin-right:4px">📢</button>
     <span id="statusDot" class="status-dot"></span>
@@ -709,6 +709,7 @@ body {
         <!-- 上半段：方向卡片 -->
         <div class="card">
           <div class="card-title">广告方向推荐</div>
+          <div id="dataStatusTab4" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:8px 12px;margin-bottom:8px;background:#FEF3C7;border:1px solid #FCD34D;color:#92400E"></div>
           <div id="execDirections" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"></div>
           <div id="aiReasoningExec" class="hidden ai-panel" style="margin-top:8px"></div>
           <div style="margin-top:10px;display:flex;gap:8px">
@@ -1074,23 +1075,64 @@ function clearTrendChart() {
 
 function onDaysChange(v) { days = parseInt(v); }
 
+function isLlmBlocked(data) {
+  return !!(data && (data.llm_status === 'blocked' || data.status === 'blocked'));
+}
+
+const DATA_REFRESH_HINT = '点击本页「刷新 / 重新推荐」可重新拉取并更新数据。';
+const DATA_STATUS_BANNER_STYLE = 'color:#92400E;background:#FEF3C7;border:1px solid #FCD34D;border-radius:var(--radius-ctl);padding:10px 14px;font-size:12px;margin-bottom:8px';
+
+function isPartialDataFreshness(fresh) {
+  return fresh === 'partial' || fresh === 'stale_cache';
+}
+
 function renderDataStatusBanner(data, elId) {
   const el = $(elId);
   if (!el) return;
-  const pf = data && data.partial_failures;
-  const fresh = data && data.data_freshness;
-  if (!pf || !pf.length) { hide(elId); return; }
-  const hasEmpty = pf.some(x => String(x).includes(':empty'));
-  const hasTimeout = pf.some(x => /timeout|fail/i.test(String(x)) && !String(x).includes(':empty'));
-  let hint = '数据可能不完整。';
-  if (hasEmpty && !hasTimeout) {
-    hint = '部分报表 MCP 无数据且数仓补数后仍为空；请核对店铺、日期窗口或 MCP_KEYWORD_MATCH_TYPES。';
-  } else if (hasEmpty && hasTimeout) {
-    hint = '部分维度超时或 MCP/数仓均无数据；可调整日期或 match_type 后重试。';
-  } else if (fresh === 'partial' || hasTimeout) {
-    hint = '部分数据维度拉取超时，已尝试数仓补数；可稍后点刷新重试。';
+  if (isLlmBlocked(data)) {
+    const labels = (data.missing_required_labels || []).join('、');
+    el.textContent = `⛔ ${data.message || '核心数据不足，无法生成 AI 建议'}${labels ? '（缺: ' + labels + '）' : ''}`;
+    el.style.cssText = 'color:var(--danger);background:var(--danger-bg);border:1px solid #FECACA;border-radius:var(--radius-ctl);padding:10px 14px;font-size:12px;margin-bottom:8px';
+    show(elId);
+    return;
   }
-  el.textContent = `⚠ ${hint} 失败项: ${pf.slice(0, 4).join('；')}${pf.length > 4 ? '…' : ''}`;
+  const dc = data && data.data_completeness;
+  const llmSt = data && data.llm_status;
+  if (llmSt === 'degraded' && dc && dc.missing_important && dc.missing_important.length) {
+    el.textContent = `⚠ 部分数据缺失，AI 已降置信度分析。缺失: ${dc.missing_important.join('、')}`;
+    el.style.cssText = DATA_STATUS_BANNER_STYLE;
+    show(elId);
+    return;
+  }
+  const pf = (data && data.partial_failures) || [];
+  const fresh = data && data.data_freshness;
+  const incomplete = pf.length > 0 || isPartialDataFreshness(fresh);
+  if (!incomplete) {
+    hide(elId);
+    return;
+  }
+  let hint;
+  if (!pf.length && isPartialDataFreshness(fresh)) {
+    hint = '本次部分数据可能未取全（使用了缓存或数仓补数）。';
+  } else {
+    const hasEmpty = pf.some(x => String(x).includes(':empty'));
+    const hasTimeout = pf.some(x => /timeout|fail/i.test(String(x)) && !String(x).includes(':empty'));
+    hint = '数据可能不完整。';
+    if (hasEmpty && !hasTimeout) {
+      hint = '部分报表 MCP 无数据且数仓补数后仍为空；请核对店铺、日期窗口或 MCP_KEYWORD_MATCH_TYPES。';
+    } else if (hasEmpty && hasTimeout) {
+      hint = '部分维度超时或 MCP/数仓均无数据；可调整日期或 match_type 后重试。';
+    } else if (isPartialDataFreshness(fresh) || hasTimeout) {
+      hint = '部分数据维度拉取超时或未完成，已尝试数仓补数。';
+    }
+  }
+  let text = `⚠ ${hint}`;
+  if (pf.length) {
+    text += ` 失败项: ${pf.slice(0, 4).join('；')}${pf.length > 4 ? '…' : ''}`;
+  }
+  text += ` ${DATA_REFRESH_HINT}`;
+  el.textContent = text;
+  el.style.cssText = DATA_STATUS_BANNER_STYLE;
   show(elId);
 }
 
@@ -1513,6 +1555,11 @@ async function refreshTacticsRecommendations() {
   show('tacticsRecLoader');
   try {
     const data = await callAPI('/tactics/recommend', { asin, days }, API_TIMEOUT.tactics);
+    if (isLlmBlocked(data)) {
+      const msg = $('tacticsRecErr');
+      if (msg) { msg.textContent = data.message || data.error || '数据不足，无法 AI 推荐'; show('tacticsRecErr'); }
+      return;
+    }
     data.dimensions.forEach(dim => {
       const recs = dim.recommendations || [];
       qsa(`input[data-dim="${dim.id}"]`).forEach(cb => {
@@ -1811,6 +1858,13 @@ async function refreshP3() {
 
 function renderP3(data) {
   renderDataStatusBanner(data, 'dataStatusTab3');
+  if (isLlmBlocked(data)) {
+    const msg = data.message || '核心数据不足，无法生成 AI 推荐';
+    setHTML('p3AcosColumn', `<div style="padding:12px;color:var(--danger);font-size:12px;line-height:1.6">${msg}</div>`);
+    setHTML('p3BudgetColumn', `<div style="padding:12px;color:var(--muted-fg);font-size:12px">—</div>`);
+    if (data.overall_reasoning) { show('p3Reasoning'); setHTML('p3Reasoning', formatAiSections(data.overall_reasoning)); }
+    return;
+  }
   const ta = data.target_acos, bb = data.budget_bid;
   const fc = data.from_cache;
   if (fc) show('p3CacheBadge'); else hide('p3CacheBadge');
@@ -2184,6 +2238,7 @@ async function loadExecution() {
     hide('aiReasoningExec');
   }
   const data = await callAPI('/execution/options', { asin, days }, API_TIMEOUT.fetch);
+  renderDataStatusBanner(data, 'dataStatusTab4');
   if (!data || !Array.isArray(data.directions)) {
     setHTML('execDirections', '<div style="padding:16px;color:var(--muted-fg);font-size:12px">暂无方向推荐数据</div>');
     return;

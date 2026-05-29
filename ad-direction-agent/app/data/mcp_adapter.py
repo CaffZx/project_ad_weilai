@@ -20,6 +20,7 @@ from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
 from app.data.mcp_db_context import resolve_mcp_context_from_db
 from app.data.mcp_normalizers import (
+    compute_natural_order_ratio,
     normalize_ad_placement,
     normalize_ad_summary,
     normalize_competitors,
@@ -313,10 +314,13 @@ class McpAdapter(DataSourceAdapter):
                 )
             )
 
-        total_orders = product_sales.get("total_orders")
-        ad_orders = product_sales.get("ad_orders")
-        if total_orders and ad_orders is not None and total_orders > 0:
-            data.natural_order_ratio = max(0, (total_orders - ad_orders) / total_orders * 100)
+        nor = compute_natural_order_ratio(
+            product_sales.get("total_orders"),
+            product_sales.get("ad_orders"),
+            trend_rows,
+        )
+        if nor is not None:
+            data.natural_order_ratio = nor
 
         stock_qty = None
         if isinstance(inventory_rows, list) and inventory_rows:
@@ -348,6 +352,27 @@ class McpAdapter(DataSourceAdapter):
         data.data_missing = bool(missing_fields and len(missing_fields) >= 3)
         data.missing_fields = missing_fields
         return data
+
+    async def campaign_call_tool(
+        self,
+        tool_name: str,
+        campaign_name: str,
+        shop_account: str,
+        start_date: str = "",
+        end_date: str = "",
+        timeout: float | None = None,
+    ) -> _CallResult:
+        """Campaign 级 MCP 工具调用封装。
+
+        与 call_tool_timed（ASIN 级）不同，使用 campaign_name 而非 parent_asin。
+        """
+        from app.data.mcp_mapping import build_campaign_tool_args
+
+        args = build_campaign_tool_args(
+            tool_name, campaign_name, shop_account, start_date, end_date,
+        )
+        t = timeout if timeout is not None else getattr(settings, "campaign_mcp_tool_timeout", 300.0)
+        return await self.call_tool_timed_with_args(tool_name, args, t)
 
     async def call_tool_timed(
         self,

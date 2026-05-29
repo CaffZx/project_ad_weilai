@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "广告方向决策子智能体"
-    app_version: str = "2.5.0"
+    app_version: str = "2.6.0"
     debug: bool = False
 
     host: str = "0.0.0.0"
@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     redis_partial_ttl: int = 900
     redis_lru_ttl: int = 30
 
+    # Campaign 分析
+    campaign_discovery_timeout: float = 90.0
+    campaign_mcp_tool_timeout: float = 300.0
+    campaign_db_fallback_timeout: float = 60.0
+    campaign_prefilter_enabled: bool = True
+
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"
     csv_key_column: str = "asin"
@@ -158,22 +164,20 @@ class Settings(BaseSettings):
 
     @property
     def llm_config(self) -> dict:
-        # 多 Key：优先从 api_keys.txt 读取（每行一个），其次逗号分隔，兜底单 Key
+        # 多 Key：DEEPSEEK_API_KEYS 逗号分隔优先，兜底 DEEPSEEK_API_KEY
         keys = []
-        keys_file = BASE_DIR / "api_keys.txt"
-        if keys_file.exists():
-            keys = [line.strip() for line in keys_file.read_text(encoding="utf-8").splitlines()
-                    if line.strip() and not line.strip().startswith("#")]
-        elif self.deepseek_api_keys:
+        if self.deepseek_api_keys:
             keys = [k.strip() for k in self.deepseek_api_keys.split(",") if k.strip()]
         elif self.deepseek_api_key:
             keys = [self.deepseek_api_key]
+        state_path = str(BASE_DIR / "config" / "key_pool_state.local.json")
         return {
             "api_key": self.deepseek_api_key,
             "api_keys": keys,
             "base_url": self.deepseek_base_url,
             "model": self.deepseek_model,
             "timeout": self.llm_timeout,
+            "state_path": state_path,
         }
 
     @property

@@ -38,6 +38,31 @@ def _int(v) -> int | None:
         return None
 
 
+def _row_key_index(row: dict) -> dict[str, Any]:
+    """Case-insensitive, whitespace-stripped key index."""
+    out: dict[str, Any] = {}
+    for k, v in row.items():
+        norm = str(k).strip().lower()
+        if norm not in out:
+            out[norm] = v
+    return out
+
+
+def _pick(row: dict, *aliases: str) -> Any:
+    """Return first non-None value for aliases; fallback to case-insensitive key match."""
+    for alias in aliases:
+        if alias in row:
+            v = row[alias]
+            if v is not None:
+                return v
+    lowered = _row_key_index(row)
+    for alias in aliases:
+        v = lowered.get(str(alias).strip().lower())
+        if v is not None:
+            return v
+    return None
+
+
 def normalize_listing_basic_info(payload: Any) -> dict:
     rows = _as_rows(payload)
     if not rows:
@@ -60,16 +85,16 @@ def normalize_ad_summary(payload: Any) -> dict:
         return {}
     row = rows[0]
     return {
-        "cost": _float(row.get("cost") or row.get("spend")),
-        "sale": _float(row.get("sale") or row.get("sales")),
-        "clicks": _int(row.get("clicks")),
-        "impressions": _int(row.get("impressions")),
-        "units_order": _int(row.get("units_order") or row.get("orders")),
-        "acos": _float(row.get("acos")),
-        "cpc": _float(row.get("cpc")),
-        "ctr": _float(row.get("ctr")),
-        "cvr": _float(row.get("cvr")),
-        "campaign_budget": _float(row.get("campaign_budget")),
+        "cost": _float(_pick(row, "cost", "spend", "花费", "广告花费")),
+        "sale": _float(_pick(row, "sale", "sales", "销售额")),
+        "clicks": _int(_pick(row, "clicks", "点击量")),
+        "impressions": _int(_pick(row, "impressions", "曝光量")),
+        "units_order": _int(_pick(row, "units_order", "orders", "广告订单量", "销售数量")),
+        "acos": _float(_pick(row, "acos", "ACOS")),
+        "cpc": _float(_pick(row, "cpc", "CPC")),
+        "ctr": _float(_pick(row, "ctr", "CTR")),
+        "cvr": _float(_pick(row, "cvr", "CVR")),
+        "campaign_budget": _float(_pick(row, "campaign_budget")),
     }
 
 
@@ -98,16 +123,16 @@ def normalize_keywords(payload: Any) -> list[dict]:
     for row in rows:
         out.append(
             {
-                "keyword_text": row.get("keyword_text") or row.get("keyword"),
-                "match_type": row.get("match_type") or "",
-                "clicks": _int(row.get("clicks")),
-                "cost": _float(row.get("cost") or row.get("spend")),
-                "impressions": _int(row.get("impressions")),
-                "sale": _float(row.get("sale") or row.get("sales")),
-                "units_order": _int(row.get("units_order") or row.get("orders")),
-                "keyword_bid": _float(row.get("keyword_bid") or row.get("bid")),
-                "acos": _float(row.get("acos")),
-                "cvr": _float(row.get("cvr")),
+                "keyword_text": _pick(row, "keyword_text", "keyword", "搜索词"),
+                "match_type": _pick(row, "match_type") or "",
+                "clicks": _int(_pick(row, "clicks", "点击量")),
+                "cost": _float(_pick(row, "cost", "spend", "花费")),
+                "impressions": _int(_pick(row, "impressions", "曝光量")),
+                "sale": _float(_pick(row, "sale", "sales", "销售额")),
+                "units_order": _int(_pick(row, "units_order", "orders", "广告订单量")),
+                "keyword_bid": _float(_pick(row, "keyword_bid", "bid")),
+                "acos": _float(_pick(row, "acos", "ACOS")),
+                "cvr": _float(_pick(row, "cvr", "CVR")),
             }
         )
     return out
@@ -171,11 +196,11 @@ def normalize_product_sales(payload: Any) -> dict:
     total_ad_cost = 0.0
     margin = None
     for row in rows:
-        total_sales += _float(row.get("sales") or row.get("sale") or row.get("sales_rmb")) or 0
-        total_orders += _float(row.get("orders") or row.get("order_num")) or 0
-        ad_orders += _float(row.get("ad_orders") or row.get("ad_sale_num")) or 0
-        total_ad_cost += _float(row.get("ad_cost") or row.get("cost") or row.get("spend")) or 0
-        m = _float(row.get("margin") or row.get("gross_margin"))
+        total_sales += _float(_pick(row, "sales", "sale", "sales_rmb", "全部销售额")) or 0
+        total_orders += _float(_pick(row, "orders", "order_num", "全部单量", "总单量", "全部订单")) or 0
+        ad_orders += _float(_pick(row, "ad_orders", "ad_sale_num", "广告单量", "广告订单量")) or 0
+        total_ad_cost += _float(_pick(row, "ad_cost", "cost", "spend", "广告花费")) or 0
+        m = _float(_pick(row, "margin", "gross_margin"))
         if m is not None:
             margin = m if margin is None else (margin + m) / 2
     return {
@@ -193,14 +218,40 @@ def normalize_trend(payload: Any) -> list[dict]:
     for row in rows:
         out.append(
             {
-                "date": row.get("date"),
-                "orders": _int(row.get("orders") or row.get("order_num")),
-                "ad_orders": _int(row.get("ad_orders") or row.get("ad_sale_num")),
-                "clicks": _int(row.get("clicks")),
-                "impressions": _int(row.get("impressions")),
-                "spend": _float(row.get("spend") or row.get("cost")),
-                "ad_sales": _float(row.get("ad_sales") or row.get("sale")),
+                "date": _pick(row, "date", "日期"),
+                "orders": _int(_pick(row, "orders", "order_num", "全部单量", "总单量", "全部订单")),
+                "ad_orders": _int(_pick(row, "ad_orders", "ad_sale_num", "广告单量", "广告订单量")),
+                "clicks": _int(_pick(row, "clicks", "点击量")),
+                "impressions": _int(_pick(row, "impressions", "曝光量")),
+                "spend": _float(_pick(row, "spend", "cost", "ad_cost", "广告花费")),
+                "ad_sales": _float(_pick(row, "ad_sales", "sale", "sales", "销售额")),
             }
         )
     return out
+
+
+def compute_natural_order_ratio(
+    total_orders: float | None,
+    ad_orders: float | None,
+    trend_rows: list[dict] | None = None,
+) -> float | None:
+    """(总订单 - 广告订单) / 总订单 * 100；聚合为 0 时从按日趋势行回退求和。"""
+    if total_orders and ad_orders is not None and total_orders > 0:
+        return max(0.0, (float(total_orders) - float(ad_orders)) / float(total_orders) * 100)
+    if not trend_rows:
+        return None
+    sum_orders = 0.0
+    sum_ad = 0.0
+    saw_ad = False
+    for row in trend_rows:
+        o = _float(row.get("orders"))
+        a = row.get("ad_orders")
+        if o is not None:
+            sum_orders += o
+        if a is not None:
+            sum_ad += _float(a) or 0
+            saw_ad = True
+    if sum_orders > 0 and saw_ad:
+        return max(0.0, (sum_orders - sum_ad) / sum_orders * 100)
+    return None
 

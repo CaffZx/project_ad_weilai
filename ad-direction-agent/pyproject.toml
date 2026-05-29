@@ -1,6 +1,6 @@
 [project]
 name = "ad-direction-agent"
-version = "2.5.0"
+version = "2.6.0"
 description = "广告方向决策子智能体 — 标签驱动型广告辅助决策系统"
 requires-python = ">=3.11"
 dependencies = [

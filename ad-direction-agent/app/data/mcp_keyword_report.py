@@ -6,7 +6,7 @@ from typing import Any
 
 from app.config.settings import settings
 from app.data.mcp_mapping import McpContext
-from app.data.mcp_normalizers import _as_rows
+from app.data.mcp_normalizers import _as_rows, _pick
 
 
 def parse_keyword_match_types() -> list[str]:
@@ -46,10 +46,10 @@ def merge_keyword_report_payloads(payloads: list[Any]) -> Any:
     merged: dict[str, dict] = {}
     for payload in payloads:
         for row in _as_rows(payload):
-            kw = str(row.get("keyword_text") or row.get("keyword") or "").strip()
+            kw = str(_pick(row, "keyword_text", "keyword", "搜索词") or "").strip()
             if not kw:
                 continue
-            clicks = int(float(row.get("clicks") or 0))
+            clicks = int(float(_pick(row, "clicks", "点击量") or 0))
             prev = merged.get(kw)
             if prev is None or clicks >= int(float(prev.get("clicks") or 0)):
                 merged[kw] = dict(row)

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from config import DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, SIBLING_PROJECT
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 # Access unified data layer (ad-direction-agent's DbAdapter) — for determine_ad_targets only
 _sys_root = Path(__file__).resolve().parent.parent / SIBLING_PROJECT
@@ -15,8 +15,15 @@ if str(_sys_root) not in sys.path:
 
 from app.data.db_adapter import DbAdapter           # noqa: E402
 from app.data.field_mapping import asin_data_to_metrics  # noqa: E402
-from app.llm.key_pool import ApiKeyPool             # noqa: E402
-from app.llm.client import key_pool                 # noqa: E402
+from app.llm.client import get_key_pool             # noqa: E402
+
+_openai_clients: dict[str, OpenAI] = {}
+
+
+def _get_openai_client(api_key: str) -> OpenAI:
+    if api_key not in _openai_clients:
+        _openai_clients[api_key] = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    return _openai_clients[api_key]
 
 
 _PURPOSE_OUTPUT_RULES = """## 输出要求
@@ -180,13 +187,16 @@ Please output strictly in JSON format.
 
     try:
         _t_llm_start = _time.time()
+        key_pool = get_key_pool()
+        if key_pool is None:
+            raise RuntimeError("LLM API 密钥未配置")
         # 多 Key 轮询 + 失败重试
         _llm_last_exc = None
         response = None
         for _attempt in range(3):
             _api_key = key_pool.next_key()
             try:
-                _client = OpenAI(api_key=_api_key, base_url=DEEPSEEK_BASE_URL)
+                _client = _get_openai_client(_api_key)
                 response = _client.chat.completions.create(
                     model=DEEPSEEK_MODEL,
                     messages=[
@@ -198,14 +208,18 @@ Please output strictly in JSON format.
                 )
                 key_pool.mark_success(_api_key)
                 break
-            except Exception as _e:
-                _err_str = str(_e)
-                if "429" in _err_str:
+            except APIStatusError as _e:
+                sc = _e.status_code
+                if sc == 429:
                     key_pool.mark_failed(_api_key, status_code=429)
-                elif "401" in _err_str or "403" in _err_str:
+                elif sc in (401, 403):
                     key_pool.mark_failed(_api_key, status_code=401)
                 else:
-                    raise
+                    key_pool.mark_failed(_api_key, status_code=500)
+                _llm_last_exc = _e
+                continue
+            except (APIConnectionError, APITimeoutError) as _e:
+                key_pool.mark_failed(_api_key, status_code=500)
                 _llm_last_exc = _e
                 continue
         if response is None:

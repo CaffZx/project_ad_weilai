@@ -31,6 +31,8 @@ from app.models.layers import (
     BudgetBidResult,
 )
 from app.workflow.context import WorkflowContext
+from app.workflow.data_contract import blocked_message, field_labels
+from app.workflow.data_gate import ensure_data_for_llm, is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.data_status import data_status_fields
 from app.workflow.helpers import (
@@ -152,14 +154,46 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
         if cached:
             return cached
 
-    # 2. 加载数据（refresh 时强制清缓存重拉）
-    data = await ctx.ensure_data(
+    # 2. 加载数据（refresh 时强制清缓存重拉）+ 完整性闸门
+    data, verdict = await ensure_data_for_llm(
+        ctx,
+        "p3",
         asin,
-        refresh=refresh,
         days=days,
         meta_filter=P3_META_FILTER,
+        refresh=refresh,
     )
     long_term = ctx.state.get_long_term_config(asin)
+
+    if is_llm_blocked(verdict):
+        msg = blocked_message(verdict)
+        return {
+            "asin": asin,
+            "status": "blocked",
+            "llm_status": "blocked",
+            "message": msg,
+            "missing_required_labels": field_labels(verdict.missing_required),
+            "data_completeness": verdict.to_completeness_dict(),
+            "target_acos": {
+                "recommended_target": 0,
+                "reasoning": msg,
+                "confidence": "low",
+                "manual_override": False,
+            },
+            "budget_bid": {
+                "current": 0.0,
+                "suggested": 0.0,
+                "direction": "maintain",
+                "magnitude_pct": 0.0,
+                "reason": msg,
+                "bid_adjustments": [],
+                "manual_override": False,
+            },
+            "overall_reasoning": msg,
+            "risk_warnings": ["核心数据不足，未调用 AI 推荐"],
+            "from_cache": False,
+            **data_status_fields(data),
+        }
 
     strategy = {
         "product_level": long_term.get("product_level", "腰部"),
@@ -217,19 +251,25 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
             )
     trend_text = "\n".join(trend_lines) if trend_lines else "(无趋势数据)"
 
+    summary_for_llm = build_data_summary(data, days=days, verdict=verdict)
+    for k, v in data_summary.items():
+        if k not in summary_for_llm:
+            summary_for_llm[k] = v
+
     # 3. 调用 LLM
     try:
         llm_result = await asyncio.wait_for(ctx.reasoner.recommend_p3(
             asin=asin,
             strategy=strategy,
             tactics=tactics,
-            data_summary=data_summary,
+            data_summary=summary_for_llm,
             keyword_details=kw_details,
             history=history,
             current_acos_target=manual_acos,
             current_daily_budget=manual_budget,
             days=days,
             trend_text=trend_text,
+            missing_notice=summary_for_llm.get("missing_notice"),
         ), timeout=LLM_TIMEOUT)
         # 组装为标准响应
         ta_raw = llm_result.get("target_acos", {})
@@ -252,6 +292,9 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
             "overall_reasoning": llm_result.get("overall_reasoning", ""),
             "risk_warnings": llm_result.get("risk_warnings", []),
             "from_cache": False,
+            "llm_status": verdict.status,
+            "status": "ok",
+            "data_completeness": verdict.to_completeness_dict(),
             **data_status_fields(data),
         }
         ctx.state.set_p3_recommendation(asin, result)

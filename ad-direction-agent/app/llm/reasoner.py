@@ -589,6 +589,12 @@ class LLMReasoner:
         return result
 
     @staticmethod
+    def _prepend_missing_notice(context: str, missing_notice: str | None) -> str:
+        if not missing_notice or not missing_notice.strip():
+            return context
+        return f"## 数据完整性说明\n{missing_notice.strip()}\n\n{context}"
+
+    @staticmethod
     def _merge_suggestions_into_analysis(analysis: str, suggestions: list) -> str:
         if not suggestions:
             return analysis
@@ -831,6 +837,7 @@ class LLMReasoner:
         scores: list[dict],
         eligible_directions: list[str] | None = None,
         ineligible_directions: list[dict] | None = None,
+        missing_notice: str | None = None,
     ) -> dict:
         """基于全上下文推荐执行方向（仅在 eligible 范围内）"""
         min_score = 40
@@ -899,11 +906,14 @@ class LLMReasoner:
                     line += f", {acos_line}"
                 context_parts.append(line)
 
+        user_body = self._prepend_missing_notice(
+            "\n".join(context_parts),
+            missing_notice or data_summary.get("missing_notice"),
+        )
         messages = [
             {"role": "system", "content": _build_execution_system_prompt()},
             {"role": "user", "content": (
-                f"请为 ASIN ({asin}) 推荐广告执行方向。\n\n"
-                + "\n".join(context_parts)
+                f"请为 ASIN ({asin}) 推荐广告执行方向。\n\n{user_body}"
             )},
         ]
 
@@ -964,6 +974,7 @@ class LLMReasoner:
         current_daily_budget: float | None = None,
         days: int = 7,
         trend_text: str = "",
+        missing_notice: str | None = None,
     ) -> dict:
         """P3 统一推荐：LLM 同时给出目标 ACOS 和预算/Bid 建议"""
         parts = [
@@ -1024,11 +1035,14 @@ class LLMReasoner:
         else:
             parts.append("## 历史调整记录\n  （无历史记录）\n")
 
+        user_body = self._prepend_missing_notice(
+            "\n".join(parts),
+            missing_notice or data_summary.get("missing_notice"),
+        )
         messages = [
             {"role": "system", "content": _build_p3_system_prompt()},
             {"role": "user", "content": (
-                f"请为 ASIN ({asin}) 同时给出目标ACOS和预算/Bid推荐。\n\n"
-                + "\n".join(parts)
+                f"请为 ASIN ({asin}) 同时给出目标ACOS和预算/Bid推荐。\n\n{user_body}"
             )},
         ]
 
@@ -1057,6 +1071,7 @@ class LLMReasoner:
         days: int = 7,
         selected_directions: list[str] | None = None,
         eligible_directions: list[str] | None = None,
+        missing_notice: str | None = None,
     ) -> dict:
         """综合分析入口（增强版，接收战略+策略上下文）"""
         context = self._build_context(
@@ -1072,11 +1087,15 @@ class LLMReasoner:
             eligible_directions=eligible_directions,
         )
 
+        context_body = self._prepend_missing_notice(
+            context,
+            missing_notice or data_summary.get("missing_notice"),
+        )
         messages = [
             {"role": "system", "content": _build_analyze_system_prompt()},
             {"role": "user", "content": (
                 f"请分析以下 ASIN ({asin}) 的广告数据，生成综合分析报告。\n\n"
-                f"{context}"
+                f"{context_body}"
             )},
         ]
 

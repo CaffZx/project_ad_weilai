@@ -52,6 +52,9 @@ def merge_db_fallback(
         if db_data.margin is not None:
             base.margin = db_data.margin
 
+    if db_data.natural_order_ratio is not None and base.natural_order_ratio is None:
+        base.natural_order_ratio = db_data.natural_order_ratio
+
     if "META_COMPETITOR" in scope and db_data.competitors:
         base.competitors = db_data.competitors
 
@@ -114,7 +117,7 @@ def prune_recovered_partial_failures(
             if db_data.expand_keyword_candidates or db_data.available_new_keywords:
                 continue
         elif tool == "product_sales":
-            if db_data.trend:
+            if db_data.trend or db_data.natural_order_ratio is not None:
                 continue
         elif tool == "direct_competitors":
             if db_data.competitors:

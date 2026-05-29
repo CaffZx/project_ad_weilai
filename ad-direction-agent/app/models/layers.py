@@ -130,6 +130,8 @@ class TacticsOptionsResponse(BaseModel):
     target_scores: list[dict] = Field(default_factory=list)  # P1 广告目的评分卡片
     keyword_analysis: list[dict] = Field(default_factory=list)  # P1 关键词AI分类
     scoring_error: str = ""  # AI 评分失败原因（purpose-agent 超时/不可达时非空，前端据此提示重试）
+    llm_status: str = "ok"
+    data_completeness: dict = Field(default_factory=dict)
     partial_failures: list[str] = Field(default_factory=list)
     data_freshness: str = "fresh"
 
@@ -191,6 +193,10 @@ class ExecutionOptionsResponse(BaseModel):
     strategy_context: StrategyConfirmRequest | None = None
     tactics_context: TacticsConfirmRequest | None = None
     query_plan: list[dict] = Field(default_factory=list)  # 本次使用的元脚本清单
+    llm_status: str = "ok"  # ok | degraded | blocked
+    data_completeness: dict = Field(default_factory=dict)
+    partial_failures: list[str] = Field(default_factory=list)
+    data_freshness: str = "fresh"
 
 
 class ExecutionSelectRequest(BaseModel):
@@ -323,6 +329,11 @@ class UnifiedRecommendResponse(BaseModel):
     cached_until: str = ""  # ISO timestamp
     partial_failures: list[str] = Field(default_factory=list)
     data_freshness: str = "fresh"
+    status: str = "ok"  # ok | blocked (llm skipped)
+    llm_status: str = "ok"
+    message: str = ""
+    data_completeness: dict = Field(default_factory=dict)
+    missing_required_labels: list[str] = Field(default_factory=list)
 
 
 # ── 向导状态 ───────────────────────────────────────────────

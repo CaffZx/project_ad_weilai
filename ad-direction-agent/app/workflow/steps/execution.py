@@ -32,6 +32,8 @@ from app.models.layers import (
     BudgetBidResult,
 )
 from app.workflow.context import WorkflowContext
+from app.workflow.data_contract import blocked_message
+from app.workflow.data_gate import ensure_data_for_llm, is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.helpers import (
     _is_valid_data,
@@ -51,7 +53,9 @@ EXECUTION_META_FILTER = get_meta_filter("execution")
 
 async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int = 7) -> ExecutionOptionsResponse:
     """返回方向选项 + 评分 + LLM推荐（从缓存取）"""
-    data = await ctx.ensure_data(asin, days=days, meta_filter=EXECUTION_META_FILTER)
+    data, verdict = await ensure_data_for_llm(
+        ctx, "execution", asin, days=days, meta_filter=EXECUTION_META_FILTER,
+    )
     long_term = ctx.state.get_long_term_config(asin)
 
     # 将战略/策略字段注入ASINData，供Recommender使用
@@ -77,8 +81,7 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
         "keyword_types": long_term.get("keyword_types", []),
     } if long_term else {}
 
-    data_summary = build_data_summary(data, days=days)
-    # 注入运营手动设定的目标 ACOS（覆盖硬编码默认值 25）
+    data_summary = build_data_summary(data, days=days, verdict=verdict)
     manual_acos = ctx.state.get_target_acos_override(asin)
     if manual_acos is not None:
         data_summary["acos_target"] = manual_acos
@@ -94,15 +97,26 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
         for s in rec_response.directions
         if s.id not in eligible_ids
     ]
-    exec_rec = await ctx.reasoner.recommend_execution(
-        asin=asin,
-        data_summary=data_summary,
-        strategy=strategy,
-        tactics=tactics,
-        scores=scores_list,
-        eligible_directions=eligible_ids,
-        ineligible_directions=ineligible,
-    )
+    if is_llm_blocked(verdict):
+        top = sorted(scores_list, key=lambda s: s.get("suitability_score", 0), reverse=True)
+        fallback_dirs = [s["id"] for s in top if s["id"] in eligible_ids][:2]
+        exec_rec = {
+            "recommended_directions": fallback_dirs or (eligible_ids[:1] if eligible_ids else []),
+            "reasoning": blocked_message(verdict),
+            "priority_order": [s["id"] for s in top],
+            "conflict_notes": "",
+        }
+    else:
+        exec_rec = await ctx.reasoner.recommend_execution(
+            asin=asin,
+            data_summary=data_summary,
+            strategy=strategy,
+            tactics=tactics,
+            scores=scores_list,
+            eligible_directions=eligible_ids,
+            ineligible_directions=ineligible,
+            missing_notice=data_summary.get("missing_notice"),
+        )
     exec_reasoning = humanize_ops_text(exec_rec.get("reasoning", "") or "")
 
     # 组装方向列表（过滤 LLM 越权推荐）
@@ -145,7 +159,10 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
     meta_ids = QueryRouter.resolve(scenario.get("id", "default"), recommended_ids)
     query_plan = QueryRouter.describe(meta_ids)
 
-    return ExecutionOptionsResponse(
+    from app.workflow.data_status import data_status_fields
+
+    status = data_status_fields(data)
+    resp = ExecutionOptionsResponse(
         asin=asin,
         directions=directions,
         recommended_directions=recommended_ids,
@@ -153,7 +170,11 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
         strategy_context=strategy_ctx,
         tactics_context=tactics_ctx,
         query_plan=query_plan,
+        llm_status=verdict.status,
+        data_completeness=verdict.to_completeness_dict(),
+        **status,
     )
+    return resp
 
 async def run_confirm_execution(ctx: WorkflowContext, req: ExecutionSelectRequest) -> ExecutionSelectResponse:
     """保存执行层选择到工作流状态（不持久化）"""

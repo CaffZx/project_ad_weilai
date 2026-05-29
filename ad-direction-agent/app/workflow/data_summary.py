@@ -1,13 +1,21 @@
 """Build LLM/report data summary from ASINData."""
 
+from __future__ import annotations
+
 from app.models.asin_data import ASINData
+from app.workflow.data_contract import CompletenessVerdict, merge_completeness_into_summary
 from app.workflow.helpers import (
     format_asin_daily_trend,
     kw_to_ai_summary,
     kw_trend_priority,
 )
 
-def build_data_summary( data: ASINData, days: int = 7) -> dict:
+
+def build_data_summary(
+    data: ASINData,
+    days: int = 7,
+    verdict: CompletenessVerdict | None = None,
+) -> dict:
     """从ASINData提取数据摘要
 
     包含5层:
@@ -137,7 +145,9 @@ def build_data_summary( data: ASINData, days: int = 7) -> dict:
     else:
         summary["placement_comparison"] = None
 
-    # 数据质量
-    summary["data_completeness"] = "complete" if not data.data_missing else "missing"
+    # 数据质量（无 verdict 时保持兼容）
+    if verdict is None:
+        summary["data_completeness"] = "complete" if not data.data_missing else "missing"
+        return summary
 
-    return summary
+    return merge_completeness_into_summary(summary, verdict)

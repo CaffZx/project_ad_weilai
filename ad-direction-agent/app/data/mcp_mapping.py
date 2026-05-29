@@ -115,3 +115,41 @@ def build_tool_args(tool_name: str, ctx: McpContext) -> dict:
         return {}
     return {k: v for k, v in builder(ctx).items() if v not in (None, "")}
 
+
+# ── Campaign 级 MCP 工具 ─────────────────────────────
+
+CAMPAIGN_TOOLS = [
+    "ad_campaign_basic_info",           # shop_account, campaign_name
+    "ad_campaign_product_report",       # + start_date, end_date
+    "ad_campaign_placement_report",     # + start_date, end_date (懒加载)
+    "ad_campaign_search_term_report",   # + start_date, end_date (懒加载)
+]
+
+
+def build_campaign_tool_args(
+    tool_name: str,
+    campaign_name: str,
+    shop_account: str,
+    start_date: str = "",
+    end_date: str = "",
+) -> dict:
+    """构建 campaign 级 MCP 入参。
+
+    与 TOOL_ARG_BUILDERS（ASIN 级，使用 parent_asin）不同，
+    campaign 级工具以 campaign_name 为必填参数。
+    """
+    base = {
+        "shop_account": shop_account,
+        "campaign_name": campaign_name,
+    }
+    # 需要日期范围的报告类工具
+    if tool_name in (
+        "ad_campaign_product_report",
+        "ad_campaign_placement_report",
+        "ad_campaign_search_term_report",
+    ):
+        if start_date:
+            base["start_date"] = start_date
+        if end_date:
+            base["end_date"] = end_date
+    return {k: v for k, v in base.items() if v != ""}

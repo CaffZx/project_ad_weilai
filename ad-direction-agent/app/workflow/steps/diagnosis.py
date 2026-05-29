@@ -32,6 +32,8 @@ from app.models.layers import (
     BudgetBidResult,
 )
 from app.workflow.context import WorkflowContext
+from app.workflow.data_contract import evaluate_completeness
+from app.workflow.data_gate import is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.data_status import data_status_fields
 from app.workflow.helpers import (
@@ -112,7 +114,9 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
     strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
     ka_raw = wf.get("keyword_analysis")
     ka_current = ka_raw.get(str(days)) if isinstance(ka_raw, dict) else ka_raw
-    if not ka_current and strategy_saved:
+    if not ka_current and strategy_saved and not is_llm_blocked(
+        evaluate_completeness("tactics", data)
+    ):
         # 回访已有策略的 ASIN 时，独立获取关键词 AI 分类
         try:
             from app.llm.purpose_adapter import recommend_tactics_from_purpose

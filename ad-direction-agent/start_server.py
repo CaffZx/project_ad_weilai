@@ -10,6 +10,7 @@
   python start_server.py --with-infra           # 一键启动：Docker 基础设施 + Python 服务
   python start_server.py --with-infra --all     # 完整 Docker Compose（含 agent 容器）
   python start_server.py --port 8010 --no-reload
+  python start_server.py --port 8010 --no-reload --workers 4
   python start_server.py --data-source mock
 """
 
@@ -132,7 +133,7 @@ def check_port(port: int) -> bool:
     return False
 
 
-def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None):
+def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None, workers: int):
     """启动 uvicorn 服务"""
     script_dir = str(PROJECT_ROOT / "ad-direction-agent")
 
@@ -144,15 +145,22 @@ def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None):
     existing_path = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{purpose_dir}{os.pathsep}{existing_path}" if existing_path else purpose_dir
 
+    if reload and workers > 1:
+        print("[WARN] --reload 与 --workers>1 不兼容，已忽略 reload")
+        reload = False
     reload_flag = "--reload" if reload else ""
+    workers_flag = f"--workers {workers}" if workers > 1 else ""
     cmd = (
         f"uvicorn app.main:app "
         f"--host {host} --port {port} "
         f"--log-level info "
+        f"{workers_flag} "
         f"{reload_flag}"
     ).strip()
 
     print(f"\n[+] 启动服务: {cmd}")
+    if workers > 1:
+        print(f"    进程数: {workers}")
     if data_source:
         print(f"    数据源: {data_source}")
     print(f"    主看板:        http://localhost:{port}/demo/ad-asisitant-agent.html")
@@ -178,6 +186,8 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认: 0.0.0.0)")
     parser.add_argument("--reload", action="store_true", default=True, help="热重载 (默认开启)")
     parser.add_argument("--no-reload", dest="reload", action="store_false", help="关闭热重载")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="uvicorn worker 进程数（生产建议 2–4；与 --reload 互斥）")
     parser.add_argument("--data-source", choices=["db", "mock", "csv"],
                         default=None, help="数据源 (默认取 settings.py 中的配置)")
     parser.add_argument("--with-infra", action="store_true", default=False,
@@ -202,11 +212,16 @@ def main():
     if not check_port(args.port):
         sys.exit(1)
 
+    if args.workers < 1:
+        print("[ERR] --workers 必须 >= 1")
+        sys.exit(1)
+
     start_uvicorn(
         port=args.port,
         reload=args.reload,
         host=args.host,
         data_source=args.data_source,
+        workers=args.workers,
     )
 
 

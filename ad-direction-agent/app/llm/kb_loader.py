@@ -32,6 +32,8 @@ class KnowledgeBase:
         "analyze_report":      ["02", "05", "09", "12", "14"],
         # AI 聊天（demo）
         "chat":                ["02", "14"],
+        # Campaign 活动调整
+        "campaign_adjustment":  ["18", "19", "21", "22"],
     }
 
     # KB 英文 enum → 项目中文 enum（与 layer_options.toml 对齐）

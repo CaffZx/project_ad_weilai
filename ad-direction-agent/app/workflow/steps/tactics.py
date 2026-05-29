@@ -31,6 +31,8 @@ from app.models.layers import (
     BudgetBidResult,
 )
 from app.workflow.context import WorkflowContext
+from app.workflow.data_contract import blocked_message
+from app.workflow.data_gate import ensure_data_for_llm, is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.data_status import data_status_fields
 from app.workflow.helpers import (
@@ -185,6 +187,8 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
     reasoning = ""
     data = None
     scoring_error = ""  # purpose-agent 失败时记录，透传前端用于提示重试
+    llm_status = "ok"
+    completeness_dict: dict = {}
 
     if strategy_saved:
         wf = ctx.state.get_workflow_state(asin)
@@ -198,8 +202,14 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
             kw_cache = None
         has_kw_cache = kw_cache is not None
 
-        data = await ctx.ensure_data(asin, days=days, meta_filter=TACTICS_META_FILTER)
-        if has_kw_cache:
+        data, verdict = await ensure_data_for_llm(
+            ctx, "tactics", asin, days=days, meta_filter=TACTICS_META_FILTER,
+        )
+        llm_status = verdict.status
+        completeness_dict = verdict.to_completeness_dict()
+        if is_llm_blocked(verdict):
+            scoring_error = blocked_message(verdict)
+        elif has_kw_cache:
             from app.data.field_mapping import asin_data_to_metrics
 
             metrics = asin_data_to_metrics(data, days)
@@ -330,6 +340,8 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
         target_scores=ts,
         keyword_analysis=ka,
         scoring_error=scoring_error,
+        llm_status=llm_status,
+        data_completeness=completeness_dict,
         **status,
     )
 
@@ -339,7 +351,35 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
     由前端「AI 重新推荐」按钮触发，调用 purpose-agent。
     """
     long_term = ctx.state.get_long_term_config(asin)
-    data = await ctx.ensure_data(asin, days=days, meta_filter=TACTICS_META_FILTER)
+    data, verdict = await ensure_data_for_llm(
+        ctx, "tactics", asin, days=days, meta_filter=TACTICS_META_FILTER,
+    )
+
+    if is_llm_blocked(verdict):
+        wf = ctx.state.get_workflow_state(asin)
+        ka = wf.get("keyword_analysis") or []
+        if isinstance(ka, dict):
+            ka = ka.get(str(days), [])
+        elif not isinstance(ka, list):
+            ka = []
+        ts = wf.get("target_scores") or []
+        if isinstance(ts, dict):
+            ts = ts.get(str(days), [])
+        elif not isinstance(ts, list):
+            ts = []
+        msg = blocked_message(verdict)
+        return {
+            "asin": asin,
+            "status": "blocked",
+            "llm_status": "blocked",
+            "message": msg,
+            "data_completeness": verdict.to_completeness_dict(),
+            "dimensions": [],
+            "reasoning": "",
+            "keyword_analysis": ka,
+            "target_scores": ts,
+            "error": msg,
+        }
 
     from app.llm.purpose_adapter import recommend_tactics_from_purpose
     try:
@@ -420,6 +460,8 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
 
     return {
         "asin": asin,
+        "llm_status": verdict.status,
+        "data_completeness": verdict.to_completeness_dict(),
         "dimensions": dimensions,
         "reasoning": reasoning,
         "keyword_analysis": merged_kws,

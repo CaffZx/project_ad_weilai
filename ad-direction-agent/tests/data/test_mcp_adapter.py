@@ -63,3 +63,85 @@ async def test_mcp_adapter_partial_failure_degrades_not_crash():
     assert "flow_keywords" in data.missing_fields
     assert "ad_keyword_report" in data.missing_fields
     assert data.ad_data.spend == 20
+
+
+@pytest.mark.asyncio
+async def test_mcp_adapter_chinese_field_keys():
+    """MCP gateway returns Chinese column names; normalizers must map them."""
+    payloads = {
+        "listing_basic_info": [{"parent_seller_sku": "PARENT-SKU", "price": 29.9}],
+        "ad_product_report": [
+            {
+                "花费": 100,
+                "销售额": 400,
+                "点击量": 200,
+                "曝光量": 10000,
+                "广告订单量": 20,
+                "ACOS": 25,
+                "CPC": 0.5,
+                "CTR": 2,
+                "CVR": 10,
+            }
+        ],
+        "ad_keyword_report": [
+            {
+                "搜索词": "dress",
+                "match_type": "EXACT",
+                "点击量": 20,
+                "花费": 10,
+                "曝光量": 500,
+                "销售额": 50,
+                "广告订单量": 5,
+                "ACOS": 20,
+                "CVR": 25,
+            }
+        ],
+        "product_sales": [
+            {
+                "全部销售额": 1000,
+                "全部单量": 50,
+                "广告单量": 15,
+                "广告花费": 200,
+                "日期": "05-20",
+            }
+        ],
+    }
+    adapter = McpAdapter(invoker=_FakeInvoker(payloads))
+    _ctx = McpDbContext(
+        parent_asin="B0TEST",
+        parent_seller_sku="PARENT-SKU",
+        shop_account="shop_us",
+    )
+    with patch("app.data.mcp_adapter.resolve_mcp_context_from_db", return_value=_ctx):
+        data = await adapter.fetch_asin_data("B0TEST")
+    assert data.ad_data.spend == 100
+    assert data.ad_data.acos == 25
+    assert data.natural_order_ratio is not None
+    assert abs(data.natural_order_ratio - 70.0) < 0.1
+    assert data.ad_data.tacos is not None
+    assert abs(data.ad_data.tacos - 20.0) < 0.1
+    assert data.keyword_count == 1
+    assert data.keywords[0].keyword == "dress"
+
+
+@pytest.mark.asyncio
+async def test_mcp_adapter_natural_order_ratio_from_daily_trend_rows():
+    """When aggregate keys are absent, sum daily 全部单量/广告单量 from product_sales rows."""
+    payloads = {
+        "listing_basic_info": [{"parent_seller_sku": "PARENT-SKU"}],
+        "ad_product_report": [{"花费": 10, "销售额": 40, "点击量": 5, "曝光量": 100, "广告订单量": 2}],
+        "product_sales": [
+            {"全部单量": 10, "广告单量": 3, "全部销售额": 200, "广告花费": 10, "日期": "05-18"},
+            {"全部单量": 10, "广告单量": 2, "全部销售额": 200, "广告花费": 10, "日期": "05-19"},
+        ],
+    }
+    adapter = McpAdapter(invoker=_FakeInvoker(payloads))
+    _ctx = McpDbContext(
+        parent_asin="B0TEST",
+        parent_seller_sku="PARENT-SKU",
+        shop_account="shop_us",
+    )
+    with patch("app.data.mcp_adapter.resolve_mcp_context_from_db", return_value=_ctx):
+        data = await adapter.fetch_asin_data("B0TEST", meta_filter=["META_TREND", "META_AD_PRODUCT"])
+    assert data.natural_order_ratio is not None
+    assert abs(data.natural_order_ratio - 75.0) < 0.1
