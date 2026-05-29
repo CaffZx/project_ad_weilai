@@ -1567,18 +1567,20 @@ function renderTargetScoresEmpty(errMsg) {
 
 function renderTargetScores(scores) {
   const targetMap = {Traffic:'引流型',Conversion:'转化型',Ranking:'排名型',Profit:'盈利型'};
+  const levelBarMap = {'推荐': {w: 95, cls: 'high'}, '可选': {w: 50, cls: 'medium'}, '不推荐': {w: 15, cls: 'low'}};
+  const levelTagMap = {'推荐': {t: '推荐', c: 'badge-green'}, '可选': {t: '可选', c: 'badge-blue'}, '不推荐': {t: '不推荐', c: 'badge-gray'}};
+  const levelCardMap = {'推荐': 'recommend', '可选': 'optional'};
   let html = '';
   scores.forEach(s => {
-    const sc = s.score || 0;
-    const barW = Math.min(sc, 100);
-    const level = sc >= 70 ? 'high' : sc >= 50 ? 'medium' : 'low';
-    const tag = sc >= 70 ? '推荐' : sc >= 50 ? '可选' : '不推荐';
-    const tagCls = sc >= 70 ? 'badge-green' : sc >= 50 ? 'badge-blue' : 'badge-gray';
-    const cardCls = sc >= 70 ? 'recommend' : sc >= 50 ? 'optional' : '';
+    // 兼容旧格式(score)和新格式(level)
+    const level = s.level || (s.score >= 70 ? '推荐' : s.score >= 50 ? '可选' : '不推荐');
+    const bar = levelBarMap[level] || levelBarMap['不推荐'];
+    const tag = levelTagMap[level] || levelTagMap['不推荐'];
+    const cardCls = levelCardMap[level] || '';
     html += `<div class="score-card ${cardCls}">
-      <div class="score-header"><span class="score-title">${targetMap[s.target]||s.target}</span><span class="badge ${tagCls} score-badge">${tag}</span></div>
-      <div class="score-bar"><div class="score-bar-fill ${level}" style="width:${barW}%"></div></div>
-      <div class="score-meta"><span class="score-reason" data-reason="${encodeURIComponent(s.reason||'暂无')}" data-title="${encodeURIComponent(targetMap[s.target]||s.target)}" onclick="showReasonPopup(this)" title="点击展开完整理由">${s.reason||'暂无'}</span><span class="score-value">${sc}分</span></div>
+      <div class="score-header"><span class="score-title">${targetMap[s.target]||s.target}</span><span class="badge ${tag.c} score-badge">${tag.t}</span></div>
+      <div class="score-bar"><div class="score-bar-fill ${bar.cls}" style="width:${bar.w}%"></div></div>
+      <div class="score-meta"><span class="score-reason" data-reason="${encodeURIComponent(s.reason||'暂无')}" data-title="${encodeURIComponent(targetMap[s.target]||s.target)}" onclick="showReasonPopup(this)" title="点击展开完整理由">${s.reason||'暂无'}</span></div>
     </div>`;
   });
   setHTML('targetScoreCards', html);

@@ -73,6 +73,34 @@ def _scores_stale_vs_metrics(cached_scores: list, metrics: dict) -> bool:
     return any(m in blob for m in stale_markers)
 
 
+def _derive_ad_purposes_from_scores(wf: dict, days: int) -> list:
+    """从缓存的 target_scores 中提取 level="推荐" 的广告目的作为侧边栏 AI 推荐标签。"""
+    ts = _read_cached_scores(wf, days)
+    if not ts:
+        return []
+    target_map = {"Traffic": "引流型", "Conversion": "转化型", "Ranking": "排名型", "Profit": "盈利型"}
+    result = []
+    for s in ts:
+        if not isinstance(s, dict):
+            continue
+        if s.get("level") == "推荐":
+            cn = target_map.get(s.get("target", ""), "")
+            if cn:
+                result.append(cn)
+    return result[:2]
+
+
+def _build_fallback_target_scores() -> list:
+    """LLM 失败时生成占位评分，全部不推荐，引导用户点击「AI 重新推荐」。"""
+    msg = "AI 评分服务暂不可用，请点击右下方「AI 重新推荐」重试"
+    return [
+        {"target": "Traffic", "level": "不推荐", "reason": msg},
+        {"target": "Conversion", "level": "不推荐", "reason": msg},
+        {"target": "Ranking", "level": "不推荐", "reason": msg},
+        {"target": "Profit", "level": "不推荐", "reason": msg},
+    ]
+
+
 async def _run_purpose_and_cache(
     ctx: WorkflowContext,
     asin: str,
@@ -185,9 +213,21 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                     recommendations, reasoning, _ = await _run_purpose_and_cache(
                         ctx, asin, wf, data, strategy_context, days, tactics_saved,
                     )
+                    # 评分重新生成成功，从新评分推导侧边栏 AI 推荐（避免 tactics_saved 时返回空）
+                    rec_from_new = _derive_ad_purposes_from_scores(wf, days)
+                    if rec_from_new:
+                        recommendations["ad_purposes"] = rec_from_new
                 except Exception as e:
                     logger.warning("purpose-agent 重新评分失败 [%s]: %s", asin, e)
                     scoring_error = f"AI 评分服务暂不可用：{e}"
+                    # 写兜底评分，防止前端评分卡片静默空白
+                    if not _read_cached_scores(wf, days):
+                        ts_dict = wf.get("target_scores") or {}
+                        if not isinstance(ts_dict, dict):
+                            ts_dict = {}
+                        ts_dict[str(days)] = _build_fallback_target_scores()
+                        wf["target_scores"] = ts_dict
+                        ctx.state.set_workflow_state(asin, wf)
                     recommendations = {
                         "ad_purposes": long_term.get("ad_purposes", []),
                         "keyword_types": long_term.get("keyword_types", []),
@@ -212,8 +252,10 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                 else:
                     wf["keyword_analysis"] = {str(days): merged_kws}
                 ctx.state.set_workflow_state(asin, wf)
+                # 侧边栏 AI 推荐标签从评分推导，与评分卡片保持一致
+                rec_from_scores = _derive_ad_purposes_from_scores(wf, days)
                 recommendations = {
-                    "ad_purposes": long_term.get("ad_purposes", []),
+                    "ad_purposes": rec_from_scores if rec_from_scores else long_term.get("ad_purposes", []),
                     "keyword_types": long_term.get("keyword_types", []),
                 }
         else:
@@ -237,6 +279,12 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                             "strategy_type": "", "action": "",
                         })
                     wf["keyword_analysis"] = {str(days): fallback_kws}
+                    # 写兜底评分，防止前端评分卡片静默空白
+                    ts_dict = wf.get("target_scores") or {}
+                    if not isinstance(ts_dict, dict):
+                        ts_dict = {}
+                    ts_dict[str(days)] = _build_fallback_target_scores()
+                    wf["target_scores"] = ts_dict
                     ctx.state.set_workflow_state(asin, wf)
 
     dimensions = []

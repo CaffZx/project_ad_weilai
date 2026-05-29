@@ -135,8 +135,8 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_api_keys: str = ""  # 多 Key 逗号分隔，优先于 deepseek_api_key
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-flash"
-    llm_timeout: int = 60
+    deepseek_model: str = "deepseek-v4-pro"
+    llm_timeout: int = 180
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

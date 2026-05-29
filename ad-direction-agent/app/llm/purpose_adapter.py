@@ -156,10 +156,19 @@ async def recommend_tactics_from_purpose(
             return t.get("target", "") or t.get("name", "") or ""
         return str(t)
 
-    result["ad_purposes"] = [
-        target_map.get(_extract_target(t), _extract_target(t))
-        for t in result.get("targets", [])
-    ]
+    ad_purposes_raw = []
+    for s in result.get("target_scores", []):
+        if isinstance(s, dict) and s.get("level") == "推荐":
+            cn = target_map.get(_extract_target(s), "")
+            if cn:
+                ad_purposes_raw.append(cn)
+    # 兜底：LLM 未遵循 level 格式时，用 targets 数组
+    if not ad_purposes_raw:
+        ad_purposes_raw = [
+            target_map.get(_extract_target(t), _extract_target(t))
+            for t in result.get("targets", [])
+        ]
+    result["ad_purposes"] = ad_purposes_raw[:2]  # 安全 cap 最多 2 个推荐
 
     # 聚合 keyword_analysis 中的 strategy_type → keyword_types
     type_map = {

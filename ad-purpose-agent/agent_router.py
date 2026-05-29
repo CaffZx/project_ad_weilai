@@ -24,8 +24,12 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
 你是亚马逊广告精算师。基于上述知识库规则和用户消息中的诊断数据，给出广告目的和关键词类型推荐。
 
 输出 JSON 格式：
-- `targets`: score >= 50 的目标数组，按 score 降序。无合格时返回 []。
-- `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 score + reason。reason 必须三段：【决策依据】（趋势优先+窗口口径）【建议】【后续关注】。低分目标也须写完整三段，禁止写"不适用"。清货属于产品阶段，不是广告目的，禁止输出 Clearance。
+- `targets`: level="推荐" 的目标数组。无合格时返回 []。
+- `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 level + reason。reason 必须三段：【决策依据】（知识库规则匹配）【建议】【后续关注】。所有目标都必须写完整三段，禁止写"不适用"。清货属于产品阶段，不是广告目的，禁止输出 Clearance。
+- `level` 判定规则（严格遵循知识库，禁止主观打分）：
+  - "推荐": 知识库触发条件命中（04-触发规则.md）且无阻断（guardrail、stage constraint 全通过）
+  - "可选": 触发条件未命中但未被阻断，或部分条件满足
+  - "不推荐": 被知识库硬护栏（10-安全护栏.md，如CPC>毛利）、产品阶段约束、或触发规则中的阻断条件明确排除
 - `keyword_analysis`: 每个关键词的 strategy_type（Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
 - `chart_metrics`: 从 ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"] 中选 2-3 个最值得关注的。
 
@@ -133,22 +137,26 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 {_trend}
 
 [Core Instructions]
-1. `targets` array: ONLY targets with score >= 50. Sorted by score descending. If none qualify, return [].
-2. `target_scores` array: ALL 4 targets (Traffic/Conversion/Ranking/Profit) with their scores and detailed reasons. Do NOT output Clearance — clearance is a product stage, not an ad purpose. Even for low-score or excluded targets, you MUST write a full three-section reason — do NOT write short dismissals like "不适用" or "不推荐". Explain WHY specifically. The `reason` field MUST contain three sections using 【】 markers:
+1. `targets` array: ONLY targets whose `level` is "推荐". If none qualify, return [].
+2. `target_scores` array: ALL 4 targets (Traffic/Conversion/Ranking/Profit) with their `level` and detailed `reason`. Do NOT output Clearance — clearance is a product stage, not an ad purpose. The `reason` field MUST contain three sections using 【】 markers:
 
-   【决策依据】— The most important part. Follow these rules:
-	     (a) PRIMARY: trending daily data (from [Last {days}d Daily Trend Data]). Look at whether each metric is improving, deteriorating, or flat over the {days}d window. The TREND direction matters more than the static aggregate. Example: a 7d avg ACOS of XX% that dropped from [Day1 ACOS] → [Day7 ACOS] over the week is very different from a flat XX% — the former suggests rapid improvement, the latter suggests stagnation.
-	     (b) SECONDARY: static window aggregates ({days}d avg CVR, {days}d avg ACOS, {days}d avg CPC, {days}d natural order ratio, etc.) as supporting evidence.
-	     (c) EVERY metric MUST carry its time window AND caliber (某日当天值 or N日平均值). Write "{days}日平均ACOS [XX]%" not "ACOS [XX]%". For a specific date from trend: "[5月17日]当天ACOS [XX]%". For a trend range: "近{days}日ACOS从[5月12日]的[XX]%逐日降至[5月17日]的[XX]%". For a window average: "{days}日平均CVR [XX]%". (All bracketed values are placeholders — use the actual data from the prompt above.) Never drop the window or caliber.
-	     (d) Only cite the 1-2 indicators that truly DETERMINED this score. Ignore secondary factors.
+   【决策依据】— Match against knowledge base rules using this decision tree, then cite evidence with proper formatting:
+         (a) STEP 1 — Trigger check: scan knowledge base trigger conditions (04-触发规则.md). Does any trigger match? Examples: 新品/低样本→Traffic, 订单不足→Conversion, 排名机会→Ranking, 效率稳定→Profit.
+         (b) STEP 2 — Guardrail check: scan knowledge base guardrails (10-安全护栏.md) and stage constraints (02-标签维度定义.md). Is this target blocked? Examples: CPC>margin blocks Traffic, CVR<category×30% blocks Traffic, push-stage suppresses Profit, harvest-stage blocks Traffic.
+         (c) STEP 3 — Assign level:
+             - trigger matched AND no guardrail blocked → level="推荐"
+             - trigger NOT matched AND no guardrail blocked → level="可选"
+             - guardrail blocked (regardless of trigger) → level="不推荐"
+         (d) FORMAT — EVERY metric MUST carry its time window AND caliber (某日当天值 or N日平均值). Write "{days}日平均ACOS [XX]%" not "ACOS [XX]%". For a specific date from trend: "[5月17日]当天ACOS [XX]%". For a trend range: "近{days}日ACOS从[5月12日]的[XX]%逐日降至[5月17日]的[XX]%". For a window average: "{days}日平均CVR [XX]%". Never drop the window or caliber.
+         (e) Only cite the 1-2 indicators that truly DETERMINED this level. Ignore secondary factors.
 
-   【建议】— 1-2 sentences of concrete action recommendation. Say WHAT to do and WHY, not HOW.
+   【建议】— 1-2 sentences. "推荐"→what to prioritize; "可选"→when this becomes viable; "不推荐"→what must change first.
 
-   【后续关注】— 1-2 key indicators or conditions to monitor going forward. Under what circumstances should the recommendation strength for this direction be re-evaluated.
+   【后续关注】— 1-2 conditions that would change this level on re-evaluation.
 
    Examples:
-   - 【低分/不推荐】{{"target": "Traffic", "score": 30, "reason": "【决策依据】近{days}日趋势：ACOS从[某日日期]的[某日ACOS]逐日降至[某日日期]的[某日ACOS]，CVR从[某日CVR]攀升至[某日CVR]，效率正在改善。但{days}日平均CPC $[CPC]仍 > 单均毛利$[毛利]，触碰引流型强制排除红线。{days}日自然单占比[自然单占比]%，曝光已充足。\\n【建议】不推荐在当前阶段开启引流型广告。CPC超毛利意味着引流即亏损。应在转化型巩固已有CVR优势，待CPC降至$[CPC阈值]以下再考虑引流。\\n【后续关注】未来{days}日重点监控CPC走势。若CPC连续3日低于$[CPC阈值]或{days}日自然单占比跌破[阈值]%，需重新评估。"}}
-   - 【高分/推荐】{{"target": "Conversion", "score": 85, "reason": "【决策依据】近{days}日趋势：CVR从[某日CVR]攀升至[某日CVR]，呈加速上升；{days}日平均CVR [CVR]%远超基准~[基准]%。{days}日平均ACOS [ACOS]%在推进期容忍上限[上限]%内，且[某日日期]当天ACOS已降至[某日ACOS]%，逐日持续改善。{days}日退款率[退款率]%，转化链路健康。\\n【建议】强烈推荐转化型广告。重点投放长尾精准词（如black string bikini），利用持续走高的CVR收割旺季订单。\\n【后续关注】以{days}日为窗口持续监控CVR和退货率。若{days}日平均CVR跌破[阈值]%或退货率升至[阈值]%以上，需排查listing或竞品动态。"}}. Sort by score descending.
+   - 【不推荐】{{"target": "Traffic", "level": "不推荐", "reason": "【决策依据】STEP1触发检查：产品阶段=推进期，引流型未被阶段约束阻断。STEP2护栏检查：{days}日平均CPC $[CPC] > 单均毛利$[毛利]，触碰知识库 CPC>毛利 硬阻断规则。STEP3结论：level=不推荐。\\n【建议】当前不应开启引流型广告，每次引流都在亏损。优先通过转化型广告巩固CVR优势，待CPC降至$[毛利]以下再重新评估。\\n【后续关注】每日监控CPC与毛利差值。若CPC连续3日低于$[毛利]，重新评估引流型level。"}}
+   - 【可选】{{"target": "Ranking", "level": "可选", "reason": "【决策依据】STEP1触发检查：{days}日自然排名第[XX]位，7日排名上升[XX]位，排名机会触发条件部分满足。STEP2护栏检查：{days}日平均ACOS [XX]%在推进期容忍上限[XX]%内，未被阻断。但7日预算利用率仅[XX]%，未达60%门槛，不满足完整触发条件。STEP3结论：level=可选。\\n【建议】排名上升趋势存在但预算利用率不足。可小幅加投测试排名反应，若预算利用率升至60%以上且ACOS不恶化，level可升至推荐。\\n【后续关注】每日监控预算利用率和ACOS联动变化。"}}
 
 3. For each keyword in the core keywords list, determine its strategy type and put into `keyword_analysis` array. The `action` MUST be in Chinese and differentiate based on the 7d trend AND whether the keyword has a natural ranking:
    - "无排名数据" → 未入榜：有花费的建议提高出价或检查词的相关性；无花费的建议暂不投放，优先推已入榜词
@@ -213,8 +221,14 @@ Please output strictly in JSON format.
         ai_keyword_analysis = ai_json.get("keyword_analysis", [])
     except Exception as e:
         _t_llm_cost = _time.time() - _t_llm_start if '_t_llm_start' in dir() else 0
-        ai_targets = ["Profit"]
-        ai_target_scores = []
+        ai_targets = []
+        _fb = "【决策依据】AI 评分服务暂不可用。\\n【建议】请点击右下方「AI 重新推荐」重试。\\n【后续关注】服务恢复后重新评估。"
+        ai_target_scores = [
+            {"target": "Traffic", "level": "不推荐", "reason": _fb},
+            {"target": "Conversion", "level": "不推荐", "reason": _fb},
+            {"target": "Ranking", "level": "不推荐", "reason": _fb},
+            {"target": "Profit", "level": "不推荐", "reason": _fb},
+        ]
         ai_html_reason = f"<div style='color:red;'>AI diagnosis error: {e}</div>"
         ai_summary = "Data parsing error"
         ai_final_action = "No action"
