@@ -237,7 +237,9 @@ def _build_p3_system_prompt() -> str:
     return _P3_TASK_PROMPT.replace("{kb_content}", kb.build("p3_recommend"))
 
 
-_CAMPAIGN_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和用户消息中的活动数据，逐活动分析并给出调整/淘汰建议。
+# ── Campaign 系统提示词 ────────────────────────────────────────────────────
+
+_CAMPAIGN_SHARED_INTRO = """你是一个资深的亚马逊广告运营专家。基于知识库规则和用户消息中的活动数据，逐活动分析并给出调整/淘汰建议。
 
 重要：所有输出内容必须使用中文（理由、证据、决策路径），JSON key 使用英文。
 
@@ -248,70 +250,119 @@ _CAMPAIGN_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。�
 用户消息中的「策略上下文」包含该 ASIN 的产品阶段、广告目的、目标 ACOS、利润率、评分、退货率、库存天数、自然单占比等信息。这些是活动分析的"背景"，不需要在每个活动中重复输出。
 
 ## 活动列表
-用户消息中的「活动列表」包含每个活动的：活动名、子ASIN、关键词、匹配类型、当前 Bid、当前 Budget、上线天数(注：-1 表示未知，勿当作新活动)、7日性能指标。
+用户消息中的「活动列表」包含每个活动的：活动名、子ASIN、关键词、匹配类型、当前 Bid、当前 Budget、上线天数(注：-1 表示未知，勿当作新活动)、7日性能指标。"""
+
+_CAMPAIGN_EXACT_PROMPT = (
+    _CAMPAIGN_SHARED_INTRO
+    + """
+
+## 角色
+你正在分析**精准广告活动**（EXACT 匹配类型）。调整维度为 Budget → Bid → Placement（三广告位）。
+
+## KB 引用指引
+优先参考: KB 22 §2（精准调整规则）、KB 19 §5/§9（广告位决策矩阵/好坏判断）、KB 21（淘汰规则）
+通用基准: KB 18 §1-4/§6、KB 19 §1-4/§6/§10、KB 22 §0/§1
 
 ## 输出格式
-严格按照以下 JSON 格式输出（不要包含 markdown 代码块标记）：
-
-{{
+{
   "campaign_adjustments": [
-    {{
+    {
       "campaign_name": "广告活动名称",
-      "campaign_key": "广告活动名 × 子ASIN（唯一标识）",
+      "campaign_key": "活动名 × 子ASIN（唯一标识）",
       "child_asin": "B0XXXXXX",
       "keyword_text": "关键词",
       "match_type": "EXACT",
       "action": "eliminate_to_low_bid_pool",
-      "direction": {{"bid": "down", "budget": "down"}},
+      "direction": {"bid": "down", "budget": "down"},
       "triggered_rule": "NO_CVR_HIGH_SPEND",
-      "reason": "\\n\\n".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议", "(4) 后续关注"]),
+      "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
       "confidence": "high",
-      "current_budget": 15.0,
-      "proposed_budget": 1.0,
-      "current_bid": 0.85,
-      "proposed_bid": 0.20,
-      "elimination_values": {{"budget": 1.0, "bid": 0.20}},
+      "current_budget": 15.0, "proposed_budget": 1.0,
+      "current_bid": 0.85, "proposed_bid": 0.20,
+      "evidence": ["7天花费$18.5", "7天订单0，CVR=0%"],
       "placement_adjustments": [
-        {{"placement": "头部", "current_pct": 20, "proposed_pct": 10, "action": "下调", "evidence": "..."}}
-      ],
-      "negative_keywords": [
-        {{"keyword": "...", "clicks_7d": 12, "orders_7d": 0, "reason": "无转化高点击"}}
-      ],
-      "evidence": [
-        "7天花费$18.5",
-        "7天订单0，CVR=0%",
-        "自然位支撑：否"
+        {"placement": "头部", "current_pct": 20, "proposed_pct": 10, "action": "下调", "evidence": "..."}
       ],
       "review_level": "MANUAL_REVIEW"
-    }}
+    }
   ],
-  "batch_summary": {{
-    "total_analyzed": 6,
-    "to_eliminate": 1,
-    "to_adjust": 3,
-    "to_keep": 2,
-    "overall_notes": "本批次中..."
-  }}
-}}
+  "batch_summary": {"total_analyzed": 6, "to_eliminate": 1, "to_adjust": 3, "to_keep": 2, "overall_notes": "..."}
+}
 
 ## 输出约束
-
 ### 必填结构字段
 - **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
-- proposed_budget / proposed_bid 必须填写具体数值，**禁止留 null/None/空**
-- EXACT 活动必须输出 placement_adjustments（三个广告位全部列出，无数据时维持 0%）
-- BROAD/PHRASE/AUTO 活动必须判断 negative_keywords（无 neg 词时输出空数组）
+- proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
+- 必须输出 placement_adjustments（三个广告位全部列出，无数据时维持 0%）
+
+### 淘汰活动
+- action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
+- 必须输出 triggered_rule（如 NO_CVR_HIGH_SPEND）和 evidence
 
 ### reasoning 文案禁则
 - 禁止泄露内部约束术语（Bid步长/决策矩阵/规则编号/confidence等级）
-- reason 中勿出现 NO_CVR_HIGH_SPEND / ACOS_UNRECOVERABLE / KEYWORD_UPGRADED 等触发码标记
-- reason 使用三部分结构：(1) 现状诊断 → (2) 原因分析 → (3) 调整建议
-- 理由须基于数据给出，不使用「建议观察」「可考虑」等模糊表述
-"""
+- reason 中勿出现 NO_CVR_HIGH_SPEND 等触发码标记
+- reason 使用三部分结构：(1) 现状诊断 → (2) 原因分析 → (3) 调整建议"""
+)
+
+_CAMPAIGN_BROAD_PROMPT = (
+    _CAMPAIGN_SHARED_INTRO
+    + """
+
+## 角色
+你正在分析**广泛/词组广告活动**（BROAD / PHRASE / AUTO 匹配类型）。调整维度为 Budget → Bid → SearchTerm（否词/提词）。禁止 Placement 调整。
+
+## KB 引用指引
+优先参考: KB 22 §3（广泛/词组调整规则）、KB 19 §7/§8（自动广泛组/否词触发）、KB 21（淘汰规则）
+通用基准: KB 18 §1-4/§6、KB 19 §1-4/§6/§10、KB 22 §0/§1
+
+## 输出格式
+{
+  "campaign_adjustments": [
+    {
+      "campaign_name": "广告活动名称",
+      "campaign_key": "活动名 × 子ASIN（唯一标识）",
+      "child_asin": "B0XXXXXX",
+      "keyword_text": "关键词",
+      "match_type": "BROAD",
+      "action": "eliminate_to_low_bid_pool",
+      "direction": {"bid": "down", "budget": "down"},
+      "triggered_rule": "IRRELEVANT_NO_IMPROVEMENT",
+      "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
+      "confidence": "high",
+      "current_budget": 10.0, "proposed_budget": 8.0,
+      "current_bid": 0.50, "proposed_bid": 0.40,
+      "evidence": ["7天花费$12.0", "否词5个后搜索词质量仍差"],
+      "negative_keywords": [
+        {"keyword": "wedding dress", "clicks_7d": 12, "orders_7d": 0, "reason": "无转化高点击"}
+      ],
+      "review_level": "MANUAL_REVIEW"
+    }
+  ],
+  "batch_summary": {"total_analyzed": 6, "to_eliminate": 1, "to_adjust": 3, "to_keep": 2, "overall_notes": "..."}
+}
+
+## 输出约束
+### 必填结构字段
+- **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
+- proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
+- 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
+
+### 淘汰活动
+- action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
+- 必须输出 triggered_rule（如 IRRELEVANT_NO_IMPROVEMENT）和 evidence
+
+### reasoning 文案禁则
+- 禁止泄露内部约束术语（Bid步长/决策矩阵/规则编号/confidence等级）
+- reason 中勿出现 IRRELEVANT_NO_IMPROVEMENT 等触发码标记
+- reason 使用三部分结构：(1) 现状诊断 → (2) 原因分析 → (3) 调整建议"""
+)
 
 
-def _build_campaign_system_prompt() -> str:
-    return _CAMPAIGN_TASK_PROMPT.replace("{kb_content}", kb.build("campaign_adjustment"))
+def _build_campaign_system_prompt(task_type: str = "exact") -> str:
+    kb_content = kb.build("campaign_adjustment")
+    template = _CAMPAIGN_EXACT_PROMPT if task_type == "exact" else _CAMPAIGN_BROAD_PROMPT
+    return template.replace("{kb_content}", kb_content)
 
 
 class LLMReasoner:
@@ -1293,8 +1344,12 @@ class LLMReasoner:
         campaign_summaries: list[dict],
         strategy_context: dict,
         temperature: float = 0.3,
+        *,
+        task_type: str = "exact",
     ) -> dict:
         """分析单批活动 (≤6个) 并返回调整建议。
+
+        task_type: "exact" → 精准专用 prompt/schema; "broad" → 广泛专用 prompt/schema
 
         Returns:
             {"parsed": dict, "raw_output": str, "success": bool, "error": str, "temperature": float}
@@ -1378,7 +1433,7 @@ class LLMReasoner:
         user_message = "\n".join(ctx_parts) + "\n" + "\n".join(camp_parts)
 
         messages = [
-            {"role": "system", "content": _build_campaign_system_prompt()},
+            {"role": "system", "content": _build_campaign_system_prompt(task_type)},
             {"role": "user", "content": user_message},
         ]
 

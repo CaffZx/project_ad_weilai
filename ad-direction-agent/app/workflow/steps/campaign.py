@@ -116,69 +116,45 @@ async def analyze_campaigns(
             rounds_detail={},
         )
 
-    # 4. 构建 per-campaign summary
-    summaries: list[dict] = []
-    unit_lookup = _build_unit_lookup(llm_campaigns)
-    for cu in llm_campaigns:
-        keyword_cls = keyword_class_map.get(cu.keyword_text, "")
-        is_core = False
-        summaries.append(reasoner._campaign_to_prompt_dict(
-            cu, target_acos=strategy_context.target_acos,
-            keyword_class=keyword_cls, is_core=is_core,
-        ))
+    # 4. 按 match_type 分流
+    exact_list = [cu for cu in llm_campaigns if cu.match_type == "EXACT"]
+    broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
 
     ctx_dict = strategy_context.model_dump()
+    llm_sem = asyncio.Semaphore(cc)
     rounds_detail: dict[str, dict] = {}
     warnings_list: list[str] = []
 
-    # 5. 预取 placement + search_term (批量，一次调用)
-    enriched_summaries = await _prefetch_enrichment(
-        fetcher, parent_asin, days, summaries, unit_lookup,
+    # 5. 精准流 + 广泛流并行分析
+    (exact_adjustments, exact_rd, exact_summaries), (broad_adjustments, broad_rd, broad_summaries) = await asyncio.gather(
+        _analyze_one_stream(
+            exact_list, "exact", reasoner, fetcher, parent_asin, days,
+            strategy_context, keyword_class_map, bs, llm_sem, temperature, ctx_dict,
+        ),
+        _analyze_one_stream(
+            broad_list, "broad", reasoner, fetcher, parent_asin, days,
+            strategy_context, keyword_class_map, bs, llm_sem, temperature, ctx_dict,
+        ),
     )
 
-    # 6. Round 1 + Round 2 并行 (均含富化数据)
-    llm_sem = asyncio.Semaphore(cc)
-    r1_batches = _build_batches(enriched_summaries, bs, seed=1)
-    r2_batches = _build_batches(enriched_summaries, bs, seed=2)
-    r1_results, r2_results = await asyncio.gather(
-        _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, llm_sem, 1),
-        _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, llm_sem, 2),
-    )
-    rounds_detail["round1"] = _round_stats(r1_results)
-    rounds_detail["round2"] = _round_stats(r2_results)
-    rounds_detail["round3"] = {"ran": False}
+    rounds_detail["exact"] = exact_rd
+    rounds_detail["broad"] = broad_rd
 
-    # 7. 投票 (比较 action + direction)
-    votes, needs_tiebreaker = _vote(r1_results, r2_results)
-    r3_results: list[CampaignBatchResult] = []
+    # 6. 合并两流结果
+    adjustments = exact_adjustments + broad_adjustments
+    action_order = {"eliminate_to_low_bid_pool": 0, "adjust_bid": 1, "adjust_budget": 1, "adjust_placement": 1, "keep": 2}
+    adjustments.sort(key=lambda x: action_order.get(x.action, 9))
 
-    # 8. Tiebreaker (按需)
-    if needs_tiebreaker:
-        tiebreaker_summaries = [s for s in enriched_summaries
-                                if s.get("campaign_key") in needs_tiebreaker]
-        if tiebreaker_summaries:
-            r3_results = await _run_round(
-                reasoner, parent_asin,
-                _build_batches(tiebreaker_summaries, bs, seed=3),
-                ctx_dict, temperature, llm_sem, round_number=3,
-            )
-            _resolve_tiebreaker(votes, r3_results)
-            rounds_detail["round3"] = {
-                "ran": True,
-                "disputed_count": len(needs_tiebreaker),
-                **_round_stats(r3_results),
-            }
-
-    # 9. 合并 + 预算冲突裁决
-    adjustments = _merge_to_adjustments(votes, r1_results, r2_results, r3_results)
+    # 7. 预算冲突裁决
     budget_warnings = _resolve_budget_conflicts(adjustments)
     warnings_list.extend(budget_warnings)
 
-    # 10. Sanity check
+    # 8. Sanity check
     sanity_ok = True
     try:
         sc_warnings = await _sanity_check(
-            reasoner, parent_asin, adjustments, enriched_summaries,
+            reasoner, parent_asin, adjustments,
+            exact_summaries + broad_summaries,
             ctx_dict, temperature,
         )
         warnings_list.extend(sc_warnings)
@@ -187,7 +163,7 @@ async def analyze_campaigns(
         warnings_list.append(f"sanity_check 执行失败: {e}")
         sanity_ok = False
 
-    # 11. 汇总统计
+    # 9. 汇总统计
     summary_stats = {
         "to_eliminate": sum(1 for a in adjustments if a.action == "eliminate_to_low_bid_pool"),
         "to_adjust": sum(1 for a in adjustments if a.action.startswith("adjust")),
@@ -201,16 +177,14 @@ async def analyze_campaigns(
         ), 2),
     }
 
-    rounds_completed = 3 if r3_results else 2
-
     return CampaignAnalysisResult(
         parent_asin=parent_asin, days=days,
-        total_campaigns=total,
+        total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
         summary=summary_stats,
         warnings=warnings_list,
         sanity_check_passed=sanity_ok,
-        llm_rounds_completed=rounds_completed,
+        llm_rounds_completed=2,
         rounds_detail=rounds_detail,
     )
 
@@ -327,6 +301,102 @@ def build_campaign_strategy_context(
     )
 
 
+# ── 单流分析 ────────────────────────────────────────────────────────────────
+
+
+async def _analyze_one_stream(
+    campaigns: list[CampaignUnit],
+    task_type: str,
+    reasoner: "LLMReasoner",
+    fetcher: CampaignFetcher,
+    parent_asin: str,
+    days: int,
+    strategy_context: CampaignStrategyContext,
+    keyword_class_map: dict[str, str],
+    batch_size: int,
+    sem: asyncio.Semaphore,
+    temperature: float,
+    ctx_dict: dict,
+) -> tuple[list[CampaignAdjustmentItem], dict, list[dict]]:
+    """单流全流程: summaries → unit_lookup → 预取 → 分批 → R1+R2 → 投票 → (R3) → 合并。
+
+    返回 (adjustments, rounds_detail, enriched_summaries)；
+    enriched_summaries 回传给 sanity_check 做事实对照（隐患1修复）。
+    """
+    if not campaigns:
+        return [], {}, []
+
+    # 1. 构建 summaries + unit_lookup
+    summaries = [
+        reasoner._campaign_to_prompt_dict(
+            cu,
+            target_acos=strategy_context.target_acos,
+            keyword_class=keyword_class_map.get(cu.keyword_text, ""),
+            is_core=False,
+        )
+        for cu in campaigns
+    ]
+    unit_lookup = _build_unit_lookup(campaigns)
+
+    # 2. 预取（精准流只拉 placement，广泛流只拉 search_term）
+    if task_type == "exact":
+        summaries = await _prefetch_placement(
+            fetcher, parent_asin, days, summaries, unit_lookup,
+        )
+    else:
+        summaries = await _prefetch_search_terms(
+            fetcher, parent_asin, days, summaries, unit_lookup,
+        )
+
+    # 3. 分批 + R1+R2（少于 2 批时跳过投票，单轮直出）
+    if len(campaigns) < batch_size * 2:
+        batches = _build_batches(summaries, batch_size, seed=1)
+        r1 = await _run_round(
+            reasoner, parent_asin, batches, ctx_dict, temperature, sem, 1,
+            task_type=task_type,
+        )
+        adjustments: list[CampaignAdjustmentItem] = []
+        for br in r1:
+            for item in br.items:
+                item.confidence = "medium"
+                adjustments.append(item)
+        return adjustments, {
+            "round1": _round_stats(r1), "round2": None, "round3": None,
+        }, summaries
+
+    r1_batches = _build_batches(summaries, batch_size, seed=1)
+    r2_batches = _build_batches(summaries, batch_size, seed=2)
+    r1_results, r2_results = await asyncio.gather(
+        _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, sem, 1, task_type=task_type),
+        _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, sem, 2, task_type=task_type),
+    )
+    rd: dict = {
+        "round1": _round_stats(r1_results),
+        "round2": _round_stats(r2_results),
+        "round3": {"ran": False},
+    }
+
+    # 4. 投票 + tiebreaker
+    votes, needs_tiebreaker = _vote(r1_results, r2_results)
+    if needs_tiebreaker:
+        tiebreaker_summaries = [s for s in summaries if s.get("campaign_key") in needs_tiebreaker]
+        if tiebreaker_summaries:
+            r3_results = await _run_round(
+                reasoner, parent_asin,
+                _build_batches(tiebreaker_summaries, batch_size, seed=3),
+                ctx_dict, temperature, sem, 3, task_type=task_type,
+            )
+            _resolve_tiebreaker(votes, r3_results)
+            rd["round3"] = {
+                "ran": True,
+                "disputed_count": len(needs_tiebreaker),
+                **_round_stats(r3_results),
+            }
+
+    adjustments = _merge_to_adjustments(votes, r1_results, r2_results)
+    return adjustments, rd, summaries
+
+
 # ── 分批与并发 ──────────────────────────────────────────────────────────────
 
 
@@ -352,6 +422,7 @@ async def _run_round(
     temperature: float,
     sem: asyncio.Semaphore,
     round_number: int,
+    task_type: str = "exact",
 ) -> list[CampaignBatchResult]:
     """执行一轮 LLM 调用 (所有 batch 并发，Semaphore 由调用方注入)。"""
 
@@ -364,6 +435,7 @@ async def _run_round(
                         campaign_summaries=batch,
                         strategy_context=strategy_context,
                         temperature=temperature,
+                        task_type=task_type,
                     ),
                     timeout=LLM_TIMEOUT,
                 )
@@ -576,96 +648,92 @@ def _merge_to_adjustments(
 # ── 懒加载 enrichment ────────────────────────────────────────────────────────
 
 
-async def _prefetch_enrichment(
+async def _prefetch_placement(
     fetcher: CampaignFetcher,
     parent_asin: str,
     days: int,
     summaries: list[dict],
     unit_lookup: dict[str, CampaignUnit],
 ) -> list[dict]:
-    """预取所有 placement (EXACT) + search_term (BROAD/PHRASE/AUTO) 数据，注入 summaries。
-
-    R1+R2 并行前调用，确保两轮都有完整数据。
-    """
+    """预取 EXACT 活动的 placement 数据并注入 summaries。"""
     enriched = [dict(s) for s in summaries]
-
-    placement_names: dict[str, str] = {}  # campaign_name → campaign_id
-    search_term_names: set[str] = set()
-
+    placement_names: dict[str, str] = {}
     for s in summaries:
-        mt = s.get("match_type", "")
-        name = s.get("campaign_name", "")
-        if not name:
-            continue
         cu = _find_campaign_unit(unit_lookup, s.get("campaign_key", ""))
-        if not cu:
-            continue
-        if mt == "EXACT" and cu.campaign_id:
+        if cu and cu.campaign_id:
             placement_names[cu.campaign_name] = cu.campaign_id
-        elif mt in ("BROAD", "PHRASE", "AUTO"):
-            search_term_names.add(cu.campaign_name)
 
-    if not placement_names and not search_term_names:
+    if not placement_names:
         return enriched
 
     from app.data.mcp_db_context import resolve_mcp_context_from_db
     try:
-        ctx = await asyncio.wait_for(
-            resolve_mcp_context_from_db(parent_asin), timeout=15,
-        )
+        ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
         shop_account = ctx.shop_account if ctx else ""
         shop_id = ctx.shop_id if ctx else 0
     except Exception:
-        shop_account = ""
-        shop_id = 0
+        shop_account = ""; shop_id = 0
 
     sd, ed = _make_date_window(days)
-    placement_raw: dict[str, dict] = {}
-    search_term_raw: dict[str, list] = {}
+    try:
+        result = await asyncio.wait_for(
+            fetcher.fetch_placement_for(placement_names, shop_account, shop_id,
+                                        start_date=sd, end_date=ed, days=days),
+            timeout=60,
+        )
+        for name in enriched:
+            s_name = name.get("campaign_name", "")
+            if s_name in (result or {}):
+                name["_placement_data"] = result[s_name]
+    except Exception as e:
+        logger.warning("placement 预取失败: %s", e)
 
-    async def _fetch_p():
-        if placement_names and shop_account:
-            try:
-                result = await asyncio.wait_for(
-                    fetcher.fetch_placement_for(
-                        placement_names, shop_account, shop_id,
-                        start_date=sd, end_date=ed, days=days,
-                    ),
-                    timeout=60,
-                )
-                for k, v in (result or {}).items():
-                    placement_raw[k] = v
-            except Exception as e:
-                logger.warning("placement 预取失败: %s", e)
+    logger.info("Campaign prefetch placement [%s]: %d/%d",
+                 parent_asin, len(result or {}), len(placement_names))
+    return enriched
 
-    async def _fetch_st():
-        if search_term_names and shop_account:
-            try:
-                result = await asyncio.wait_for(
-                    fetcher.fetch_search_terms_for(
-                        list(search_term_names), shop_account,
-                        start_date=sd, end_date=ed,
-                    ),
-                    timeout=60,
-                )
-                for k, v in (result or {}).items():
-                    search_term_raw[k] = v
-            except Exception as e:
-                logger.warning("search_term 预取失败: %s", e)
 
-    await asyncio.gather(_fetch_p(), _fetch_st())
+async def _prefetch_search_terms(
+    fetcher: CampaignFetcher,
+    parent_asin: str,
+    days: int,
+    summaries: list[dict],
+    unit_lookup: dict[str, CampaignUnit],
+) -> list[dict]:
+    """预取 BROAD/PHRASE/AUTO 活动的 search_term 数据并注入 summaries。"""
+    enriched = [dict(s) for s in summaries]
+    search_term_names: set[str] = set()
+    for s in summaries:
+        cu = _find_campaign_unit(unit_lookup, s.get("campaign_key", ""))
+        if cu:
+            search_term_names.add(cu.campaign_name)
 
-    for s in enriched:
-        name = s.get("campaign_name", "")
-        if name in placement_raw:
-            s["_placement_data"] = placement_raw[name]
-        if name in search_term_raw:
-            s["_search_term_data"] = search_term_raw[name]
+    if not search_term_names:
+        return enriched
 
-    logger.info("Campaign prefetch [%s]: placement=%d/%d search_term=%d/%d",
-                 parent_asin,
-                 len(placement_raw), len(placement_names),
-                 len(search_term_raw), len(search_term_names))
+    from app.data.mcp_db_context import resolve_mcp_context_from_db
+    try:
+        ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
+        shop_account = ctx.shop_account if ctx else ""
+    except Exception:
+        shop_account = ""
+
+    sd, ed = _make_date_window(days)
+    try:
+        result = await asyncio.wait_for(
+            fetcher.fetch_search_terms_for(list(search_term_names), shop_account,
+                                           start_date=sd, end_date=ed),
+            timeout=60,
+        )
+        for name in enriched:
+            s_name = name.get("campaign_name", "")
+            if s_name in (result or {}):
+                name["_search_term_data"] = result[s_name]
+    except Exception as e:
+        logger.warning("search_term 预取失败: %s", e)
+
+    logger.info("Campaign prefetch search_terms [%s]: %d/%d",
+                 parent_asin, len(result or {}), len(search_term_names))
     return enriched
 
 

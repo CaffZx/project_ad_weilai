@@ -163,7 +163,8 @@ def start_uvicorn(port: int, reload: bool, host: str, data_source: str | None, w
         print(f"    进程数: {workers}")
     if data_source:
         print(f"    数据源: {data_source}")
-    print(f"    主看板:        http://localhost:{port}/demo/ad-asisitant-agent.html")
+    print(f"    主看板:             http://localhost:{port}/demo/ad-asisitant-agent.html")
+    print(f"    Campaign 活动分析:   http://localhost:{port}/demo/campaign_test.html")
     print()
 
     try:

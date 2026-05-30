@@ -203,7 +203,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <button id="btnCampaignAnalyze" class="btn btn-primary btn-block" style="margin-top:10px;"
               onclick="runCampaignAnalysis()">运行活动分析</button>
       <div class="text-xs muted" style="margin-top:6px;">
-        全流程 2~5 分钟，期间可继续浏览。
+        全流程约 15~30 分钟（视父 ASIN 活动数量而定），期间可继续浏览。
       </div>
     </div>
 
@@ -253,7 +253,7 @@ const API = window.location.origin + '/api/v1/agent/ad-direction';
 const API_TIMEOUT = {
   default: 30,
   context: 60,        // 加载状态
-  campaign: 600,      // 活动分析最重，10 分钟
+  campaign: 1800,     // 活动分析最重，30 分钟
 };
 
 let asin = '';
@@ -345,8 +345,8 @@ async function loadContext() {
 }
 
 function renderContext(stratOpts, tactOpts) {
-  const sCurr = (stratOpts && stratOpts.current) || {};
-  const tCurr = (tactOpts && tactOpts.current) || {};
+  const sCurr = (stratOpts && stratOpts.current_selection) || {};
+  const tCurr = (tactOpts && tactOpts.current_selection) || {};
 
   const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v ${v ? '' : 'empty'}">${v || '未设置'}</span></div>`;
 
