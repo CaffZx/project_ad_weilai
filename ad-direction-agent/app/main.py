@@ -96,6 +96,10 @@ app.include_router(feedback_router, prefix=API_PREFIX, tags=["反馈"])
 from app.api.chat import router as chat_router
 app.include_router(chat_router, prefix=API_PREFIX, tags=["AI对话"])
 
+# Campaign 活动分析（调试）
+from app.api.campaign import router as campaign_router
+app.include_router(campaign_router, prefix=API_PREFIX, tags=["Campaign 活动分析"])
+
 # 版本公告
 from app.api.announcements import router as announce_router
 app.include_router(announce_router, prefix=API_PREFIX, tags=["公告"])
