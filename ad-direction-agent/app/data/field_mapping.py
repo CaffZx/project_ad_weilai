@@ -85,7 +85,7 @@ DEFAULT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "product_stage": ("product_stage",),
     "season_stage": ("season_stage",),
     "ad_purpose": ("ad_purpose",),
-    "keyword_type": ("keyword_type",),
+    "target_keyword_strategy": ("target_keyword_strategy",),
 
     # === 中文列名（asin_test_data.xlsx 等） ===
     "父asin": ("asin",),

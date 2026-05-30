@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Campaign 活动分析 — 调试</title>
+<style>
+:root {
+  --bg: #F9FAFB;
+  --card-bg: #FFFFFF;
+  --border: #E5E7EB;
+  --foreground: #111827;
+  --muted-fg: #6B7280;
+  --primary: #4F46E5;
+  --primary-hover: #4338CA;
+  --primary-light: #EEF2FF;
+  --radius-card: 8px;
+  --transition-ctl: .15s ease;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg); color: var(--foreground); font-size: 13px; line-height: 1.5;
+}
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px; background: rgba(255,255,255,0.95);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
+}
+.topbar-title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.topbar-badge { font-size: 10px; background: var(--primary-light); color: var(--primary); padding: 2px 8px; border-radius: 9999px; font-weight: 600; }
+.topbar-status { font-size: 12px; color: var(--muted-fg); display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: #9CA3AF; }
+.status-dot.online { background: #22C55E; }
+
+.app-layout { display: flex; height: calc(100vh - 46px); }
+.sidebar {
+  width: 360px; min-width: 360px; overflow-y: auto;
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  border-right: 1px solid var(--border);
+}
+.main-area { flex: 1; overflow-y: auto; padding: 16px; }
+
+.card {
+  background: var(--card-bg); border-radius: var(--radius-card);
+  border: 1px solid var(--border); padding: 12px 14px;
+}
+.card-title { font-size: 12px; font-weight: 600; color: var(--muted-fg); margin-bottom: 8px; }
+
+label { display: block; font-size: 11px; color: var(--muted-fg); margin-bottom: 4px; }
+input, select {
+  width: 100%; padding: 6px 8px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 6px; background: white;
+}
+input:focus, select:focus { outline: none; border-color: var(--primary); }
+
+.btn {
+  display: inline-block; padding: 7px 14px; font-size: 12px; font-weight: 500;
+  border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+  transition: all var(--transition-ctl); text-align: center;
+}
+.btn-primary { background: var(--primary); color: white; }
+.btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+.btn-primary:disabled { background: #9CA3AF; cursor: not-allowed; }
+.btn-ghost { background: transparent; color: var(--muted-fg); border-color: var(--border); }
+.btn-ghost:hover { background: #F3F4F6; }
+.btn-block { display: block; width: 100%; }
+
+.kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 4px 0; }
+.kv .k { color: var(--muted-fg); }
+.kv .v { font-weight: 500; }
+.kv .v.empty { color: #9CA3AF; font-style: italic; font-weight: 400; }
+
+.muted { color: var(--muted-fg); }
+.text-xs { font-size: 11px; }
+.text-sm { font-size: 12px; }
+.hidden { display: none !important; }
+
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid var(--border); border-top-color: var(--primary);
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Campaign 分析专属 ─── */
+.disclaimer {
+  font-size: 11px; color: #78350F; padding: 8px 12px;
+  background: #FEF3C7; border-left: 3px solid #F59E0B; margin-bottom: 12px;
+  border-radius: 0 4px 4px 0;
+}
+.campaign-summary {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  margin-bottom: 8px;
+}
+.campaign-summary .stat { text-align: center; }
+.campaign-summary .num  { font-size: 22px; font-weight: 700; }
+.campaign-summary .lab  { font-size: 11px; color: var(--muted-fg); margin-top: 2px; }
+
+#campaignFilters { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; padding: 8px 12px; }
+.filter-btn {
+  font-size: 12px; padding: 4px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: white; cursor: pointer;
+}
+.filter-btn:hover { background: #F3F4F6; }
+.filter-btn.active { background: var(--primary); color: white; border-color: var(--primary); }
+#campaignSearch {
+  flex: 1; max-width: 280px; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+
+.campaign-card {
+  display: flex; gap: 12px;
+  border-left: 4px solid var(--border);
+  padding: 12px 14px; margin-bottom: 8px;
+  background: var(--card-bg); border-radius: var(--radius-card);
+  border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
+}
+.campaign-card.eliminate { border-left-color: #DC2626; }
+.campaign-card.adjust    { border-left-color: #F59E0B; }
+.campaign-card.keep      { border-left-color: #16A34A; }
+
+.campaign-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.campaign-card .meta { font-size: 12px; color: var(--muted-fg); margin-top: 4px; }
+.campaign-card .values {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px;
+  margin-top: 8px; font-size: 13px;
+}
+.campaign-card .reason {
+  font-size: 12px; line-height: 1.55; color: var(--foreground);
+  margin-top: 8px; white-space: pre-wrap;
+}
+.campaign-card .detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.campaign-card .detail.hidden { display: none; }
+.campaign-card .badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600;
+}
+.badge-eliminate { background: #FEE2E2; color: #991B1B; }
+.badge-adjust    { background: #FEF3C7; color: #92400E; }
+.badge-keep      { background: #DCFCE7; color: #166534; }
+.badge-high      { background: #DBEAFE; color: #1E40AF; }
+.badge-medium    { background: #E5E7EB; color: #374151; }
+.badge-low       { background: #FCE7F3; color: #9D174D; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-title">
+    Campaign 活动分析 <span class="topbar-badge">DEBUG</span>
+  </div>
+  <div class="topbar-status">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">检测中…</span>
+  </div>
+</div>
+
+<div class="app-layout">
+  <!-- ═══════════════ 左侧 ═══════════════ -->
+  <aside class="sidebar">
+
+    <!-- ASIN 输入 -->
+    <div class="card">
+      <div class="card-title">ASIN 输入</div>
+      <label>父 ASIN</label>
+      <input id="asinInput" placeholder="如 B0B7S3PWWB" value="B0B7S3PWWB">
+      <div style="display:flex; gap:8px; margin-top:8px;">
+        <div style="flex:1;">
+          <label>窗口</label>
+          <select id="daysSelect">
+            <option value="7" selected>7 天</option>
+            <option value="14">14 天</option>
+            <option value="30">30 天</option>
+          </select>
+        </div>
+        <div style="flex:1; display:flex; align-items:flex-end;">
+          <button class="btn btn-primary btn-block" onclick="loadContext()">加载状态</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 当前状态（只读，来自共享后端）-->
+    <div class="card" id="cardContext">
+      <div class="card-title">当前状态（只读）</div>
+      <div id="contextBody">
+        <div class="muted text-xs">请先「加载状态」</div>
+      </div>
+      <div class="text-xs muted" style="margin-top:8px; border-top:1px dashed var(--border); padding-top:6px;">
+        如需修改战略/策略/目标 ACOS，请去主应用
+        <a href="/demo/ad-asisitant-agent.html" target="_blank" style="color:var(--primary);">ad-asisitant-agent.html</a>
+        设置；本页只读取并展示。
+      </div>
+    </div>
+
+    <!-- 活动分析触发 -->
+    <div class="card">
+      <div class="card-title">★ 活动分析触发</div>
+      <label>LLM 温度</label>
+      <select id="campaignTemp">
+        <option value="0">0 (确定性)</option>
+        <option value="0.3" selected>0.3 (默认)</option>
+        <option value="0.7">0.7 (发散)</option>
+      </select>
+      <button id="btnCampaignAnalyze" class="btn btn-primary btn-block" style="margin-top:10px;"
+              onclick="runCampaignAnalysis()">运行活动分析</button>
+      <div class="text-xs muted" style="margin-top:6px;">
+        全流程 2~5 分钟，期间可继续浏览。
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ═══════════════ 右侧主面板 ═══════════════ -->
+  <main class="main-area">
+
+    <div class="disclaimer">
+      ⚠ 本页展示为<strong>后处理（合规校验 + 上限截断 + 淘汰固定值修正）后的结果</strong>。要查 LLM 原始输出做 KB 遵循度评估，请看 server.log 的 raw_llm_output 落盘（不在此页）。
+    </div>
+
+    <div class="card hidden" id="campaignSummary">
+      <div class="card-title">分析概览</div>
+      <div class="campaign-summary">
+        <div class="stat"><div class="num" id="sumTotal">-</div><div class="lab">活动总数</div></div>
+        <div class="stat"><div class="num" id="sumElim" style="color:#DC2626;">-</div><div class="lab">淘汰</div></div>
+        <div class="stat"><div class="num" id="sumAdj" style="color:#F59E0B;">-</div><div class="lab">调整</div></div>
+        <div class="stat"><div class="num" id="sumKeep" style="color:#16A34A;">-</div><div class="lab">保持</div></div>
+      </div>
+      <div class="text-sm muted" id="sumMeta" style="margin-top:8px;"></div>
+      <div class="text-sm" style="color:#DC2626; margin-top:6px; cursor:help;" id="sumWarnings"></div>
+    </div>
+
+    <div class="card hidden" id="campaignFilters">
+      <button class="filter-btn active" data-filter="all">全部</button>
+      <button class="filter-btn" data-filter="eliminate">淘汰</button>
+      <button class="filter-btn" data-filter="adjust">调整</button>
+      <button class="filter-btn" data-filter="keep">保持</button>
+      <input id="campaignSearch" placeholder="搜索活动名 / 关键词">
+    </div>
+
+    <div id="campaignList"></div>
+
+    <div id="campaignLoader" class="hidden" style="text-align:center; padding:60px 20px;">
+      <span class="spinner"></span>
+      <div style="margin-top:12px; color:var(--muted-fg);">正在分析广告活动，预计 2~5 分钟…</div>
+      <div class="text-xs muted" style="margin-top:6px;">后端正在拉数据 → 分批 → R1+R2 投票 → sanity_check</div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ═══════════════ 全局 ═══════════════
+const API = window.location.origin + '/api/v1/agent/ad-direction';
+const API_TIMEOUT = {
+  default: 30,
+  context: 60,        // 加载状态
+  campaign: 600,      // 活动分析最重，10 分钟
+};
+
+let asin = '';
+let days = 7;
+let _campaignAdjustments = [];
+
+// ═══════════════ 工具 ═══════════════
+function $(id) { return document.getElementById(id); }
+function show(id) { $(id).classList.remove('hidden'); }
+function hide(id) { $(id).classList.add('hidden'); }
+function escapeHTML(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+function fmtMoney(v) {
+  if (v == null) return '—';
+  return Number(v).toFixed(2);
+}
+function fmtChange(cur, prop) {
+  if (prop == null) return '<span class="muted">— (保持)</span>';
+  if (cur == null) return '$' + fmtMoney(prop);
+  const d = prop - cur;
+  if (Math.abs(d) < 0.005) return '$' + fmtMoney(prop) + ' <span class="text-xs muted">(持平)</span>';
+  const sign = d > 0 ? '+' : '';
+  const color = d > 0 ? '#16A34A' : '#DC2626';
+  return `$${fmtMoney(prop)} <span style="color:${color}; font-size:11px;">(${sign}$${d.toFixed(2)})</span>`;
+}
+
+async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST') {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout * 1000);
+  try {
+    const opts = { method, headers: {'Content-Type': 'application/json'}, signal: ctrl.signal };
+    if (body != null) opts.body = JSON.stringify(body);
+    const r = await fetch(`${API}${path}`, opts);
+    if (!r.ok) {
+      const txt = await r.text();
+      throw new Error(`HTTP ${r.status}: ${txt.slice(0, 300)}`);
+    }
+    return await r.json();
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error(`请求超时（${timeout} 秒）`);
+    }
+    if (e instanceof TypeError) {
+      throw new Error('无法连接后端：请通过 http://<host>/demo/campaign_test.html 访问（不要 file://）');
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ═══════════════ 服务检测 ═══════════════
+(async () => {
+  try {
+    const r = await fetch(window.location.origin + '/health', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      $('statusDot').classList.add('online');
+      $('statusText').textContent = '后端在线';
+    } else {
+      $('statusText').textContent = '后端异常';
+    }
+  } catch {
+    $('statusText').textContent = '无法连接';
+  }
+})();
+
+// ═══════════════ 加载状态（只读）═══════════════
+async function loadContext() {
+  asin = ($('asinInput').value || '').trim().toUpperCase();
+  days = parseInt($('daysSelect').value);
+  if (!asin) { alert('请输入 ASIN'); return; }
+
+  $('contextBody').innerHTML = '<div class="muted text-xs"><span class="spinner"></span> 加载中…</div>';
+
+  try {
+    // 并行拉取战略/策略/目标 ACOS（用现有 wizard/state 端点；找不到时优雅降级）
+    const [stratOpts, tactOpts] = await Promise.all([
+      callAPI('/strategy/options', { asin, days }, API_TIMEOUT.context).catch(() => null),
+      callAPI('/tactics/options',  { asin, days }, API_TIMEOUT.context).catch(() => null),
+    ]);
+    renderContext(stratOpts, tactOpts);
+  } catch (e) {
+    $('contextBody').innerHTML = `<div class="text-xs" style="color:#DC2626;">加载失败: ${escapeHTML(e.message)}</div>`;
+  }
+}
+
+function renderContext(stratOpts, tactOpts) {
+  const sCurr = (stratOpts && stratOpts.current) || {};
+  const tCurr = (tactOpts && tactOpts.current) || {};
+
+  const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v ${v ? '' : 'empty'}">${v || '未设置'}</span></div>`;
+
+  const purposes = (tCurr.ad_purposes || []).join('、') || '';
+  const ktypes = (tCurr.target_keyword_strategy || []).join('、') || '';
+
+  $('contextBody').innerHTML = [
+    kv('产品定位', sCurr.product_level),
+    kv('产品阶段', sCurr.product_stage),
+    kv('淡旺季', sCurr.season_stage),
+    kv('广告目的', purposes),
+    kv('关键词类型', ktypes),
+  ].join('');
+}
+
+// ═══════════════ 活动分析 ═══════════════
+async function runCampaignAnalysis() {
+  if (!asin) {
+    asin = ($('asinInput').value || '').trim().toUpperCase();
+    days = parseInt($('daysSelect').value);
+  }
+  if (!asin) { alert('请先输入 ASIN'); return; }
+
+  const temp = parseFloat($('campaignTemp').value);
+
+  $('btnCampaignAnalyze').disabled = true;
+  show('campaignLoader');
+  hide('campaignSummary'); hide('campaignFilters');
+  $('campaignList').innerHTML = '';
+
+  try {
+    const result = await callAPI(
+      '/campaign/analyze',
+      { asin, days, temperature: temp },
+      API_TIMEOUT.campaign,
+    );
+    renderResult(result);
+  } catch (e) {
+    $('campaignList').innerHTML =
+      `<div class="card" style="color:#DC2626; padding:20px;">分析失败：${escapeHTML(e.message)}</div>`;
+  } finally {
+    hide('campaignLoader');
+    $('btnCampaignAnalyze').disabled = false;
+  }
+}
+
+function renderResult(r) {
+  _campaignAdjustments = r.adjustments || [];
+
+  const s = r.summary || {};
+  $('sumTotal').textContent = r.total_campaigns ?? '-';
+  $('sumElim').textContent  = s.to_eliminate ?? 0;
+  $('sumAdj').textContent   = s.to_adjust ?? 0;
+  $('sumKeep').textContent  = s.to_keep ?? 0;
+
+  const conf = `高 ${s.confidence_high||0} / 中 ${s.confidence_medium||0} / 低 ${s.confidence_low||0}`;
+  const budget = s.estimated_budget_impact ?? 0;
+  const budgetStr = budget >= 0 ? `+$${budget.toFixed(2)}` : `-$${Math.abs(budget).toFixed(2)}`;
+  const sanity = r.sanity_check_passed ? '✓' : '✗';
+  $('sumMeta').textContent =
+    `置信: ${conf}  |  预算影响: ${budgetStr}  |  Sanity: ${sanity}  |  完成 ${r.llm_rounds_completed||0} 轮`;
+
+  const warns = r.warnings || [];
+  if (warns.length) {
+    $('sumWarnings').textContent = `⚠ ${warns.length} 条警告（鼠标悬停查看全部）`;
+    $('sumWarnings').title = warns.join('\n');
+  } else {
+    $('sumWarnings').textContent = '';
+  }
+
+  show('campaignSummary');
+  show('campaignFilters');
+  bindFilterEvents();
+  applyFilters();
+}
+
+function bindFilterEvents() {
+  document.querySelectorAll('#campaignFilters .filter-btn').forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll('#campaignFilters .filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      applyFilters();
+    };
+  });
+  $('campaignSearch').oninput = applyFilters;
+}
+
+function applyFilters() {
+  const filter = document.querySelector('#campaignFilters .filter-btn.active').dataset.filter;
+  const q = ($('campaignSearch').value || '').toLowerCase().trim();
+
+  let items = _campaignAdjustments;
+  if (filter === 'eliminate') items = items.filter(a => a.action === 'eliminate_to_low_bid_pool');
+  else if (filter === 'adjust') items = items.filter(a => a.action && a.action.startsWith('adjust'));
+  else if (filter === 'keep') items = items.filter(a => a.action === 'keep');
+
+  if (q) {
+    items = items.filter(a =>
+      (a.campaign_name || '').toLowerCase().includes(q) ||
+      (a.keyword_text || '').toLowerCase().includes(q)
+    );
+  }
+
+  renderCards(items);
+}
+
+function actionLabel(a) {
+  return ({
+    eliminate_to_low_bid_pool: '淘汰',
+    adjust_bid: '调出价',
+    adjust_budget: '调预算',
+    adjust_placement: '调广告位',
+    keep: '保持',
+  }[a] || a || '?');
+}
+
+function renderCards(items) {
+  if (!items.length) {
+    $('campaignList').innerHTML =
+      '<div class="card" style="text-align:center; color:var(--muted-fg); padding:30px;">无匹配活动</div>';
+    return;
+  }
+  $('campaignList').innerHTML = items.map(adj => {
+    const klass = adj.action === 'eliminate_to_low_bid_pool' ? 'eliminate'
+                 : (adj.action || '').startsWith('adjust') ? 'adjust' : 'keep';
+    const confKlass = adj.confidence === 'high' ? 'high'
+                    : adj.confidence === 'low' ? 'low' : 'medium';
+
+    const fullReason = adj.reason || '';
+    const shortReason = fullReason.length > 250 ? fullReason.slice(0, 250) + '…' : fullReason;
+
+    return `
+      <div class="campaign-card ${klass}">
+        <div style="flex:1; min-width:0;">
+          <div class="head">
+            <span class="badge badge-${klass}">${actionLabel(adj.action)}</span>
+            <span class="badge badge-${confKlass}">${escapeHTML(adj.confidence || 'medium')}</span>
+            <strong style="word-break:break-all;">${escapeHTML(adj.campaign_name || '?')}</strong>
+          </div>
+          <div class="meta">
+            × ${escapeHTML(adj.child_asin || '?')}
+            | ${escapeHTML(adj.match_type || '?')}
+            | 关键词: ${escapeHTML(adj.keyword_text || '?')}
+            ${adj.keyword_class ? '| ' + escapeHTML(adj.keyword_class) : ''}
+            ${adj.is_core ? '| <span style="color:#DC2626;">⚠ 核心词</span>' : ''}
+            ${adj.triggered_rule ? '| 触发规则: <code>' + escapeHTML(adj.triggered_rule) + '</code>' : ''}
+          </div>
+          <div class="values">
+            <div>Bid: $${fmtMoney(adj.current_bid)} → ${fmtChange(adj.current_bid, adj.proposed_bid)}</div>
+            <div>Budget: $${fmtMoney(adj.current_budget)} → ${fmtChange(adj.current_budget, adj.proposed_budget)}</div>
+          </div>
+          <div class="reason">${escapeHTML(shortReason)}</div>
+          <div class="detail hidden">
+            ${renderEvidence(adj)}
+            ${renderPlacements(adj)}
+            ${renderNegKeywords(adj)}
+            ${renderVotes(adj)}
+            ${fullReason.length > 250 ? `<div class="text-xs" style="margin-top:8px;"><strong>完整理由:</strong><div class="reason" style="margin-top:4px;">${escapeHTML(fullReason)}</div></div>` : ''}
+            <div class="text-xs muted" style="margin-top:8px;">
+              审核等级: ${escapeHTML(adj.review_level || 'MANUAL_REVIEW')}
+            </div>
+          </div>
+          <button class="btn btn-ghost" style="font-size:11px; padding:2px 10px; margin-top:6px;"
+                  onclick="toggleDetail(this)">展开详情</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderEvidence(adj) {
+  const ev = adj.evidence || [];
+  if (!ev.length) return '';
+  return `<div class="text-sm" style="margin-top:6px;">
+    <strong>证据:</strong>
+    <ul style="margin:4px 0; padding-left:18px;">
+      ${ev.map(e => `<li>${escapeHTML(e)}</li>`).join('')}
+    </ul>
+  </div>`;
+}
+
+function renderPlacements(adj) {
+  const pl = adj.placement_adjustments || [];
+  if (!pl.length) return '';
+  return `<div class="text-sm" style="margin-top:6px;">
+    <strong>广告位调整:</strong>
+    <div style="margin-left:12px;">
+    ${pl.map(p => `<div>
+      ${escapeHTML(p.placement || '?')}: ${p.current_pct ?? 0}% → ${p.proposed_pct ?? 0}%
+      ${p.action ? ' <span class="muted">(' + escapeHTML(p.action) + ')</span>' : ''}
+      ${p.evidence ? ' — <span class="text-xs muted">' + escapeHTML(p.evidence) + '</span>' : ''}
+    </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function renderNegKeywords(adj) {
+  const nk = adj.negative_keywords || [];
+  if (!nk.length) return '';
+  return `<div class="text-sm" style="margin-top:6px;">
+    <strong>否定词建议:</strong>
+    <div style="margin-left:12px;">
+    ${nk.map(n => `<div>
+      ${escapeHTML(n.keyword || '?')}
+      <span class="text-xs muted">
+        (花费$${n.spend_7d ?? n.cost ?? '?'}, 点击${n.clicks_7d ?? n.clicks ?? '?'}, 订单${n.orders_7d ?? n.orders ?? 0})
+      </span>
+      ${n.reason ? ' — ' + escapeHTML(n.reason) : ''}
+    </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function renderVotes(adj) {
+  const v = adj.round_votes || {};
+  if (!Object.keys(v).length) return '';
+  return `<div class="text-xs muted" style="margin-top:6px;">
+    投票: ${Object.entries(v).map(([k, val]) => `${k}=<code>${escapeHTML(String(val))}</code>`).join(' &nbsp;|&nbsp; ')}
+  </div>`;
+}
+
+function toggleDetail(btn) {
+  const detail = btn.previousElementSibling;
+  detail.classList.toggle('hidden');
+  btn.textContent = detail.classList.contains('hidden') ? '展开详情' : '收起详情';
+}
+</script>
+</body>
+</html>

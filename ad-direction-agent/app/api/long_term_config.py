@@ -26,7 +26,7 @@ async def get_config(
         product_stage=config.get("product_stage"),
         season_stage=config.get("season_stage"),
         ad_purposes=config.get("ad_purposes", []),
-        keyword_types=config.get("keyword_types", []),
+        target_keyword_strategy=config.get("target_keyword_strategy", []),
         last_modified=config.get("last_modified", ""),
     )
 
@@ -47,8 +47,8 @@ async def update_config(
         updates["season_stage"] = req.season_stage
     if req.ad_purposes is not None:
         updates["ad_purposes"] = req.ad_purposes
-    if req.keyword_types is not None:
-        updates["keyword_types"] = req.keyword_types
+    if req.target_keyword_strategy is not None:
+        updates["target_keyword_strategy"] = req.target_keyword_strategy
 
     sm.set_long_term_config(asin, updates)
     config = sm.get_long_term_config(asin)
@@ -59,6 +59,6 @@ async def update_config(
         product_stage=config.get("product_stage"),
         season_stage=config.get("season_stage"),
         ad_purposes=config.get("ad_purposes", []),
-        keyword_types=config.get("keyword_types", []),
+        target_keyword_strategy=config.get("target_keyword_strategy", []),
         last_modified=config.get("last_modified", ""),
     )

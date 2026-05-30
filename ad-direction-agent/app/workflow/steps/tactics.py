@@ -132,8 +132,8 @@ async def _run_purpose_and_cache(
         raise ValueError(rec["error"])
     recommendations = {
         "ad_purposes": rec.get("ad_purposes", []),
-        "keyword_types": rec.get("keyword_types", []),
-    } if not tactics_saved else {"ad_purposes": [], "keyword_types": []}
+        "target_keyword_strategy": rec.get("target_keyword_strategy", []),
+    } if not tactics_saved else {"ad_purposes": [], "target_keyword_strategy": []}
     reasoning = rec.get("reason", "") if not tactics_saved else ""
     ai_kw_map = {a.get("word", ""): a for a in rec.get("keyword_analysis", [])}
     merged_kws = []
@@ -146,7 +146,7 @@ async def _run_purpose_and_cache(
             "rank_change": kw.rank_change_14d or 0,
             "rank_change_14d": kw.rank_change_14d or 0,
             "rank_change_7d": kw.rank_change_7d,
-            "strategy_type": ai.get("strategy_type", ""),
+            "keyword_class": ai.get("keyword_class", ""),
             "action": ai.get("action", ""),
         })
     if isinstance(wf.get("keyword_analysis"), dict):
@@ -171,7 +171,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
     """
     long_term = ctx.state.get_long_term_config(asin)
     strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
-    tactics_saved = all(k in long_term for k in ("ad_purposes", "keyword_types"))
+    tactics_saved = all(k in long_term for k in ("ad_purposes", "target_keyword_strategy"))
 
     strategy_context = StrategyConfirmRequest(
         asin=asin,
@@ -183,7 +183,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
     layer_config = settings.layer_options_config or {}
     tactics_cfg = layer_config.get("tactics", {})
 
-    recommendations = {"ad_purposes": [], "keyword_types": []}
+    recommendations = {"ad_purposes": [], "target_keyword_strategy": []}
     reasoning = ""
     data = None
     scoring_error = ""  # purpose-agent 失败时记录，透传前端用于提示重试
@@ -240,7 +240,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                         ctx.state.set_workflow_state(asin, wf)
                     recommendations = {
                         "ad_purposes": long_term.get("ad_purposes", []),
-                        "keyword_types": long_term.get("keyword_types", []),
+                        "target_keyword_strategy": long_term.get("target_keyword_strategy", []),
                     }
             else:
                 ai_kw_map = {a.get("word", ""): a for a in kw_cache}
@@ -254,7 +254,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                         "rank_change": kw.rank_change_14d or 0,
                         "rank_change_14d": kw.rank_change_14d or 0,
                         "rank_change_7d": kw.rank_change_7d,
-                        "strategy_type": ai.get("strategy_type", ""),
+                        "keyword_class": ai.get("keyword_class", ""),
                         "action": ai.get("action", ""),
                     })
                 if isinstance(wf.get("keyword_analysis"), dict):
@@ -266,7 +266,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                 rec_from_scores = _derive_ad_purposes_from_scores(wf, days)
                 recommendations = {
                     "ad_purposes": rec_from_scores if rec_from_scores else long_term.get("ad_purposes", []),
-                    "keyword_types": long_term.get("keyword_types", []),
+                    "target_keyword_strategy": long_term.get("target_keyword_strategy", []),
                 }
         else:
             try:
@@ -286,7 +286,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                             "rank_change": kw.rank_change_14d or 0,
                             "rank_change_14d": kw.rank_change_14d or 0,
                             "rank_change_7d": kw.rank_change_7d,
-                            "strategy_type": "", "action": "",
+                            "keyword_class": "", "action": "",
                         })
                     wf["keyword_analysis"] = {str(days): fallback_kws}
                     # 写兜底评分，防止前端评分卡片静默空白
@@ -298,7 +298,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
                     ctx.state.set_workflow_state(asin, wf)
 
     dimensions = []
-    for dim_key in ("ad_purposes", "keyword_types"):
+    for dim_key in ("ad_purposes", "target_keyword_strategy"):
         dim_cfg = tactics_cfg.get(dim_key, {})
         rec_ids = recommendations.get(dim_key, [])
         dimensions.append(TacticsDimension(
@@ -335,7 +335,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
         strategy_context=strategy_context,
         current_selection={
             "ad_purposes": current.get("ad_purposes"),
-            "keyword_types": current.get("keyword_types"),
+            "target_keyword_strategy": current.get("target_keyword_strategy"),
         } if current else None,
         target_scores=ts,
         keyword_analysis=ka,
@@ -423,7 +423,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
     reasoning = rec.get("reason", "")
 
     dimensions = []
-    for dim_key in ("ad_purposes", "keyword_types"):
+    for dim_key in ("ad_purposes", "target_keyword_strategy"):
         dim_cfg = tactics_cfg.get(dim_key, {})
         rec_ids = rec.get(dim_key, [])
         dimensions.append({
@@ -445,7 +445,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
             "rank_change": kw.rank_change_14d or 0,
             "rank_change_14d": kw.rank_change_14d or 0,
             "rank_change_7d": kw.rank_change_7d,
-            "strategy_type": ai.get("strategy_type", ""),
+            "keyword_class": ai.get("keyword_class", ""),
             "action": ai.get("action", ""),
         })
     wf = ctx.state.get_workflow_state(asin)
@@ -471,7 +471,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
 async def run_confirm_tactics(ctx: WorkflowContext, req: TacticsConfirmRequest) -> TacticsConfirmResponse:
     config = {
         "ad_purposes": [p.value for p in req.ad_purposes],
-        "keyword_types": [k.value for k in req.keyword_types],
+        "target_keyword_strategy": [k.value for k in req.target_keyword_strategy],
     }
     ctx.state.set_long_term_config(req.asin, config)
     ctx.state.advance_layer(req.asin, "diagnosis")

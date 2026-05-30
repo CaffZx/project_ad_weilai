@@ -65,7 +65,7 @@ def run_get_wizard_state(ctx: WorkflowContext, asin: str) -> WizardStateResponse
         tactics = TacticsConfirmRequest(
             asin=asin,
             ad_purposes=lt.get("ad_purposes", []),
-            keyword_types=lt.get("keyword_types", []),
+            target_keyword_strategy=lt.get("target_keyword_strategy", []),
         )
 
     execution = None

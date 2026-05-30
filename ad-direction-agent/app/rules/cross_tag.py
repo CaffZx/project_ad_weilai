@@ -55,7 +55,7 @@ async def harvest_stage_ad_purpose(data: ASINData, thresholds: dict) -> Validati
     description="Broad 大词需要产品阶段不是测试阶段",
 )
 async def broad_keyword_stage_check(data: ASINData, thresholds: dict) -> ValidationItem | None:
-    if data.keyword_type != "Broad":
+    if data.target_keyword_strategy != "Broad":
         return None
 
     disallowed = thresholds.get("cross_tag", {}).get("broad_keyword_stage", {}).get("disallowed_stages", ["测试期", "起步期"])
@@ -114,13 +114,13 @@ async def peak_season_brand_defense(data: ASINData, thresholds: dict) -> Validat
     if data.season_stage not in ("大旺季", "旺季准备"):
         return None
 
-    keyword_type = data.keyword_type or ""
-    if "品牌词" not in keyword_type:
+    target_keyword_strategy = data.target_keyword_strategy or ""
+    if "品牌词" not in target_keyword_strategy:
         return ValidationItem(
             rule_id="CROSS-7",
             level="suggest_optimize",
             message=f"当前处于{data.season_stage}，建议增加「品牌词」防守，防止竞品截流自有流量",
-            evidence=Evidence(current_value=keyword_type, threshold="品牌词"),
+            evidence=Evidence(current_value=target_keyword_strategy, threshold="品牌词"),
             suggestion="增加品牌词防守",
         )
     return None

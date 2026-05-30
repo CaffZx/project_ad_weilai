@@ -202,7 +202,7 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
     } if long_term else {}
     tactics = {
         "ad_purposes": long_term.get("ad_purposes", []),
-        "keyword_types": long_term.get("keyword_types", []),
+        "target_keyword_strategy": long_term.get("target_keyword_strategy", []),
     } if long_term else {}
 
     # 构建数据摘要

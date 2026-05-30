@@ -14,6 +14,7 @@ from app.core.metrics_ops_language import format_keyword_acos_change, humanize_o
 from app.core.validation_ops import format_validation_item_ops
 from app.llm.client import DeepSeekClient
 from app.llm.kb_loader import kb
+from app.models.campaign import CampaignUnit
 
 # 运营正文禁止出现的规则编号 / 内部等级词
 _RULE_ID_PATTERN = re.compile(
@@ -234,6 +235,83 @@ _P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于�
 
 def _build_p3_system_prompt() -> str:
     return _P3_TASK_PROMPT.replace("{kb_content}", kb.build("p3_recommend"))
+
+
+_CAMPAIGN_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和用户消息中的活动数据，逐活动分析并给出调整/淘汰建议。
+
+重要：所有输出内容必须使用中文（理由、证据、决策路径），JSON key 使用英文。
+
+## 业务知识（必须严格遵循）
+{kb_content}
+
+## 策略上下文解读
+用户消息中的「策略上下文」包含该 ASIN 的产品阶段、广告目的、目标 ACOS、利润率、评分、退货率、库存天数、自然单占比等信息。这些是活动分析的"背景"，不需要在每个活动中重复输出。
+
+## 活动列表
+用户消息中的「活动列表」包含每个活动的：活动名、子ASIN、关键词、匹配类型、当前 Bid、当前 Budget、上线天数(注：-1 表示未知，勿当作新活动)、7日性能指标。
+
+## 输出格式
+严格按照以下 JSON 格式输出（不要包含 markdown 代码块标记）：
+
+{{
+  "campaign_adjustments": [
+    {{
+      "campaign_name": "广告活动名称",
+      "campaign_key": "广告活动名 × 子ASIN（唯一标识）",
+      "child_asin": "B0XXXXXX",
+      "keyword_text": "关键词",
+      "match_type": "EXACT",
+      "action": "eliminate_to_low_bid_pool",
+      "direction": {{"bid": "down", "budget": "down"}},
+      "triggered_rule": "NO_CVR_HIGH_SPEND",
+      "reason": "\\n\\n".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议", "(4) 后续关注"]),
+      "confidence": "high",
+      "current_budget": 15.0,
+      "proposed_budget": 1.0,
+      "current_bid": 0.85,
+      "proposed_bid": 0.20,
+      "elimination_values": {{"budget": 1.0, "bid": 0.20}},
+      "placement_adjustments": [
+        {{"placement": "头部", "current_pct": 20, "proposed_pct": 10, "action": "下调", "evidence": "..."}}
+      ],
+      "negative_keywords": [
+        {{"keyword": "...", "clicks_7d": 12, "orders_7d": 0, "reason": "无转化高点击"}}
+      ],
+      "evidence": [
+        "7天花费$18.5",
+        "7天订单0，CVR=0%",
+        "自然位支撑：否"
+      ],
+      "review_level": "MANUAL_REVIEW"
+    }}
+  ],
+  "batch_summary": {{
+    "total_analyzed": 6,
+    "to_eliminate": 1,
+    "to_adjust": 3,
+    "to_keep": 2,
+    "overall_notes": "本批次中..."
+  }}
+}}
+
+## 输出约束
+
+### 必填结构字段
+- **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
+- proposed_budget / proposed_bid 必须填写具体数值，**禁止留 null/None/空**
+- EXACT 活动必须输出 placement_adjustments（三个广告位全部列出，无数据时维持 0%）
+- BROAD/PHRASE/AUTO 活动必须判断 negative_keywords（无 neg 词时输出空数组）
+
+### reasoning 文案禁则
+- 禁止泄露内部约束术语（Bid步长/决策矩阵/规则编号/confidence等级）
+- reason 中勿出现 NO_CVR_HIGH_SPEND / ACOS_UNRECOVERABLE / KEYWORD_UPGRADED 等触发码标记
+- reason 使用三部分结构：(1) 现状诊断 → (2) 原因分析 → (3) 调整建议
+- 理由须基于数据给出，不使用「建议观察」「可考虑」等模糊表述
+"""
+
+
+def _build_campaign_system_prompt() -> str:
+    return _CAMPAIGN_TASK_PROMPT.replace("{kb_content}", kb.build("campaign_adjustment"))
 
 
 class LLMReasoner:
@@ -666,7 +744,7 @@ class LLMReasoner:
         if tactics:
             parts.append("## 策略层（人工选择）")
             parts.append(f"  - 广告目的: {tactics.get('ad_purposes', [])}")
-            parts.append(f"  - 关键词类型: {tactics.get('keyword_types', [])}")
+            parts.append(f"  - 关键词类型: {tactics.get('target_keyword_strategy', [])}")
             parts.append("")
 
         # ASIN 基本信息（仅标量字段）
@@ -862,7 +940,7 @@ class LLMReasoner:
             "",
             "## 策略层",
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
-            f"  - 关键词类型: {tactics.get('keyword_types', [])}",
+            f"  - 关键词类型: {tactics.get('target_keyword_strategy', [])}",
             "",
             "## 可推荐方向（eligible，仅可从中选择）",
             f"  {eligible_directions}",
@@ -985,7 +1063,7 @@ class LLMReasoner:
             "",
             "## 策略层",
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
-            f"  - 关键词类型: {tactics.get('keyword_types', [])}",
+            f"  - 关键词类型: {tactics.get('target_keyword_strategy', [])}",
             "",
         ]
 
@@ -1155,6 +1233,192 @@ class LLMReasoner:
                 self._sanitize_ops_text(result["skip_directions_note"])
             )
         return result
+
+    # ── Campaign 活动调整 ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _campaign_to_prompt_dict(
+        cu: CampaignUnit,
+        target_acos: int | None = None,
+        keyword_class: str = "",
+        is_core: bool = False,
+    ) -> dict:
+        """CampaignUnit → LLM prompt dict。
+
+        keyword_class: 逐词 AI 分类 (取自 keyword_analysis, 已转中文)
+        is_core: KB 21 Custom 核心词保护
+        """
+        p = cu.perf_7d
+        campaign_type = "精准广告" if cu.match_type == "EXACT" else "广泛广告"
+
+        summary: dict = {
+            "campaign_name": cu.campaign_name,
+            "campaign_key": cu.campaign_key,
+            "child_asin": cu.child_asin,
+            "keyword_text": cu.keyword_text,
+            "match_type": cu.match_type,
+            "campaign_type": campaign_type,
+            "current_bid": round(cu.current_bid, 4),
+            "current_budget": round(cu.current_budget, 2),
+            "campaign_status": cu.campaign_status,
+            "days_online": cu.days_online,
+            "days_online_note": "未知（非新活动）" if cu.days_online == -1 else f"{cu.days_online}天",
+            "perf_7d": {
+                "cost": round(p.cost, 2),
+                "sales": round(p.sales, 2),
+                "orders": p.orders,
+                "acos": round(p.acos, 1) if p.acos is not None else None,
+                "cvr": round(p.cvr, 1) if p.cvr is not None else None,
+                "cpc": round(p.cpc, 2) if p.cpc is not None else None,
+                "ctr": round(p.ctr, 1) if p.ctr is not None else None,
+                "clicks": p.clicks,
+                "impressions": p.impressions,
+            },
+        }
+
+        if target_acos is not None and p.acos is not None:
+            summary["acos_vs_target"] = round(p.acos - target_acos, 1)
+        if cu.current_budget > 0 and p.cost > 0:
+            summary["budget_utilization_pct"] = round(p.cost / (cu.current_budget * 7) * 100, 1)
+        if keyword_class:
+            summary["keyword_class"] = keyword_class
+        if is_core:
+            summary["is_core"] = True
+
+        return summary
+
+    async def recommend_campaign_batch(
+        self,
+        asin: str,
+        campaign_summaries: list[dict],
+        strategy_context: dict,
+        temperature: float = 0.3,
+    ) -> dict:
+        """分析单批活动 (≤6个) 并返回调整建议。
+
+        Returns:
+            {"parsed": dict, "raw_output": str, "success": bool, "error": str, "temperature": float}
+        """
+        # 构建策略上下文字符串
+        ctx_parts = [
+            "## 策略上下文 (ASIN 级，全批次共享)",
+            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            f"  - 产品定位: {strategy_context.get('product_level', '?')}",
+            f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
+            f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
+            f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
+        ]
+        margin = strategy_context.get("margin")
+        ctx_parts.append(f"  - 毛利率: {'%.1f%%' % (margin * 100) if margin is not None else 'N/A'}")
+        ctx_parts.append(f"  - 评分: {strategy_context.get('rating', 'N/A')}")
+        ctx_parts.append(f"  - 退货率: {'%.1f%%' % strategy_context['refund_rate'] if strategy_context.get('refund_rate') is not None else 'N/A'}")
+        inv_days = strategy_context.get("inventory_days")
+        ctx_parts.append(f"  - 库存可售天数: {'%.0f天' % inv_days if inv_days is not None else 'N/A'}")
+        ctx_parts.append(f"  - 自然单占比: {'%.1f%%' % strategy_context['natural_order_ratio'] if strategy_context.get('natural_order_ratio') is not None else 'N/A'}")
+        ctx_parts.append(f"  - 日均销量(30d): {'%.1f单' % strategy_context['avg_daily_sales_30d'] if strategy_context.get('avg_daily_sales_30d') is not None else 'N/A'}")
+        if strategy_context.get("target_acos"):
+            ctx_parts.append(f"  - 运营目标 ACOS: {strategy_context['target_acos']}%")
+        flags = strategy_context.get("warning_flags", [])
+        if flags:
+            ctx_parts.append(f"  - ⚠️ 注意事项: {'; '.join(flags)}")
+        ctx_parts.append("")
+
+        # 构建活动列表
+        camp_parts = ["## 活动列表 (逐活动分析)"]
+        for i, s in enumerate(campaign_summaries):
+            camp_parts.append(f"\n### 活动 {i + 1}: {s.get('campaign_name', '?')}")
+            camp_parts.append(f"  - 活动Key (活动名×子ASIN): {s.get('campaign_key', '')}")
+            camp_parts.append(f"  - 子ASIN: {s.get('child_asin', '')}")
+            camp_parts.append(f"  - 关键词: {s.get('keyword_text', '')}")
+            camp_parts.append(f"  - 匹配类型: {s.get('match_type', '')}")
+            camp_parts.append(f"  - 活动类型: {s.get('campaign_type', '')}")
+            camp_parts.append(f"  - 当前 Bid: ${s.get('current_bid', 0)}")
+            camp_parts.append(f"  - 当前 Budget: ${s.get('current_budget', 0)}")
+            camp_parts.append(f"  - 状态: {s.get('campaign_status', '')}")
+            camp_parts.append(f"  - 上线天数: {s.get('days_online_note', '?')}")
+            if s.get("keyword_class"):
+                camp_parts.append(f"  - 关键词类型: {s['keyword_class']}")
+            if s.get("is_core"):
+                camp_parts.append(f"  - ⚠️ 核心词 (Custom保护)")
+            p = s.get("perf_7d", {})
+            camp_parts.append(f"  - 7日性能: 花费${p.get('cost', 0)}, 销售额${p.get('sales', 0)}, "
+                             f"订单{p.get('orders', 0)}, ACOS={p.get('acos', 'N/A')}%, "
+                             f"CVR={p.get('cvr', 'N/A')}%, CPC=${p.get('cpc', 'N/A')}, "
+                             f"CTR={p.get('ctr', 'N/A')}%, "
+                             f"曝光{p.get('impressions', 0)}, 点击{p.get('clicks', 0)}")
+            if "acos_vs_target" in s:
+                camp_parts.append(f"  - ACOS vs 目标: {'+' if s['acos_vs_target'] > 0 else ''}{s['acos_vs_target']}%")
+            if "budget_utilization_pct" in s:
+                camp_parts.append(f"  - 预算利用率: {s['budget_utilization_pct']}%")
+            # 广告位懒加载数据 (KB 22 §2.3 / KB 19 §5)
+            if s.get("_placement_data"):
+                pd_data = s["_placement_data"]
+                camp_parts.append(f"  - ★广告位数据 (per-placement):")
+                for pname, pinfo in pd_data.items():
+                    if isinstance(pinfo, dict):
+                        camp_parts.append(
+                            f"      {pname}: ACOS={pinfo.get('acos','N/A')}%, "
+                            f"花费=${pinfo.get('cost',0)}, 订单={pinfo.get('orders',0)}, "
+                            f"点击={pinfo.get('clicks',0)}, 曝光={pinfo.get('impressions',0)}"
+                        )
+            # 搜索词懒加载数据 (KB 22 §3.3 / KB 19 §8)
+            if s.get("_search_term_data"):
+                st_data = s["_search_term_data"]
+                terms = st_data if isinstance(st_data, list) else st_data.get("search_terms", [])
+                if terms:
+                    camp_parts.append(f"  - ★搜索词报告 ({len(terms)} 个搜索词):")
+                    for t in terms[:15]:  # 最多展示15个
+                        if isinstance(t, dict):
+                            camp_parts.append(
+                                f"      [{t.get('keyword','?')}] 花费=${t.get('cost',0)}, "
+                                f"订单={t.get('orders',0)}, 点击={t.get('clicks',0)}, "
+                                f"ACOS={t.get('acos','N/A')}%"
+                            )
+
+        user_message = "\n".join(ctx_parts) + "\n" + "\n".join(camp_parts)
+
+        messages = [
+            {"role": "system", "content": _build_campaign_system_prompt()},
+            {"role": "user", "content": user_message},
+        ]
+
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+            )
+            parsed = self._parse_json(raw)
+            adjustments = parsed.get("campaign_adjustments", [])
+            # 后处理：规则编号脱敏 + 文风清洗
+            for adj in adjustments:
+                adj["reason"] = humanize_ops_text(
+                    self._sanitize_ops_text(adj.get("reason", ""))
+                )
+                adj["evidence"] = [
+                    humanize_ops_text(self._sanitize_ops_text(e))
+                    for e in adj.get("evidence", [])
+                ]
+            parsed["campaign_adjustments"] = adjustments
+            logger.info("Campaign batch LLM 成功 [%s], %d items, temp=%.1f",
+                        asin, len(adjustments), temperature)
+            return {
+                "parsed": parsed,
+                "raw_output": raw,
+                "success": True,
+                "error": "",
+                "temperature": temperature,
+            }
+        except Exception as e:
+            logger.warning("Campaign batch LLM 失败 [%s] temp=%.1f: %s", asin, temperature, e)
+            return {
+                "parsed": {},
+                "raw_output": "",
+                "success": False,
+                "error": str(e),
+                "temperature": temperature,
+            }
 
 
 # 全局单例

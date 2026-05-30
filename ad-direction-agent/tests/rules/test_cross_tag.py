@@ -38,7 +38,7 @@ async def test_cross_1_test_stage_pass(standard_asin):
 @pytest.mark.asyncio
 async def test_cross_4_broad_in_test_force(test_stage_asin):
     thresholds = settings.thresholds_config
-    test_stage_asin.keyword_type = "Broad"
+    test_stage_asin.target_keyword_strategy = "Broad"
     result = await cross_rules.broad_keyword_stage_check(test_stage_asin, thresholds)
     assert result is not None
     assert result.level == "force_correct"

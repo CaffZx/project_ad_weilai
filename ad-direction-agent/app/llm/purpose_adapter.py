@@ -87,7 +87,7 @@ async def recommend_tactics_from_purpose(
     Returns:
         {
             "targets": [...],              # English target names
-            "keyword_analysis": [...],      # per-keyword {word, strategy_type, action}
+            "keyword_analysis": [...],      # per-keyword {word, keyword_class, action}
             "reason": "...",               # HTML diagnosis report
             "indicators": [...],           # KPI dashboard data
             "trend_data": [...],           # time-series trend
@@ -170,17 +170,17 @@ async def recommend_tactics_from_purpose(
         ]
     result["ad_purposes"] = ad_purposes_raw[:2]  # 安全 cap 最多 2 个推荐
 
-    # 聚合 keyword_analysis 中的 strategy_type → keyword_types
+    # 聚合 keyword_analysis 中的 keyword_class → target_keyword_strategy
     type_map = {
         "Broad": "大词", "Long-tail": "长尾词", "Competitor": "竞品词",
         "Brand": "品牌词", "Custom": "自定义",
     }
     kw_types = set()
     for kw in result.get("keyword_analysis", []):
-        cn_type = type_map.get(kw.get("strategy_type", ""))
+        cn_type = type_map.get(kw.get("keyword_class", ""))
         if cn_type:
             kw_types.add(cn_type)
-    result["keyword_types"] = list(kw_types) if kw_types else []
+    result["target_keyword_strategy"] = list(kw_types) if kw_types else []
     result["target_scores"] = result.get("target_scores", [])
 
     return result

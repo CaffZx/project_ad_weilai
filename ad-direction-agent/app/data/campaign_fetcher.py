@@ -409,10 +409,11 @@ class CampaignFetcher:
         # days_online: -1=未知（保持，勿当 0）；basic 缺键时也按 -1
         days_raw = basic.get("days_online", -1)
         days_online = int(days_raw) if days_raw is not None else -1
+        campaign_name = str(ctx.get("campaign_name") or "")
 
         return CampaignUnit(
-            campaign_name=str(ctx.get("campaign_name") or ""),
-            campaign_key=f"{child_asin}_{match_type}_{keyword_text}",
+            campaign_name=campaign_name,
+            campaign_key=f"{campaign_name} × {child_asin}",
             campaign_id=str(ctx.get("campaign_id") or ""),
             child_asin=child_asin,
             seller_sku=str(ctx.get("seller_sku") or ""),

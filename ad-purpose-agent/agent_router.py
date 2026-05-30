@@ -37,7 +37,7 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
   - "推荐": 知识库触发条件命中（04-触发规则.md）且无阻断（guardrail、stage constraint 全通过）
   - "可选": 触发条件未命中但未被阻断，或部分条件满足
   - "不推荐": 被知识库硬护栏（10-安全护栏.md，如CPC>毛利）、产品阶段约束、或触发规则中的阻断条件明确排除
-- `keyword_analysis`: 每个关键词的 strategy_type（Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
+- `keyword_analysis`: 每个关键词的 keyword_class（识别的关键词类别: Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
 - `chart_metrics`: 从 ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"] 中选 2-3 个最值得关注的。
 
 严禁违反知识库中的安全护栏规则。
@@ -172,7 +172,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
    - "持平" → 建议保持稳定投放即可
    - "轻微下滑" → 建议微调出价或检查竞品动态
    - "快速下滑" → 建议立即排查原因（竞品降价/差评/listing问题），并给出紧急补救措施
-   Format: {{"word": "keyword text", "strategy_type": "Broad/Long-tail/Competitor/Brand/Custom", "action": "one-line Chinese ad suggestion based on trend"}}
+   Format: {{"word": "keyword text", "keyword_class": "Broad/Long-tail/Competitor/Brand/Custom", "action": "one-line Chinese ad suggestion based on trend"}}
 
 4. `chart_metrics` array: pick 2-3 metrics most worth monitoring from ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"].
 5. NEVER violate the 6 [AI Absolute Red Lines] in the knowledge base!

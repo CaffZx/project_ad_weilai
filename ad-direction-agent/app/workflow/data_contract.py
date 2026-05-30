@@ -8,7 +8,7 @@ from typing import Any, Literal
 from app.config.settings import settings
 from app.models.asin_data import ASINData
 
-ModuleId = Literal["tactics", "execution", "p3", "report"]
+ModuleId = Literal["tactics", "execution", "p3", "report", "campaign"]
 
 Status = Literal["ok", "degraded", "blocked"]
 
@@ -34,6 +34,11 @@ DEFAULT_MODULE_CONTRACTS: dict[str, dict[str, list[str]]] = {
         "important": ["margin", "trend", "ad_data.cvr"],
         "optional": ["placement_comparison", "competitor_summary"],
     },
+    "campaign": {
+        "required": ["keywords"],
+        "important": ["margin", "natural_order_ratio", "inventory_qty", "avg_daily_sales_30d"],
+        "optional": ["placement_comparison"],
+    },
 }
 
 _FIELD_LABELS: dict[str, str] = {
@@ -52,6 +57,8 @@ _FIELD_LABELS: dict[str, str] = {
     "placement_comparison": "广告位对比",
     "competitor_summary": "竞品摘要",
     "history": "历史调整记录",
+    "campaigns": "广告活动列表",
+    "avg_daily_sales_30d": "日均销量",
 }
 
 
@@ -104,6 +111,10 @@ def _get_attr_path(data: ASINData, path: str) -> Any:
         return data.trend
     if path == "natural_order_ratio":
         return data.natural_order_ratio
+    if path == "avg_daily_sales_30d":
+        return data.avg_daily_sales_30d
+    if path == "campaigns":
+        return None  # campaigns from CampaignData, not ASINData
     if path.startswith("ad_data."):
         ad = data.ad_data
         if not ad:
@@ -121,6 +132,10 @@ def _is_present(path: str, value: Any) -> bool:
         return value is not None
     if path == "history":
         return True  # optional-only; never evaluated as required on ASINData
+    if path == "campaigns":
+        return True  # always present when this module is reached
+    if path == "avg_daily_sales_30d":
+        return value is not None
     if path in ("competitor_price", "inventory_qty", "margin", "natural_order_ratio"):
         return value is not None
     if path.startswith("ad_data."):
@@ -242,3 +257,28 @@ def merge_completeness_into_summary(summary: dict, verdict: CompletenessVerdict)
     if notice:
         out["missing_notice"] = notice
     return out
+
+
+def evaluate_campaign_completeness(
+    campaign_count: int,
+    asin_data: ASINData,
+) -> CompletenessVerdict:
+    """Campaign 专用完整性校验：活动数量 + ASIN 级关键字段。"""
+    if campaign_count == 0:
+        return CompletenessVerdict(
+            status="degraded",
+            missing_important=["campaigns"],
+            retryable=False,
+        )
+    contract = get_module_contract("campaign")
+    missing_important: list[str] = []
+    for path in contract["important"]:
+        if not _is_present(path, _get_attr_path(asin_data, path)):
+            missing_important.append(path)
+    if missing_important:
+        return CompletenessVerdict(
+            status="degraded",
+            missing_important=missing_important,
+            retryable=False,
+        )
+    return CompletenessVerdict(status="ok")

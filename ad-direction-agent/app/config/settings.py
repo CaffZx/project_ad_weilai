@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     campaign_mcp_tool_timeout: float = 300.0
     campaign_db_fallback_timeout: float = 60.0
     campaign_prefilter_enabled: bool = True
+    # Campaign LLM 分析
+    campaign_llm_concurrency: int = 3
+    campaign_llm_temperature: float = 0.3
+    campaign_batch_size: int = 6
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"

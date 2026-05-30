@@ -1354,7 +1354,7 @@ async function loadStrategy() {
   return { ok: true, data };
 }
 
-let _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
+let _lastTacticsAiRec = { ad_purposes: [], target_keyword_strategy: [] };
 let _lastExecAiDirs = [];
 
 async function confirmStrategy() {
@@ -1440,11 +1440,11 @@ async function loadTactics() {
   }
 
   // 缓存 AI 推荐值供反馈使用
-  _lastTacticsAiRec = { ad_purposes: [], keyword_types: [] };
+  _lastTacticsAiRec = { ad_purposes: [], target_keyword_strategy: [] };
   if (data.dimensions) {
     data.dimensions.forEach(dim => {
       if (dim.id === 'ad_purposes') _lastTacticsAiRec.ad_purposes = dim.recommendations || [];
-      if (dim.id === 'keyword_types') _lastTacticsAiRec.keyword_types = dim.recommendations || [];
+      if (dim.id === 'target_keyword_strategy') _lastTacticsAiRec.target_keyword_strategy = dim.recommendations || [];
     });
   }
 
@@ -1513,12 +1513,12 @@ async function loadTactics() {
 async function confirmTactics() {
   const btn = $('btnTactics');
   const g = dim => Array.from(qsa(`input[data-dim="${dim}"]:checked`)).map(cb => cb.value);
-  const ap = g('ad_purposes'), kt = g('keyword_types');
+  const ap = g('ad_purposes'), kt = g('target_keyword_strategy');
   if (ap.length===0 || kt.length===0) { err('errSec2', '请至少选择一项'); return; }
   hide('errSec2');
   btn.disabled = true; btn.textContent = '⏳ 保存中...';
   try {
-    const res = await callAPI('/tactics/confirm', { asin, ad_purposes:ap, keyword_types:kt });
+    const res = await callAPI('/tactics/confirm', { asin, ad_purposes:ap, target_keyword_strategy:kt });
     if (!res.accepted) { err('errSec2', '保存失败'); btn.disabled = false; btn.textContent = '保存'; return; }
     show('sec2Done'); sec2Confirmed = true;
     btn.disabled = false; btn.textContent = '保存';
@@ -1530,7 +1530,7 @@ async function confirmTactics() {
 
   // 反馈数据捕获
 
-  fbCaptureTactics(_lastTacticsAiRec.ad_purposes, _lastTacticsAiRec.keyword_types, ap, kt);
+  fbCaptureTactics(_lastTacticsAiRec.ad_purposes, _lastTacticsAiRec.target_keyword_strategy, ap, kt);
 
   // 解锁 Tab2(诊断) + Tab3(ACOS)
   setTabEnabled('tab2', true);
@@ -1651,7 +1651,7 @@ function renderKeywordTable(kws) {
       return `<span style="color:var(--muted-fg)">—</span>`;
     }
     let chgHtml = kw.rank == null ? '<span style="color:var(--muted-fg)">— / —</span>' : `${_chgSpan(nearChg)} / ${_chgSpan(weekChg)}`;
-    const st = kw.strategy_type || '';
+    const st = kw.keyword_class || '';
     const stBadge = st ? `<span class="badge ${stColorMap[st]||'badge-gray'}">${st} ${stCnMap[st]||''}</span>` : '<span style="color:var(--muted-fg)">—</span>';
     html += `<tr><td style="max-width:120px;word-break:break-all;font-size:12px">${kw.word||kw.keyword||'?'}</td><td style="text-align:right;font-size:12px;font-weight:600">${rank}</td><td style="text-align:right;font-size:11px">${chgHtml}</td><td>${stBadge}</td><td style="font-size:11px;color:var(--muted-fg);max-width:160px">${renderExpandableAction(kw.action||'暂无建议')}</td></tr>`;
   });

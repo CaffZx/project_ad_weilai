@@ -62,7 +62,7 @@ async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int =
         data.season_stage = long_term.get("season_stage")
         purposes = long_term.get("ad_purposes", [])
         data.ad_purpose = purposes[0] if purposes else None
-        data.keyword_type = ",".join(long_term.get("keyword_types", []))
+        data.target_keyword_strategy = ",".join(long_term.get("target_keyword_strategy", []))
 
     selected_dirs = (wf_state.get("execution", {}) or {}).get("selected_directions", [])
     sub_options = (wf_state.get("execution", {}) or {}).get("sub_options", {})
@@ -96,7 +96,7 @@ async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int =
     } if long_term else None
     tactics = {
         "ad_purposes": long_term.get("ad_purposes", []),
-        "keyword_types": long_term.get("keyword_types", []),
+        "target_keyword_strategy": long_term.get("target_keyword_strategy", []),
     } if long_term else None
 
     rpt_summary = build_data_summary(data, days=days, verdict=verdict)

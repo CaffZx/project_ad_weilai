@@ -63,7 +63,7 @@ class KnowledgeBase:
         "expand_keywords": "新增扩词",
         "optimize_acos": "优化ACOS",
         "balance_maintain": "平衡维持",
-        # keyword_type
+        # target_keyword_strategy
         "broad": "大词",
         "long_tail": "长尾词",
         "long-tail": "长尾词",

@@ -122,7 +122,7 @@ class MySQLStateManager:
                     "one",
                 )
                 tact = self._execute(
-                    "SELECT ad_purposes, keyword_types, updated_at FROM tactics_config WHERE asin=%s",
+                    "SELECT ad_purposes, target_keyword_strategy, updated_at FROM tactics_config WHERE asin=%s",
                     (asin,),
                     "one",
                 )
@@ -147,13 +147,13 @@ class MySQLStateManager:
                 })
             if tact:
                 ap = tact.get("ad_purposes")
-                kt = tact.get("keyword_types")
+                kt = tact.get("target_keyword_strategy")
                 if isinstance(ap, str):
                     ap = json.loads(ap)
                 if isinstance(kt, str):
                     kt = json.loads(kt)
                 data["ad_purposes"] = ap or []
-                data["keyword_types"] = kt or []
+                data["target_keyword_strategy"] = kt or []
             if bud:
                 exp = bud.get("expires_at")
                 if isinstance(exp, str):
@@ -188,14 +188,14 @@ class MySQLStateManager:
                         "season_stage=VALUES(season_stage), updated_at=VALUES(updated_at)",
                         (asin, pl, ps, ss, now),
                     )
-                if "ad_purposes" in config or "keyword_types" in config:
+                if "ad_purposes" in config or "target_keyword_strategy" in config:
                     existing = self.get_long_term_config(asin)
                     ap = config.get("ad_purposes", existing.get("ad_purposes", []))
-                    kt = config.get("keyword_types", existing.get("keyword_types", []))
+                    kt = config.get("target_keyword_strategy", existing.get("target_keyword_strategy", []))
                     self._execute(
-                        "INSERT INTO tactics_config (asin, ad_purposes, keyword_types, updated_at) "
+                        "INSERT INTO tactics_config (asin, ad_purposes, target_keyword_strategy, updated_at) "
                         "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
-                        "ad_purposes=VALUES(ad_purposes), keyword_types=VALUES(keyword_types), "
+                        "ad_purposes=VALUES(ad_purposes), target_keyword_strategy=VALUES(target_keyword_strategy), "
                         "updated_at=VALUES(updated_at)",
                         (asin, json.dumps(ap, ensure_ascii=False), json.dumps(kt, ensure_ascii=False), now),
                     )

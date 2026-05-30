@@ -798,9 +798,9 @@ class DbAdapter(DataSourceAdapter):
         rows = await self._query(
             f"""
             SELECT daak.campaign_name, daak.campaign_id,
-                   daak.campaign_budget, daak.campaign_status,
                    daap.asin AS child_asin, daap.seller_sku,
                    daak.keyword_text, daak.match_type,
+                   'ENABLED' AS campaign_status, 'ENABLED' AS keyword_status,
                    AVG(daak.keyword_bid) AS keyword_bid
             FROM dwd_amazon_ad_keyword_report daak
             INNER JOIN dwd_amazon_ad_product daap
@@ -812,7 +812,6 @@ class DbAdapter(DataSourceAdapter):
               AND daak.local_report_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
               AND {in_sql}
             GROUP BY daak.campaign_name, daak.campaign_id,
-                     daak.campaign_budget, daak.campaign_status,
                      daap.asin, daap.seller_sku,
                      daak.keyword_text, daak.match_type
             ORDER BY daak.campaign_name, daak.keyword_text

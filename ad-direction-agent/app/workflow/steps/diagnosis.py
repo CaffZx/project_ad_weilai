@@ -78,7 +78,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
     tactics_ctx = TacticsConfirmRequest(
         asin=asin,
         ad_purposes=long_term.get("ad_purposes", []),
-        keyword_types=long_term.get("keyword_types", []),
+        target_keyword_strategy=long_term.get("target_keyword_strategy", []),
     ) if long_term else None
 
     metric_board = build_metric_board(
@@ -155,7 +155,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
             "cvr": kw.cvr,
             "bid": kw.bid,
             "match_type": kw.match_type,
-            "strategy_type": ai.get("strategy_type", ""),
+            "keyword_class": ai.get("keyword_class", ""),
             "action": ai.get("action", ""),
         })
     # 趋势数据

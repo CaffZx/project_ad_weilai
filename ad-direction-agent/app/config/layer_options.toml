@@ -94,31 +94,31 @@ id = "盈利型"
 label = "盈利型"
 description = "以控制ACOS和利润最大化为主要目标，适合达成期/超预期产品"
 
-[tactics.keyword_types]
+[tactics.target_keyword_strategy]
 label = "目标关键词类型"
 description = "广告投放的关键词类型选择，受广告目的影响"
 selection_type = "multi_select"
-[[tactics.keyword_types.options]]
+[[tactics.target_keyword_strategy.options]]
 id = "大词"
 label = "大词"
 description = "高流量泛词/类目词，CPC高竞争激烈，适合引流和品牌曝光"
 
-[[tactics.keyword_types.options]]
+[[tactics.target_keyword_strategy.options]]
 id = "长尾词"
 label = "长尾词"
 description = "精准长尾搜索词，CPC低转化率高，适合转化和ACOS优化"
 
-[[tactics.keyword_types.options]]
+[[tactics.target_keyword_strategy.options]]
 id = "竞品词"
 label = "竞品词"
 description = "竞品品牌/ASIN词，适合截流和竞品防守"
 
-[[tactics.keyword_types.options]]
+[[tactics.target_keyword_strategy.options]]
 id = "品牌词"
 label = "品牌词"
 description = "自身品牌词，防守流量防止竞品截流"
 
-[[tactics.keyword_types.options]]
+[[tactics.target_keyword_strategy.options]]
 id = "自定义"
 label = "自定义"
 description = "运营手动指定的关键词列表"

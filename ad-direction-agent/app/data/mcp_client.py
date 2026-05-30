@@ -83,7 +83,7 @@ def unwrap_tool_payload(result: dict[str, Any]) -> Any:
     for block in body.get("content") or []:
         if not isinstance(block, dict):
             continue
-        if block.get("type") == "text" and block.get("text") is not None:
+        if (block.get("type") == "text" or "text" in block) and block.get("text") is not None:
             text = str(block["text"]).strip()
             if not text:
                 continue
@@ -95,9 +95,11 @@ def unwrap_tool_payload(result: dict[str, Any]) -> Any:
             chunks.append(block["data"])
     if not chunks:
         return body
-    if len(chunks) == 1:
-        return chunks[0]
-    return chunks
+    result_val = chunks[0] if len(chunks) == 1 else chunks
+    # 递归拆解：campaign 工具返回双层 content→text→JSON 嵌套
+    if isinstance(result_val, dict) and "content" in result_val:
+        return unwrap_tool_payload({"result": result_val})
+    return result_val
 
 
 class StreamableHttpMcpInvoker:

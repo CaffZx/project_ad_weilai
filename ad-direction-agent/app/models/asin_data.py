@@ -165,7 +165,8 @@ class ASINData(BaseModel):
     product_stage: Optional[str] = None
     season_stage: Optional[str] = None
     ad_purpose: Optional[str] = None
-    keyword_type: Optional[str] = None
+    # 概念1: 关键词策略的简并串（逗号分隔，供 cross_tag 规则使用）
+    target_keyword_strategy: Optional[str] = None
 
     # 数据质量标记
     data_missing: bool = False

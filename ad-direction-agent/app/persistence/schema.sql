@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS strategy_config (
 CREATE TABLE IF NOT EXISTS tactics_config (
     asin VARCHAR(20) PRIMARY KEY,
     ad_purposes JSON,
-    keyword_types JSON,
+    target_keyword_strategy JSON,
     updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB;
 

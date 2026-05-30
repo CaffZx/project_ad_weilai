@@ -1,7 +1,26 @@
 """Campaign 分析数据模型 — 与 ASINData 独立共存，不同的聚合粒度。
 
-campaign_key = child_asin + match_type + keyword_text
-每行 = 一个广告活动的完整画像
+campaign_key = "活动名 × 子ASIN"，唯一标识一个广告活动。
+每行 = 一个广告活动的完整画像。
+
+同一个活动可能包含多个关键词，同一个关键词可能被多个活动投放——
+仅靠 child_asin + match_type + keyword 不能区分。
+
+──────────────────────────────────────────────────────────────────────
+【关键词类型命名规范】(本模块强制，避免与既有 4 个混名概念再撞车)
+
+  既有(勿在本模块复用其名)：
+    ① 术语表       layer_options[tactics.keyword_types] / kb_loader.ENUM_MAP(中/英枚举)
+    ② ASIN 策略选择 keyword_types: list  (该 ASIN 该投哪些类型，中文) → 本模块用 target_keyword_strategy
+    ③ ASIN 简并串   ASINData.keyword_type: str (② join 成中文逗号串)
+    ④ 逐词 AI 分类  keyword_analysis[].strategy_type: str (英文 Broad/Long-tail) → 本模块用 keyword_class
+
+  本模块统一命名（对齐全项目规范）：
+    target_keyword_strategy: list[str] ← 取自 ②，中文（概念1: 关键词策略）
+    keyword_class: str                ← 取自 ④，值转中文  （概念3: 关键词类别）
+    match_type: str                   ← 概念2: 匹配类型
+    is_core: bool                     ← KB 21 Custom 核心词保护;本期留 False
+──────────────────────────────────────────────────────────────────────
 """
 
 from pydantic import BaseModel, Field
@@ -21,7 +40,7 @@ class CampaignPerf(BaseModel):
 
 
 class CampaignUnit(BaseModel):
-    """campaign_key = child_asin + match_type + keyword_text"""
+    """单条广告活动画像。campaign_key = "活动名 × 子ASIN"，全局唯一。"""
     campaign_name: str
     campaign_key: str = ""
     campaign_id: str = ""                     # Doris 上下文 (placement 懒加载/回落依赖)
@@ -49,3 +68,81 @@ class CampaignData(BaseModel):
     excluded: list[dict] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     fetch_source: str = "mcp"
+
+
+# ── Campaign LLM 分析引擎模型 ──────────────────────────────────────────────
+
+
+class CampaignStrategyContext(BaseModel):
+    """ASIN 级共享上下文，注入每批 LLM 分析。
+
+    从 ASINData + long_term_config + keyword_analysis 组装，不含 campaign 级字段。
+    """
+    parent_asin: str = ""
+    product_stage: str = ""
+    product_level: str = ""
+    season_stage: str = ""
+    ad_purposes: list[str] = Field(default_factory=list)
+    target_keyword_strategy: list[str] = Field(default_factory=list)
+    # 诊断层 (ASINData)
+    margin: float | None = None
+    natural_order_ratio: float | None = None
+    rating: float | None = None
+    refund_rate: float | None = None
+    inventory_qty: int | None = None
+    inventory_days: float | None = None          # ← 计算: qty / avg_daily_sales
+    avg_daily_sales_30d: float | None = None
+    target_acos: int | None = None
+    warning_flags: list[str] = Field(default_factory=list)
+
+
+class CampaignAdjustmentItem(BaseModel):
+    """LLM 输出的单活动调整建议 (对齐 KB 21 §6 / 22 §4)"""
+    campaign_name: str
+    campaign_key: str = ""
+    child_asin: str = ""
+    keyword_text: str = ""
+    match_type: str = ""
+    keyword_class: str = ""
+    is_core: bool = False
+    action: str = ""                             # eliminate_to_low_bid_pool | adjust_bid | adjust_budget | adjust_placement | keep
+    direction: dict[str, str] = Field(default_factory=dict)
+    triggered_rule: str = ""
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    confidence: str = "medium"
+    current_budget: float | None = None
+    current_bid: float | None = None
+    proposed_budget: float | None = None
+    proposed_bid: float | None = None
+    placement_adjustments: list[dict] = Field(default_factory=list)
+    negative_keywords: list[dict] = Field(default_factory=list)
+    elimination_values: dict | None = None
+    round_votes: dict[str, str] = Field(default_factory=dict)
+    review_level: str = "MANUAL_REVIEW"
+
+
+class CampaignBatchResult(BaseModel):
+    """单批 LLM 返回 (投票中间产物)"""
+    batch_id: int = 0
+    round_number: int = 0
+    items: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    raw_llm_output: str = ""
+    temperature: float = 0.3
+    llm_success: bool = True
+    llm_error: str = ""
+
+
+class CampaignAnalysisResult(BaseModel):
+    """顶层分析返回"""
+    parent_asin: str = ""
+    days: int = 7
+    total_campaigns: int = 0
+    adjustments: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    summary: dict = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    sanity_check_passed: bool = True
+    llm_rounds_completed: int = 2
+    rounds_detail: dict = Field(default_factory=dict)
+
+

@@ -70,6 +70,7 @@ class DeepSeekClient:
         messages: list[dict],
         temperature: float = 0.3,
         response_format: dict | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """调用 DeepSeek Chat API，自动轮询 Key + 失败重试"""
         pool = get_key_pool()
@@ -88,6 +89,8 @@ class DeepSeekClient:
         }
         if response_format:
             body["response_format"] = response_format
+        if max_tokens:
+            body["max_tokens"] = max_tokens
 
         client = await self._ensure_client()
         last_exc = None

@@ -56,7 +56,8 @@ class AdPurpose(StrEnum):
     PROFIT = "盈利型"
 
 
-class KeywordType(StrEnum):
+class TargetKeywordStrategy(StrEnum):
+    """已选关键词类别 — 运营在策略层选择的投放方向"""
     BROAD = "大词"
     LONG_TAIL = "长尾词"
     COMPETITOR = "竞品词"
@@ -140,7 +141,7 @@ class TacticsConfirmRequest(BaseModel):
     """POST 确认策略层选择"""
     asin: str
     ad_purposes: list[AdPurpose]
-    keyword_types: list[KeywordType]
+    target_keyword_strategy: list[TargetKeywordStrategy] = Field(default_factory=list)
 
 
 class TacticsConfirmResponse(BaseModel):
@@ -362,7 +363,7 @@ class LongTermConfigResponse(BaseModel):
     product_stage: ProductStage | None = None
     season_stage: SeasonStage | None = None
     ad_purposes: list[AdPurpose] = Field(default_factory=list)
-    keyword_types: list[KeywordType] = Field(default_factory=list)
+    target_keyword_strategy: list[TargetKeywordStrategy] = Field(default_factory=list)
     last_modified: str = ""
 
 
@@ -372,4 +373,4 @@ class LongTermConfigUpdateRequest(BaseModel):
     product_stage: ProductStage | None = None
     season_stage: SeasonStage | None = None
     ad_purposes: list[AdPurpose] | None = None
-    keyword_types: list[KeywordType] | None = None
+    target_keyword_strategy: list[TargetKeywordStrategy] | None = None
