@@ -281,10 +281,6 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
   <!-- ═══════════════ 右侧主面板 ═══════════════ -->
   <main class="main-area">
 
-    <div class="disclaimer">
-      ⚠ 本页展示为<strong>后处理（合规校验 + 上限截断 + 淘汰固定值修正）后的结果</strong>。要查 LLM 原始输出做 KB 遵循度评估，请看 server.log 的 raw_llm_output 落盘（不在此页）。
-    </div>
-
     <div class="card hidden" id="campaignSummary">
       <div class="card-title">分析概览</div>
       <div class="campaign-summary">
@@ -349,7 +345,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
     <div id="campaignLoader" class="hidden" style="text-align:center; padding:60px 20px;">
       <span class="spinner"></span>
       <div style="margin-top:12px; color:var(--muted-fg);">正在分析广告活动，预计 15~30 分钟…</div>
-      <div class="text-xs muted" style="margin-top:6px;">后端流程：拉数据 → 分批（精准/广泛并行）→ R1+R2 投票 → sanity_check → AI 汇总合成</div>
+      <div class="text-xs muted" style="margin-top:6px;">后端流程：拉数据 → 分批（精准/广泛并行）→ AI 分析 → 交叉校验 → 汇总合成</div>
     </div>
 
   </main>
@@ -562,7 +558,7 @@ function renderResult(r) {
   const sanity = r.sanity_check_passed ? '✓' : '✗';
   const skippedNote = skipped.length ? `  |  丢失: ${skipped.length}` : '';
   $('sumMeta').textContent =
-    `置信: ${conf}  |  预算影响: ${budgetStr}  |  Sanity: ${sanity}  |  完成 ${r.llm_rounds_completed||0} 轮${skippedNote}  |  run_id: ${_currentRunId || '?'}`;
+    `置信: ${conf}  |  预算影响: ${budgetStr}  |  校验: ${sanity}${skippedNote}`;
 
   const warns = r.warnings || [];
   if (warns.length) {
@@ -750,7 +746,6 @@ function renderCards(items) {
             ${renderEvidence(adj)}
             ${renderPlacements(adj)}
             ${renderNegKeywords(adj)}
-            ${renderVotes(adj)}
             ${fullReason.length > 250 ? `<div class="text-xs" style="margin-top:8px;"><strong>完整理由:</strong><div class="reason" style="margin-top:4px;">${escapeHTML(fullReason)}</div></div>` : ''}
             <div class="text-xs muted" style="margin-top:8px;">
               审核等级: ${escapeHTML(adj.review_level || 'MANUAL_REVIEW')}
@@ -883,14 +878,6 @@ function renderNegKeywords(adj) {
       ${n.reason ? ' — ' + escapeHTML(n.reason) : ''}
     </div>`).join('')}
     </div>
-  </div>`;
-}
-
-function renderVotes(adj) {
-  const v = adj.round_votes || {};
-  if (!Object.keys(v).length) return '';
-  return `<div class="text-xs muted" style="margin-top:6px;">
-    投票: ${Object.entries(v).map(([k, val]) => `${k}=<code>${escapeHTML(String(val))}</code>`).join(' &nbsp;|&nbsp; ')}
   </div>`;
 }
 

@@ -548,13 +548,16 @@ def _round_stats(results: list[CampaignBatchResult]) -> dict:
     }
 
 
+def _vote_key(item: CampaignAdjustmentItem) -> str:
+    """投票/合并阶段对 item 的统一 key 生成规则。"""
+    return item.campaign_key or item.campaign_name or f"unknown_{id(item)}"
+
+
 def _vote(
     r1_results: list[CampaignBatchResult],
     r2_results: list[CampaignBatchResult],
 ) -> tuple[dict[str, dict], set[str]]:
     """比较 R1 与 R2 的 action + direction：全一致 → high (保守幅度)；否则 → tiebreaker。"""
-    def _make_key(item: CampaignAdjustmentItem) -> str:
-        return item.campaign_key or item.campaign_name or f"unknown_{id(item)}"
 
     def _same_direction(a: CampaignAdjustmentItem, b: CampaignAdjustmentItem) -> bool:
         if a.action != b.action:
@@ -567,13 +570,13 @@ def _vote(
     for br in r1_results:
         if br.llm_success:
             for item in br.items:
-                r1_map[_make_key(item)] = item
+                r1_map[_vote_key(item)] = item
 
     r2_map: dict[str, CampaignAdjustmentItem] = {}
     for br in r2_results:
         if br.llm_success:
             for item in br.items:
-                r2_map[_make_key(item)] = item
+                r2_map[_vote_key(item)] = item
 
     all_keys = set(r1_map.keys()) | set(r2_map.keys())
     votes: dict[str, dict] = {}
@@ -661,7 +664,7 @@ def _resolve_tiebreaker(
     for br in r3_results:
         if br.llm_success:
             for item in br.items:
-                r3_map[item.campaign_key or item.campaign_name] = item
+                r3_map[_vote_key(item)] = item
 
     for key in votes:
         r3 = r3_map.get(key)
