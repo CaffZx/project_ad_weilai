@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     # Campaign LLM 分析
     campaign_llm_concurrency: int = 3
     campaign_llm_temperature: float = 0.3
-    campaign_batch_size: int = 6
+    campaign_batch_size: int = 10
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"

@@ -16,6 +16,7 @@ from app.core.data_aggregator import DataAggregator
 from app.core.recommender import TargetAcosRecommender
 from app.data.campaign_fetcher import CampaignFetcher
 from app.llm.reasoner import reasoner
+from app.models.campaign import CampaignAnalysisResult, CampaignConfirmRequest
 from app.persistence.state_factory import get_state_manager
 from app.workflow.steps.campaign import (
     analyze_campaigns,
@@ -42,15 +43,12 @@ async def campaign_analyze(req: dict):
     temp = req.get("temperature", None)
 
     if not asin:
-        return {
-            "asin": "", "parent_asin": "", "days": days,
-            "total_campaigns": 0,
-            "adjustments": [], "summary": {},
-            "warnings": ["asin 必填"],
-            "sanity_check_passed": False,
-            "llm_rounds_completed": 0,
-            "rounds_detail": {},
-        }
+        return CampaignAnalysisResult(
+            parent_asin="", days=days,
+            warnings=["asin 必填"],
+            sanity_check_passed=False,
+            llm_rounds_completed=0,
+        ).model_dump()
 
     # ── 状态 & 长期配置 ────────────────────────────────────────────────────
     # 用工厂单例，保证与左侧卡片 (strategy/tactics/P3 override) 读写同一后端
@@ -105,3 +103,31 @@ async def campaign_analyze(req: dict):
         keyword_analysis=keyword_analysis,
     )
     return result.model_dump()
+
+
+# ── 审核占位端点（本期 stub）─────────────────────────────────────────────────
+
+
+@router.post("/campaign/confirm")
+async def campaign_confirm(req: CampaignConfirmRequest):
+    """运营批量审核占位端点 —— 本期仅记录日志，后续生产化会：
+    1. 写 MySQL 表 campaign_confirm_log（含 run_id 幂等键）
+    2. 异步推送到 ERP 系统
+    3. 与 adjustment_history 关联
+    """
+    # TODO 生产化：写表 + 推 ERP
+    approve_n = sum(1 for d in req.decisions if d.decision == "approve")
+    reject_n = sum(1 for d in req.decisions if d.decision == "reject")
+    logger.info(
+        "Campaign confirm [%s run_id=%s] %d decisions (approve=%d, reject=%d) from %s",
+        req.asin, req.run_id or "?", len(req.decisions), approve_n, reject_n,
+        req.operator or "anonymous",
+    )
+    return {
+        "received": len(req.decisions),
+        "asin": req.asin,
+        "run_id": req.run_id,
+        "approve": approve_n,
+        "reject": reject_n,
+        "note": "本期仅日志占位，后续会写库+推 ERP",
+    }

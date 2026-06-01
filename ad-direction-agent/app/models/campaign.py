@@ -23,6 +23,8 @@ campaign_key = "活动名 × 子ASIN"，唯一标识一个广告活动。
 ──────────────────────────────────────────────────────────────────────
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -137,12 +139,34 @@ class CampaignAnalysisResult(BaseModel):
     """顶层分析返回"""
     parent_asin: str = ""
     days: int = 7
+    run_id: str = ""                                                  # 本次分析唯一 ID (e.g. "20260601T123456Z")，前端 localStorage 隔离用
     total_campaigns: int = 0
     adjustments: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    skipped_campaigns: list[dict] = Field(default_factory=list)       # 整批 LLM 失败或未返回，需人工补救
+    synthesis: dict | None = None                                     # AI 汇总分析 (groups + special_cases)；失败时为 None
     summary: dict = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     sanity_check_passed: bool = True
     llm_rounds_completed: int = 2
     rounds_detail: dict = Field(default_factory=dict)
+
+
+# ── 审核占位（本期 stub，后续生产化写表 + 推 ERP）────────────────────────────
+
+
+class CampaignDecision(BaseModel):
+    """单活动审核决定。"""
+    campaign_key: str
+    decision: Literal["approve", "reject"]
+    note: str = ""
+
+
+class CampaignConfirmRequest(BaseModel):
+    """运营批量审核提交。"""
+    asin: str
+    days: int = 7
+    run_id: str = ""                          # 关联到 analyze 那次的 run_id；生产化时作幂等键
+    decisions: list[CampaignDecision] = Field(default_factory=list)
+    operator: str = ""
 
 

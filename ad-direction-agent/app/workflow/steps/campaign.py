@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.config.settings import settings
@@ -63,6 +64,7 @@ async def analyze_campaigns(
 
     bs = batch_size or settings.campaign_batch_size
     cc = concurrency or settings.campaign_llm_concurrency
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     # 1. 获取活动数据
     if campaign_data is None:
@@ -70,7 +72,7 @@ async def analyze_campaigns(
 
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
-            parent_asin=parent_asin, days=days,
+            parent_asin=parent_asin, days=days, run_id=run_id,
             total_campaigns=0,
             warnings=[f"ASIN {parent_asin} 无可用广告活动"],
             rounds_detail={},
@@ -110,7 +112,7 @@ async def analyze_campaigns(
     total = len(llm_campaigns)
     if total == 0:
         return CampaignAnalysisResult(
-            parent_asin=parent_asin, days=days,
+            parent_asin=parent_asin, days=days, run_id=run_id,
             total_campaigns=0,
             warnings=["所有活动均在预过滤阶段被排除（疑似全部已淘汰）"],
             rounds_detail={},
@@ -126,7 +128,10 @@ async def analyze_campaigns(
     warnings_list: list[str] = []
 
     # 5. 精准流 + 广泛流并行分析
-    (exact_adjustments, exact_rd, exact_summaries), (broad_adjustments, broad_rd, broad_summaries) = await asyncio.gather(
+    (
+        (exact_adjustments, exact_rd, exact_summaries, exact_skipped),
+        (broad_adjustments, broad_rd, broad_summaries, broad_skipped),
+    ) = await asyncio.gather(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, llm_sem, temperature, ctx_dict,
@@ -142,6 +147,12 @@ async def analyze_campaigns(
 
     # 6. 合并两流结果
     adjustments = exact_adjustments + broad_adjustments
+    skipped_campaigns = exact_skipped + broad_skipped
+    if skipped_campaigns:
+        logger.warning(
+            "Campaign analyze [%s]: %d 个活动未被分析（LLM 批次失败或未返回）",
+            parent_asin, len(skipped_campaigns),
+        )
     action_order = {"eliminate_to_low_bid_pool": 0, "adjust_bid": 1, "adjust_budget": 1, "adjust_placement": 1, "keep": 2}
     adjustments.sort(key=lambda x: action_order.get(x.action, 9))
 
@@ -149,10 +160,10 @@ async def analyze_campaigns(
     budget_warnings = _resolve_budget_conflicts(adjustments)
     warnings_list.extend(budget_warnings)
 
-    # 8. Sanity check
+    # 8. Sanity check（仅校验低置信项，分批并行避免 LLM 输出超 max_tokens）
     sanity_ok = True
     try:
-        sc_warnings = await _sanity_check(
+        sc_warnings = await _sanity_check_batched(
             reasoner, parent_asin, adjustments,
             exact_summaries + broad_summaries,
             ctx_dict, temperature,
@@ -162,6 +173,30 @@ async def analyze_campaigns(
         logger.warning("Campaign sanity check 失败 [%s]: %s", parent_asin, e)
         warnings_list.append(f"sanity_check 执行失败: {e}")
         sanity_ok = False
+
+    # 8b. AI 汇总合成 (按共同原因分组的运营叙事) — 失败不阻塞
+    synthesis: dict | None = None
+    if adjustments:
+        try:
+            synthesis = await asyncio.wait_for(
+                reasoner.recommend_campaign_synthesis(
+                    asin=parent_asin,
+                    adjustments=adjustments,
+                    strategy_context=ctx_dict,
+                    temperature=temperature,
+                ),
+                timeout=60,
+            )
+            if synthesis.get("error"):
+                warnings_list.append(f"AI 汇总合成失败: {synthesis['error']}")
+        except asyncio.TimeoutError:
+            logger.warning("Campaign synthesis 超时 [%s]", parent_asin)
+            warnings_list.append("AI 汇总合成超时 (>60s)")
+            synthesis = None
+        except Exception as e:
+            logger.warning("Campaign synthesis 异常 [%s]: %s", parent_asin, e)
+            warnings_list.append(f"AI 汇总合成异常: {e}")
+            synthesis = None
 
     # 9. 汇总统计
     summary_stats = {
@@ -178,9 +213,11 @@ async def analyze_campaigns(
     }
 
     return CampaignAnalysisResult(
-        parent_asin=parent_asin, days=days,
+        parent_asin=parent_asin, days=days, run_id=run_id,
         total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
+        skipped_campaigns=skipped_campaigns,
+        synthesis=synthesis,
         summary=summary_stats,
         warnings=warnings_list,
         sanity_check_passed=sanity_ok,
@@ -317,14 +354,14 @@ async def _analyze_one_stream(
     sem: asyncio.Semaphore,
     temperature: float,
     ctx_dict: dict,
-) -> tuple[list[CampaignAdjustmentItem], dict, list[dict]]:
+) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
     """单流全流程: summaries → unit_lookup → 预取 → 分批 → R1+R2 → 投票 → (R3) → 合并。
 
-    返回 (adjustments, rounds_detail, enriched_summaries)；
-    enriched_summaries 回传给 sanity_check 做事实对照（隐患1修复）。
+    返回 (adjustments, rounds_detail, enriched_summaries, skipped_campaigns)。
+    skipped = 整批 LLM 失败或未返回 item 的活动（运营需人工补救）。
     """
     if not campaigns:
-        return [], {}, []
+        return [], {}, [], []
 
     # 1. 构建 summaries + unit_lookup
     summaries = [
@@ -360,9 +397,10 @@ async def _analyze_one_stream(
             for item in br.items:
                 item.confidence = "medium"
                 adjustments.append(item)
+        skipped = _collect_skipped(campaigns, adjustments)
         return adjustments, {
             "round1": _round_stats(r1), "round2": None, "round3": None,
-        }, summaries
+        }, summaries, skipped
 
     r1_batches = _build_batches(summaries, batch_size, seed=1)
     r2_batches = _build_batches(summaries, batch_size, seed=2)
@@ -394,7 +432,28 @@ async def _analyze_one_stream(
             }
 
     adjustments = _merge_to_adjustments(votes, r1_results, r2_results)
-    return adjustments, rd, summaries
+    skipped = _collect_skipped(campaigns, adjustments)
+    return adjustments, rd, summaries, skipped
+
+
+def _collect_skipped(
+    campaigns: list[CampaignUnit],
+    adjustments: list[CampaignAdjustmentItem],
+) -> list[dict]:
+    """对比期望 vs 实际产出，找出未被分析的活动（整批 LLM 失败时）。"""
+    returned_keys = {item.campaign_key for item in adjustments if item.campaign_key}
+    return [
+        {
+            "campaign_key": cu.campaign_key,
+            "campaign_name": cu.campaign_name,
+            "child_asin": cu.child_asin,
+            "match_type": cu.match_type,
+            "keyword_text": cu.keyword_text,
+            "reason": "LLM 批次失败或未返回此活动",
+        }
+        for cu in campaigns
+        if cu.campaign_key and cu.campaign_key not in returned_keys
+    ]
 
 
 # ── 分批与并发 ──────────────────────────────────────────────────────────────
@@ -675,21 +734,22 @@ async def _prefetch_placement(
         shop_account = ""; shop_id = 0
 
     sd, ed = _make_date_window(days)
+    result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
         result = await asyncio.wait_for(
             fetcher.fetch_placement_for(placement_names, shop_account, shop_id,
                                         start_date=sd, end_date=ed, days=days),
             timeout=60,
-        )
+        ) or {}
         for name in enriched:
             s_name = name.get("campaign_name", "")
-            if s_name in (result or {}):
+            if s_name in result:
                 name["_placement_data"] = result[s_name]
     except Exception as e:
-        logger.warning("placement 预取失败: %s", e)
+        logger.warning("placement 预取失败 [%s]: %s", parent_asin, e)
 
     logger.info("Campaign prefetch placement [%s]: %d/%d",
-                 parent_asin, len(result or {}), len(placement_names))
+                 parent_asin, len(result), len(placement_names))
     return enriched
 
 
@@ -719,21 +779,22 @@ async def _prefetch_search_terms(
         shop_account = ""
 
     sd, ed = _make_date_window(days)
+    result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
         result = await asyncio.wait_for(
             fetcher.fetch_search_terms_for(list(search_term_names), shop_account,
                                            start_date=sd, end_date=ed),
             timeout=60,
-        )
+        ) or {}
         for name in enriched:
             s_name = name.get("campaign_name", "")
-            if s_name in (result or {}):
+            if s_name in result:
                 name["_search_term_data"] = result[s_name]
     except Exception as e:
-        logger.warning("search_term 预取失败: %s", e)
+        logger.warning("search_term 预取失败 [%s]: %s", parent_asin, e)
 
     logger.info("Campaign prefetch search_terms [%s]: %d/%d",
-                 parent_asin, len(result or {}), len(search_term_names))
+                 parent_asin, len(result), len(search_term_names))
     return enriched
 
 
@@ -764,6 +825,65 @@ def _find_campaign_unit(
         if cu.campaign_name == key_or_name:
             return cu
     return None
+
+
+# ── Sanity check 输入截断 ───────────────────────────────────────────────────
+
+
+async def _sanity_check_batched(
+    reasoner: "LLMReasoner",
+    asin: str,
+    adjustments: list[CampaignAdjustmentItem],
+    campaign_summaries: list[dict],
+    strategy_context: dict,
+    temperature: float,
+    *,
+    batch_size: int = 10,
+) -> list[str]:
+    """只校验低置信 (confidence=low) 项，分批并行避免 LLM 输出超 max_tokens。
+
+    设计：
+    - 过滤：只取 confidence=='low' 的 adjustments（投票分歧最需要复核）。
+      高置信项假定 LLM 双轮一致，不再 sanity check（节省调用且这类最稳）。
+    - 分批：每批 ≤batch_size 条；不做优先级排序，按原顺序切分。
+    - 并行：asyncio.gather 同时跑所有批次。
+    - 失败隔离：单批 LLM 失败仅该批 warning，其他批不受影响。
+    """
+    low_conf = [a for a in adjustments if a.confidence == "low"]
+    if not low_conf:
+        return []
+
+    chunks = [
+        low_conf[i:i + batch_size]
+        for i in range(0, len(low_conf), batch_size)
+    ]
+
+    logger.info(
+        "Sanity check [%s]: 低置信 %d/%d 条 → %d 批 × ≤%d 条/批，并行执行",
+        asin, len(low_conf), len(adjustments), len(chunks), batch_size,
+    )
+
+    async def _run_one(idx: int, batch: list[CampaignAdjustmentItem]) -> list[str]:
+        try:
+            return await _sanity_check(
+                reasoner, asin, batch, campaign_summaries,
+                strategy_context, temperature,
+            )
+        except Exception as e:
+            logger.warning(
+                "Sanity 批次 %d/%d 失败 [%s]: %s",
+                idx + 1, len(chunks), asin, e,
+            )
+            return [f"sanity_check 批次 {idx + 1}/{len(chunks)} 失败: {e}"]
+
+    batch_results = await asyncio.gather(
+        *[_run_one(i, b) for i, b in enumerate(chunks)],
+    )
+
+    all_warnings: list[str] = []
+    for r in batch_results:
+        all_warnings.extend(r)
+    return all_warnings
 
 
 # ── 预算冲突裁决 ──────────────────────────────────────────────────────────────
@@ -852,17 +972,18 @@ _SANITY_PROMPT = """你是亚马逊广告数据一致性校验员，不是决策
       "campaign_name": "...",
       "action": "eliminate_to_low_bid_pool",
       "triggered_rule": "NO_CVR_HIGH_SPEND",
-      "contradiction": "事实 CVR=3.2%、订单=2，不满足 NO_CVR_HIGH_SPEND 条件 (需要 CVR=0 + spend>$15 + 无自然位支撑)",
+      "contradiction": "花费不足$15不满足条件",
       "severity": "warning"
     }
-  ],
-  "overall_notes": "..."
+  ]
 }
 
-## 规则
+## 输出约束
+- contradictions 最多 10 条，按 severity (critical > warning > info) 只取最重要
+- 每条 contradiction 字段 ≤ 80 字，精炼描述事实与规则的不符
 - 只报真正的矛盾（事实 vs 规则触发条件），不报判断偏好差异
 - 不修改建议，不输出新建议
-- 无矛盾 → contradictions 空数组
+- 无矛盾时 contradictions 为空数组
 - 输出纯 JSON，不含 markdown 代码块标记
 """
 
@@ -924,9 +1045,9 @@ async def _sanity_check(
                 messages=messages,
                 temperature=max(temperature, 0.1),
                 response_format={"type": "json_object"},
-                max_tokens=2048,
+                max_tokens=4096,
             ),
-            timeout=30,
+            timeout=60,
         )
         parsed = reasoner._parse_json(raw)
         contradictions = parsed.get("contradictions", [])

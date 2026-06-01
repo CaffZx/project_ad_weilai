@@ -365,6 +365,57 @@ def _build_campaign_system_prompt(task_type: str = "exact") -> str:
     return template.replace("{kb_content}", kb_content)
 
 
+# ── Campaign 汇总合成 Prompt ─────────────────────────────────────────────────
+
+_CAMPAIGN_SYNTHESIS_PROMPT = """你是亚马逊广告运营专家。把若干单活动调整建议合成为运营可读的「分组叙事 + 特殊调整尾部清单」。
+
+## 业务知识（仅作背景参考，不需复述）
+{kb_content}
+
+## 任务
+按"共同原因"把建议聚成 4-7 组（不超过 7 组），每组给出标题 + 一段 2-4 句运营叙事；
+剩下少数难以归组的特殊建议放进 `special_cases` 尾部清单。
+
+## 分组依据（按优先级）
+1. 同 action + 同 triggered_rule（典型共同原因，如 12 个广泛词都因 ACOS_UNRECOVERABLE 被淘汰）
+2. 同 action + 同业务现象（如多个精准词都因 "TOS 广告位 ACOS 过高" 被下调）
+3. 同 match_type + 同 keyword_class 的相同动作（精准/广泛策略一致）
+
+## 输出 JSON（严格遵循 schema，禁 markdown 围栏）
+
+{
+  "groups": [
+    {
+      "title": "12 个广泛词因连续 7 天 ACOS 严重超标被降出价",
+      "action": "adjust_bid",
+      "common_reason_code": "ACOS_UNRECOVERABLE",
+      "narrative": "这批广泛词 7 天 ACOS 普遍超 60%，订单稀少；为控制无效花费统一下调 Bid 约 30%，预算同步收紧。建议同步关注次周转化恢复情况，若 ACOS 仍居高需进一步处理。",
+      "campaign_keys": ["活动A × B0AAA", "活动B × B0BBB"],
+      "count": 12
+    }
+  ],
+  "special_cases": [
+    {"campaign_key": "活动X × B0XXX", "why_special": "唯一一个核心词被建议淘汰，需运营复核 Custom 保护名单"}
+  ]
+}
+
+## 文案禁则
+- narrative 用运营可读中文，禁规则编号（如 NO_CVR_HIGH_SPEND / ACOS_UNRECOVERABLE 等）
+- 禁内部术语（"决策矩阵"/"决策包"/"门禁"/"confidence"）
+- 引用数值要带时间窗口（如 "7 天花费 $X、订单 0"）
+- 每组叙事 2-4 句，控制在 200 字内
+
+## 严格要求
+- 所有出现在 groups[*].campaign_keys 的值必须存在于输入数组的 campaign_key 字段中（禁止编造）
+- 同一 campaign_key 只能出现在一组里（互斥分组），剩余的放 special_cases
+- 输出纯 JSON，不含 markdown 代码块标记
+"""
+
+
+def _build_campaign_synthesis_prompt() -> str:
+    return _CAMPAIGN_SYNTHESIS_PROMPT.replace("{kb_content}", kb.build("campaign_adjustment"))
+
+
 class LLMReasoner:
     """LLM 推理器 —— 组装上下文并调用大模型"""
 
@@ -1474,6 +1525,93 @@ class LLMReasoner:
                 "error": str(e),
                 "temperature": temperature,
             }
+
+    # ── Campaign 汇总合成 ──────────────────────────────────────────────────
+    async def recommend_campaign_synthesis(
+        self,
+        asin: str,
+        adjustments: list,
+        strategy_context: dict,
+        *,
+        temperature: float = 0.3,
+    ) -> dict:
+        """把 N 条单活动建议合成为 4-7 段按共同原因分组的运营叙事 + 特殊调整尾部清单。
+
+        失败返回 {"groups": [], "special_cases": [], "error": "..."}。调用方自行判断。
+        """
+        if not adjustments:
+            return {"groups": [], "special_cases": []}
+
+        # 精简单条信息，控制输入 token
+        compact: list[dict] = []
+        for adj in adjustments:
+            d = adj.model_dump() if hasattr(adj, "model_dump") else dict(adj)
+            compact.append({
+                "campaign_key": d.get("campaign_key", ""),
+                "campaign_name": (d.get("campaign_name") or "")[:60],
+                "action": d.get("action", ""),
+                "triggered_rule": d.get("triggered_rule", ""),
+                "match_type": d.get("match_type", ""),
+                "keyword_class": d.get("keyword_class", ""),
+                "is_core": d.get("is_core", False),
+                "current_bid": d.get("current_bid"),
+                "proposed_bid": d.get("proposed_bid"),
+                "current_budget": d.get("current_budget"),
+                "proposed_budget": d.get("proposed_budget"),
+                "reason_excerpt": (d.get("reason") or "")[:80],
+                "confidence": d.get("confidence", "medium"),
+            })
+
+        ctx_lines = [
+            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
+            f"  - 目标 ACOS: {strategy_context.get('target_acos', '?')}%",
+        ]
+        warning_flags = strategy_context.get("warning_flags", []) or []
+        if warning_flags:
+            ctx_lines.append(f"  - ⚠️ 注意事项: {'; '.join(warning_flags)}")
+
+        user_message = (
+            "## 策略上下文\n"
+            + "\n".join(ctx_lines)
+            + f"\n\n## 待合成的 {len(compact)} 条单活动建议（JSON 数组）\n"
+            + json.dumps(compact, ensure_ascii=False)
+        )
+
+        messages = [
+            {"role": "system", "content": _build_campaign_synthesis_prompt()},
+            {"role": "user", "content": user_message},
+        ]
+
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=3000,
+            )
+            parsed = self._parse_json(raw)
+            groups = parsed.get("groups", []) or []
+            special_cases = parsed.get("special_cases", []) or []
+            # 文风脱敏 narrative
+            for g in groups:
+                if g.get("narrative"):
+                    g["narrative"] = humanize_ops_text(
+                        self._sanitize_ops_text(g["narrative"])
+                    )
+                if g.get("title"):
+                    g["title"] = self._sanitize_ops_text(g["title"])
+            for sc in special_cases:
+                if sc.get("why_special"):
+                    sc["why_special"] = humanize_ops_text(
+                        self._sanitize_ops_text(sc["why_special"])
+                    )
+            logger.info("Campaign synthesis 成功 [%s], %d groups + %d special_cases",
+                         asin, len(groups), len(special_cases))
+            return {"groups": groups, "special_cases": special_cases}
+        except Exception as e:
+            logger.warning("Campaign synthesis 失败 [%s]: %s", asin, e)
+            return {"groups": [], "special_cases": [], "error": str(e)}
 
 
 # 全局单例
