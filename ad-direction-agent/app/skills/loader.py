@@ -33,7 +33,7 @@ def default_skills_dir() -> Path:
         return Path(settings.skills_dir)
     from app.config.settings import BASE_DIR
 
-    return BASE_DIR.parent / ".claude" / "skills"
+    return BASE_DIR / "app" / "config" / "skills"
 
 
 def _resolve_value(raw: Any) -> Any:
