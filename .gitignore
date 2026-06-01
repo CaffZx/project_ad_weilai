@@ -31,7 +31,8 @@ ad-direction-agent/.gitignore
 ad-purpose-agent/.idea/.gitignore
 
 # Claude Code
-.claude/
+.claude/settings.local.json
+.claude/roo/
 
 # 本地调试 / 备份（勿提交）
 *.tar
