@@ -33,5 +33,4 @@ TARGET_TYPE_MAP = {
     "Conversion": "转化收割",
     "Ranking": "排名卡位",
     "Profit": "利润守卫",
-    "Clearance": "清仓止损",
 }

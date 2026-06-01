@@ -32,7 +32,7 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
 
 输出 JSON 格式：
 - `targets`: level="推荐" 的目标数组。无合格时返回 []。
-- `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 level + reason。reason 必须三段：【决策依据】（知识库规则匹配）【建议】【后续关注】。所有目标都必须写完整三段，禁止写"不适用"。清货属于产品阶段，不是广告目的，禁止输出 Clearance。
+- `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 level + reason。reason 必须三段：【决策依据】（知识库规则匹配）【建议】【后续关注】。所有目标都必须写完整三段，禁止写"不适用"。
 - `level` 判定规则（严格遵循知识库，禁止主观打分）：
   - "推荐": 知识库触发条件命中（04-触发规则.md）且无阻断（guardrail、stage constraint 全通过）
   - "可选": 触发条件未命中但未被阻断，或部分条件满足
@@ -145,7 +145,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 
 [Core Instructions]
 1. `targets` array: ONLY targets whose `level` is "推荐". If none qualify, return [].
-2. `target_scores` array: ALL 4 targets (Traffic/Conversion/Ranking/Profit) with their `level` and detailed `reason`. Do NOT output Clearance — clearance is a product stage, not an ad purpose. The `reason` field MUST contain three sections using 【】 markers:
+2. `target_scores` array: ALL 4 targets (Traffic/Conversion/Ranking/Profit) with their `level` and detailed `reason`. The `reason` field MUST contain three sections using 【】 markers:
 
    【决策依据】— Match against knowledge base rules using this decision tree, then cite evidence with proper formatting:
          (a) STEP 1 — Trigger check: scan knowledge base trigger conditions (04-触发规则.md). Does any trigger match? Examples: 新品/低样本→Traffic, 订单不足→Conversion, 排名机会→Ranking, 效率稳定→Profit.
