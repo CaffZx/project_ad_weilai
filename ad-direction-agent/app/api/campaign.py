@@ -50,59 +50,77 @@ async def campaign_analyze(req: dict):
             llm_rounds_completed=0,
         ).model_dump()
 
-    # ── 状态 & 长期配置 ────────────────────────────────────────────────────
-    # 用工厂单例，保证与左侧卡片 (strategy/tactics/P3 override) 读写同一后端
-    state = get_state_manager()
-    long_term = state.get_long_term_config(asin) or {}
-    wf = state.get_workflow_state(asin) or {}
-    keyword_analysis = wf.get("keyword_analysis", {})
+    # ── 顶层 try/except：任何未捕获异常都转成降级 CampaignAnalysisResult，避免 500 + 堆栈 ──
+    try:
+        # 状态 & 长期配置
+        state = get_state_manager()
+        long_term = state.get_long_term_config(asin) or {}
+        wf = state.get_workflow_state(asin) or {}
+        keyword_analysis = wf.get("keyword_analysis", {})
 
-    # ── ASIN 数据 ──────────────────────────────────────────────────────────
-    aggregator = DataAggregator()
-    asin_data = await asyncio.wait_for(
-        aggregator.fetch(asin, days=days),
-        timeout=120,
-    )
+        # ASIN 数据（120s 超时；超时由外层 except 兜住）
+        aggregator = DataAggregator()
+        asin_data = await asyncio.wait_for(
+            aggregator.fetch(asin, days=days),
+            timeout=120,
+        )
 
-    # ── 策略上下文组装 ────────────────────────────────────────────────────
-    strat_ctx = build_campaign_strategy_context(
-        asin, asin_data, long_term, keyword_analysis,
-    )
+        # 策略上下文组装
+        strat_ctx = build_campaign_strategy_context(
+            asin, asin_data, long_term, keyword_analysis,
+        )
 
-    # target_acos 三级回落：manual override > P3缓存 > 算法
-    manual = state.get_target_acos_override(asin)
-    if manual is not None:
-        strat_ctx.target_acos = int(manual)
-    else:
-        p3 = state.get_p3_recommendation(asin)
-        if p3 and p3.get("target_acos", {}).get("recommended_target"):
-            strat_ctx.target_acos = int(p3["target_acos"]["recommended_target"])
+        # target_acos 三级回落：manual override > P3缓存 > 算法
+        manual = state.get_target_acos_override(asin)
+        if manual is not None:
+            strat_ctx.target_acos = int(manual)
         else:
-            rec = TargetAcosRecommender().recommend(
-                asin_data, long_term.get("ad_purposes", []),
-            )
-            strat_ctx.target_acos = int(rec.recommended_target)
+            p3 = state.get_p3_recommendation(asin)
+            if p3 and p3.get("target_acos", {}).get("recommended_target"):
+                strat_ctx.target_acos = int(p3["target_acos"]["recommended_target"])
+            else:
+                rec = TargetAcosRecommender().recommend(
+                    asin_data, long_term.get("ad_purposes", []),
+                )
+                strat_ctx.target_acos = int(rec.recommended_target)
 
-    effective_temp = float(temp) if temp is not None else settings.campaign_llm_temperature
+        effective_temp = float(temp) if temp is not None else settings.campaign_llm_temperature
 
-    logger.info(
-        "Campaign analyze [%s] days=%d temp=%.2f target_acos=%s",
-        asin, days, effective_temp, strat_ctx.target_acos,
-    )
+        logger.info(
+            "Campaign analyze [%s] days=%d temp=%.2f target_acos=%s",
+            asin, days, effective_temp, strat_ctx.target_acos,
+        )
 
-    # ── LLM 分析 ───────────────────────────────────────────────────────────
-    fetcher = CampaignFetcher()
-    result = await analyze_campaigns(
-        fetcher=fetcher,
-        reasoner=reasoner,
-        parent_asin=asin,
-        asin_data=asin_data,
-        strategy_context=strat_ctx,
-        days=days,
-        temperature=effective_temp,
-        keyword_analysis=keyword_analysis,
-    )
-    return result.model_dump()
+        # LLM 分析（内部已有 fetch_campaigns timeout / sanity+synthesis 禁用 flag 等多层防护）
+        fetcher = CampaignFetcher()
+        result = await analyze_campaigns(
+            fetcher=fetcher,
+            reasoner=reasoner,
+            parent_asin=asin,
+            asin_data=asin_data,
+            strategy_context=strat_ctx,
+            days=days,
+            temperature=effective_temp,
+            keyword_analysis=keyword_analysis,
+        )
+        return result.model_dump()
+
+    except asyncio.TimeoutError as e:
+        logger.warning("Campaign analyze 超时 [%s]: %s", asin, e)
+        return CampaignAnalysisResult(
+            parent_asin=asin, days=days,
+            warnings=[f"分析超时（>120s 数据拉取阶段），请稍后重试"],
+            sanity_check_passed=False,
+            llm_rounds_completed=0,
+        ).model_dump()
+    except Exception as e:
+        logger.exception("Campaign analyze 异常 [%s]: %s", asin, e)
+        return CampaignAnalysisResult(
+            parent_asin=asin, days=days,
+            warnings=[f"分析失败: {type(e).__name__}: {e}"],
+            sanity_check_passed=False,
+            llm_rounds_completed=0,
+        ).model_dump()
 
 
 # ── 审核占位端点（本期 stub）─────────────────────────────────────────────────

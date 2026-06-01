@@ -12,7 +12,7 @@ from app.llm.key_pool import ApiKeyPool
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 
 _key_pool: ApiKeyPool | None = None
 
@@ -71,8 +71,11 @@ class DeepSeekClient:
         temperature: float = 0.3,
         response_format: dict | None = None,
         max_tokens: int | None = None,
+        *,
+        timeout_override: float | None = None,
     ) -> str:
-        """调用 DeepSeek Chat API，自动轮询 Key + 失败重试"""
+        """调用 DeepSeek Chat API，自动轮询 Key + 失败重试。
+        timeout_override: 单次 HTTP 超时，不传则用实例默认值。"""
         pool = get_key_pool()
         if pool is None or pool.key_count == 0:
             return json.dumps({
@@ -105,6 +108,7 @@ class DeepSeekClient:
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
+                    timeout=timeout_override or self.timeout,
                     json=body,
                 )
                 if resp.status_code in (429, 401, 403):

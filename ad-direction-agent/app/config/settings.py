@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     campaign_db_fallback_timeout: float = 60.0
     campaign_prefilter_enabled: bool = True
     # Campaign LLM 分析
-    campaign_llm_concurrency: int = 3
+    campaign_llm_concurrency: int = 8
     campaign_llm_temperature: float = 0.3
     campaign_batch_size: int = 6
 
@@ -146,7 +146,7 @@ class Settings(BaseSettings):
     deepseek_api_keys: str = ""  # 多 Key 逗号分隔，优先于 deepseek_api_key
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-pro"
-    llm_timeout: int = 180
+    llm_timeout: int = 75
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

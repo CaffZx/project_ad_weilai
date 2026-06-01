@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
+
+# 临时禁用后置 LLM 步骤 — 排查挂起问题
+# 现状：synthesis LLM 调用在某些 ASIN 下挂起 >10 分钟（asyncio.wait_for 应 60s 超时但未触发，可能是 client 层 timeout 缺失）
+# 待排查后恢复：DeepSeek client.chat 是否设了 client-level timeout / 是否有 socket 层挂死
+_SANITY_CHECK_ENABLED = False
+_SYNTHESIS_ENABLED = False
 
 TYPE_MAP: dict[str, str] = {
     "broad": "大词", "long_tail": "长尾词", "long-tail": "长尾词",
@@ -65,10 +72,33 @@ async def analyze_campaigns(
     bs = batch_size or settings.campaign_batch_size
     cc = concurrency or settings.campaign_llm_concurrency
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    t_start = time.monotonic()
+    _t = lambda label: logger.info("Campaign timing [%s] +%.1fs: %s", parent_asin, time.monotonic() - t_start, label)
 
-    # 1. 获取活动数据
+    # 1. 获取活动数据（包外层 timeout，避免 MCP/Doris 子调用挂死整个链路）
     if campaign_data is None:
-        campaign_data = await fetcher.fetch_campaigns(parent_asin, days=days)
+        try:
+            campaign_data = await asyncio.wait_for(
+                fetcher.fetch_campaigns(parent_asin, days=days),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("fetch_campaigns 超时 [%s] >300s", parent_asin)
+            return CampaignAnalysisResult(
+                parent_asin=parent_asin, days=days, run_id=run_id,
+                total_campaigns=0,
+                warnings=[f"获取活动数据超时 (>300s)，请重试"],
+                sanity_check_passed=False,
+            )
+        except Exception as e:
+            logger.exception("fetch_campaigns 异常 [%s]: %s", parent_asin, e)
+            return CampaignAnalysisResult(
+                parent_asin=parent_asin, days=days, run_id=run_id,
+                total_campaigns=0,
+                warnings=[f"获取活动数据失败: {type(e).__name__}: {e}"],
+                sanity_check_passed=False,
+            )
+    _t("DONE fetch_campaigns")
 
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
@@ -121,29 +151,41 @@ async def analyze_campaigns(
     # 4. 按 match_type 分流
     exact_list = [cu for cu in llm_campaigns if cu.match_type == "EXACT"]
     broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
+    _t(f"split: exact={len(exact_list)} broad={len(broad_list)}")
 
     ctx_dict = strategy_context.model_dump()
-    llm_sem = asyncio.Semaphore(cc)
+    exact_sem = asyncio.Semaphore(10)
+    broad_sem = asyncio.Semaphore(10)
     rounds_detail: dict[str, dict] = {}
     warnings_list: list[str] = []
 
-    # 5. 精准流 + 广泛流并行分析
-    (
-        (exact_adjustments, exact_rd, exact_summaries, exact_skipped),
-        (broad_adjustments, broad_rd, broad_summaries, broad_skipped),
-    ) = await asyncio.gather(
+    # 5. 精准流 + 广泛流并行分析（各自独立限流 10，互不阻塞）
+    # return_exceptions=True：一流抛未捕获异常 → 不连累另一流，转为 warning
+    stream_results = await asyncio.gather(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
-            strategy_context, keyword_class_map, bs, llm_sem, temperature, ctx_dict,
+            strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
-            strategy_context, keyword_class_map, bs, llm_sem, temperature, ctx_dict,
+            strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
         ),
+        return_exceptions=True,
     )
+
+    def _unpack_stream(r, label):
+        if isinstance(r, BaseException):
+            logger.exception("Stream %s 异常 [%s]: %s", label, parent_asin, r)
+            warnings_list.append(f"{label} 流分析异常: {type(r).__name__}: {r}")
+            return [], {}, [], []
+        return r
+
+    (exact_adjustments, exact_rd, exact_summaries, exact_skipped) = _unpack_stream(stream_results[0], "exact")
+    (broad_adjustments, broad_rd, broad_summaries, broad_skipped) = _unpack_stream(stream_results[1], "broad")
 
     rounds_detail["exact"] = exact_rd
     rounds_detail["broad"] = broad_rd
+    _t("DONE exact+broad streams")
 
     # 6. 合并两流结果
     adjustments = exact_adjustments + broad_adjustments
@@ -161,22 +203,29 @@ async def analyze_campaigns(
     warnings_list.extend(budget_warnings)
 
     # 8. Sanity check（仅校验低置信项，分批并行避免 LLM 输出超 max_tokens）
-    sanity_ok = True
-    try:
-        sc_warnings = await _sanity_check_batched(
-            reasoner, parent_asin, adjustments,
-            exact_summaries + broad_summaries,
-            ctx_dict, temperature,
-        )
-        warnings_list.extend(sc_warnings)
-    except Exception as e:
-        logger.warning("Campaign sanity check 失败 [%s]: %s", parent_asin, e)
-        warnings_list.append(f"sanity_check 执行失败: {e}")
-        sanity_ok = False
+    # 当前由 _SANITY_CHECK_ENABLED 控制，默认禁用 — 排查 LLM 挂起后恢复
+    sanity_ok = False  # 禁用时默认"未通过"，前端 sumMeta 显示 ✗ 提示运营这一步被跳过
+    if _SANITY_CHECK_ENABLED:
+        try:
+            sc_warnings = await _sanity_check_batched(
+                reasoner, parent_asin, adjustments,
+                exact_summaries + broad_summaries,
+                ctx_dict, temperature,
+            )
+            warnings_list.extend(sc_warnings)
+            sanity_ok = True
+            _t("DONE sanity_check")
+        except Exception as e:
+            logger.warning("Campaign sanity check 失败 [%s]: %s", parent_asin, e)
+            warnings_list.append(f"sanity_check 执行失败: {e}")
+    else:
+        logger.info("Campaign sanity check 已禁用 [%s]", parent_asin)
+        warnings_list.append("sanity_check 已暂时禁用（排查 LLM 挂起问题后恢复）")
 
-    # 8b. AI 汇总合成 (按共同原因分组的运营叙事) — 失败不阻塞
+    # 8b. AI 汇总合成 (按共同原因分组的运营叙事)
+    # 当前由 _SYNTHESIS_ENABLED 控制，默认禁用 — 已确认在此处挂起 >10 分钟
     synthesis: dict | None = None
-    if adjustments:
+    if _SYNTHESIS_ENABLED and adjustments:
         try:
             synthesis = await asyncio.wait_for(
                 reasoner.recommend_campaign_synthesis(
@@ -187,7 +236,8 @@ async def analyze_campaigns(
                 ),
                 timeout=60,
             )
-            if synthesis.get("error"):
+            _t("DONE synthesis")
+            if synthesis and synthesis.get("error"):
                 warnings_list.append(f"AI 汇总合成失败: {synthesis['error']}")
         except asyncio.TimeoutError:
             logger.warning("Campaign synthesis 超时 [%s]", parent_asin)
@@ -197,6 +247,9 @@ async def analyze_campaigns(
             logger.warning("Campaign synthesis 异常 [%s]: %s", parent_asin, e)
             warnings_list.append(f"AI 汇总合成异常: {e}")
             synthesis = None
+    elif adjustments:
+        logger.info("Campaign synthesis 已禁用 [%s]", parent_asin)
+        warnings_list.append("AI 汇总合成已暂时禁用（排查 LLM 挂起问题后恢复）")
 
     # 9. 汇总统计
     summary_stats = {
@@ -212,6 +265,7 @@ async def analyze_campaigns(
         ), 2),
     }
 
+    _t("DONE total")
     return CampaignAnalysisResult(
         parent_asin=parent_asin, days=days, run_id=run_id,
         total_campaigns=len(llm_campaigns),
@@ -498,6 +552,27 @@ async def _run_round(
                     ),
                     timeout=LLM_TIMEOUT,
                 )
+
+                # 解析挪进 try：result 形状异常也会落到下面的 except，不外抛
+                if not isinstance(result, dict):
+                    raise ValueError(f"recommend_campaign_batch 返回非 dict: {type(result).__name__}")
+                parsed = result.get("parsed") or {}
+                raw_adj = parsed.get("campaign_adjustments", []) if isinstance(parsed, dict) else []
+                items: list[CampaignAdjustmentItem] = []
+                for adj in raw_adj:
+                    try:
+                        items.append(CampaignAdjustmentItem(**adj))
+                    except Exception as e:
+                        logger.warning("Campaign adjustment item 解析失败 batch=%d: %s", batch_idx, e)
+
+                return CampaignBatchResult(
+                    batch_id=batch_idx, round_number=round_number,
+                    items=items,
+                    raw_llm_output=result.get("raw_output", "") or "",
+                    temperature=temperature,
+                    llm_success=bool(result.get("success", False)),
+                    llm_error=result.get("error", "") or "",
+                )
             except asyncio.TimeoutError:
                 return CampaignBatchResult(
                     batch_id=batch_idx, round_number=round_number,
@@ -505,33 +580,28 @@ async def _run_round(
                     temperature=temperature,
                 )
             except Exception as e:
+                logger.warning("Batch %d 处理异常 [%s]: %s", batch_idx, asin, e)
                 return CampaignBatchResult(
                     batch_id=batch_idx, round_number=round_number,
                     llm_success=False, llm_error=str(e),
                     temperature=temperature,
                 )
 
-        parsed = result.get("parsed", {})
-        raw_adj = parsed.get("campaign_adjustments", [])
-        items: list[CampaignAdjustmentItem] = []
-        for adj in raw_adj:
-            try:
-                items.append(CampaignAdjustmentItem(**adj))
-            except Exception as e:
-                logger.warning("Campaign adjustment item 解析失败 batch=%d: %s", batch_idx, e)
-
-        return CampaignBatchResult(
-            batch_id=batch_idx, round_number=round_number,
-            items=items,
-            raw_llm_output=result.get("raw_output", ""),
-            temperature=temperature,
-            llm_success=result.get("success", False),
-            llm_error=result.get("error", ""),
-        )
-
     tasks = [_call_one(i, batch) for i, batch in enumerate(batches)]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    # return_exceptions=True 防御性兜底：_call_one 已自包裹异常，这里再防万一
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    final: list[CampaignBatchResult] = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, BaseException):
+            logger.warning("Batch %d gather 异常 [%s]: %s", i, asin, r)
+            final.append(CampaignBatchResult(
+                batch_id=i, round_number=round_number,
+                llm_success=False, llm_error=f"gather: {r}",
+                temperature=temperature,
+            ))
+        else:
+            final.append(r)
+    return final
 
 
 # ── 投票与合并 ──────────────────────────────────────────────────────────────
@@ -852,41 +922,53 @@ async def _sanity_check_batched(
     - 并行：asyncio.gather 同时跑所有批次。
     - 失败隔离：单批 LLM 失败仅该批 warning，其他批不受影响。
     """
+    # FIXME: Windows asyncio 取消机制缺陷 — DeepSeek 响应 >60s 时
+    # httpx recv 无法被取消，导致 sanity check 批次永久挂死。
+    # 临时跳过，待后续切线程池方案后恢复。
     low_conf = [a for a in adjustments if a.confidence == "low"]
-    if not low_conf:
-        return []
+    if low_conf:
+        logger.info(
+            "Sanity check [%s]: 跳过（Windows asyncio 挂死规避），低置信 %d/%d 条",
+            asin, len(low_conf), len(adjustments),
+        )
+    return []
 
-    chunks = [
-        low_conf[i:i + batch_size]
-        for i in range(0, len(low_conf), batch_size)
-    ]
-
-    logger.info(
-        "Sanity check [%s]: 低置信 %d/%d 条 → %d 批 × ≤%d 条/批，并行执行",
-        asin, len(low_conf), len(adjustments), len(chunks), batch_size,
-    )
-
-    async def _run_one(idx: int, batch: list[CampaignAdjustmentItem]) -> list[str]:
-        try:
-            return await _sanity_check(
-                reasoner, asin, batch, campaign_summaries,
-                strategy_context, temperature,
-            )
-        except Exception as e:
-            logger.warning(
-                "Sanity 批次 %d/%d 失败 [%s]: %s",
-                idx + 1, len(chunks), asin, e,
-            )
-            return [f"sanity_check 批次 {idx + 1}/{len(chunks)} 失败: {e}"]
-
-    batch_results = await asyncio.gather(
-        *[_run_one(i, b) for i, b in enumerate(chunks)],
-    )
-
-    all_warnings: list[str] = []
-    for r in batch_results:
-        all_warnings.extend(r)
-    return all_warnings
+    # --- 以下为原始实现，待修复后恢复 ---
+    # low_conf = [a for a in adjustments if a.confidence == "low"]
+    # if not low_conf:
+    #     return []
+    #
+    # chunks = [
+    #     low_conf[i:i + batch_size]
+    #     for i in range(0, len(low_conf), batch_size)
+    # ]
+    #
+    # logger.info(
+    #     "Sanity check [%s]: 低置信 %d/%d 条 → %d 批 × ≤%d 条/批，并行执行",
+    #     asin, len(low_conf), len(adjustments), len(chunks), batch_size,
+    # )
+    #
+    # async def _run_one(idx: int, batch: list[CampaignAdjustmentItem]) -> list[str]:
+    #     try:
+    #         return await _sanity_check(
+    #             reasoner, asin, batch, campaign_summaries,
+    #             strategy_context, temperature,
+    #         )
+    #     except Exception as e:
+    #         logger.warning(
+    #             "Sanity 批次 %d/%d 失败 [%s]: %s",
+    #             idx + 1, len(chunks), asin, e,
+    #         )
+    #         return [f"sanity_check 批次 {idx + 1}/{len(chunks)} 失败: {e}"]
+    #
+    # batch_results = await asyncio.gather(
+    #     *[_run_one(i, b) for i, b in enumerate(chunks)],
+    # )
+    #
+    # all_warnings: list[str] = []
+    # for r in batch_results:
+    #     all_warnings.extend(r)
+    # return all_warnings
 
 
 # ── 预算冲突裁决 ──────────────────────────────────────────────────────────────
@@ -1043,14 +1125,12 @@ async def _sanity_check(
     ]
 
     try:
-        raw = await asyncio.wait_for(
-            reasoner.client.chat(
-                messages=messages,
-                temperature=max(temperature, 0.1),
-                response_format={"type": "json_object"},
-                max_tokens=4096,
-            ),
-            timeout=60,
+        raw = await reasoner.client.chat(
+            messages=messages,
+            temperature=max(temperature, 0.1),
+            response_format={"type": "json_object"},
+            max_tokens=4096,
+            timeout_override=90,
         )
         parsed = reasoner._parse_json(raw)
         contradictions = parsed.get("contradictions", [])
