@@ -1534,6 +1534,7 @@ class LLMReasoner:
         strategy_context: dict,
         *,
         temperature: float = 0.3,
+        timeout_override: float | None = None,
     ) -> dict:
         """把 N 条单活动建议合成为 4-7 段按共同原因分组的运营叙事 + 特殊调整尾部清单。
 
@@ -1589,6 +1590,7 @@ class LLMReasoner:
                 temperature=temperature,
                 response_format={"type": "json_object"},
                 max_tokens=3000,
+                timeout_override=timeout_override or 55,
             )
             parsed = self._parse_json(raw)
             groups = parsed.get("groups", []) or []

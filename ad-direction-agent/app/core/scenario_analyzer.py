@@ -17,12 +17,13 @@ from app.models.asin_data import ASINData
 
 SCENARIOS = [
     {"id": "acos_crisis", "name": "ACOS 告急", "priority": 1},
-    {"id": "cold_start", "name": "新品冷启动", "priority": 2},
-    {"id": "rapid_growth", "name": "快速起量", "priority": 3},
-    {"id": "push_ranking", "name": "推自然排名", "priority": 4},
-    {"id": "profit_harvest", "name": "盈利收割", "priority": 5},
-    {"id": "stable_conversion", "name": "稳定转化", "priority": 6},
-    {"id": "default", "name": "综合看板", "priority": 7},
+    {"id": "clearance", "name": "清仓止损", "priority": 2},
+    {"id": "cold_start", "name": "新品冷启动", "priority": 3},
+    {"id": "rapid_growth", "name": "快速起量", "priority": 4},
+    {"id": "push_ranking", "name": "推自然排名", "priority": 5},
+    {"id": "profit_harvest", "name": "盈利收割", "priority": 6},
+    {"id": "stable_conversion", "name": "稳定转化", "priority": 7},
+    {"id": "default", "name": "综合看板", "priority": 8},
 ]
 
 # 各场景的北极星指标定义 — 与数据血缘可用字段对齐
@@ -67,6 +68,13 @@ METRIC_DEFS = {
         ("natural_order_ratio", "自然订单占比", "%", {"warning": 40}),
         ("avg_daily_sales_30d", "日均销量", "单", {}),
         ("tacos", "TACOS", "%", {"warning": 20}),
+    ],
+    "clearance": [
+        ("inventory_qty", "可售库存", "件", {"danger": 0, "warning": 50}),
+        ("avg_daily_sales_30d", "日均销量", "单", {}),
+        ("acos", "ACOS", "%", {"warning": 80}),
+        ("margin", "毛利率", "%", {"danger": -10, "warning": 5}),
+        ("natural_order_ratio", "自然订单占比", "%", {}),
     ],
     "acos_crisis": [
         ("acos", "ACOS", "%", {"danger": 50, "warning": 40}),
@@ -187,11 +195,16 @@ def detect_scenario(data: ASINData, product_stage: str | None = None, ad_purpose
     acos = data.ad_data.acos if data.ad_data else None
     purposes = ad_purposes or []
 
-    # Priority 1: ACOS告急
-    if acos is not None and acos > 40:
+    # Priority 1: ACOS告急（清货期豁免）
+    inventory_qty = data.signals.inventory_qty if data.signals else None
+    if acos is not None and acos > 40 and product_stage != "清货期":
         return {"id": "acos_crisis", "name": "ACOS 告急", "trigger": f"ACOS {acos:.0f}% > 40%"}
 
-    # Priority 2: 新品冷启动
+    # Priority 2: 清仓止损 — 清货期 或 库存=0
+    if product_stage == "清货期" or (inventory_qty is not None and inventory_qty == 0):
+        return {"id": "clearance", "name": "清仓止损", "trigger": f"{product_stage or '库存=0'}"}
+
+    # Priority 3: 新品冷启动
     if product_stage == "测试期" and ("引流型" in purposes or "排名型" in purposes):
         return {"id": "cold_start", "name": "新品冷启动", "trigger": f"{product_stage} + {'/'.join(purposes)}"}
 

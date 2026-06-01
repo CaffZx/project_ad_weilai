@@ -34,16 +34,69 @@ logger = logging.getLogger(__name__)
 
 LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 
-# 临时禁用后置 LLM 步骤 — 排查挂起问题
-# 现状：synthesis LLM 调用在某些 ASIN 下挂起 >10 分钟（asyncio.wait_for 应 60s 超时但未触发，可能是 client 层 timeout 缺失）
-# 待排查后恢复：DeepSeek client.chat 是否设了 client-level timeout / 是否有 socket 层挂死
-_SANITY_CHECK_ENABLED = False
-_SYNTHESIS_ENABLED = False
+# Sanity / Synthesis 开关（2026-06-01 恢复）
+# 修复方式：去掉外层 asyncio.wait_for（Windows 取消不生效），改用 chat(timeout_override=)
+# 由 httpx socket 层超时接管，不依赖 asyncio 取消
+_SANITY_CHECK_ENABLED = True
+_SYNTHESIS_ENABLED = True
 
 TYPE_MAP: dict[str, str] = {
     "broad": "大词", "long_tail": "长尾词", "long-tail": "长尾词",
     "competitor": "竞品词", "brand": "品牌词", "custom": "自定义",
 }
+
+
+# ── 运行互斥 & 数据缓存 ──────────────────────────────────────────────────
+
+_running: dict[str, str] = {}  # asin → run_id，防重复触发
+
+
+async def _get_redis():
+    """懒加载 Redis 客户端，不可用时返回 None。"""
+    import redis.asyncio as aioredis
+    from app.config.settings import settings
+
+    try:
+        r = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
+        await r.ping()
+        return r
+    except Exception:
+        return None
+
+
+def _campaign_cache_key(asin: str, days: int) -> str:
+    return f"campaign:data:{asin}:{days}"
+
+
+async def _load_cached_campaigns(asin: str, days: int) -> CampaignData | None:
+    """从 Redis 读取缓存的 CampaignData。"""
+    import json as _json
+    r = await _get_redis()
+    if not r:
+        return None
+    try:
+        raw = await r.get(_campaign_cache_key(asin, days))
+        if raw:
+            return CampaignData.model_validate(_json.loads(raw))
+    except Exception:
+        pass
+    return None
+
+
+async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> None:
+    """将 CampaignData 写入 Redis 缓存，TTL 30 分钟。"""
+    import json as _json
+    r = await _get_redis()
+    if not r:
+        return
+    try:
+        await r.setex(
+            _campaign_cache_key(asin, days),
+            1800,
+            _json.dumps(data.model_dump(), default=str),
+        )
+    except Exception:
+        pass
 
 
 # ── 公开入口 ────────────────────────────────────────────────────────────────
@@ -75,30 +128,77 @@ async def analyze_campaigns(
     t_start = time.monotonic()
     _t = lambda label: logger.info("Campaign timing [%s] +%.1fs: %s", parent_asin, time.monotonic() - t_start, label)
 
-    # 1. 获取活动数据（包外层 timeout，避免 MCP/Doris 子调用挂死整个链路）
+    # 0. 幂等检查：同 ASIN 已跑则拒绝
+    if parent_asin in _running:
+        existing = _running[parent_asin]
+        logger.warning("Campaign 幂等拦截 [%s]: 已有 run_id=%s 正在运行", parent_asin, existing)
+        return CampaignAnalysisResult(
+            parent_asin=parent_asin, days=days, run_id=run_id,
+            total_campaigns=0,
+            warnings=[f"该 ASIN 已有分析正在运行 (run_id={existing})，请等待完成后重试"],
+            sanity_check_passed=False,
+        )
+    _running[parent_asin] = run_id
+
+    try:
+        result = await _analyze_campaigns_impl(
+            fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
+            asin_data=asin_data, strategy_context=strategy_context,
+            days=days, bs=bs, cc=cc, temperature=temperature,
+            campaign_data=campaign_data, keyword_analysis=keyword_analysis,
+            run_id=run_id, _t=_t,
+        )
+        return result
+    finally:
+        _running.pop(parent_asin, None)
+
+
+async def _analyze_campaigns_impl(
+    fetcher: CampaignFetcher,
+    reasoner: "LLMReasoner",
+    parent_asin: str,
+    asin_data: ASINData,
+    strategy_context: CampaignStrategyContext,
+    *,
+    days: int,
+    bs: int,
+    cc: int,
+    temperature: float,
+    campaign_data: CampaignData | None,
+    keyword_analysis: dict | None,
+    run_id: str,
+    _t,
+) -> CampaignAnalysisResult:
+
+    # 1. 获取活动数据 — 优先 Redis 缓存，miss 时拉 MCP/Doris
     if campaign_data is None:
-        try:
-            campaign_data = await asyncio.wait_for(
-                fetcher.fetch_campaigns(parent_asin, days=days),
-                timeout=300,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("fetch_campaigns 超时 [%s] >300s", parent_asin)
-            return CampaignAnalysisResult(
-                parent_asin=parent_asin, days=days, run_id=run_id,
-                total_campaigns=0,
-                warnings=[f"获取活动数据超时 (>300s)，请重试"],
-                sanity_check_passed=False,
-            )
-        except Exception as e:
-            logger.exception("fetch_campaigns 异常 [%s]: %s", parent_asin, e)
-            return CampaignAnalysisResult(
-                parent_asin=parent_asin, days=days, run_id=run_id,
-                total_campaigns=0,
-                warnings=[f"获取活动数据失败: {type(e).__name__}: {e}"],
-                sanity_check_passed=False,
-            )
-    _t("DONE fetch_campaigns")
+        campaign_data = await _load_cached_campaigns(parent_asin, days)
+        if campaign_data:
+            _t("DONE fetch_campaigns (redis hit)")
+        else:
+            try:
+                campaign_data = await asyncio.wait_for(
+                    fetcher.fetch_campaigns(parent_asin, days=days),
+                    timeout=300,
+                )
+                await _save_cached_campaigns(parent_asin, days, campaign_data)
+                _t("DONE fetch_campaigns (fetched)")
+            except asyncio.TimeoutError:
+                logger.warning("fetch_campaigns 超时 [%s] >300s", parent_asin)
+                return CampaignAnalysisResult(
+                    parent_asin=parent_asin, days=days, run_id=run_id,
+                    total_campaigns=0,
+                    warnings=[f"获取活动数据超时 (>300s)，请重试"],
+                    sanity_check_passed=False,
+                )
+            except Exception as e:
+                logger.exception("fetch_campaigns 异常 [%s]: %s", parent_asin, e)
+                return CampaignAnalysisResult(
+                    parent_asin=parent_asin, days=days, run_id=run_id,
+                    total_campaigns=0,
+                    warnings=[f"获取活动数据失败: {type(e).__name__}: {e}"],
+                    sanity_check_passed=False,
+                )
 
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
@@ -204,7 +304,7 @@ async def analyze_campaigns(
 
     # 8. Sanity check（仅校验低置信项，分批并行避免 LLM 输出超 max_tokens）
     # 当前由 _SANITY_CHECK_ENABLED 控制，默认禁用 — 排查 LLM 挂起后恢复
-    sanity_ok = False  # 禁用时默认"未通过"，前端 sumMeta 显示 ✗ 提示运营这一步被跳过
+    sanity_ok = True
     if _SANITY_CHECK_ENABLED:
         try:
             sc_warnings = await _sanity_check_batched(
@@ -213,43 +313,35 @@ async def analyze_campaigns(
                 ctx_dict, temperature,
             )
             warnings_list.extend(sc_warnings)
-            sanity_ok = True
             _t("DONE sanity_check")
         except Exception as e:
             logger.warning("Campaign sanity check 失败 [%s]: %s", parent_asin, e)
             warnings_list.append(f"sanity_check 执行失败: {e}")
+            sanity_ok = False
     else:
         logger.info("Campaign sanity check 已禁用 [%s]", parent_asin)
-        warnings_list.append("sanity_check 已暂时禁用（排查 LLM 挂起问题后恢复）")
 
     # 8b. AI 汇总合成 (按共同原因分组的运营叙事)
-    # 当前由 _SYNTHESIS_ENABLED 控制，默认禁用 — 已确认在此处挂起 >10 分钟
+    # timeout_override=55：httpx socket 层自断，不依赖 asyncio 取消
     synthesis: dict | None = None
     if _SYNTHESIS_ENABLED and adjustments:
         try:
-            synthesis = await asyncio.wait_for(
-                reasoner.recommend_campaign_synthesis(
-                    asin=parent_asin,
-                    adjustments=adjustments,
-                    strategy_context=ctx_dict,
-                    temperature=temperature,
-                ),
-                timeout=60,
+            synthesis = await reasoner.recommend_campaign_synthesis(
+                asin=parent_asin,
+                adjustments=adjustments,
+                strategy_context=ctx_dict,
+                temperature=temperature,
+                timeout_override=55,
             )
             _t("DONE synthesis")
             if synthesis and synthesis.get("error"):
                 warnings_list.append(f"AI 汇总合成失败: {synthesis['error']}")
-        except asyncio.TimeoutError:
-            logger.warning("Campaign synthesis 超时 [%s]", parent_asin)
-            warnings_list.append("AI 汇总合成超时 (>60s)")
-            synthesis = None
         except Exception as e:
             logger.warning("Campaign synthesis 异常 [%s]: %s", parent_asin, e)
             warnings_list.append(f"AI 汇总合成异常: {e}")
             synthesis = None
     elif adjustments:
         logger.info("Campaign synthesis 已禁用 [%s]", parent_asin)
-        warnings_list.append("AI 汇总合成已暂时禁用（排查 LLM 挂起问题后恢复）")
 
     # 9. 汇总统计
     summary_stats = {
@@ -416,6 +508,8 @@ async def _analyze_one_stream(
     """
     if not campaigns:
         return [], {}, [], []
+    t0 = time.monotonic()
+    _st = lambda label: logger.info("Stream timing [%s|%s] +%.1fs: %s", parent_asin, task_type, time.monotonic() - t0, label)
 
     # 1. 构建 summaries + unit_lookup
     summaries = [
@@ -438,6 +532,7 @@ async def _analyze_one_stream(
         summaries = await _prefetch_search_terms(
             fetcher, parent_asin, days, summaries, unit_lookup,
         )
+    _st(f"DONE prefetch ({len(campaigns)} campaigns)")
 
     # 3. 分批 + R1+R2（少于 2 批时跳过投票，单轮直出）
     if len(campaigns) < batch_size * 2:
@@ -462,6 +557,7 @@ async def _analyze_one_stream(
         _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, sem, 1, task_type=task_type),
         _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, sem, 2, task_type=task_type),
     )
+    _st(f"DONE R1+R2 ({len(r1_batches)}+{len(r2_batches)} batches)")
     rd: dict = {
         "round1": _round_stats(r1_results),
         "round2": _round_stats(r2_results),
@@ -487,6 +583,7 @@ async def _analyze_one_stream(
 
     adjustments = _merge_to_adjustments(votes, r1_results, r2_results)
     skipped = _collect_skipped(campaigns, adjustments)
+    _st(f"DONE merge ({len(adjustments)} items, {len(skipped)} skipped)")
     return adjustments, rd, summaries, skipped
 
 

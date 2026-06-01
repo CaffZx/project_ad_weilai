@@ -44,6 +44,11 @@ id = "维持期"
 label = "维持期"
 description = "超预期表现，维持当前稳定状态，精细化调控"
 
+[[strategy.product_stage.options]]
+id = "清货期"
+label = "清货期"
+description = "库存清理阶段，放宽ACOS限制，优先清仓止损"
+
 [strategy.season_stage]
 label = "淡旺季阶段"
 description = "当前所处的季节性时段，影响广告投放节奏和出价策略"

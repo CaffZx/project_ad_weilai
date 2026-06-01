@@ -25,6 +25,7 @@ class ProductStage(StrEnum):
     GROW = "推进期"           # 增长推进/冲刺
     HARVEST = "收割利润期"    # 达成预期
     MAINTAIN = "维持期"       # 超预期维持
+    LIQUIDATING = "清货期"    # 清仓止损
 
 
 # 旧值 → 新值映射，用于 DB 存量数据和 long_term_config 旧值的透明转换
@@ -39,6 +40,8 @@ STAGE_OLD_TO_NEW: dict[str, str] = {
     "推进": "推进期",
     "收割": "收割利润期",
     "维持": "维持期",
+    "清货": "清货期",
+    "清仓": "清货期",
 }
 
 
