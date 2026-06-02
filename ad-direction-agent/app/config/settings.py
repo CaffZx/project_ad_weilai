@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     campaign_batch_size: int = 6
     # 策略总览(执行总纲)：明细前的宏观方向 AI 文本 + 定性 preamble 注入分批
     # 在主链上，必须 fail-open；Windows 本机有 asyncio 取消缺陷风险，建议仅服务器(Linux)开启
-    campaign_overview_enabled: bool = True
+    campaign_overview_enabled: bool = False  # 临时禁用(2026-06-02)：KB 15/17 注入后先验明细流，总览待后续单独验
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"
