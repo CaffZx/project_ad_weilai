@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
 > **最后更新**: 2026-06-01
-> **版本**: v1.0
+> **版本**: v1.1
 > **分支**: chenv3.0
 
 ---
@@ -52,8 +52,8 @@ parent_asin
   │   ├─ 精准流: 预取 placement → _EXACT_PROMPT → 分批投票
   │   └─ 广泛流: 预取 search_term → _BROAD_PROMPT → 分批投票
   ├─ 合并两流结果 + Budget 冲突裁决
-  ├─ Sanity check (仅低置信项，≤10/批，并行) — 当前临时禁用
-  └─ AI 汇总合成 (按共同原因分组叙事) — 当前临时禁用
+  ├─ Sanity check (仅低置信项，≤10/批，并行) — ✅ 已恢复
+  └─ AI 汇总合成 (按共同原因分组叙事) — ✅ 已恢复
 ```
 
 ### 2.2 核心设计决策
@@ -137,6 +137,7 @@ deepseek_model: str = "deepseek-v4-pro"
 | LLM 重试 | `MAX_RETRIES` | 2 | llm/client.py |
 | LLM 单次最坏耗时 | = 75 × 2 重试 | ~150s | 累计 |
 | MCP 工具 | `mcp_tool_timeout` | 1200s | settings.py |
+| Doris 子 ASIN 上限 | `db_child_asin_cap` | 200 | settings.py → db_sql_helpers.py |
 | MCP 上下文解析 | `mcp_context_timeout` | 30s | settings.py |
 | Doris 主 fetch | `db_fetch_timeout` | 180s | settings.py |
 | Doris flow_keywords | `db_flow_keyword_timeout` | 90s | settings.py |
@@ -168,6 +169,16 @@ deepseek_model: str = "deepseek-v4-pro"
 | 06-01 | `_run_round` 解析挪进 try | result 非 dict / parsed 非 dict 等异常落到 except，不外抛 |
 | 06-01 | `_run_round` gather `return_exceptions=True` | 二次防御 `_call_one` 未来回归 |
 | 06-01 | `_unpack_stream` helper | 流级 gather 异常→空 4 元组，warning 入栈 |
+| 06-01 | Sanity/Synthesis 恢复 | `timeout_override` 绕过 Windows asyncio 缺陷；sanity gather 加 120s timeout |
+| 06-01 | `_resolve_tiebreaker` bug | 修复全量降级：仅遍历 disputed_keys，高置信项不受影响 |
+| 06-01 | `_same_direction` 扩展 | 精准流比 `_placement_sig`，广泛流比 `_negative_kw_sig`，杜绝 placement/否词分歧误判 |
+| 06-01 | sanity 语义修正 | 返回 `tuple[warnings, all_ok]`，细化区分"校验通过"与"校验失败" |
+| 06-01 | 淘汰活动清洗 | `_resolve_budget_conflicts` 无条件填 $1/$0.20 + 清空 placement/neg_kw |
+| 06-01 | 幂等 TTL 兜底 | `_running` 存 `(run_id, monotonic)` + 600s 僵尸兜底 |
+| 06-01 | Redis refresh | `refresh=True` 跳过缓存；`save_cached` 去掉 `default=str` hack |
+| 06-01 | `db_child_asin_cap` | 80→200 |
+| 06-01 | synthesis `max_tokens` | 3000→4096 |
+| 06-01 | 入口日志 | batch/synthesis/sanity 三处 LLM 入口打 `logger.info` (ASIN/items/temp) |
 
 ---
 
@@ -175,24 +186,22 @@ deepseek_model: str = "deepseek-v4-pro"
 
 ### 4.1 Windows asyncio 缺陷
 
-| 问题 | 影响 | 临时方案 |
+| 问题 | 影响 | 当前方案 |
 |------|------|---------|
-| ProactorEventLoop 下 asyncio 取消 httpx recv 不生效 | sanity/synthesis LLM 调用 >60s 时挂死 | 已禁用，待切换线程池方案 |
-| `timeout_override` 同样依赖 asyncio | httpx 超时也可能不生效 | 设置不超过 90s，但不能根本解决 |
+| ProactorEventLoop 下 asyncio 取消 httpx recv 不生效 | DeepSeek 响应 >60s 时可能挂死 | `timeout_override`（httpx socket 层自断）。sanity 已验证通过（5s 完成），synthesis 偶现挂死 |
+| `timeout_override` 同样依赖 asyncio | httpx 超时也可能不生效 | synthesis 用 55s，sanity 用 90s。synthesis 大输入时仍可能挂 |
 
-**恢复方案**：用 `loop.run_in_executor(ThreadPoolExecutor, fn)` 在独立线程跑 httpx，`future.result(timeout=N)` 可强制中断。
+**根治方案**：`loop.run_in_executor(ThreadPoolExecutor, sync_chat)` + `future.result(timeout=N)`，OS 级 socket timeout。
 
 ### 4.2 功能待办
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| Sanity check 恢复 | P0 | 线程池方案 |
-| Synthesis 恢复 | P0 | 同上 + 加 `timeout_override` |
-| LLM 调用入口日志 | P0 | `recommend_campaign_batch/synthesis/_sanity_check` 入口打 logger.info（含 ASIN / batch_id / item count），下次挂死能立刻定位卡在哪一步 |
-| R3 tiebreaker 端到端验证 | P1 | 从未真触发，需构造分歧用例 |
+| Synthesis Windows 根治 | P0 | 线程池方案，当前 `timeout_override` 偶失效 |
+| R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则 |
 | DB 落库 | P1 | `t_advert_agent_campaign_analysis` + `_adjustment` 表 |
-| L420 投票 key 同源化 | P1 | `tiebreaker_summaries = [s for s in summaries if s.get("campaign_key") in needs_tiebreaker]` 依赖 LLM 原样回显 campaign_key；需用代码侧反向索引消除脆弱性 |
+| L420 投票 key 同源化 | P1 | `tiebreaker_summaries` 依赖 LLM 回显 campaign_key |
 | `POST /campaign/confirm` 落地 | P2 | MySQL pending 表 + ERP 推送 |
 | `is_core` 真实数据源 | P2 | 替换硬编码 False |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL |
@@ -207,6 +216,11 @@ deepseek_model: str = "deepseek-v4-pro"
 | Sanity check 截断 | max_tokens: 2048→4096 |
 | `_resolve_tiebreaker` key 不一致 | 统一使用 `_vote_key()` |
 | API 错误返回缺字段 | 使用 `CampaignAnalysisResult().model_dump()` |
+| `_resolve_tiebreaker` 全量降级 | 仅遍历 disputed_keys，高置信项不受影响 |
+| `_same_direction` 漏 placement/neg_kw | 精准流比 `_placement_sig`，广泛流比 `_negative_kw_sig` |
+| sanity LLM 失败吞异常 | 改为 raise，`_run_one` 标记 `ok=False` |
+| 淘汰活动字段缺失 | 无条件填 $1/$0.20 + 清空 placement/neg_kw |
+| 预过滤活动不可见 | `skipped_eliminated` 入 `skipped_campaigns`，含 campaign_key 等 |
 | `fetch_campaigns` 无外层 timeout | 包 `wait_for(timeout=300)` + try/except，子调用挂死不连累整链 |
 | `asyncio.gather` 默认不 `return_exceptions` | 流级 + batch 级两处加 `return_exceptions=True`，异常隔离 |
 | `_run_round` 解析在 try 之外 | result 形状异常会 AttributeError 外抛；改为全部挪进 try，加 `isinstance(result, dict)` 守卫 |
