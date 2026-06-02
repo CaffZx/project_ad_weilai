@@ -23,6 +23,7 @@ from app.models.campaign import (
     CampaignAnalysisResult,
     CampaignBatchResult,
     CampaignData,
+    CampaignStrategicOverview,
     CampaignStrategyContext,
     CampaignUnit,
 )
@@ -33,6 +34,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
+
+# Tier 2: 进程级 LLM 并发上限 —— 跨 ASIN/流共享，与 key 容量匹配。
+# 防多个 ASIN 并行时各开各的 Semaphore(10) 把 DeepSeek/连接池打满引发 stall→级联死锁。
+# 懒初始化：在运行的事件循环内首次取用时创建（避免 import 期无 loop 绑定问题）。
+_GLOBAL_LLM_SEM: asyncio.Semaphore | None = None
+
+
+def _global_llm_sem() -> asyncio.Semaphore:
+    global _GLOBAL_LLM_SEM
+    if _GLOBAL_LLM_SEM is None:
+        _GLOBAL_LLM_SEM = asyncio.Semaphore(settings.campaign_global_llm_concurrency)
+    return _GLOBAL_LLM_SEM
+
 
 # Sanity / Synthesis 开关（2026-06-01 恢复）
 # 修复方式：去掉外层 asyncio.wait_for（Windows 取消不生效），改用 chat(timeout_override=)
@@ -272,10 +286,23 @@ async def _analyze_campaigns_impl(
     _t(f"split: exact={len(exact_list)} broad={len(broad_list)}")
 
     ctx_dict = strategy_context.model_dump()
-    exact_sem = asyncio.Semaphore(10)
-    broad_sem = asyncio.Semaphore(10)
+    exact_sem = asyncio.Semaphore(cc)   # 每流并发上限 = campaign_llm_concurrency
+    broad_sem = asyncio.Semaphore(cc)
     rounds_detail: dict[str, dict] = {}
     warnings_list: list[str] = []
+
+    # 4.5 策略总览(执行总纲)：先于明细产出；posture_brief 注入各批作定性框架。
+    #     在主链上 → fail-open：失败仅 facts-only + warning，明细照常无 preamble 跑。
+    strategic_overview: dict | None = None
+    if settings.campaign_overview_enabled:
+        facts = _build_overview_facts(campaign_data, llm_campaigns, strategy_context)
+        overview_obj = await _run_overview(reasoner, parent_asin, facts, ctx_dict, temperature)
+        strategic_overview = overview_obj.model_dump()
+        if overview_obj.posture_brief:
+            ctx_dict["_strategic_overview_text"] = overview_obj.posture_brief
+        if overview_obj.generated_by == "fallback":
+            warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
+        _t("DONE strategic_overview")
 
     # 5. 精准流 + 广泛流并行分析（各自独立限流 10，互不阻塞）
     # return_exceptions=True：一流抛未捕获异常 → 不连累另一流，转为 warning
@@ -391,6 +418,7 @@ async def _analyze_campaigns_impl(
         total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
         skipped_campaigns=skipped_campaigns,
+        strategic_overview=strategic_overview,
         synthesis=synthesis,
         summary=summary_stats,
         warnings=warnings_list,
@@ -417,13 +445,15 @@ async def run_campaign_analysis(
     long_term = ctx.state.get_long_term_config(asin) or {}
     wf_state = ctx.state.get_workflow_state(asin) or {}
     keyword_analysis = wf_state.get("keyword_analysis", {})
+    # 广告方向：运营 tab4「生成评估报告」已选并持久化到 workflow_state.execution
+    ad_directions = (wf_state.get("execution") or {}).get("selected_directions") or []
 
     # ASIN 数据
     asin_data = await ctx.ensure_data(asin, days=days, refresh=refresh)
 
     # 组装策略上下文
     strat_ctx = build_campaign_strategy_context(
-        asin, asin_data, long_term, keyword_analysis,
+        asin, asin_data, long_term, keyword_analysis, ad_directions,
     )
 
     # target_acos: manual > P3 > algorithm
@@ -463,6 +493,7 @@ def build_campaign_strategy_context(
     asin_data: ASINData,
     long_term: dict,
     keyword_analysis: dict | None = None,
+    ad_directions: list[str] | None = None,
 ) -> CampaignStrategyContext:
     """从 ASINData + long_term_config + keyword_analysis 组装 ASIN 级上下文。
 
@@ -471,8 +502,16 @@ def build_campaign_strategy_context(
     - refund_rate → asin_data.refund_rate
     - inventory_days → 计算值 (inventory_qty / avg_daily_sales_30d)
     - target_keyword_strategy → long_term.get("target_keyword_strategy", [])
+    - ad_directions → 调用方从 workflow_state.execution.selected_directions 取（运营 tab4 已选）
+    - daily_budget → long_term.daily_budget_override → asin_data.daily_budget 回落
+    - target_acos → 仍由调用方三级回落填充（override→P3→算法）
     """
     flags: list[str] = []
+
+    # 每日预算：状态机 override 优先，回落数仓 asin_data
+    daily_budget = long_term.get("daily_budget_override")
+    if daily_budget is None:
+        daily_budget = getattr(asin_data, "daily_budget", None)
 
     # 库存天数计算
     inventory_days: float | None = None
@@ -500,6 +539,7 @@ def build_campaign_strategy_context(
         product_level=long_term.get("product_level", ""),
         season_stage=long_term.get("season_stage", ""),
         ad_purposes=long_term.get("ad_purposes", []),
+        ad_directions=ad_directions or [],
         target_keyword_strategy=long_term.get("target_keyword_strategy", []),
         margin=asin_data.margin,
         natural_order_ratio=asin_data.natural_order_ratio,
@@ -509,8 +549,90 @@ def build_campaign_strategy_context(
         inventory_days=inventory_days,
         avg_daily_sales_30d=asin_data.avg_daily_sales_30d,
         target_acos=None,  # 由调用方填充 (resolve_target_acos)
+        daily_budget=daily_budget,
         warning_flags=flags,
     )
+
+
+# ── 策略总览(执行总纲) ────────────────────────────────────────────────────────
+
+
+def _build_overview_facts(
+    campaign_data: CampaignData,
+    llm_campaigns: list[CampaignUnit],
+    strat_ctx: CampaignStrategyContext,
+) -> dict:
+    """确定性算总览「现状」数字 —— 纯当前状态，不调 LLM、不引用任何分析结果。
+
+    ACOS 分桶以**运营目标 ACOS**为界（权威值），不碰争议的"有效容忍上限"。
+    """
+    total = len(llm_campaigns)
+    exact = sum(1 for cu in llm_campaigns if cu.match_type == "EXACT")
+    total_budget = round(sum((cu.current_budget or 0) for cu in llm_campaigns), 2)
+
+    target = strat_ctx.target_acos
+    acos_pass = acos_over = acos_zero = 0
+    for cu in llm_campaigns:
+        p = cu.perf_7d
+        if (p.cost or 0) <= 0:
+            acos_zero += 1          # 零花费
+        elif p.acos is None or target is None:
+            continue                # 无法判定达标/超标，不计入
+        elif p.acos <= target:
+            acos_pass += 1          # ≤目标
+        else:
+            acos_over += 1          # >目标
+
+    return {
+        "product_stage": strat_ctx.product_stage,
+        "product_level": strat_ctx.product_level,
+        "season_stage": strat_ctx.season_stage,
+        "ad_purposes": strat_ctx.ad_purposes,
+        "ad_directions": strat_ctx.ad_directions,
+        "target_acos": target,
+        "daily_budget": strat_ctx.daily_budget,
+        "margin": strat_ctx.margin,
+        "rating": strat_ctx.rating,
+        "refund_rate": strat_ctx.refund_rate,
+        "inventory_days": strat_ctx.inventory_days,
+        "natural_order_ratio": strat_ctx.natural_order_ratio,
+        "total_campaigns": total,
+        "exact_campaigns": exact,
+        "broad_campaigns": total - exact,
+        "total_current_budget": total_budget,
+        "acos_pass": acos_pass,
+        "acos_over": acos_over,
+        "acos_zero_spend": acos_zero,
+        "warning_flags": strat_ctx.warning_flags,
+    }
+
+
+async def _run_overview(
+    reasoner: "LLMReasoner",
+    parent_asin: str,
+    facts: dict,
+    ctx_dict: dict,
+    temperature: float,
+) -> CampaignStrategicOverview:
+    """调 LLM 生成执行总纲三段 + posture_brief；fail-open：失败返回 facts-only。"""
+    try:
+        res = await reasoner.recommend_campaign_overview(
+            asin=parent_asin, facts=facts, strategy_context=ctx_dict,
+            temperature=temperature, timeout_override=55,
+        )
+        if not isinstance(res, dict) or res.get("error"):
+            return CampaignStrategicOverview(facts=facts, generated_by="fallback")
+        return CampaignStrategicOverview(
+            facts=facts,
+            status_text=res.get("status_text", ""),
+            purpose_text=res.get("purpose_text", ""),
+            direction_text=res.get("direction_text", ""),
+            posture_brief=res.get("posture_brief", ""),
+            generated_by="ai",
+        )
+    except Exception as e:
+        logger.warning("Campaign overview 异常 [%s]: %s", parent_asin, e)
+        return CampaignStrategicOverview(facts=facts, generated_by="fallback")
 
 
 # ── 单流分析 ────────────────────────────────────────────────────────────────
@@ -666,7 +788,8 @@ async def _run_round(
     """执行一轮 LLM 调用 (所有 batch 并发，Semaphore 由调用方注入)。"""
 
     async def _call_one(batch_idx: int, batch: list[dict]) -> CampaignBatchResult:
-        async with sem:
+        # 全局并发上限（跨 ASIN/流，防打满）+ 流内限流（既有）
+        async with _global_llm_sem(), sem:
             try:
                 result = await asyncio.wait_for(
                     reasoner.recommend_campaign_batch(

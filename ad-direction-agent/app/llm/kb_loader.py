@@ -34,6 +34,8 @@ class KnowledgeBase:
         "chat":                ["02", "14"],
         # Campaign 活动调整
         "campaign_adjustment":  ["18", "19", "21", "22"],
+        # Campaign 策略总览(执行总纲)：维度/广告目的→方向倾向 + 目的触发 + 取舍优先级
+        "campaign_overview":    ["02", "04", "09"],
     }
 
     # KB 英文 enum → 项目中文 enum（与 layer_options.toml 对齐）

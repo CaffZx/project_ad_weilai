@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-01
-> **版本**: v1.1
+> **最后更新**: 2026-06-02
+> **版本**: v1.2
 > **分支**: chenv3.0
 
 ---
@@ -163,6 +163,21 @@ deepseek_model: str = "deepseek-v4-pro"
 | 06-01 | `timeout_override` | `chat()` 新增参数，httpx 层自断绕过 asyncio 取消 |
 | 06-01 | `max_tokens: 4096→8192` | 防止 JSON 输出截断 |
 | 06-01 | `return_exceptions=True` | 精准+广泛 stream gather 异常隔离 |
+| 06-01 | 清货期补齐 | ProductStage 枚举 + TOML + scenario_analyzer |
+| 06-01 | Sanity 恢复 | 恢复并加固：`timeout_override=90` + gather `wait_for(120s)` + 语义化 `(warnings, all_ok)` |
+| 06-01 | Synthesis 修复 | `timeout_override=55`，去 `asyncio.wait_for`（需 Linux 验证后开启） |
+| 06-01 | 幂等防护 | 同 ASIN 重复运行拒绝 + 600s 僵尸清理 |
+| 06-01 | Redis 缓存 | `fetch_campaigns` 结果进 Redis（TTL 30min），`refresh=True` 跳过 |
+| 06-01 | 淘汰活动字段清洗 | 无条件填 $1/$0.20 + 清空 placement/neg_kw |
+| 06-01 | `_same_direction` 扩展 | 精准流补 placement 比对，广泛流补 neg_kw 比对 |
+| 06-01 | `_resolve_tiebreaker` bug | 只处理 disputed_keys，防止高置信项被误降级 |
+| 06-01 | 计时日志 | `Campaign timing` + `Stream timing` 全链路 |
+| 06-02 | **策略总览（执行总纲）** | AI 定性指挥：现状→目的→方向（三段+posture_brief），注入批量分析 preamble |
+| 06-02 | 广告方向+每日预算入上下文 | `ad_directions` ← `workflow_state.execution`，`daily_budget` ← override→asin_data |
+| 06-02 | **Tier 1 Event Loop 修复** | `main.py` 切 `SelectorEventLoopPolicy`（Windows），根治 asyncio 取消挂死 |
+| 06-02 | **Tier 2 全局并发上限** | `_global_llm_sem()` 进程级 Semaphore(30)，跨 ASIN/流共享 |
+| 06-02 | 每流并发配置化 | `campaign_llm_concurrency: 10` 接到 exact/broad Semaphore |
+| 06-02 | `db_child_asin_cap`: 80→200 | 子 ASIN 截断放宽 |
 | 06-01 | playbook.yaml 迁移 | `.claude/skills` → `app/config/skills` |
 | 06-01 | `fetch_campaigns` 加 wait_for(300s) | MCP/Doris 子调用挂死防护，超时返回降级 result |
 | 06-01 | `api/campaign.py` 顶层 try/except | TimeoutError + Exception 全捕获，500 → 降级 CampaignAnalysisResult |
@@ -184,22 +199,20 @@ deepseek_model: str = "deepseek-v4-pro"
 
 ## 4. 已知问题与待办
 
-### 4.1 Windows asyncio 缺陷
+### 4.1 Windows asyncio 缺陷（已修复）
 
-| 问题 | 影响 | 当前方案 |
-|------|------|---------|
-| ProactorEventLoop 下 asyncio 取消 httpx recv 不生效 | DeepSeek 响应 >60s 时可能挂死 | `timeout_override`（httpx socket 层自断）。sanity 已验证通过（5s 完成），synthesis 偶现挂死 |
-| `timeout_override` 同样依赖 asyncio | httpx 超时也可能不生效 | synthesis 用 55s，sanity 用 90s。synthesis 大输入时仍可能挂 |
-
-**根治方案**：`loop.run_in_executor(ThreadPoolExecutor, sync_chat)` + `future.result(timeout=N)`，OS 级 socket timeout。
+| 问题 | 修复 | 说明 |
+|------|------|------|
+| ProactorEventLoop 下 asyncio 取消 httpx recv 不生效 | `main.py` 切 `SelectorEventLoopPolicy` | 在 `asyncio` 创建前设置，Windows only |
+| 多 ASIN 并行时批量 LLM 打满信号量级联死锁 | Tier 2 全局并发上限 `Semaphore(30)` | 跨 ASIN/流共享，单 ASIN 不限速(20<30) |
 
 ### 4.2 功能待办
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| Synthesis Windows 根治 | P0 | 线程池方案，当前 `timeout_override` 偶失效 |
+| Synthesis 恢复 | P0 | 当前 `_SYNTHESIS_ENABLED=False`（第一期上线），Linux 验证后开启 |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
-| 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则 |
+| 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
 | DB 落库 | P1 | `t_advert_agent_campaign_analysis` + `_adjustment` 表 |
 | L420 投票 key 同源化 | P1 | `tiebreaker_summaries` 依赖 LLM 回显 campaign_key |
 | `POST /campaign/confirm` 落地 | P2 | MySQL pending 表 + ERP 推送 |

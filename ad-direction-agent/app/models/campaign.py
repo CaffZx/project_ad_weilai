@@ -85,6 +85,7 @@ class CampaignStrategyContext(BaseModel):
     product_level: str = ""
     season_stage: str = ""
     ad_purposes: list[str] = Field(default_factory=list)
+    ad_directions: list[str] = Field(default_factory=list)   # 广告方向选择(运营 tab4 已选)：取自 workflow_state.execution.selected_directions
     target_keyword_strategy: list[str] = Field(default_factory=list)
     # 诊断层 (ASINData)
     margin: float | None = None
@@ -95,6 +96,7 @@ class CampaignStrategyContext(BaseModel):
     inventory_days: float | None = None          # ← 计算: qty / avg_daily_sales
     avg_daily_sales_30d: float | None = None
     target_acos: int | None = None
+    daily_budget: float | None = None            # 目标/当前每日预算基准：long_term daily_budget_override → asin_data.daily_budget
     warning_flags: list[str] = Field(default_factory=list)
 
 
@@ -135,6 +137,20 @@ class CampaignBatchResult(BaseModel):
     llm_error: str = ""
 
 
+class CampaignStrategicOverview(BaseModel):
+    """策略总览(执行总纲) — 明细前的宏观方向。
+
+    数字(facts)由 Python 确定性算；三段叙事 + posture_brief 由 LLM 生成。
+    LLM 失败时 generated_by='fallback'，仅 facts 可用、文本段为空。
+    """
+    facts: dict = Field(default_factory=dict)        # 现状数字(确定性)：总预算/活动分布/当前ACOS分桶等
+    status_text: str = ""                            # 1. 现状(叙事)
+    purpose_text: str = ""                           # 2. 调整目的 + 原因
+    direction_text: str = ""                         # 3. 调整方向 + 原因
+    posture_brief: str = ""                          # 注入明细分批的精炼框架(2-4句)
+    generated_by: str = "ai"                         # "ai" | "fallback"
+
+
 class CampaignAnalysisResult(BaseModel):
     """顶层分析返回"""
     parent_asin: str = ""
@@ -143,6 +159,7 @@ class CampaignAnalysisResult(BaseModel):
     total_campaigns: int = 0
     adjustments: list[CampaignAdjustmentItem] = Field(default_factory=list)
     skipped_campaigns: list[dict] = Field(default_factory=list)       # 整批 LLM 失败或未返回，需人工补救
+    strategic_overview: dict | None = None                            # 策略总览(执行总纲)；失败时为 facts-only 或 None
     synthesis: dict | None = None                                     # AI 汇总分析 (groups + special_cases)；失败时为 None
     summary: dict = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)

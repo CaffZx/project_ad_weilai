@@ -58,6 +58,8 @@ async def campaign_analyze(req: dict):
         long_term = state.get_long_term_config(asin) or {}
         wf = state.get_workflow_state(asin) or {}
         keyword_analysis = wf.get("keyword_analysis", {})
+        # 广告方向：运营 tab4「生成评估报告」已选并持久化到 workflow_state.execution
+        ad_directions = (wf.get("execution") or {}).get("selected_directions") or []
 
         # ASIN 数据（120s 超时；超时由外层 except 兜住）
         aggregator = DataAggregator()
@@ -68,7 +70,7 @@ async def campaign_analyze(req: dict):
 
         # 策略上下文组装
         strat_ctx = build_campaign_strategy_context(
-            asin, asin_data, long_term, keyword_analysis,
+            asin, asin_data, long_term, keyword_analysis, ad_directions,
         )
 
         # target_acos 三级回落：manual override > P3缓存 > 算法

@@ -1,5 +1,15 @@
 """广告方向决策子智能体 — FastAPI 应用入口"""
 
+# ── Windows 事件循环修复（必须在任何 loop 创建之前）──────────────────────────
+# ProactorEventLoop 下 asyncio.wait_for 取消不穿透 httpx 的 IOCP socket recv，
+# 导致 LLM 调用超时不生效、高并发下信号量级联死锁。切 SelectorEventLoop 后取消正常。
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# ──────────────────────────────────────────────────────────────────────────────
+
 from pathlib import Path
 
 from fastapi import FastAPI

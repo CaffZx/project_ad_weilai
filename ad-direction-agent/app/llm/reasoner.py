@@ -416,6 +416,35 @@ def _build_campaign_synthesis_prompt() -> str:
     return _CAMPAIGN_SYNTHESIS_PROMPT.replace("{kb_content}", kb.build("campaign_adjustment"))
 
 
+# ── Campaign 策略总览(执行总纲) Prompt ───────────────────────────────────────
+
+_CAMPAIGN_OVERVIEW_PROMPT = """你是资深亚马逊广告策略分析师。基于知识库规则和给定的「策略上下文 + 当前状态数字」，为这个 ASIN 产出**今天广告调整的执行总纲**——宏观方向，不聚焦任何单个活动。
+
+重要：所有输出使用中文，JSON key 用英文。
+
+## 业务知识（必须遵循）
+{kb_content}
+
+## 硬性约束
+- **只用用户消息给定的数字**，禁止编造或自行计算新数字（总预算、活动数、ACOS 分桶等都已给定）。
+- **这是明细分析之前的总纲**：只描述"应该往哪个方向调"，**禁止**出现"已淘汰 N 个/已提价/预计预算下调$X"这类**分析结果**——那是后续汇总的事。
+- 宏观视角，不要逐个活动点评。
+- 广告方向只能用中文名：推进自然位 / 新增扩词 / 优化ACOS / 平衡维持。
+
+## 输出格式（纯 JSON，不含 markdown 代码块标记）
+{
+  "status": "1.现状：用 2-3 句概括产品阶段/淡旺季/目标ACOS/总预算/库存评分退货是否健康/活动规模与当前ACOS分布。",
+  "purpose": "2.调整目的：根据策略上下文推导今天的核心目标，并说明原因（如推进期叠旺季→以抢排名为主、兼顾效率，因自然单占比已高、广告依赖度低）。",
+  "direction": "3.调整方向：整体执行打法——以哪个广告方向为主、哪个为辅，低效流量如何处理，排名词/核心词如何保护，并给原因。不含具体活动数。",
+  "posture_brief": "一句到三句的精炼框架，供逐活动分析时作为统一判断基准（如：今日以平衡维持为主、优化ACOS为辅；保护排名型与核心词Bid不轻易下调；广泛词优先否词净化低效流量；库存/评分/退货正常，可适度收紧无效花费）。"
+}
+"""
+
+
+def _build_campaign_overview_prompt() -> str:
+    return _CAMPAIGN_OVERVIEW_PROMPT.replace("{kb_content}", kb.build("campaign_overview"))
+
+
 class LLMReasoner:
     """LLM 推理器 —— 组装上下文并调用大模型"""
 
@@ -1428,6 +1457,12 @@ class LLMReasoner:
         ctx_parts.append(f"  - 日均销量(30d): {'%.1f单' % strategy_context['avg_daily_sales_30d'] if strategy_context.get('avg_daily_sales_30d') is not None else 'N/A'}")
         if strategy_context.get("target_acos"):
             ctx_parts.append(f"  - 运营目标 ACOS: {strategy_context['target_acos']}%")
+        _db = strategy_context.get("daily_budget")
+        if _db is not None:
+            ctx_parts.append(f"  - 运营每日预算基准: ${_db:.2f}/天")
+        _adirs = strategy_context.get("ad_directions") or []
+        if _adirs:
+            ctx_parts.append(f"  - 广告方向(运营已选): {_adirs}")
         flags = strategy_context.get("warning_flags", [])
         if flags:
             ctx_parts.append(f"  - ⚠️ 注意事项: {'; '.join(flags)}")
@@ -1485,7 +1520,14 @@ class LLMReasoner:
                                 f"ACOS={t.get('acos','N/A')}%"
                             )
 
-        user_message = "\n".join(ctx_parts) + "\n" + "\n".join(camp_parts)
+        # 策略总览(执行总纲)preamble：非空时置于用户消息最前，作为本批逐活动判断的统一框架
+        overview_text = (strategy_context.get("_strategic_overview_text") or "").strip()
+        preamble = (
+            f"## 今日执行总纲（逐活动判断须遵循此宏观框架）\n{overview_text}\n\n---\n\n"
+            if overview_text else ""
+        )
+
+        user_message = preamble + "\n".join(ctx_parts) + "\n" + "\n".join(camp_parts)
 
         messages = [
             {"role": "system", "content": _build_campaign_system_prompt(task_type)},
@@ -1529,6 +1571,79 @@ class LLMReasoner:
                 "error": str(e),
                 "temperature": temperature,
             }
+
+    # ── Campaign 策略总览(执行总纲) ──────────────────────────────────────────
+    async def recommend_campaign_overview(
+        self,
+        asin: str,
+        facts: dict,
+        strategy_context: dict,
+        *,
+        temperature: float = 0.3,
+        timeout_override: float | None = None,
+    ) -> dict:
+        """基于策略上下文 + 当前状态数字，产出执行总纲三段 + posture_brief。
+
+        数字全部由调用方(Python)算好放进 facts，本方法只做叙事。
+        失败返回 {"error": "..."}；调用方据此走 fail-open。
+        """
+        logger.info("Campaign overview LLM 入口 [%s] facts_keys=%d", asin, len(facts))
+
+        ctx_lines = [
+            "## 策略上下文",
+            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            f"  - 产品定位: {strategy_context.get('product_level', '?')}",
+            f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
+            f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
+            f"  - 广告方向(运营已选): {strategy_context.get('ad_directions', []) or '未选'}",
+            f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
+        ]
+        margin = strategy_context.get("margin")
+        ctx_lines.append(f"  - 毛利率: {'%.1f%%' % (margin * 100) if margin is not None else 'N/A'}")
+        db = strategy_context.get("daily_budget")
+        ctx_lines.append(f"  - 运营每日预算基准: {'$%.2f/天' % db if db is not None else 'N/A'}")
+        ctx_lines.append(f"  - 评分: {strategy_context.get('rating', 'N/A')}")
+        ctx_lines.append(f"  - 退货率: {'%.1f%%' % strategy_context['refund_rate'] if strategy_context.get('refund_rate') is not None else 'N/A'}")
+        inv = strategy_context.get("inventory_days")
+        ctx_lines.append(f"  - 库存可售天数: {'%.0f天' % inv if inv is not None else 'N/A'}")
+        ctx_lines.append(f"  - 自然单占比: {'%.1f%%' % strategy_context['natural_order_ratio'] if strategy_context.get('natural_order_ratio') is not None else 'N/A'}")
+        if strategy_context.get("target_acos"):
+            ctx_lines.append(f"  - 运营目标 ACOS: {strategy_context['target_acos']}%")
+        flags = strategy_context.get("warning_flags", []) or []
+        if flags:
+            ctx_lines.append(f"  - ⚠️ 注意事项: {'; '.join(flags)}")
+
+        user_message = (
+            "\n".join(ctx_lines)
+            + "\n\n## 当前状态数字（仅可引用，禁止改算）\n"
+            + json.dumps(facts, ensure_ascii=False)
+        )
+
+        messages = [
+            {"role": "system", "content": _build_campaign_overview_prompt()},
+            {"role": "user", "content": user_message},
+        ]
+
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+                timeout_override=timeout_override or 55,
+            )
+            parsed = self._parse_json(raw)
+            out = {
+                "status_text": self._sanitize_ops_text(parsed.get("status", "") or ""),
+                "purpose_text": self._sanitize_ops_text(parsed.get("purpose", "") or ""),
+                "direction_text": self._sanitize_ops_text(parsed.get("direction", "") or ""),
+                "posture_brief": self._sanitize_ops_text(parsed.get("posture_brief", "") or ""),
+            }
+            logger.info("Campaign overview 成功 [%s]", asin)
+            return out
+        except Exception as e:
+            logger.warning("Campaign overview 失败 [%s]: %s", asin, e)
+            return {"error": str(e)}
 
     # ── Campaign 汇总合成 ──────────────────────────────────────────────────
     async def recommend_campaign_synthesis(

@@ -120,9 +120,16 @@ class Settings(BaseSettings):
     campaign_db_fallback_timeout: float = 60.0
     campaign_prefilter_enabled: bool = True
     # Campaign LLM 分析
-    campaign_llm_concurrency: int = 8
+    # 每流(精准/广泛各一)并发上限。单 ASIN 上限 = exact + broad = 2×该值。
+    campaign_llm_concurrency: int = 10
+    # 进程级 LLM 总并发上限（跨 ASIN/流共享）。须 ≥ 单 ASIN 上限(2×campaign_llm_concurrency=20)
+    # 才不限速单 ASIN；24 给点余量并把多 ASIN 并行从 ~60 收到 24。可调。
+    campaign_global_llm_concurrency: int = 24
     campaign_llm_temperature: float = 0.3
     campaign_batch_size: int = 6
+    # 策略总览(执行总纲)：明细前的宏观方向 AI 文本 + 定性 preamble 注入分批
+    # 在主链上，必须 fail-open；Windows 本机有 asyncio 取消缺陷风险，建议仅服务器(Linux)开启
+    campaign_overview_enabled: bool = True
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"

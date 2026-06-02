@@ -39,7 +39,7 @@ async def execution_select(
     req: ExecutionSelectRequest,
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
-    """确认执行层方向选择（不持久化）"""
+    """确认执行层方向选择（持久化至 workflow_state，Campaign 分析复用）"""
     return await orchestrator.confirm_execution(req)
 
 

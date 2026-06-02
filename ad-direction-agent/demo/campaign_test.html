@@ -281,6 +281,12 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
   <!-- ═══════════════ 右侧主面板 ═══════════════ -->
   <main class="main-area">
 
+    <!-- 策略总览（执行总纲）-->
+    <div class="card hidden" id="campaignOverview">
+      <div class="card-title">策略总览（执行总纲）</div>
+      <div id="overviewBody"></div>
+    </div>
+
     <div class="card hidden" id="campaignSummary">
       <div class="card-title">分析概览</div>
       <div class="campaign-summary">
@@ -512,6 +518,7 @@ async function runCampaignAnalysis() {
 
   $('btnCampaignAnalyze').disabled = true;
   show('campaignLoader');
+  hide('campaignOverview');
   hide('campaignSummary'); hide('campaignFilters');
   hide('campaignSynthesis'); hide('batchToolbar');
   $('campaignList').innerHTML = '';
@@ -532,8 +539,36 @@ async function runCampaignAnalysis() {
   }
 }
 
+function renderOverview(ov) {
+  if (!ov) { hide('campaignOverview'); return; }
+  const f = ov.facts || {};
+  const money = v => '$' + (Number(v) || 0).toFixed(2);
+  const pct = v => (v == null ? 'N/A' : Number(v).toFixed(1) + '%');
+  // 现状数字（确定性，始终展示）
+  const dirs = (f.ad_directions && f.ad_directions.length) ? f.ad_directions.join('、') : '未选';
+  let body = `<div class="text-sm" style="line-height:1.7;">
+    <div><strong>现状数字</strong>：${f.product_stage || '?'} ｜ ${f.season_stage || '?'} ｜ 目标ACOS ${f.target_acos != null ? f.target_acos + '%' : 'N/A'} ｜ 当前总预算 ${money(f.total_current_budget)}/天</div>
+    <div>广告方向(运营已选)：${dirs} ｜ 每日预算基准 ${f.daily_budget != null ? money(f.daily_budget) + '/天' : 'N/A'}</div>
+    <div>${f.total_campaigns || 0} 个活动（精准 ${f.exact_campaigns || 0} ｜ 广泛 ${f.broad_campaigns || 0}）：ACOS 达标 ${f.acos_pass || 0} ｜ 超标 ${f.acos_over || 0} ｜ 零花费 ${f.acos_zero_spend || 0}</div>
+    <div>库存 ${f.inventory_days != null ? Math.round(f.inventory_days) + '天' : 'N/A'} ｜ 评分 ${f.rating ?? 'N/A'} ｜ 退货 ${pct(f.refund_rate)} ｜ 自然单占比 ${pct(f.natural_order_ratio)}</div>
+  </div>`;
+  // AI 三段叙事（fail-open：失败时只显数字块）
+  if (ov.generated_by === 'ai' && (ov.status_text || ov.purpose_text || ov.direction_text)) {
+    body += `<div class="text-sm" style="margin-top:10px; line-height:1.7; white-space:pre-wrap;">`;
+    if (ov.status_text)    body += `<div style="margin-top:6px;">${escapeHTML(ov.status_text)}</div>`;
+    if (ov.purpose_text)   body += `<div style="margin-top:8px;">${escapeHTML(ov.purpose_text)}</div>`;
+    if (ov.direction_text) body += `<div style="margin-top:8px;">${escapeHTML(ov.direction_text)}</div>`;
+    body += `</div>`;
+  } else {
+    body += `<div class="text-xs muted" style="margin-top:8px;">（AI 执行总纲未生成，仅显示现状数字）</div>`;
+  }
+  $('overviewBody').innerHTML = body;
+  show('campaignOverview');
+}
+
 function renderResult(r) {
   _currentRunId = r.run_id || '';
+  renderOverview(r.strategic_overview);
 
   // 合并 adjustments + skipped 占位项（标 __skipped: true）
   const skipped = (r.skipped_campaigns || []).map(s => Object.assign({}, s, {
