@@ -41,6 +41,7 @@ async def campaign_analyze(req: dict):
     asin = str(req.get("asin", "")).strip()
     days = int(req.get("days", 7))
     temp = req.get("temperature", None)
+    refresh = bool(req.get("refresh", False))   # True 时跳过 Redis 缓存，强制重新拉数据
 
     if not asin:
         return CampaignAnalysisResult(
@@ -101,6 +102,7 @@ async def campaign_analyze(req: dict):
             strategy_context=strat_ctx,
             days=days,
             temperature=effective_temp,
+            refresh=refresh,
             keyword_analysis=keyword_analysis,
         )
         return result.model_dump()

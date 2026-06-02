@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     db_flow_keyword_prefetch_limit: int = 150
     db_flow_keyword_expand_limit: int = 100
     db_use_legacy_flow_sql: bool = False
-    db_child_asin_cap: int = 80
+    db_child_asin_cap: int = 200               # 子 ASIN 截断上限（0 == 不限）
     # 单 MCP 工具超时（秒），超时后按维度回落 Doris
     mcp_tool_timeout: float = 1200.0
     mcp_bootstrap_timeout: float = 180.0

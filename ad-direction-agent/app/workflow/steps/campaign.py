@@ -48,7 +48,10 @@ TYPE_MAP: dict[str, str] = {
 
 # ── 运行互斥 & 数据缓存 ──────────────────────────────────────────────────
 
-_running: dict[str, str] = {}  # asin → run_id，防重复触发
+# 进程内幂等表：asin → (run_id, start_monotonic)
+# 注意：仅单 worker 有效；多 worker 部署需换 Redis SET NX EX 才能跨进程互斥。
+_running: dict[str, tuple[str, float]] = {}
+_RUNNING_TTL = 600.0  # 僵尸条目兜底：超 10 分钟视为已死，放行新请求
 
 
 async def _get_redis():
@@ -65,6 +68,8 @@ async def _get_redis():
 
 
 def _campaign_cache_key(asin: str, days: int) -> str:
+    # 注意：本部署内 parent_asin → 单店铺（resolve_mcp_context_from_db 解析）。
+    # 若未来同一 parent_asin 跨店铺复用，需在 key 中加入 shop_account 前缀防串店。
     return f"campaign:data:{asin}:{days}"
 
 
@@ -93,7 +98,7 @@ async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> No
         await r.setex(
             _campaign_cache_key(asin, days),
             1800,
-            _json.dumps(data.model_dump(), default=str),
+            _json.dumps(data.model_dump()),
         )
     except Exception:
         pass
@@ -113,6 +118,7 @@ async def analyze_campaigns(
     batch_size: int | None = None,
     concurrency: int | None = None,
     temperature: float = 0.3,
+    refresh: bool = False,
     campaign_data: CampaignData | None = None,
     keyword_analysis: dict | None = None,
 ) -> CampaignAnalysisResult:
@@ -128,23 +134,25 @@ async def analyze_campaigns(
     t_start = time.monotonic()
     _t = lambda label: logger.info("Campaign timing [%s] +%.1fs: %s", parent_asin, time.monotonic() - t_start, label)
 
-    # 0. 幂等检查：同 ASIN 已跑则拒绝
-    if parent_asin in _running:
-        existing = _running[parent_asin]
-        logger.warning("Campaign 幂等拦截 [%s]: 已有 run_id=%s 正在运行", parent_asin, existing)
+    # 0. 幂等检查：同 ASIN 已跑且未超 TTL 则拒绝（超 TTL 视为僵尸条目，放行）
+    now = time.monotonic()
+    existing = _running.get(parent_asin)
+    if existing and (now - existing[1]) < _RUNNING_TTL:
+        logger.warning("Campaign 幂等拦截 [%s]: 已有 run_id=%s 运行中 (%.0fs)",
+                       parent_asin, existing[0], now - existing[1])
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
             total_campaigns=0,
-            warnings=[f"该 ASIN 已有分析正在运行 (run_id={existing})，请等待完成后重试"],
+            warnings=[f"该 ASIN 已有分析正在运行 (run_id={existing[0]})，请等待完成后重试"],
             sanity_check_passed=False,
         )
-    _running[parent_asin] = run_id
+    _running[parent_asin] = (run_id, now)
 
     try:
         result = await _analyze_campaigns_impl(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
             asin_data=asin_data, strategy_context=strategy_context,
-            days=days, bs=bs, cc=cc, temperature=temperature,
+            days=days, bs=bs, cc=cc, temperature=temperature, refresh=refresh,
             campaign_data=campaign_data, keyword_analysis=keyword_analysis,
             run_id=run_id, _t=_t,
         )
@@ -164,15 +172,17 @@ async def _analyze_campaigns_impl(
     bs: int,
     cc: int,
     temperature: float,
+    refresh: bool,
     campaign_data: CampaignData | None,
     keyword_analysis: dict | None,
     run_id: str,
     _t,
 ) -> CampaignAnalysisResult:
 
-    # 1. 获取活动数据 — 优先 Redis 缓存，miss 时拉 MCP/Doris
+    # 1. 获取活动数据 — 优先 Redis 缓存（refresh=True 时跳过），miss 时拉 MCP/Doris
     if campaign_data is None:
-        campaign_data = await _load_cached_campaigns(parent_asin, days)
+        if not refresh:
+            campaign_data = await _load_cached_campaigns(parent_asin, days)
         if campaign_data:
             _t("DONE fetch_campaigns (redis hit)")
         else:
@@ -226,12 +236,19 @@ async def _analyze_campaigns_impl(
     # 3b. 疑似已淘汰活动：预算 ≈ $1.00 且 Bid ≈ $0.20
     #     → 符合 KB 21 §4 淘汰池执行值特征，本期暂时过滤不做重复分析
     llm_campaigns: list[CampaignUnit] = []
-    skipped_eliminated: list[str] = []
+    skipped_eliminated: list[dict] = []
     for cu in campaign_data.campaigns:
         if (cu.current_budget is not None and cu.current_bid is not None
                 and 0.99 <= cu.current_budget <= 1.01
                 and 0.19 <= cu.current_bid <= 0.21):
-            skipped_eliminated.append(cu.campaign_name)
+            skipped_eliminated.append({
+                "campaign_key": cu.campaign_key,
+                "campaign_name": cu.campaign_name,
+                "child_asin": cu.child_asin,
+                "match_type": cu.match_type,
+                "keyword_text": cu.keyword_text,
+                "reason": "suspected_eliminated",
+            })
             continue
         llm_campaigns.append(cu)
 
@@ -244,6 +261,7 @@ async def _analyze_campaigns_impl(
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
             total_campaigns=0,
+            skipped_campaigns=skipped_eliminated,
             warnings=["所有活动均在预过滤阶段被排除（疑似全部已淘汰）"],
             rounds_detail={},
         )
@@ -287,9 +305,9 @@ async def _analyze_campaigns_impl(
     rounds_detail["broad"] = broad_rd
     _t("DONE exact+broad streams")
 
-    # 6. 合并两流结果
+    # 6. 合并两流结果（含预过滤阶段疑似已淘汰的活动，供前端可见）
     adjustments = exact_adjustments + broad_adjustments
-    skipped_campaigns = exact_skipped + broad_skipped
+    skipped_campaigns = exact_skipped + broad_skipped + skipped_eliminated
     if skipped_campaigns:
         logger.warning(
             "Campaign analyze [%s]: %d 个活动未被分析（LLM 批次失败或未返回）",
@@ -303,11 +321,11 @@ async def _analyze_campaigns_impl(
     warnings_list.extend(budget_warnings)
 
     # 8. Sanity check（仅校验低置信项，分批并行避免 LLM 输出超 max_tokens）
-    # 当前由 _SANITY_CHECK_ENABLED 控制，默认禁用 — 排查 LLM 挂起后恢复
-    sanity_ok = True
+    # sanity_ok 默认 False：未运行/有批次失败都按"未通过"展示，仅全批次成功才置 True
+    sanity_ok = False
     if _SANITY_CHECK_ENABLED:
         try:
-            sc_warnings = await _sanity_check_batched(
+            sc_warnings, sanity_ok = await _sanity_check_batched(
                 reasoner, parent_asin, adjustments,
                 exact_summaries + broad_summaries,
                 ctx_dict, temperature,
@@ -422,6 +440,7 @@ async def run_campaign_analysis(
         strategy_context=strat_ctx,
         days=days,
         temperature=temp,
+        refresh=refresh,
         keyword_analysis=keyword_analysis,
     )
 
@@ -574,7 +593,7 @@ async def _analyze_one_stream(
                 _build_batches(tiebreaker_summaries, batch_size, seed=3),
                 ctx_dict, temperature, sem, 3, task_type=task_type,
             )
-            _resolve_tiebreaker(votes, r3_results)
+            _resolve_tiebreaker(votes, r3_results, needs_tiebreaker)
             rd["round3"] = {
                 "ran": True,
                 "disputed_count": len(needs_tiebreaker),
@@ -720,6 +739,26 @@ def _vote_key(item: CampaignAdjustmentItem) -> str:
     return item.campaign_key or item.campaign_name or f"unknown_{id(item)}"
 
 
+def _placement_sig(adjustments: list[dict]) -> frozenset:
+    """广告位调整签名：{(广告位, 动作)} 集合，用于跨轮一致性比对（精准流）。"""
+    sig: set[tuple[str, str]] = set()
+    for p in adjustments or []:
+        if isinstance(p, dict):
+            sig.add((str(p.get("placement", "")), str(p.get("action", ""))))
+    return frozenset(sig)
+
+
+def _negative_kw_sig(neg: list[dict]) -> frozenset:
+    """否定关键词签名：去重小写词集合，用于跨轮一致性比对（广泛流）。"""
+    sig: set[str] = set()
+    for n in neg or []:
+        if isinstance(n, dict):
+            kw = str(n.get("keyword", "")).strip().lower()
+            if kw:
+                sig.add(kw)
+    return frozenset(sig)
+
+
 def _vote(
     r1_results: list[CampaignBatchResult],
     r2_results: list[CampaignBatchResult],
@@ -731,7 +770,13 @@ def _vote(
             return False
         da = a.direction or {}
         db = b.direction or {}
-        return da.get("bid") == db.get("bid") and da.get("budget") == db.get("budget")
+        if da.get("bid") != db.get("bid") or da.get("budget") != db.get("budget"):
+            return False
+        # 精准流：广告位调整方向也须一致，否则视为分歧（防 placement 分歧被误判 high）
+        if a.match_type == "EXACT" or b.match_type == "EXACT":
+            return _placement_sig(a.placement_adjustments) == _placement_sig(b.placement_adjustments)
+        # 广泛流：否定关键词集合须一致
+        return _negative_kw_sig(a.negative_keywords) == _negative_kw_sig(b.negative_keywords)
 
     r1_map: dict[str, CampaignAdjustmentItem] = {}
     for br in r1_results:
@@ -825,15 +870,21 @@ def _item_to_vote(item: CampaignAdjustmentItem, confidence: str) -> dict:
 def _resolve_tiebreaker(
     votes: dict[str, dict],
     r3_results: list[CampaignBatchResult],
+    disputed_keys: set[str],
 ) -> None:
-    """R3 直接采信，覆盖 votes 中暂存的 R1 值。"""
+    """R3 直接采信，覆盖 votes 中暂存的 R1 值。
+
+    仅处理 disputed_keys（R1/R2 分歧项）；高置信项已定，不得在此被误降级为 low。
+    """
     r3_map: dict[str, CampaignAdjustmentItem] = {}
     for br in r3_results:
         if br.llm_success:
             for item in br.items:
                 r3_map[_vote_key(item)] = item
 
-    for key in votes:
+    for key in disputed_keys:
+        if key not in votes:
+            continue
         r3 = r3_map.get(key)
         if r3:
             votes[key].update(r3.model_dump())
@@ -1009,63 +1060,67 @@ async def _sanity_check_batched(
     temperature: float,
     *,
     batch_size: int = 10,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """只校验低置信 (confidence=low) 项，分批并行避免 LLM 输出超 max_tokens。
+
+    返回 (warnings, all_ok)：all_ok 仅当所有批次都成功执行时为 True；
+    任一批次 LLM 失败 / 超时 / gather 异常 → all_ok=False，前端据此显示 ✗。
 
     设计：
     - 过滤：只取 confidence=='low' 的 adjustments（投票分歧最需要复核）。
       高置信项假定 LLM 双轮一致，不再 sanity check（节省调用且这类最稳）。
     - 分批：每批 ≤batch_size 条；不做优先级排序，按原顺序切分。
-    - 并行：asyncio.gather 同时跑所有批次。
-    - 失败隔离：单批 LLM 失败仅该批 warning，其他批不受影响。
+    - 并行：asyncio.gather 同时跑所有批次，外层 wait_for(120s) 防整体挂死。
+    - 失败隔离：单批 LLM 失败仅该批 warning + all_ok=False，其他批不受影响。
     """
-    # FIXME: Windows asyncio 取消机制缺陷 — DeepSeek 响应 >60s 时
-    # httpx recv 无法被取消，导致 sanity check 批次永久挂死。
-    # 临时跳过，待后续切线程池方案后恢复。
     low_conf = [a for a in adjustments if a.confidence == "low"]
-    if low_conf:
-        logger.info(
-            "Sanity check [%s]: 跳过（Windows asyncio 挂死规避），低置信 %d/%d 条",
-            asin, len(low_conf), len(adjustments),
-        )
-    return []
+    if not low_conf:
+        return [], True
 
-    # --- 以下为原始实现，待修复后恢复 ---
-    # low_conf = [a for a in adjustments if a.confidence == "low"]
-    # if not low_conf:
-    #     return []
-    #
-    # chunks = [
-    #     low_conf[i:i + batch_size]
-    #     for i in range(0, len(low_conf), batch_size)
-    # ]
-    #
-    # logger.info(
-    #     "Sanity check [%s]: 低置信 %d/%d 条 → %d 批 × ≤%d 条/批，并行执行",
-    #     asin, len(low_conf), len(adjustments), len(chunks), batch_size,
-    # )
-    #
-    # async def _run_one(idx: int, batch: list[CampaignAdjustmentItem]) -> list[str]:
-    #     try:
-    #         return await _sanity_check(
-    #             reasoner, asin, batch, campaign_summaries,
-    #             strategy_context, temperature,
-    #         )
-    #     except Exception as e:
-    #         logger.warning(
-    #             "Sanity 批次 %d/%d 失败 [%s]: %s",
-    #             idx + 1, len(chunks), asin, e,
-    #         )
-    #         return [f"sanity_check 批次 {idx + 1}/{len(chunks)} 失败: {e}"]
-    #
-    # batch_results = await asyncio.gather(
-    #     *[_run_one(i, b) for i, b in enumerate(chunks)],
-    # )
-    #
-    # all_warnings: list[str] = []
-    # for r in batch_results:
-    #     all_warnings.extend(r)
-    # return all_warnings
+    chunks = [
+        low_conf[i:i + batch_size]
+        for i in range(0, len(low_conf), batch_size)
+    ]
+
+    logger.info(
+        "Sanity check [%s]: 低置信 %d/%d 条 → %d 批 × ≤%d 条/批，并行执行",
+        asin, len(low_conf), len(adjustments), len(chunks), batch_size,
+    )
+
+    async def _run_one(idx: int, batch: list[CampaignAdjustmentItem]) -> tuple[list[str], bool]:
+        try:
+            warns = await _sanity_check(
+                reasoner, asin, batch, campaign_summaries,
+                strategy_context, temperature,
+            )
+            return warns, True
+        except Exception as e:
+            logger.warning(
+                "Sanity 批次 %d/%d 失败 [%s]: %s",
+                idx + 1, len(chunks), asin, e,
+            )
+            return [f"sanity_check 批次 {idx + 1}/{len(chunks)} 失败: {e}"], False
+
+    batch_results = await asyncio.wait_for(
+        asyncio.gather(
+            *[_run_one(i, b) for i, b in enumerate(chunks)],
+            return_exceptions=True,
+        ),
+        timeout=120,
+    )
+
+    all_warnings: list[str] = []
+    all_ok = True
+    for item in batch_results:
+        if isinstance(item, BaseException):
+            logger.warning("Sanity 批次异常 [%s]: %s", asin, item)
+            all_warnings.append(f"sanity_check 批次异常: {item}")
+            all_ok = False
+        elif isinstance(item, tuple):
+            warns, ok = item
+            all_warnings.extend(warns)
+            all_ok = all_ok and ok
+    return all_warnings, all_ok
 
 
 # ── 预算冲突裁决 ──────────────────────────────────────────────────────────────
@@ -1084,22 +1139,30 @@ def _resolve_budget_conflicts(
     warnings: list[str] = []
 
     for adj in adjustments:
-        # 淘汰执行值硬校验
+        # 淘汰执行值硬校验：无条件填充 $1.00/$0.20
+        # （LLM 听话留 None 时也要补齐，避免前端淘汰活动出价/预算空白）
         if adj.action == "eliminate_to_low_bid_pool":
             expected_budget = 1.0
             expected_bid = 0.20
-            if adj.proposed_budget is not None and adj.proposed_budget != expected_budget:
-                warnings.append(
-                    f"[{adj.campaign_name}] 淘汰活动 proposed_budget=${adj.proposed_budget} "
-                    f"(应为 ${expected_budget})，已强制修正"
-                )
+            if adj.proposed_budget != expected_budget:
+                if adj.proposed_budget is not None:
+                    warnings.append(
+                        f"[{adj.campaign_name}] 淘汰活动 proposed_budget=${adj.proposed_budget} "
+                        f"(应为 ${expected_budget})，已强制修正"
+                    )
                 adj.proposed_budget = expected_budget
-            if adj.proposed_bid is not None and adj.proposed_bid != expected_bid:
-                warnings.append(
-                    f"[{adj.campaign_name}] 淘汰活动 proposed_bid=${adj.proposed_bid} "
-                    f"(应为 ${expected_bid})，已强制修正"
-                )
+            if adj.proposed_bid != expected_bid:
+                if adj.proposed_bid is not None:
+                    warnings.append(
+                        f"[{adj.campaign_name}] 淘汰活动 proposed_bid=${adj.proposed_bid} "
+                        f"(应为 ${expected_bid})，已强制修正"
+                    )
                 adj.proposed_bid = expected_bid
+            # 淘汰活动不应携带广告位/否词调整（前端展示无意义），清空
+            if adj.placement_adjustments:
+                adj.placement_adjustments = []
+            if adj.negative_keywords:
+                adj.negative_keywords = []
 
         # 日预算上限 (KB 19 §10)
         if adj.proposed_budget is not None and adj.proposed_budget > 200:
@@ -1178,9 +1241,15 @@ async def _sanity_check(
     strategy_context: dict,
     temperature: float,
 ) -> list[str]:
-    """纯事实陈述 + LLM 交叉校验 → 矛盾 → warnings。"""
+    """纯事实陈述 + LLM 交叉校验 → 矛盾 → warnings。
+
+    LLM 调用失败时**抛出**异常（由 _sanity_check_batched._run_one 捕获并标记该批失败），
+    不再吞掉返回 warning 字符串——否则上层无法区分"校验通过"与"校验失败"。
+    """
     if not adjustments:
         return []
+
+    logger.info("Campaign sanity LLM 入口 [%s] items=%d", asin, len(adjustments))
 
     # 构建事实快照
     facts_parts: list[str] = []
@@ -1239,4 +1308,4 @@ async def _sanity_check(
         return warnings_list
     except Exception as e:
         logger.warning("Sanity check LLM 失败 [%s]: %s", asin, e)
-        return [f"sanity_check LLM 调用失败: {e}"]
+        raise  # 交由调用方标记该批失败（all_ok=False）

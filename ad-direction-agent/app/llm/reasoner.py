@@ -1405,6 +1405,10 @@ class LLMReasoner:
         Returns:
             {"parsed": dict, "raw_output": str, "success": bool, "error": str, "temperature": float}
         """
+        logger.info(
+            "Campaign batch LLM 入口 [%s] task=%s items=%d temp=%.2f",
+            asin, task_type, len(campaign_summaries), temperature,
+        )
         # 构建策略上下文字符串
         ctx_parts = [
             "## 策略上下文 (ASIN 级，全批次共享)",
@@ -1543,6 +1547,11 @@ class LLMReasoner:
         if not adjustments:
             return {"groups": [], "special_cases": []}
 
+        logger.info(
+            "Campaign synthesis LLM 入口 [%s] adjustments=%d timeout=%ss",
+            asin, len(adjustments), timeout_override or 55,
+        )
+
         # 精简单条信息，控制输入 token
         compact: list[dict] = []
         for adj in adjustments:
@@ -1589,7 +1598,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                max_tokens=3000,
+                max_tokens=4096,
                 timeout_override=timeout_override or 55,
             )
             parsed = self._parse_json(raw)
