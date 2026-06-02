@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from app.config.settings import settings
 from app.data.campaign_fetcher import CampaignFetcher
 from app.models.asin_data import ASINData
+from app.workflow.steps.campaign_portfolio import classify as _classify_portfolio
 from app.models.campaign import (
     CampaignAdjustmentItem,
     CampaignAnalysisResult,
@@ -285,6 +286,15 @@ async def _analyze_campaigns_impl(
     broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
     _t(f"split: exact={len(exact_list)} broad={len(broad_list)}")
 
+    # 4.1 组合预分类 (主推/广泛自动/测试新增,无 llm_action 时淘汰组用"已在池中"判定)
+    #     分析前先填,分析后再用 llm_action 在 adjustments 上补一遍。
+    if settings.campaign_portfolio_enabled:
+        for cu in llm_campaigns:
+            cu.portfolio = _classify_portfolio(cu)
+        # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
+        for s in skipped_eliminated:
+            s["portfolio"] = "淘汰"
+
     ctx_dict = strategy_context.model_dump()
     exact_sem = asyncio.Semaphore(cc)   # 每流并发上限 = campaign_llm_concurrency
     broad_sem = asyncio.Semaphore(cc)
@@ -353,6 +363,19 @@ async def _analyze_campaigns_impl(
     action_order = {"eliminate_to_low_bid_pool": 0, "adjust_bid": 1, "adjust_budget": 1, "adjust_placement": 1, "keep": 2}
     adjustments.sort(key=lambda x: action_order.get(x.action, 9))
 
+    # 6b. 组合终分类: 用 LLM action 把"建议淘汰"的活动从主推/广泛重分到淘汰组
+    #     必须在 _resolve_budget_conflicts 之前——后者会把淘汰活动 budget 改成 $1,
+    #     之后再走 _is_in_elimination_pool 会误判一批"刚被强制淘汰"的活动。
+    if settings.campaign_portfolio_enabled:
+        unit_by_key = {cu.campaign_key: cu for cu in llm_campaigns}
+        for item in adjustments:
+            cu = unit_by_key.get(item.campaign_key)
+            if cu is not None:
+                item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action)
+                # 同步覆写 CampaignUnit.portfolio (主要影响淘汰组,前端可能复用 unit 视图)
+                cu.portfolio = item.ai_portfolio_class
+            # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
+
     # 7. 预算冲突裁决
     budget_warnings = _resolve_budget_conflicts(adjustments)
     warnings_list.extend(budget_warnings)
@@ -412,6 +435,26 @@ async def _analyze_campaigns_impl(
         ), 2),
     }
 
+    # 10. 组合预算汇总 (4 组合 sum + 占比 + 告警)
+    budget_summary: dict | None = None
+    if settings.campaign_portfolio_enabled:
+        try:
+            from app.workflow.steps.campaign_budget_summary import build_summary
+            budget_summary = build_summary(
+                adjustments=adjustments,
+                all_units=llm_campaigns,
+                ctx=strategy_context,
+            )
+            _t("DONE budget_summary")
+            if budget_summary.get("alerts"):
+                warnings_list.extend(
+                    f"预算告警: {a}" for a in budget_summary["alerts"]
+                )
+        except Exception as e:
+            logger.exception("budget_summary 构建失败 [%s]: %s", parent_asin, e)
+            warnings_list.append(f"预算汇总构建失败: {type(e).__name__}: {e}")
+            budget_summary = None
+
     _t("DONE total")
     return CampaignAnalysisResult(
         parent_asin=parent_asin, days=days, run_id=run_id,
@@ -420,6 +463,7 @@ async def _analyze_campaigns_impl(
         skipped_campaigns=skipped_campaigns,
         strategic_overview=strategic_overview,
         synthesis=synthesis,
+        budget_summary=budget_summary,
         summary=summary_stats,
         warnings=warnings_list,
         sanity_check_passed=sanity_ok,
@@ -453,7 +497,7 @@ async def run_campaign_analysis(
 
     # 组装策略上下文
     strat_ctx = build_campaign_strategy_context(
-        asin, asin_data, long_term, keyword_analysis, ad_directions,
+        asin, asin_data, long_term, keyword_analysis, ad_directions, days=days,
     )
 
     # target_acos: manual > P3 > algorithm
@@ -494,6 +538,8 @@ def build_campaign_strategy_context(
     long_term: dict,
     keyword_analysis: dict | None = None,
     ad_directions: list[str] | None = None,
+    *,
+    days: int = 7,
 ) -> CampaignStrategyContext:
     """从 ASINData + long_term_config + keyword_analysis 组装 ASIN 级上下文。
 
@@ -505,13 +551,44 @@ def build_campaign_strategy_context(
     - ad_directions → 调用方从 workflow_state.execution.selected_directions 取（运营 tab4 已选）
     - daily_budget → long_term.daily_budget_override → asin_data.daily_budget 回落
     - target_acos → 仍由调用方三级回落填充（override→P3→算法）
+    - days → 用于 daily_budget 兜底:asin_data.ad_data.spend 是 days 窗口总花费,
+            兜底 daily_avg = spend / max(days, 1)。默认 7 与 ad_data 拉取窗口一致。
     """
     flags: list[str] = []
 
-    # 每日预算：状态机 override 优先，回落数仓 asin_data
-    daily_budget = long_term.get("daily_budget_override")
-    if daily_budget is None:
-        daily_budget = getattr(asin_data, "daily_budget", None)
+    # 每日预算三级兜底:
+    #   1. long_term.daily_budget_override (运营手动设定)
+    #   2. asin_data.daily_budget (数仓拉取)
+    #   3. 日均广告花费 × campaign_budget_fallback_multiplier (兜底,通常 1.15)
+    # daily_budget_source 标记来源,前端用于显示"按花费兜底"提示。
+    daily_budget: float | None = None
+    daily_budget_source: str = ""
+
+    override_val = long_term.get("daily_budget_override")
+    if override_val is not None:
+        daily_budget = float(override_val)
+        daily_budget_source = "override"
+    else:
+        asin_val = getattr(asin_data, "daily_budget", None)
+        if asin_val is not None:
+            daily_budget = float(asin_val)
+            daily_budget_source = "asin_data"
+        else:
+            # 兜底: 日均广告花费 × 1.15
+            # ad_data.spend 是 days 窗口总花费,除以 days 得日均
+            ad = getattr(asin_data, "ad_data", None)
+            spend = getattr(ad, "spend", None) if ad else None
+            if spend is not None and spend > 0:
+                window_days = max(int(days), 1)  # 防 0/负数
+                daily_avg_spend = spend / window_days
+                daily_budget = round(
+                    daily_avg_spend * settings.campaign_budget_fallback_multiplier, 2
+                )
+                daily_budget_source = "fallback_spend_x1.15"
+                flags.append(
+                    f"目标预算未配置,按近 {window_days} 天日均花费 ${daily_avg_spend:.2f} × "
+                    f"{settings.campaign_budget_fallback_multiplier} 兜底"
+                )
 
     # 库存天数计算
     inventory_days: float | None = None
@@ -550,6 +627,7 @@ def build_campaign_strategy_context(
         avg_daily_sales_30d=asin_data.avg_daily_sales_30d,
         target_acos=None,  # 由调用方填充 (resolve_target_acos)
         daily_budget=daily_budget,
+        daily_budget_source=daily_budget_source,
         warning_flags=flags,
     )
 

@@ -70,7 +70,7 @@ async def campaign_analyze(req: dict):
 
         # 策略上下文组装
         strat_ctx = build_campaign_strategy_context(
-            asin, asin_data, long_term, keyword_analysis, ad_directions,
+            asin, asin_data, long_term, keyword_analysis, ad_directions, days=days,
         )
 
         # target_acos 三级回落：manual override > P3缓存 > 算法

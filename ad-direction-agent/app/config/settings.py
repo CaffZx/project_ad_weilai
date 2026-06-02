@@ -130,6 +130,18 @@ class Settings(BaseSettings):
     # 策略总览(执行总纲)：明细前的宏观方向 AI 文本 + 定性 preamble 注入分批
     # 在主链上，必须 fail-open；Windows 本机有 asyncio 取消缺陷风险，建议仅服务器(Linux)开启
     campaign_overview_enabled: bool = False  # 临时禁用(2026-06-02)：KB 15/17 注入后先验明细流，总览待后续单独验
+    # Campaign 组合(Portfolio)分类与预算汇总(2026-06-02)
+    # 4 类 AI 自造逻辑分类: 主推/广泛自动/测试新增/淘汰；非亚马逊后台 Portfolio。
+    # 关闭后 ai_portfolio_class 留空、result.budget_summary=None，行为退化到改前。
+    campaign_portfolio_enabled: bool = True
+    # daily_budget 兜底乘数: 当 override + asin_data.daily_budget 均不可用时
+    # 用 (ad_data.spend / days) × multiplier 作兜底目标；与会议拍板的 1.15 一致
+    campaign_budget_fallback_multiplier: float = 1.15
+    # 4 组合默认占比(单一默认值,v1 拍脑袋；运营给出 (阶段×目的) 表后迁 TOML)
+    campaign_portfolio_share_main: int = 50
+    campaign_portfolio_share_broad: int = 30
+    campaign_portfolio_share_test: int = 15
+    campaign_portfolio_share_eliminate: int = 5
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"

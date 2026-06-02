@@ -57,6 +57,9 @@ class CampaignUnit(BaseModel):
     perf_7d: CampaignPerf = Field(default_factory=CampaignPerf)   # MCP product_report(7d)
     placements: dict[str, dict] = Field(default_factory=dict)     # MCP placement_report (懒加载)
     placement_data_available: bool = False   # 懒加载前为空
+    # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
+    #   主推 / 广泛自动 / 测试新增 / 淘汰；空串=未分类(开关关闭或前置阶段)
+    portfolio: str = ""
     # 元数据
     source: str = "mcp"                      # "mcp" | "doris" | "mixed"
     flags: list[str] = Field(default_factory=list)
@@ -96,7 +99,8 @@ class CampaignStrategyContext(BaseModel):
     inventory_days: float | None = None          # ← 计算: qty / avg_daily_sales
     avg_daily_sales_30d: float | None = None
     target_acos: int | None = None
-    daily_budget: float | None = None            # 目标/当前每日预算基准：long_term daily_budget_override → asin_data.daily_budget
+    daily_budget: float | None = None            # 目标/当前每日预算基准：long_term daily_budget_override → asin_data.daily_budget → 兜底
+    daily_budget_source: str = ""                # "override" | "asin_data" | "fallback_spend_x1.15" | "" (全失败)
     warning_flags: list[str] = Field(default_factory=list)
 
 
@@ -124,6 +128,10 @@ class CampaignAdjustmentItem(BaseModel):
     elimination_values: dict | None = None
     round_votes: dict[str, str] = Field(default_factory=dict)
     review_level: str = "MANUAL_REVIEW"
+    # 组合分类(AI 自造 4 类,非后台 Portfolio): 主推 / 广泛自动 / 测试新增 / 淘汰
+    ai_portfolio_class: str = ""
+    # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
+    portfolio_or_group: str = ""
 
 
 class CampaignBatchResult(BaseModel):
@@ -161,6 +169,7 @@ class CampaignAnalysisResult(BaseModel):
     skipped_campaigns: list[dict] = Field(default_factory=list)       # 整批 LLM 失败或未返回，需人工补救
     strategic_overview: dict | None = None                            # 策略总览(执行总纲)；失败时为 facts-only 或 None
     synthesis: dict | None = None                                     # AI 汇总分析 (groups + special_cases)；失败时为 None
+    budget_summary: dict | None = None                                # 4 组合预算汇总 + 占比 + 告警；开关关闭时 None
     summary: dict = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     sanity_check_passed: bool = True

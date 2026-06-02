@@ -209,6 +209,83 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 #campaignFilters select {
   width: auto; padding: 4px 8px; font-size: 12px;
 }
+
+/* ─── 组合筛选气泡 (在下拉框下) ─── */
+.portfolio-pills-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+  width: 100%;
+}
+.portfolio-pill {
+  display: inline-flex; flex-direction: column; align-items: flex-start;
+  padding: 6px 12px; border-radius: 9999px;
+  border: 1.5px solid var(--border); background: white; cursor: pointer;
+  font-size: 12px; line-height: 1.3; transition: all 0.12s ease;
+  user-select: none;
+}
+.portfolio-pill:hover { background: #F3F4F6; }
+.portfolio-pill.active {
+  background: var(--primary); color: white; border-color: var(--primary);
+}
+.portfolio-pill .pp-name { font-weight: 600; }
+.portfolio-pill .pp-amount { font-size: 11px; opacity: 0.85; margin-top: 1px; }
+.portfolio-pill.active .pp-amount { opacity: 1; }
+.portfolio-fallback-hint {
+  font-size: 11px; color: #B45309; background: #FEF3C7;
+  padding: 4px 10px; border-radius: 6px; margin-left: 6px;
+}
+
+/* ─── 预算汇总卡 ─── */
+.budget-summary-totals {
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px;
+}
+.budget-summary-totals .stat {
+  font-size: 12px; color: var(--muted-fg);
+}
+.budget-summary-totals .stat strong {
+  color: var(--text); font-size: 14px; font-weight: 700;
+}
+.budget-portfolio-row {
+  display: grid;
+  grid-template-columns: 110px 50px 100px 100px 100px 1fr 80px;
+  align-items: center; gap: 10px; font-size: 12px;
+  padding: 6px 0; border-bottom: 1px dashed #EFEFEF;
+}
+.budget-portfolio-row:last-child { border-bottom: none; }
+.budget-portfolio-row .ppn { font-weight: 600; }
+.budget-portfolio-row .pbar {
+  height: 8px; background: #F3F4F6; border-radius: 4px; position: relative; overflow: hidden;
+}
+.budget-portfolio-row .pbar-fill {
+  position: absolute; top: 0; left: 0; height: 100%; border-radius: 4px;
+}
+.budget-portfolio-row .pbar-target {
+  position: absolute; top: -2px; bottom: -2px; width: 2px; background: #1F2937;
+}
+.sev-green  .pbar-fill { background: #16A34A; }
+.sev-yellow .pbar-fill { background: #F59E0B; }
+.sev-red    .pbar-fill { background: #DC2626; }
+.sev-neutral .pbar-fill { background: #9CA3AF; }
+.budget-portfolio-row .delta-tag {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: 600;
+  text-align: center;
+}
+.delta-green  { background: #DCFCE7; color: #166534; }
+.delta-yellow { background: #FEF3C7; color: #92400E; }
+.delta-red    { background: #FEE2E2; color: #991B1B; }
+.delta-neutral{ background: #F3F4F6; color: #6B7280; }
+.budget-summary-alerts {
+  margin-top: 8px; padding: 8px 12px; background: #FFFBEB;
+  border-left: 3px solid #F59E0B; border-radius: 0 6px 6px 0;
+  font-size: 12px;
+}
+.budget-summary-header {
+  display: grid;
+  grid-template-columns: 110px 50px 100px 100px 100px 1fr 80px;
+  gap: 10px; font-size: 11px; color: var(--muted-fg);
+  padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
 </style>
 </head>
 <body>
@@ -305,6 +382,12 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <div id="synthesisBody"></div>
     </div>
 
+    <!-- 4 组合预算汇总卡 -->
+    <div class="card hidden" id="campaignBudgetSummary">
+      <div class="card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
+      <div id="budgetSummaryBody"></div>
+    </div>
+
     <!-- 多维筛选 + 搜索 -->
     <div class="card hidden" id="campaignFilters">
       <div class="filter-group">
@@ -333,6 +416,9 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
         </select>
       </div>
       <input id="campaignSearch" placeholder="搜索活动名 / 关键词" style="flex:1; max-width:280px;">
+
+      <!-- 组合筛选气泡 (下拉框下,4 按钮互斥单选;再点取消) -->
+      <div class="portfolio-pills-row" id="portfolioFilterPills"></div>
     </div>
 
     <!-- 批量审核工具条 -->
@@ -372,6 +458,8 @@ let _campaignItems = [];          // adjustments + skipped (统一渲染源)
 let _currentRunId = '';
 let _reviewState = {};            // {campaign_key: 'approve' | 'reject'}
 let _selection = new Set();       // 当前选中的 campaign_keys
+let _budgetSummary = null;        // 后端返回的 4 组合预算汇总 (run 级缓存)
+let _portfolioFilter = '';        // 当前激活的组合筛选器名;'' = 不过滤
 
 // localStorage helpers (key 含 run_id，自动隔离不同次分析)
 function _reviewStorageKey(asin, days, runId) {
@@ -606,6 +694,12 @@ function renderResult(r) {
   // AI 汇总叙事
   renderSynthesis(r.synthesis);
 
+  // 4 组合预算汇总 + 筛选气泡 (新 run → 复位组合筛选)
+  _budgetSummary = r.budget_summary || null;
+  _portfolioFilter = '';
+  renderBudgetSummary(_budgetSummary);
+  renderPortfolioFilterPills(_budgetSummary);
+
   show('campaignSummary');
   show('campaignFilters');
   show('batchToolbar');
@@ -658,6 +752,167 @@ function renderSynthesis(synthesis) {
   show('campaignSynthesis');
 }
 
+// ─── 4 组合预算汇总卡 ────────────────────────────────────────────────────
+//    卡片语义: 预算约束(人工设定 daily_budget × share%) vs 运营已同意(动态),
+//    不做 AI 逐活动建议的 aggregate sum (逐活动独立判断,aggregate 无宏观意义)。
+// 占比工具: 同一公式同一舍入,杜绝行内显示与告警区不一致(7.9pp vs 8.0pp 类问题)
+function calcShare(part, total) {
+  return total > 0 ? Math.round(part / total * 1000) / 10 : 0;
+}
+
+function renderBudgetSummary(bs) {
+  if (!bs) { hide('campaignBudgetSummary'); return; }
+  const money = v => (v == null ? 'N/A' : '$' + Number(v).toFixed(2));
+  const totalCur = bs.total_current_budget || 0;
+  const totalTgt = bs.total_target_budget;
+  const src = bs.target_budget_source || '';
+
+  // 运营已同意预算 = Σ(approved ? proposed : current);淘汰组 approved 强制 $1
+  const opsApprovedByPortfolio = {};
+  let totalOpsApproved = 0;
+  for (const item of _campaignItems) {
+    if (item.__skipped) continue;
+    const p = item.ai_portfolio_class || '广泛/自动';
+    const approved = _reviewState[item.campaign_key] === 'approve';
+    let amt;
+    if (approved) {
+      amt = (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
+    } else {
+      amt = Number(item.current_budget) || 0;
+    }
+    opsApprovedByPortfolio[p] = (opsApprovedByPortfolio[p] || 0) + amt;
+    totalOpsApproved += amt;
+  }
+
+  // 兜底来源提示
+  const srcHint = (src === 'fallback_spend_x1.15')
+    ? `<span class="portfolio-fallback-hint">⚠ 目标预算无法读取,按近 7 天日均花费 ×1.15 兜底</span>`
+    : (src === 'override')   ? `<span class="text-xs muted">预算来源: 运营 override</span>`
+    : (src === 'asin_data')  ? `<span class="text-xs muted">预算来源: 数仓 asin_data</span>`
+    : (!src && totalTgt == null) ? `<span class="text-xs muted">⚠ 无法读取目标预算</span>` : '';
+
+  // 顶部总计行: 预算约束 | 当前总预算 | 已同意
+  let head = `<div class="budget-summary-totals">
+    <div class="stat">预算约束 <strong>${money(totalTgt)}</strong>${srcHint ? ' ' + srcHint : ''}</div>
+    <div class="stat">当前总预算 <strong>${money(totalCur)}</strong></div>
+    <div class="stat">已同意 <strong>${money(totalOpsApproved)}</strong></div>
+  </div>`;
+
+  // 表头
+  let header = `<div class="budget-summary-header">
+    <div>组合</div><div>活动数</div><div>当前预算</div><div>约束分配</div><div>已同意</div><div>占比对比 (已同意 vs 约束)</div><div>偏离</div>
+  </div>`;
+
+  // 4 行: 已同意 share vs 目标 share (前端动态算,后端不知道运营点过哪些同意)
+  const rows = (bs.portfolios || []).map(p => {
+    const opsApproved = opsApprovedByPortfolio[p.name] || 0;
+    const tgtAmount = p.target_amount;
+    const tgtPct = p.target_share_pct || 0;
+
+    // 已同意占比 (基于已同意总预算,不是 AI 总预算)
+    // 使用全局 calcShare 统一舍入,与告警区严格一致(否则行内显示 7.9pp 但告警写 8.0pp)
+    const approvedSharePct = calcShare(opsApproved, totalOpsApproved);
+
+    // 偏离 = 已同意占比 - 目标占比
+    const delta = (tgtAmount != null) ? approvedSharePct - tgtPct : null;
+    const absDelta = delta != null ? Math.abs(delta) : 0;
+    const sev = (absDelta >= 8) ? 'red' : (absDelta >= 3) ? 'yellow' : 'green';
+
+    const deltaTag = (delta == null)
+      ? `<span class="delta-tag delta-neutral">N/A</span>`
+      : (absDelta < 0.05)
+        ? `<span class="delta-tag delta-green">0pp</span>`
+        : `<span class="delta-tag delta-${sev}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
+
+    // 占比条: 已同意占比作填充,约束占比作竖线
+    const barFill = Math.max(0, Math.min(100, approvedSharePct));
+    const barTarget = Math.max(0, Math.min(100, tgtPct));
+
+    return `<div class="budget-portfolio-row sev-${sev}">
+      <div class="ppn">${escapeHTML(p.name)}</div>
+      <div>${p.campaign_count || 0}</div>
+      <div>${money(p.current_budget_sum)}</div>
+      <div>${money(tgtAmount)}</div>
+      <div>${money(opsApproved)}</div>
+      <div class="pbar">
+        <div class="pbar-fill" style="width:${barFill}%;"></div>
+        <div class="pbar-target" style="left:${barTarget}%;" title="约束 ${tgtPct}%"></div>
+      </div>
+      <div>${deltaTag}</div>
+    </div>`;
+  }).join('');
+
+  // 前端动态告警 (KB 03 §7 ASIN 级 ±50% 硬约束: 已同意 vs 当前)
+  // 后端无法算 (不感知运营同意状态),前端按当前 _reviewState 动态触发。
+  const dynamicAlerts = [];
+  if (totalCur > 0) {
+    const dynChangePct = (totalOpsApproved - totalCur) / totalCur * 100;
+    if (Math.abs(dynChangePct) > 50) {
+      dynamicAlerts.push(
+        `已同意预算变化 ${dynChangePct >= 0 ? '+' : ''}${dynChangePct.toFixed(1)}% 超过 KB 03 §7 硬约束 ±50% (基于 ${Object.keys(_reviewState).filter(k => _reviewState[k] === 'approve').length} 个已同意活动)`
+      );
+    }
+  }
+  // 占比偏离 >8pp 的组合 (前端基于已同意 share 动态算)
+  // 必须用同一 calcShare 工具,否则会与行内显示对不上(行 7.9pp 告警 8.0pp 同一数字两种面孔)
+  (bs.portfolios || []).forEach(p => {
+    if (p.target_amount == null) return;
+    const opsApproved = opsApprovedByPortfolio[p.name] || 0;
+    const aShare = calcShare(opsApproved, totalOpsApproved);
+    const delta = aShare - (p.target_share_pct || 0);
+    if (Math.abs(delta) >= 8) {
+      const dir = delta > 0 ? '高于' : '低于';
+      dynamicAlerts.push(`${p.name} 已同意占比 ${aShare.toFixed(1)}% ${dir}约束 ${p.target_share_pct}% ${Math.abs(delta).toFixed(1)}pp`);
+    }
+  });
+
+  // 后端告警 + 前端动态告警 合并
+  const allAlerts = (bs.alerts || []).concat(dynamicAlerts);
+  let alertsHtml = '';
+  if (allAlerts.length) {
+    alertsHtml = `<div class="budget-summary-alerts">
+      <strong>预算告警 (${allAlerts.length})</strong>
+      <ul style="margin:4px 0 0 0; padding-left:18px;">
+        ${allAlerts.map(a => `<li>${escapeHTML(a)}</li>`).join('')}
+      </ul>
+    </div>`;
+  }
+
+  $('budgetSummaryBody').innerHTML = head + header + rows + alertsHtml;
+  show('campaignBudgetSummary');
+}
+
+// ─── 4 组合筛选气泡 (互斥单选,再点取消) ─────────────────────────────────
+function renderPortfolioFilterPills(bs) {
+  const el = $('portfolioFilterPills');
+  if (!el) return;
+  if (!bs || !(bs.portfolios || []).length) { el.innerHTML = ''; return; }
+  const money = v => (v == null ? '—' : '$' + Number(v).toFixed(2));
+  const src = bs.target_budget_source || '';
+
+  const pills = (bs.portfolios || []).map(p => {
+    const active = (_portfolioFilter === p.name) ? 'active' : '';
+    const amount = (p.target_amount != null) ? money(p.target_amount) : '—';
+    return `<button class="portfolio-pill ${active}" type="button"
+       onclick="togglePortfolioFilter('${escapeHTML(p.name).replace(/'/g, "\\'")}')">
+      <span class="pp-name">${escapeHTML(p.name)} (${p.campaign_count || 0})</span>
+      <span class="pp-amount">约束 ${amount}</span>
+    </button>`;
+  }).join('');
+
+  const hint = (src === 'fallback_spend_x1.15')
+    ? `<span class="portfolio-fallback-hint">⚠ 按日均花费×1.15 兜底</span>`
+    : '';
+
+  el.innerHTML = pills + hint;
+}
+
+function togglePortfolioFilter(name) {
+  _portfolioFilter = (_portfolioFilter === name) ? '' : name;
+  renderPortfolioFilterPills(_budgetSummary);
+  applyFilters();
+}
+
 function bindFilterEvents() {
   ['filterAction', 'filterStatus', 'filterMatch'].forEach(id => {
     $(id).onchange = applyFilters;
@@ -686,6 +941,11 @@ function applyFilters() {
     // 匹配类型维度
     if (fMatch === 'exact' && a.match_type !== 'EXACT') return false;
     if (fMatch === 'broad' && a.match_type === 'EXACT') return false;
+    // 组合维度 (气泡按钮选中时生效)
+    if (_portfolioFilter) {
+      const itemPortfolio = a.ai_portfolio_class || a.portfolio || '';
+      if (itemPortfolio !== _portfolioFilter) return false;
+    }
     // 搜索
     if (q) {
       const hay = ((a.campaign_name || '') + ' ' + (a.keyword_text || '')).toLowerCase();
@@ -853,6 +1113,8 @@ async function batchConfirm(decision) {
   _selection.clear();
   applyFilters();
   updateSelectionCount();
+  // 同意状态变更 → 重算"已同意预算"列
+  renderBudgetSummary(_budgetSummary);
 }
 
 function exportReview() {

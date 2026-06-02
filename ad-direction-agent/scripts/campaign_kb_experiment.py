@@ -149,7 +149,7 @@ async def run_experiment() -> None:
                 target_acos = int(p3["target_acos"]["recommended_target"])
 
         strategy_context = build_campaign_strategy_context(
-            asin, asin_data, long_term, keyword_analysis,
+            asin, asin_data, long_term, keyword_analysis, days=7,
         )
         strategy_context.target_acos = target_acos
 
