@@ -581,7 +581,7 @@ function renderResult(r) {
 
 function renderSynthesis(synthesis) {
   if (!synthesis) {
-    $('synthesisBody').innerHTML = '<div class="text-xs muted">AI 合成不可用（synthesis=null），请查看下方明细清单。</div>';
+    $('synthesisBody').innerHTML = '<div class="text-xs muted">AI 汇总临时禁用（synthesis=null），请查看下方明细清单。</div>';
     show('campaignSynthesis');
     return;
   }
@@ -867,17 +867,22 @@ function renderPlacements(adj) {
 function renderNegKeywords(adj) {
   const nk = adj.negative_keywords || [];
   if (!nk.length) return '';
+  // vote=optional 为「可选否词」(仅单轮命中)，其余视为「推荐否词」(两轮一致或单轮直出)
+  const rec = nk.filter(n => n.vote !== 'optional');
+  const opt = nk.filter(n => n.vote === 'optional');
+  const row = n => `<div>
+    ${escapeHTML(n.keyword || '?')}
+    <span class="text-xs muted">
+      (花费$${n.spend_7d ?? n.cost ?? '?'}, 点击${n.clicks_7d ?? n.clicks ?? '?'}, 订单${n.orders_7d ?? n.orders ?? 0})
+    </span>
+    ${n.reason ? ' — ' + escapeHTML(n.reason) : ''}
+  </div>`;
+  let body = '';
+  if (rec.length) body += `<div class="text-xs" style="color:#166534; margin-top:2px;">推荐否词（两轮一致 ${rec.length}）</div>${rec.map(row).join('')}`;
+  if (opt.length) body += `<div class="text-xs muted" style="margin-top:4px;">可选否词（仅单轮建议 ${opt.length}）</div>${opt.map(row).join('')}`;
   return `<div class="text-sm" style="margin-top:6px;">
     <strong>否定词建议:</strong>
-    <div style="margin-left:12px;">
-    ${nk.map(n => `<div>
-      ${escapeHTML(n.keyword || '?')}
-      <span class="text-xs muted">
-        (花费$${n.spend_7d ?? n.cost ?? '?'}, 点击${n.clicks_7d ?? n.clicks ?? '?'}, 订单${n.orders_7d ?? n.orders ?? 0})
-      </span>
-      ${n.reason ? ' — ' + escapeHTML(n.reason) : ''}
-    </div>`).join('')}
-    </div>
+    <div style="margin-left:12px;">${body}</div>
   </div>`;
 }
 

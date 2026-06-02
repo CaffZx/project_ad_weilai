@@ -38,7 +38,7 @@ LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 # 修复方式：去掉外层 asyncio.wait_for（Windows 取消不生效），改用 chat(timeout_override=)
 # 由 httpx socket 层超时接管，不依赖 asyncio 取消
 _SANITY_CHECK_ENABLED = True
-_SYNTHESIS_ENABLED = True
+_SYNTHESIS_ENABLED = False   # 临时禁用汇总（第一期上线，待服务器/Linux 验证后再开）
 
 TYPE_MAP: dict[str, str] = {
     "broad": "大词", "long_tail": "长尾词", "long-tail": "长尾词",
@@ -304,6 +304,16 @@ async def _analyze_campaigns_impl(
     rounds_detail["exact"] = exact_rd
     rounds_detail["broad"] = broad_rd
     _t("DONE exact+broad streams")
+
+    # 短期兜底：广泛流完全没拿到搜索词报告时显式 warning。
+    # 搜索词无 Doris 回落，MCP 空/失败会静默 → 否词不可用，需让运营可见而非以为"无否词"。
+    if broad_list:
+        with_terms = sum(1 for s in broad_summaries if s.get("_search_term_data"))
+        if with_terms == 0:
+            warnings_list.append(
+                f"广泛流 {len(broad_list)} 个活动均未取到搜索词报告（MCP 无数据/失败，暂无 Doris 回落）→ 否词建议不可用"
+            )
+            logger.warning("Campaign [%s] 广泛流搜索词全空，否词不可用", parent_asin)
 
     # 6. 合并两流结果（含预过滤阶段疑似已淘汰的活动，供前端可见）
     adjustments = exact_adjustments + broad_adjustments
@@ -748,15 +758,31 @@ def _placement_sig(adjustments: list[dict]) -> frozenset:
     return frozenset(sig)
 
 
-def _negative_kw_sig(neg: list[dict]) -> frozenset:
-    """否定关键词签名：去重小写词集合，用于跨轮一致性比对（广泛流）。"""
-    sig: set[str] = set()
-    for n in neg or []:
-        if isinstance(n, dict):
-            kw = str(n.get("keyword", "")).strip().lower()
-            if kw:
-                sig.add(kw)
-    return frozenset(sig)
+def _merge_negative_keywords(
+    a: CampaignAdjustmentItem,
+    b: CampaignAdjustmentItem,
+) -> list[dict]:
+    """合并两轮否词：两轮都命中=推荐(vote=recommended)，仅单轮命中=可选(vote=optional)。
+
+    否词是叠加型建议，不作为投票分歧判据；两轮并集全部保留，只用 vote 标注可信度。
+    """
+    def _index(items: list[dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for n in items or []:
+            if isinstance(n, dict):
+                kw = str(n.get("keyword", "")).strip().lower()
+                if kw:
+                    out[kw] = n
+        return out
+
+    ma, mb = _index(a.negative_keywords), _index(b.negative_keywords)
+    merged: list[dict] = []
+    for kw in ma.keys() | mb.keys():
+        base = dict(ma.get(kw) or mb.get(kw) or {})
+        base["vote"] = "recommended" if (kw in ma and kw in mb) else "optional"
+        merged.append(base)
+    merged.sort(key=lambda n: 0 if n.get("vote") == "recommended" else 1)  # 推荐排前
+    return merged
 
 
 def _vote(
@@ -775,8 +801,8 @@ def _vote(
         # 精准流：广告位调整方向也须一致，否则视为分歧（防 placement 分歧被误判 high）
         if a.match_type == "EXACT" or b.match_type == "EXACT":
             return _placement_sig(a.placement_adjustments) == _placement_sig(b.placement_adjustments)
-        # 广泛流：否定关键词集合须一致
-        return _negative_kw_sig(a.negative_keywords) == _negative_kw_sig(b.negative_keywords)
+        # 广泛流：否词是叠加型建议，不作为分歧判据；两轮否词在 _conservative 里合并为 推荐/可选
+        return True
 
     r1_map: dict[str, CampaignAdjustmentItem] = {}
     for br in r1_results:
@@ -809,23 +835,22 @@ def _vote(
                 conservative["confidence"] = "high"
                 votes[key] = conservative
             else:
-                # 不一致 → tiebreaker
+                # action / bid·budget 方向分歧 → tiebreaker
+                # 保留 R1 全部富字段（否词/广告位/理由/建议值），不再用骨架 dict 丢字段
                 needs_tiebreaker.add(key)
-                votes[key] = {
-                    "campaign_key": key,
-                    "campaign_name": r1.campaign_name,
-                    "child_asin": r1.child_asin,
-                    "keyword_text": r1.keyword_text,
-                    "match_type": r1.match_type,
-                    "action": r1.action,
-                    "direction": r1.direction,
-                    "confidence": "low",
-                    "round_votes": {
-                        "round1": f"{r1.action}|{r1.direction}",
-                        "round2": f"{r2.action}|{r2.direction}",
-                    },
-                    "_r1": r1, "_r2": r2,
+                v = r1.model_dump()
+                v["campaign_key"] = key
+                v["confidence"] = "low"
+                v["round_votes"] = {
+                    "round1": f"{r1.action}|{r1.direction}",
+                    "round2": f"{r2.action}|{r2.direction}",
                 }
+                merged_neg = _merge_negative_keywords(r1, r2)
+                if merged_neg:
+                    v["negative_keywords"] = merged_neg
+                v["_r1"] = r1
+                v["_r2"] = r2
+                votes[key] = v
         elif r1:
             votes[key] = _item_to_vote(r1, "low")
             votes[key]["round_votes"] = {"round1": r1.action, "round2": "missing"}
@@ -858,6 +883,10 @@ def _conservative(
         if delta_b < delta_a:
             chosen["proposed_budget"] = b.proposed_budget
             chosen["reason"] = b.reason
+    # 广泛流：合并两轮否词为 推荐(两轮一致)/可选(单轮)，不丢任一轮建议
+    merged_neg = _merge_negative_keywords(a, b)
+    if merged_neg:
+        chosen["negative_keywords"] = merged_neg
     return chosen
 
 
