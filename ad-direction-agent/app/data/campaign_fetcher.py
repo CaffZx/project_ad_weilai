@@ -415,6 +415,7 @@ class CampaignFetcher:
             campaign_name=campaign_name,
             campaign_key=f"{campaign_name} × {child_asin}",
             campaign_id=str(ctx.get("campaign_id") or ""),
+            keyword_id=str(ctx.get("keyword_id") or ""),
             child_asin=child_asin,
             seller_sku=str(ctx.get("seller_sku") or ""),
             keyword_text=keyword_text,

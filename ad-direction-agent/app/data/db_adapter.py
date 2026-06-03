@@ -797,7 +797,7 @@ class DbAdapter(DataSourceAdapter):
         in_sql, in_params = build_in_clause("daap.asin", listing_ctx.child_asins)
         rows = await self._query(
             f"""
-            SELECT daak.campaign_name, daak.campaign_id,
+            SELECT daak.campaign_name, daak.campaign_id, daak.keyword_id,
                    daap.asin AS child_asin, daap.seller_sku,
                    daak.keyword_text, daak.match_type,
                    'ENABLED' AS campaign_status, 'ENABLED' AS keyword_status,
@@ -811,7 +811,7 @@ class DbAdapter(DataSourceAdapter):
               AND daak.keyword_status = 'ENABLED'
               AND daak.local_report_time >= DATE_SUB(NOW(), INTERVAL 7 DAY)
               AND {in_sql}
-            GROUP BY daak.campaign_name, daak.campaign_id,
+            GROUP BY daak.campaign_name, daak.campaign_id, daak.keyword_id,
                      daap.asin, daap.seller_sku,
                      daak.keyword_text, daak.match_type
             ORDER BY daak.campaign_name, daak.keyword_text

@@ -46,6 +46,7 @@ class CampaignUnit(BaseModel):
     campaign_name: str
     campaign_key: str = ""
     campaign_id: str = ""                     # Doris 上下文 (placement 懒加载/回落依赖)
+    keyword_id: str = ""                       # Doris 上下文 (Amazon 关键词 ID, 写 ERP pending 用)
     child_asin: str
     seller_sku: str = ""
     keyword_text: str
