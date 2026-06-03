@@ -729,27 +729,29 @@ function renderSynthesis(synthesis) {
 // ─── 4 组合预算汇总卡 ────────────────────────────────────────────────────
 //    卡片语义: 预算约束(人工设定 daily_budget × share%) vs 运营已同意(动态),
 //    不做 AI 逐活动建议的 aggregate sum (逐活动独立判断,aggregate 无宏观意义)。
-// 极简版 (2026-06-02): 只 2 个数字 —— 预算约束 + 当前勾选活动预算汇总
+//   聚合逻辑: 已勾选用 proposed(淘汰$1) + 未勾选用 current = 执行后预计总预算
 //   预算约束: 后端返 target_budget (策略上下文 daily_budget,已三级兜底)
-//   当前勾选汇总: 运营勾选(_selection)的活动 proposed_budget 之和,随勾选动态
-// 已删: 4 组合表格 / 占比条 / severity / target_amount 分配 / 告警区
+//   执行后预计总预算: 随勾选动态,反映"如果现在执行勾选项"的总预算
 function renderBudgetSummary(bs) {
   if (!bs) { hide('campaignBudgetSummary'); return; }
   const money = v => (v == null ? 'N/A' : '$' + Number(v).toFixed(2));
   const target = bs.target_budget;
   const src = bs.target_budget_source || '';
 
-  // 当前勾选活动预算汇总 = Σ(_selection 中活动的 proposed_budget,淘汰组按 $1)
-  // _selection 是 Set<campaign_key>,由勾选框维护;批量同意按钮不影响此值
-  let selectedSum = 0;
+  // 执行后预计总预算 = Σ(已勾选→proposed, 未勾选→current), 跳过 excluded
+  let execTotal = 0;
   let selectedCount = 0;
+  let totalCount = 0;
   for (const item of _campaignItems) {
     if (item.__skipped) continue;
-    if (!_selection.has(item.campaign_key)) continue;
+    totalCount++;
     const p = item.ai_portfolio_class || '广泛/自动';
-    const amt = (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
-    selectedSum += amt;
-    selectedCount++;
+    if (_selection.has(item.campaign_key)) {
+      execTotal += (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
+      selectedCount++;
+    } else {
+      execTotal += (Number(item.current_budget) || 0);
+    }
   }
 
   // 来源提示 (仅兜底场景显眼提示;override/asin_data 不打扰)
@@ -759,16 +761,16 @@ function renderBudgetSummary(bs) {
     : (src === 'asin_data')  ? `<span class="text-xs muted">来源: 数仓 asin_data</span>`
     : (!src && target == null) ? `<span class="text-xs muted">⚠ 无法读取目标预算</span>` : '';
 
-  // 勾选超约束的高亮 (target 可用时才判)
-  const overBudget = (target != null && selectedSum > target);
+  // 超约束高亮 (target 可用时才判)
+  const overBudget = (target != null && execTotal > target);
   const selStyle = overBudget ? 'color:#DC2626;' : '';
 
   $('budgetSummaryBody').innerHTML = `
     <div class="budget-summary-totals">
       <div class="stat">预算约束 <strong>${money(target)}</strong>${srcHint ? ' ' + srcHint : ''}</div>
-      <div class="stat">当前勾选汇总
-        <strong style="${selStyle}">${money(selectedSum)}</strong>
-        <span class="text-xs muted">(${selectedCount} 个活动${overBudget ? ',超约束' : ''})</span>
+      <div class="stat">执行后预计总预算
+        <strong style="${selStyle}">${money(execTotal)}</strong>
+        <span class="text-xs muted">(${selectedCount}/${totalCount} 个已勾选${overBudget ? ',超约束' : ''})</span>
       </div>
     </div>
   `;
