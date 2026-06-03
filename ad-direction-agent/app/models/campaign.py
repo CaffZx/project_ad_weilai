@@ -109,8 +109,11 @@ class CampaignAdjustmentItem(BaseModel):
     """LLM 输出的单活动调整建议 (对齐 KB 21 §6 / 22 §4)"""
     campaign_name: str
     campaign_key: str = ""
+    campaign_id: str = ""                        # Doris 上下文, 写 ERP campaign_pending 用
     child_asin: str = ""
+    seller_sku: str = ""                         # Doris 上下文
     keyword_text: str = ""
+    keyword_id: str = ""                         # Doris 上下文, 写 ERP keyword_pending 用
     match_type: str = ""
     keyword_class: str = ""
     is_core: bool = False

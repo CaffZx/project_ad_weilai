@@ -384,15 +384,19 @@ async def _analyze_campaigns_impl(
     # 6b. 组合终分类: 用 LLM action 把"建议淘汰"的活动从主推/广泛重分到淘汰组
     #     必须在 _resolve_budget_conflicts 之前——后者会把淘汰活动 budget 改成 $1,
     #     之后再走 _is_in_elimination_pool 会误判一批"刚被强制淘汰"的活动。
-    if settings.campaign_portfolio_enabled:
-        unit_by_key = {cu.campaign_key: cu for cu in llm_campaigns}
-        for item in adjustments:
-            cu = unit_by_key.get(item.campaign_key)
-            if cu is not None:
-                item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action)
-                # 同步覆写 CampaignUnit.portfolio (主要影响淘汰组,前端可能复用 unit 视图)
-                cu.portfolio = item.ai_portfolio_class
-            # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
+    # 用 unit_lookup 把 Doris 上下文独有字段补到 adjustment 上 (LLM 不产出这些)
+    unit_by_key = {cu.campaign_key: cu for cu in llm_campaigns}
+    for item in adjustments:
+        cu = unit_by_key.get(item.campaign_key)
+        if cu is None:
+            continue
+        item.campaign_id = cu.campaign_id
+        item.keyword_id = cu.keyword_id
+        item.seller_sku = cu.seller_sku
+        if settings.campaign_portfolio_enabled:
+            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action)
+            cu.portfolio = item.ai_portfolio_class
+        # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
 
     # 7. 预算冲突裁决
     budget_warnings = _resolve_budget_conflicts(adjustments)
