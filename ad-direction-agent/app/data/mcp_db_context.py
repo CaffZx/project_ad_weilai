@@ -17,7 +17,8 @@ _LOOKUP_SQL = """
     SELECT a.parent_asin,
            a.parent_seller_sku,
            a.shop_id,
-           s.account AS shop_account
+           s.account AS shop_account,
+           a.site_code
     FROM dwd_whp_amazon_listing_general a
     JOIN dwd_shop s ON a.shop_id = s.id
     WHERE (a.parent_asin = %s OR a.asin = %s)
@@ -126,12 +127,13 @@ async def resolve_mcp_context_from_db(asin: str) -> McpDbContext | None:
         logger.warning("MCP 上下文：listing 无记录 asin=%s shop=%s", asin, shop_hint or "*")
         return None
 
+    site_code = str(row.get("site_code") or settings.mcp_default_site_code or "")
     ctx = McpDbContext(
         parent_asin=str(row.get("parent_asin") or asin),
         parent_seller_sku=str(row.get("parent_seller_sku") or ""),
         shop_account=str(row.get("shop_account") or shop_hint),
         shop_id=row.get("shop_id"),
-        site_code=settings.mcp_default_site_code,
+        site_code=site_code,
     )
     logger.info(
         "MCP 上下文(DB) [%s] parent_asin=%s sku=%s shop=%s",
