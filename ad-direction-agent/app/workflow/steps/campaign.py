@@ -280,7 +280,7 @@ async def _analyze_campaigns_impl(
                 "child_asin": cu.child_asin,
                 "match_type": cu.match_type,
                 "keyword_text": cu.keyword_text,
-                "reason": "suspected_eliminated",
+                "reason": "疑似已淘汰（预算≈$1，出价≈$0.2）",
             })
             continue
         llm_campaigns.append(cu)
