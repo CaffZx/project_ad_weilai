@@ -137,11 +137,14 @@ class Settings(BaseSettings):
     # daily_budget 兜底乘数: 当 override + asin_data.daily_budget 均不可用时
     # 用 (ad_data.spend / days) × multiplier 作兜底目标；与会议拍板的 1.15 一致
     campaign_budget_fallback_multiplier: float = 1.15
-    # 4 组合默认占比(单一默认值,v1 拍脑袋；运营给出 (阶段×目的) 表后迁 TOML)
-    campaign_portfolio_share_main: int = 50
-    campaign_portfolio_share_broad: int = 30
-    campaign_portfolio_share_test: int = 15
-    campaign_portfolio_share_eliminate: int = 5
+    # 3 组合预算约束占比 (2026-06-02 更新):
+    #   总预算约束 = 策略上下文 daily_budget
+    #             = 主推约束 + 测试约束 + 广泛约束 (3 组之和 == 总约束)
+    #   淘汰组完全不在约束概念里 (按 KB 21 §6 每活动 $1,与运营策略预算无关)
+    # 这 3 个 share 加起来必须 = 100
+    campaign_portfolio_share_main: int = 60   # 主推
+    campaign_portfolio_share_test: int = 20   # 测试/新增
+    campaign_portfolio_share_broad: int = 20  # 广泛/自动
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"

@@ -235,56 +235,15 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
   padding: 4px 10px; border-radius: 6px; margin-left: 6px;
 }
 
-/* ─── 预算汇总卡 ─── */
+/* ─── 预算汇总卡 (极简版,2026-06-02) ─── */
 .budget-summary-totals {
-  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
-  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px;
+  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
 }
 .budget-summary-totals .stat {
   font-size: 12px; color: var(--muted-fg);
 }
 .budget-summary-totals .stat strong {
-  color: var(--text); font-size: 14px; font-weight: 700;
-}
-.budget-portfolio-row {
-  display: grid;
-  grid-template-columns: 110px 50px 100px 100px 100px 1fr 80px;
-  align-items: center; gap: 10px; font-size: 12px;
-  padding: 6px 0; border-bottom: 1px dashed #EFEFEF;
-}
-.budget-portfolio-row:last-child { border-bottom: none; }
-.budget-portfolio-row .ppn { font-weight: 600; }
-.budget-portfolio-row .pbar {
-  height: 8px; background: #F3F4F6; border-radius: 4px; position: relative; overflow: hidden;
-}
-.budget-portfolio-row .pbar-fill {
-  position: absolute; top: 0; left: 0; height: 100%; border-radius: 4px;
-}
-.budget-portfolio-row .pbar-target {
-  position: absolute; top: -2px; bottom: -2px; width: 2px; background: #1F2937;
-}
-.sev-green  .pbar-fill { background: #16A34A; }
-.sev-yellow .pbar-fill { background: #F59E0B; }
-.sev-red    .pbar-fill { background: #DC2626; }
-.sev-neutral .pbar-fill { background: #9CA3AF; }
-.budget-portfolio-row .delta-tag {
-  font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: 600;
-  text-align: center;
-}
-.delta-green  { background: #DCFCE7; color: #166534; }
-.delta-yellow { background: #FEF3C7; color: #92400E; }
-.delta-red    { background: #FEE2E2; color: #991B1B; }
-.delta-neutral{ background: #F3F4F6; color: #6B7280; }
-.budget-summary-alerts {
-  margin-top: 8px; padding: 8px 12px; background: #FFFBEB;
-  border-left: 3px solid #F59E0B; border-radius: 0 6px 6px 0;
-  font-size: 12px;
-}
-.budget-summary-header {
-  display: grid;
-  grid-template-columns: 110px 50px 100px 100px 100px 1fr 80px;
-  gap: 10px; font-size: 11px; color: var(--muted-fg);
-  padding-bottom: 4px; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 16px; font-weight: 700; margin: 0 4px;
 }
 </style>
 </head>
@@ -582,8 +541,20 @@ async function loadContext() {
 function renderContext(wf) {
   const s = (wf && wf.strategy) || {};
   const t = (wf && wf.tactics)  || {};
+  const e = (wf && wf.execution) || {};
 
   const kv = (k, v) => `<div class="kv"><span class="k">${k}</span><span class="v ${v ? '' : 'empty'}">${v || '未设置'}</span></div>`;
+
+  // 目标 ACOS: 只显示运营 override;未设时提示"未设(将走 P3/算法)"
+  const tgtAcos = wf && wf.target_acos_override;
+  const tgtAcosTxt = (tgtAcos != null) ? `${tgtAcos}%` : '未设 (将走 P3/算法兜底)';
+
+  // 每日预算: 只显示运营 override;未设时提示"未设(将走数仓/兜底)"
+  const dailyBudget = wf && wf.daily_budget_override;
+  const dailyBudgetTxt = (dailyBudget != null) ? `$${Number(dailyBudget).toFixed(2)}/天` : '未设 (将走数仓/×1.15 花费兜底)';
+
+  // 广告方向: 运营在主应用 tab4 已选;execution.selected_directions
+  const dirs = (e.selected_directions || []).join('、');
 
   $('contextBody').innerHTML = [
     kv('产品定位', s.product_level),
@@ -591,6 +562,9 @@ function renderContext(wf) {
     kv('淡旺季',   s.season_stage),
     kv('广告目的', (t.ad_purposes || []).join('、')),
     kv('关键词类型', (t.target_keyword_strategy || []).join('、')),
+    kv('目标 ACOS', tgtAcosTxt),
+    kv('每日预算', dailyBudgetTxt),
+    kv('广告方向', dirs),
   ].join('');
 }
 
@@ -755,151 +729,85 @@ function renderSynthesis(synthesis) {
 // ─── 4 组合预算汇总卡 ────────────────────────────────────────────────────
 //    卡片语义: 预算约束(人工设定 daily_budget × share%) vs 运营已同意(动态),
 //    不做 AI 逐活动建议的 aggregate sum (逐活动独立判断,aggregate 无宏观意义)。
-// 占比工具: 同一公式同一舍入,杜绝行内显示与告警区不一致(7.9pp vs 8.0pp 类问题)
-function calcShare(part, total) {
-  return total > 0 ? Math.round(part / total * 1000) / 10 : 0;
-}
-
+// 极简版 (2026-06-02): 只 2 个数字 —— 预算约束 + 当前勾选活动预算汇总
+//   预算约束: 后端返 target_budget (策略上下文 daily_budget,已三级兜底)
+//   当前勾选汇总: 运营勾选(_selection)的活动 proposed_budget 之和,随勾选动态
+// 已删: 4 组合表格 / 占比条 / severity / target_amount 分配 / 告警区
 function renderBudgetSummary(bs) {
   if (!bs) { hide('campaignBudgetSummary'); return; }
   const money = v => (v == null ? 'N/A' : '$' + Number(v).toFixed(2));
-  const totalCur = bs.total_current_budget || 0;
-  const totalTgt = bs.total_target_budget;
+  const target = bs.target_budget;
   const src = bs.target_budget_source || '';
 
-  // 运营已同意预算 = Σ(approved ? proposed : current);淘汰组 approved 强制 $1
-  const opsApprovedByPortfolio = {};
-  let totalOpsApproved = 0;
+  // 当前勾选活动预算汇总 = Σ(_selection 中活动的 proposed_budget,淘汰组按 $1)
+  // _selection 是 Set<campaign_key>,由勾选框维护;批量同意按钮不影响此值
+  let selectedSum = 0;
+  let selectedCount = 0;
   for (const item of _campaignItems) {
     if (item.__skipped) continue;
+    if (!_selection.has(item.campaign_key)) continue;
     const p = item.ai_portfolio_class || '广泛/自动';
-    const approved = _reviewState[item.campaign_key] === 'approve';
-    let amt;
-    if (approved) {
-      amt = (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
-    } else {
-      amt = Number(item.current_budget) || 0;
-    }
-    opsApprovedByPortfolio[p] = (opsApprovedByPortfolio[p] || 0) + amt;
-    totalOpsApproved += amt;
+    const amt = (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
+    selectedSum += amt;
+    selectedCount++;
   }
 
-  // 兜底来源提示
+  // 来源提示 (仅兜底场景显眼提示;override/asin_data 不打扰)
   const srcHint = (src === 'fallback_spend_x1.15')
     ? `<span class="portfolio-fallback-hint">⚠ 目标预算无法读取,按近 7 天日均花费 ×1.15 兜底</span>`
-    : (src === 'override')   ? `<span class="text-xs muted">预算来源: 运营 override</span>`
-    : (src === 'asin_data')  ? `<span class="text-xs muted">预算来源: 数仓 asin_data</span>`
-    : (!src && totalTgt == null) ? `<span class="text-xs muted">⚠ 无法读取目标预算</span>` : '';
+    : (src === 'override')   ? `<span class="text-xs muted">来源: 运营 override</span>`
+    : (src === 'asin_data')  ? `<span class="text-xs muted">来源: 数仓 asin_data</span>`
+    : (!src && target == null) ? `<span class="text-xs muted">⚠ 无法读取目标预算</span>` : '';
 
-  // 顶部总计行: 预算约束 | 当前总预算 | 已同意
-  let head = `<div class="budget-summary-totals">
-    <div class="stat">预算约束 <strong>${money(totalTgt)}</strong>${srcHint ? ' ' + srcHint : ''}</div>
-    <div class="stat">当前总预算 <strong>${money(totalCur)}</strong></div>
-    <div class="stat">已同意 <strong>${money(totalOpsApproved)}</strong></div>
-  </div>`;
+  // 勾选超约束的高亮 (target 可用时才判)
+  const overBudget = (target != null && selectedSum > target);
+  const selStyle = overBudget ? 'color:#DC2626;' : '';
 
-  // 表头
-  let header = `<div class="budget-summary-header">
-    <div>组合</div><div>活动数</div><div>当前预算</div><div>约束分配</div><div>已同意</div><div>占比对比 (已同意 vs 约束)</div><div>偏离</div>
-  </div>`;
-
-  // 4 行: 已同意 share vs 目标 share (前端动态算,后端不知道运营点过哪些同意)
-  const rows = (bs.portfolios || []).map(p => {
-    const opsApproved = opsApprovedByPortfolio[p.name] || 0;
-    const tgtAmount = p.target_amount;
-    const tgtPct = p.target_share_pct || 0;
-
-    // 已同意占比 (基于已同意总预算,不是 AI 总预算)
-    // 使用全局 calcShare 统一舍入,与告警区严格一致(否则行内显示 7.9pp 但告警写 8.0pp)
-    const approvedSharePct = calcShare(opsApproved, totalOpsApproved);
-
-    // 偏离 = 已同意占比 - 目标占比
-    const delta = (tgtAmount != null) ? approvedSharePct - tgtPct : null;
-    const absDelta = delta != null ? Math.abs(delta) : 0;
-    const sev = (absDelta >= 8) ? 'red' : (absDelta >= 3) ? 'yellow' : 'green';
-
-    const deltaTag = (delta == null)
-      ? `<span class="delta-tag delta-neutral">N/A</span>`
-      : (absDelta < 0.05)
-        ? `<span class="delta-tag delta-green">0pp</span>`
-        : `<span class="delta-tag delta-${sev}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}pp</span>`;
-
-    // 占比条: 已同意占比作填充,约束占比作竖线
-    const barFill = Math.max(0, Math.min(100, approvedSharePct));
-    const barTarget = Math.max(0, Math.min(100, tgtPct));
-
-    return `<div class="budget-portfolio-row sev-${sev}">
-      <div class="ppn">${escapeHTML(p.name)}</div>
-      <div>${p.campaign_count || 0}</div>
-      <div>${money(p.current_budget_sum)}</div>
-      <div>${money(tgtAmount)}</div>
-      <div>${money(opsApproved)}</div>
-      <div class="pbar">
-        <div class="pbar-fill" style="width:${barFill}%;"></div>
-        <div class="pbar-target" style="left:${barTarget}%;" title="约束 ${tgtPct}%"></div>
+  $('budgetSummaryBody').innerHTML = `
+    <div class="budget-summary-totals">
+      <div class="stat">预算约束 <strong>${money(target)}</strong>${srcHint ? ' ' + srcHint : ''}</div>
+      <div class="stat">当前勾选汇总
+        <strong style="${selStyle}">${money(selectedSum)}</strong>
+        <span class="text-xs muted">(${selectedCount} 个活动${overBudget ? ',超约束' : ''})</span>
       </div>
-      <div>${deltaTag}</div>
-    </div>`;
-  }).join('');
-
-  // 前端动态告警 (KB 03 §7 ASIN 级 ±50% 硬约束: 已同意 vs 当前)
-  // 后端无法算 (不感知运营同意状态),前端按当前 _reviewState 动态触发。
-  const dynamicAlerts = [];
-  if (totalCur > 0) {
-    const dynChangePct = (totalOpsApproved - totalCur) / totalCur * 100;
-    if (Math.abs(dynChangePct) > 50) {
-      dynamicAlerts.push(
-        `已同意预算变化 ${dynChangePct >= 0 ? '+' : ''}${dynChangePct.toFixed(1)}% 超过 KB 03 §7 硬约束 ±50% (基于 ${Object.keys(_reviewState).filter(k => _reviewState[k] === 'approve').length} 个已同意活动)`
-      );
-    }
-  }
-  // 占比偏离 >8pp 的组合 (前端基于已同意 share 动态算)
-  // 必须用同一 calcShare 工具,否则会与行内显示对不上(行 7.9pp 告警 8.0pp 同一数字两种面孔)
-  (bs.portfolios || []).forEach(p => {
-    if (p.target_amount == null) return;
-    const opsApproved = opsApprovedByPortfolio[p.name] || 0;
-    const aShare = calcShare(opsApproved, totalOpsApproved);
-    const delta = aShare - (p.target_share_pct || 0);
-    if (Math.abs(delta) >= 8) {
-      const dir = delta > 0 ? '高于' : '低于';
-      dynamicAlerts.push(`${p.name} 已同意占比 ${aShare.toFixed(1)}% ${dir}约束 ${p.target_share_pct}% ${Math.abs(delta).toFixed(1)}pp`);
-    }
-  });
-
-  // 后端告警 + 前端动态告警 合并
-  const allAlerts = (bs.alerts || []).concat(dynamicAlerts);
-  let alertsHtml = '';
-  if (allAlerts.length) {
-    alertsHtml = `<div class="budget-summary-alerts">
-      <strong>预算告警 (${allAlerts.length})</strong>
-      <ul style="margin:4px 0 0 0; padding-left:18px;">
-        ${allAlerts.map(a => `<li>${escapeHTML(a)}</li>`).join('')}
-      </ul>
-    </div>`;
-  }
-
-  $('budgetSummaryBody').innerHTML = head + header + rows + alertsHtml;
+    </div>
+  `;
   show('campaignBudgetSummary');
 }
 
 // ─── 4 组合筛选气泡 (互斥单选,再点取消) ─────────────────────────────────
+// 气泡内容: 组合名 (活动数) + 组合预算约束金额
+// 淘汰组不在 portfolio_constraints 里(KB 21 §6 每活动 $1,与约束无关) → 显示 "—"
+const PORTFOLIO_NAMES = ['主推', '广泛/自动', '测试/新增', '淘汰'];
 function renderPortfolioFilterPills(bs) {
   const el = $('portfolioFilterPills');
   if (!el) return;
-  if (!bs || !(bs.portfolios || []).length) { el.innerHTML = ''; return; }
-  const money = v => (v == null ? '—' : '$' + Number(v).toFixed(2));
-  const src = bs.target_budget_source || '';
+  if (!bs) { el.innerHTML = ''; return; }
 
-  const pills = (bs.portfolios || []).map(p => {
-    const active = (_portfolioFilter === p.name) ? 'active' : '';
-    const amount = (p.target_amount != null) ? money(p.target_amount) : '—';
+  // 实时算每组活动数 (后端不返回 portfolios 数组,前端遍历 _campaignItems 算)
+  const countByName = {};
+  for (const name of PORTFOLIO_NAMES) countByName[name] = 0;
+  for (const item of _campaignItems) {
+    if (item.__skipped) continue;
+    const p = item.ai_portfolio_class || '广泛/自动';
+    if (countByName[p] != null) countByName[p]++;
+  }
+
+  const constraints = bs.portfolio_constraints || {};
+  const money = v => '$' + Number(v).toFixed(0);
+
+  const pills = PORTFOLIO_NAMES.map(name => {
+    const active = (_portfolioFilter === name) ? 'active' : '';
+    // 淘汰组不显示约束(不在 portfolio_constraints 里);其它组取后端返回的约束金额
+    const amt = (name === '淘汰') ? '—' : (constraints[name] != null ? money(constraints[name]) : '—');
     return `<button class="portfolio-pill ${active}" type="button"
-       onclick="togglePortfolioFilter('${escapeHTML(p.name).replace(/'/g, "\\'")}')">
-      <span class="pp-name">${escapeHTML(p.name)} (${p.campaign_count || 0})</span>
-      <span class="pp-amount">约束 ${amount}</span>
+       onclick="togglePortfolioFilter('${name.replace(/'/g, "\\'")}')">
+      <span class="pp-name">${escapeHTML(name)} (${countByName[name] || 0})</span>
+      <span class="pp-amount">约束 ${amt}</span>
     </button>`;
   }).join('');
 
+  const src = bs.target_budget_source || '';
   const hint = (src === 'fallback_spend_x1.15')
     ? `<span class="portfolio-fallback-hint">⚠ 按日均花费×1.15 兜底</span>`
     : '';
@@ -1066,6 +974,8 @@ function toggleSelection(checkbox) {
 function updateSelectionCount() {
   const el = $('selectionCount');
   if (el) el.textContent = _selection.size;
+  // 勾选变化 → 重算"当前勾选活动预算汇总"(随勾选动态)
+  if (_budgetSummary) renderBudgetSummary(_budgetSummary);
 }
 
 function _visibleNonSkippedKeys() {
@@ -1112,9 +1022,7 @@ async function batchConfirm(decision) {
 
   _selection.clear();
   applyFilters();
-  updateSelectionCount();
-  // 同意状态变更 → 重算"已同意预算"列
-  renderBudgetSummary(_budgetSummary);
+  updateSelectionCount();  // updateSelectionCount 内部已会重渲 budget summary
 }
 
 function exportReview() {

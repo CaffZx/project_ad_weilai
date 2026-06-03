@@ -77,6 +77,10 @@ def run_get_wizard_state(ctx: WorkflowContext, asin: str) -> WizardStateResponse
             sub_options=exec_data.get("sub_options", {}),
         )
 
+    # 运营手动设置值透传(只显示 override,未设时 None;前端按"未设/将走兜底"渲染)
+    target_acos_override = ctx.state.get_target_acos_override(asin)
+    daily_budget_override = lt.get("daily_budget_override")
+
     return WizardStateResponse(
         asin=asin,
         current_layer=wf.get("current_layer", "strategy"),
@@ -86,6 +90,8 @@ def run_get_wizard_state(ctx: WorkflowContext, asin: str) -> WizardStateResponse
         execution=execution,
         long_term_config_exists=ctx.state.config_exists(asin),
         last_updated=wf.get("last_updated", ""),
+        target_acos_override=int(target_acos_override) if target_acos_override is not None else None,
+        daily_budget_override=float(daily_budget_override) if daily_budget_override is not None else None,
     )
 
 def run_reset_asin(ctx: WorkflowContext, asin: str) -> bool:

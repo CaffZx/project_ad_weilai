@@ -354,6 +354,9 @@ class WizardStateResponse(BaseModel):
     long_term_config_exists: bool = False
     last_updated: str = ""
     days: int = 7
+    # 运营手动设置值 (供前端"当前状态"只读展示;均仅显示 override,未设时 None)
+    target_acos_override: int | None = None        # 来源: state.get_target_acos_override
+    daily_budget_override: float | None = None     # 来源: long_term.daily_budget_override
 
 
 # ── 长期配置 ───────────────────────────────────────────────

@@ -49,7 +49,7 @@ class ApiKeyPool:
         self._stats: dict[str, dict] = {k: _empty_stat() for k in self._keys}
         self._call_count = 0
         self._state_path = state_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         if state_path:
             self._load_state()
 

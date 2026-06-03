@@ -104,8 +104,26 @@ async def _load_cached_campaigns(asin: str, days: int) -> CampaignData | None:
 
 
 async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> None:
-    """将 CampaignData 写入 Redis 缓存，TTL 30 分钟。"""
+    """将 CampaignData 写入 Redis 缓存，TTL 30 分钟。
+
+    空结果防毒化:total_campaigns == 0 或 errors 非空时不入缓存。
+    原因:上游(MCP/Doris)临时失败/超时时 fetcher 会兜底返回空 CampaignData,
+    若缓存空对象,后续 30 分钟内同 ASIN 永远命中空 → 运营看到"无可用广告活动"
+    即使刷新也无效(直到 TTL 过期)。空结果不缓存可以让下次请求重新拉取。
+    """
     import json as _json
+    if data is None or data.total_campaigns == 0:
+        logger.info(
+            "Campaign 空结果不入缓存 [%s] (total_campaigns=0,防毒化)",
+            asin,
+        )
+        return
+    if data.errors:
+        logger.info(
+            "Campaign 有 fetcher 错误不入缓存 [%s]: %s",
+            asin, data.errors[:3],
+        )
+        return
     r = await _get_redis()
     if not r:
         return
@@ -435,7 +453,7 @@ async def _analyze_campaigns_impl(
         ), 2),
     }
 
-    # 10. 组合预算汇总 (4 组合 sum + 占比 + 告警)
+    # 10. 预算汇总 (极简版: 只返 target_budget + source,前端按勾选动态算"已勾选总和")
     budget_summary: dict | None = None
     if settings.campaign_portfolio_enabled:
         try:
@@ -446,10 +464,6 @@ async def _analyze_campaigns_impl(
                 ctx=strategy_context,
             )
             _t("DONE budget_summary")
-            if budget_summary.get("alerts"):
-                warnings_list.extend(
-                    f"预算告警: {a}" for a in budget_summary["alerts"]
-                )
         except Exception as e:
             logger.exception("budget_summary 构建失败 [%s]: %s", parent_asin, e)
             warnings_list.append(f"预算汇总构建失败: {type(e).__name__}: {e}")
@@ -886,11 +900,23 @@ async def _run_round(
                 parsed = result.get("parsed") or {}
                 raw_adj = parsed.get("campaign_adjustments", []) if isinstance(parsed, dict) else []
                 items: list[CampaignAdjustmentItem] = []
+                normalized_cnt = 0
                 for adj in raw_adj:
                     try:
-                        items.append(CampaignAdjustmentItem(**adj))
+                        item = CampaignAdjustmentItem(**adj)
+                        # action 全程由代码 derive,LLM action 仅作淘汰判据
+                        # (在 _vote 之前归一,让 _same_direction 拿到准确 action,
+                        #  避免 LLM "action=keep 但 proposed 改了" 引发的无谓 R3 触发)
+                        if _normalize_action(item):
+                            normalized_cnt += 1
+                        items.append(item)
                     except Exception as e:
                         logger.warning("Campaign adjustment item 解析失败 batch=%d: %s", batch_idx, e)
+                if normalized_cnt:
+                    logger.info(
+                        "Batch %d [%s] action 归一: 改写 %d/%d 条",
+                        batch_idx, asin, normalized_cnt, len(items),
+                    )
 
                 return CampaignBatchResult(
                     batch_id=batch_idx, round_number=round_number,
@@ -1356,6 +1382,62 @@ async def _sanity_check_batched(
 # ── 预算冲突裁决 ──────────────────────────────────────────────────────────────
 
 
+def _normalize_action(item: CampaignAdjustmentItem) -> bool:
+    """根据 proposed vs current 的实际差异 derive 出权威 action。
+
+    设计原则:
+      - action 不应该由 LLM 决定 (LLM 经常 action=keep 但又填了不同 proposed,
+        或者 action=adjust_bid 但 proposed_bid==current_bid)
+      - eliminate_to_low_bid_pool 是业务语义特殊保留 LLM 决定 (淘汰 ≠ 简单调到 $1)
+      - 其他全部代码 derive: budget 变 → adjust_budget; bid 变 → adjust_bid;
+        placement 非空 → adjust_placement; 全没变 → keep
+      - 多维同时变: 按业务优先级 budget > bid > placement 选 1 个 (单 action 字段限制)
+      - keep 时强制 proposed=current,清 direction/placement/neg_kw (keep 就是 keep)
+
+    Returns:
+        bool: True 表示 action 被改写过 (用于日志统计)
+    """
+    # 淘汰由 LLM 决定,代码不干预 (淘汰组业务语义)
+    if item.action == "eliminate_to_low_bid_pool":
+        return False
+
+    _EPS = 0.001
+    bid_changed = (
+        item.proposed_bid is not None and item.current_bid is not None
+        and abs(item.proposed_bid - item.current_bid) > _EPS
+    )
+    budget_changed = (
+        item.proposed_budget is not None and item.current_budget is not None
+        and abs(item.proposed_budget - item.current_budget) > _EPS
+    )
+    placement_changed = bool(item.placement_adjustments)
+    # negative_keywords 是叠加建议,不算 action 变更 (KB 22 §3.3)
+
+    if budget_changed:
+        derived = "adjust_budget"
+    elif bid_changed:
+        derived = "adjust_bid"
+    elif placement_changed:
+        derived = "adjust_placement"
+    else:
+        derived = "keep"
+
+    changed = (item.action != derived)
+    item.action = derived
+
+    # keep 语义清理: proposed 对齐 current, 清空 direction/placement/neg_kw
+    if derived == "keep":
+        item.proposed_bid = item.current_bid
+        item.proposed_budget = item.current_budget
+        item.direction = {}
+        if item.placement_adjustments:
+            item.placement_adjustments = []
+        if item.negative_keywords:
+            item.negative_keywords = []
+
+    return changed
+
+
 def _resolve_budget_conflicts(
     adjustments: list[CampaignAdjustmentItem],
     total_budget_limit: float | None = None,
@@ -1407,6 +1489,17 @@ def _resolve_budget_conflicts(
                 f"[{adj.campaign_name}] Bid ${adj.proposed_bid} 超过上限 $3.00，已截断"
             )
             adj.proposed_bid = 3.0
+
+    # 终态 action 归一: _conservative 可能把 proposed 改回 current,
+    # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变 (上面 if 已 continue)。
+    re_normalized = 0
+    for adj in adjustments:
+        if adj.action == "eliminate_to_low_bid_pool":
+            continue
+        if _normalize_action(adj):
+            re_normalized += 1
+    if re_normalized:
+        logger.info("_resolve_budget_conflicts: 终态 action 二次归一改写 %d 条", re_normalized)
 
     # 总预算上限检查 (如果有外部输入)
     if total_budget_limit is not None:

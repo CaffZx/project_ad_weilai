@@ -4,6 +4,8 @@
 - 不走 ctx 路径（因 run_campaign_analysis 内 ensure_data 解包问题 A1 本期未修）
 - 在 handler 内手动组装 strat_ctx + 三级 target_acos 回落
 - 用 get_state_manager() 单例，与左侧卡片读写后端一致
+- fetch 时硬限 meta_filter=["META_AD_PRODUCT"] 砍掉 Campaign 用不到的 6 个 META
+  (详见 fetch 调用点的 TODO(A1) 注释)
 """
 
 import asyncio
@@ -62,9 +64,22 @@ async def campaign_analyze(req: dict):
         ad_directions = (wf.get("execution") or {}).get("selected_directions") or []
 
         # ASIN 数据（120s 超时；超时由外层 except 兜住）
+        # 只拉 META_AD_PRODUCT(供 daily_budget 兜底 spend/days × 1.15)
+        # + listing/gross_profit (必跑,提供 margin/inventory_qty/rating/refund_rate/avg_daily_sales)。
+        # Campaign 模块完全用不到的 6 个 META 一律跳过:
+        #   META_KW_AD / META_AD_PLACEMENT(ASIN级,campaign 有自己的懒加载) /
+        #   META_KW_COMPETITOR_RANK + META_KW_SUB_ASIN_RANK (自然排名 ~62s 慢查询) /
+        #   META_FLOW_KEYWORD (搜索量库 ~87s 慢查询) /
+        #   META_COMPETITOR / META_TREND
+        # MCP 路径下原本并发拉快几百毫秒看不出,doris_fallback 串行就累计 ~150s 触发 120s 超时。
+        #
+        # TODO(A1): 修 run_campaign_analysis 内 ensure_data 解包 bug 后,
+        #   本端点应改走 ctx._ensure_data(meta_filter=...) → asin_data_cache(Redis TTL 4h),
+        #   主应用诊断查过后 Campaign 直接命中缓存,完全不查数仓;
+        #   届时本黑名单 meta_filter 可保留(ctx 内 _ensure_data 也支持透传)。
         aggregator = DataAggregator()
         asin_data = await asyncio.wait_for(
-            aggregator.fetch(asin, days=days),
+            aggregator.fetch(asin, days=days, meta_filter=["META_AD_PRODUCT"]),
             timeout=120,
         )
 

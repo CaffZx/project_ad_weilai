@@ -7,14 +7,21 @@
 ⚠️ "测试/新增"组是【活动层面】的测试 — 即"新建活动还在跑数据的阶段",
    与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
 
-判定优先级 (命中即止):
-  1. 淘汰    — LLM action=eliminate_to_low_bid_pool OR 已在淘汰池 ($1/$0.20)
-  2. 测试/新增 — 0 ≤ days_online < 14 AND current_budget < $20
-  3. 主推    — match_type==EXACT 且非以上
-  4. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO} 且非以上
+判定优先级 (命中即止) - 2026-06-02 更新顺序:
+  1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 已在淘汰池 ($1/$0.20)
+  2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
+  3. 测试/新增 — 0 ≤ days_online < 14 AND current_budget < $20 (仅对 EXACT 生效)
+  4. 主推      — 其它 (默认 EXACT 入主推)
+
+为什么把广泛/自动提前到测试/新增之前?
+  - 广泛/自动 是按 match_type 的硬归类 (业务上"测词广告"),
+    一个 BROAD 活动即使刚上线/小预算,本质仍是测词,不是"测试新活动"
+  - 测试/新增 这层口径限定为 EXACT 流的新建活动 (因为运营测词都走广泛/自动 portfolio,
+    新建的精准活动才是"测试/新增")
 
 数据来源:
-  - days_online    : MCP basic_info (拿不到时 = -1,不算"新")
+  - days_online    : MCP basic_info 拿"活动上线天数" (拿不到时 = -1,不算"新")
+                     → MCP 能拿到,但不保证每次都有;Doris 回落不提供
   - current_budget : MCP basic_info → Doris 回落
   - current_bid    : Doris 上下文 (MCP 不返回)
   - match_type     : Doris 上下文
@@ -74,23 +81,26 @@ def _is_new_test_campaign(unit: CampaignUnit) -> bool:
 def classify(unit: CampaignUnit, llm_action: str | None = None) -> str:
     """按优先级判定 4 组合归属,返回常量字符串。
 
+    顺序 (命中即止): 淘汰 → 广泛/自动 → 测试/新增 → 主推
+
     Args:
         unit: 活动单元。current_budget/current_bid/days_online/match_type 是关键输入。
         llm_action: 本批 LLM 输出的 action (合并后才有);分析前阶段传 None,
                     淘汰组只能通过"已在淘汰池"判定。
     """
-    # 1. 淘汰
+    # 1. 淘汰 (LLM 标记 OR 已在淘汰池 $1/$0.20)
     if llm_action == "eliminate_to_low_bid_pool" or _is_in_elimination_pool(unit):
         return PORTFOLIO_ELIMINATE
-    # 2. 测试 / 新增
-    if _is_new_test_campaign(unit):
-        return PORTFOLIO_TEST
-    # 3. 主推 (精准匹配)
     mt = (unit.match_type or "").upper()
-    if mt == "EXACT":
-        return PORTFOLIO_MAIN
-    # 4. 广泛 / 自动 (BROAD/PHRASE/AUTO)
+    # 2. 广泛 / 自动 (BROAD/PHRASE/AUTO) —— 业务上"测词广告",硬归类
+    #    一个 BROAD 即使刚上线/小预算,本质仍是测词,不算"测试新活动"
     if mt in _BROAD_MATCH_TYPES:
         return PORTFOLIO_BROAD
-    # 兜底: 未知 match_type → 归广泛 (与 campaign.py:_split_campaigns 同口径)
+    # 3. 测试 / 新增 (仅 EXACT 流,新建的精准活动才算 "测试新")
+    if _is_new_test_campaign(unit):
+        return PORTFOLIO_TEST
+    # 4. 主推 (EXACT 且非新建)
+    if mt == "EXACT":
+        return PORTFOLIO_MAIN
+    # 兜底: 未知 match_type → 归广泛 (与 campaign.py 既有口径一致)
     return PORTFOLIO_BROAD
