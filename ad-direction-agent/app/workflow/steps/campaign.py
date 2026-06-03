@@ -965,8 +965,8 @@ async def _run_round(
             if got_gsem:
                 gsem.release()
 
-    tasks = [_call_one(i, batch) for i, batch in enumerate(batches)]
-    # 纵深防御 3: 单轮 gather 兜底超时 (超时批标 round_timeout,不丢掉已完成的结果)
+    tasks = [asyncio.ensure_future(_call_one(i, batch)) for i, batch in enumerate(batches)]
+    # 纵深防御 3: 单轮 gather 兜底超时
     round_timeout = LLM_TIMEOUT * 2 + 30
     try:
         raw_results = await asyncio.wait_for(
@@ -974,14 +974,14 @@ async def _run_round(
             timeout=round_timeout,
         )
     except asyncio.TimeoutError:
+        not_done = sum(1 for t in tasks if not t.done())
         logger.warning(
             "Round %d gather 超时 [%s] >%ds: %d/%d 批未完成",
-            round_number, asin, round_timeout,
-            sum(1 for t in tasks if not t.done()), len(tasks),
+            round_number, asin, round_timeout, not_done, len(tasks),
         )
         raw_results = [
             t.result() if t.done() and not t.cancelled()
-            else BaseException(TimeoutError(f"round_timeout:{round_timeout}s"))
+            else TimeoutError(f"round_timeout:{round_timeout}s")
             for t in tasks
         ]
     final: list[CampaignBatchResult] = []
