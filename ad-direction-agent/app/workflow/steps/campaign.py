@@ -246,6 +246,9 @@ async def _analyze_campaigns_impl(
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
+            shop_id=campaign_data.shop_id,
+            parent_seller_sku=campaign_data.parent_seller_sku,
+            site_code=campaign_data.site_code,
             total_campaigns=0,
             warnings=[f"ASIN {parent_asin} 无可用广告活动"],
             rounds_detail={},
@@ -293,6 +296,9 @@ async def _analyze_campaigns_impl(
     if total == 0:
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
+            shop_id=campaign_data.shop_id,
+            parent_seller_sku=campaign_data.parent_seller_sku,
+            site_code=campaign_data.site_code,
             total_campaigns=0,
             skipped_campaigns=skipped_eliminated,
             warnings=["所有活动均在预过滤阶段被排除（疑似全部已淘汰）"],
@@ -476,6 +482,9 @@ async def _analyze_campaigns_impl(
     _t("DONE total")
     return CampaignAnalysisResult(
         parent_asin=parent_asin, days=days, run_id=run_id,
+        shop_id=campaign_data.shop_id,
+        parent_seller_sku=campaign_data.parent_seller_sku,
+        site_code=campaign_data.site_code,
         total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
         skipped_campaigns=skipped_campaigns,

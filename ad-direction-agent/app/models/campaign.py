@@ -69,6 +69,9 @@ class CampaignUnit(BaseModel):
 class CampaignData(BaseModel):
     """顶层容器，对标 ASINData"""
     parent_asin: str
+    shop_id: int = 0
+    parent_seller_sku: str = ""
+    site_code: str = "Amazon_US"
     total_campaigns: int = 0
     campaigns: list[CampaignUnit] = Field(default_factory=list)
     excluded: list[dict] = Field(default_factory=list)
@@ -166,6 +169,9 @@ class CampaignStrategicOverview(BaseModel):
 class CampaignAnalysisResult(BaseModel):
     """顶层分析返回"""
     parent_asin: str = ""
+    shop_id: int = 0
+    parent_seller_sku: str = ""
+    site_code: str = "Amazon_US"
     days: int = 7
     run_id: str = ""                                                  # 本次分析唯一 ID (e.g. "20260601T123456Z")，前端 localStorage 隔离用
     total_campaigns: int = 0

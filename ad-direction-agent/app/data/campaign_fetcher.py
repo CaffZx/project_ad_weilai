@@ -55,6 +55,14 @@ class CampaignFetcher:
 
         # ① 解析上下文 → child_asins + shop_account
         db_ctx = await resolve_mcp_context_from_db(parent_asin)
+        shop_id = 0
+        parent_seller_sku = ""
+        site_code = "Amazon_US"
+        if db_ctx:
+            shop_id = db_ctx.shop_id or 0
+            parent_seller_sku = db_ctx.parent_seller_sku or ""
+            site_code = db_ctx.site_code or "Amazon_US"
+
         if not db_ctx:
             return CampaignData(
                 parent_asin=parent_asin,
@@ -67,6 +75,9 @@ class CampaignFetcher:
         if not raw_campaigns:
             return CampaignData(
                 parent_asin=parent_asin,
+                shop_id=shop_id,
+                parent_seller_sku=parent_seller_sku,
+                site_code=site_code,
                 total_campaigns=0,
                 fetch_source="doris",
             )
@@ -81,6 +92,9 @@ class CampaignFetcher:
         if not surviving:
             return CampaignData(
                 parent_asin=parent_asin,
+                shop_id=shop_id,
+                parent_seller_sku=parent_seller_sku,
+                site_code=site_code,
                 total_campaigns=len(raw_campaigns),
                 excluded=excluded,
                 fetch_source="doris",
@@ -168,6 +182,9 @@ class CampaignFetcher:
 
         return CampaignData(
             parent_asin=parent_asin,
+            shop_id=shop_id,
+            parent_seller_sku=parent_seller_sku,
+            site_code=site_code,
             total_campaigns=len(campaigns),
             campaigns=campaigns,
             excluded=excluded,
