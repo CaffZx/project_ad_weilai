@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-02
-> **版本**: v1.2
+> **最后更新**: 2026-06-03
+> **版本**: v1.3
 > **分支**: chenv3.0
 
 ---
@@ -43,17 +43,21 @@ purpose-agent 负责策略层 LLM 调用（`determine_ad_targets_from_metrics()`
 
 ```
 parent_asin
-  ├─ Doris 上下文查询 → 仅维度字段 (campaign_name/child_asin/keyword_text/match_type/keyword_bid)
+  ├─ Doris 上下文查询 → 仅维度字段 (campaign_name/campaign_id/child_asin/keyword_text/match_type/keyword_bid)
   ├─ 代码硬过滤 → 排除 non-ENABLED / 无数据 / 多关键词活动
   ├─ Campaign 预过滤 → 排除 budget≈$1 & bid≈$0.2 的疑似已淘汰活动
   ├─ MCP basic_info + product_report 并行 → 回落 Doris
   ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN")
+  ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
   ├─ 分流: EXACT → 精准流 / BROAD+PHRASE+AUTO → 广泛流
   │   ├─ 精准流: 预取 placement → _EXACT_PROMPT → 分批投票
   │   └─ 广泛流: 预取 search_term → _BROAD_PROMPT → 分批投票
-  ├─ 合并两流结果 + Budget 冲突裁决
-  ├─ Sanity check (仅低置信项，≤10/批，并行) — ✅ 已恢复
-  └─ AI 汇总合成 (按共同原因分组叙事) — ✅ 已恢复
+  ├─ 合并两流结果 + ★组合终分类 (LLM action 补淘汰判定)
+  ├─ ★action 归一化 (_normalize_action: proposed vs current 差值 derive 权威 action)
+  ├─ Budget 冲突裁决 + ★终态 action 二次归一
+  ├─ Sanity check (仅低置信项，≤10/批，并行)
+  ├─ ★组合预算汇总 (campaign_budget_summary.py: 3 组约束分配)
+  └─ AI 汇总合成 (按共同原因分组叙事) — 已禁用，待服务器验证后开启
 ```
 
 ### 2.2 核心设计决策
@@ -94,16 +98,18 @@ parent_asin
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | ~1150 | ★编排引擎：分流→分批→投票→校验→合成 |
+| `app/workflow/steps/campaign.py` | ~1450 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度 |
 | `app/llm/reasoner.py` | ~1640 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` |
-| `app/models/campaign.py` | ~160 | 全部 Campaign 数据模型 |
+| `app/models/campaign.py` | ~183 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
 | `app/data/campaign_fetcher.py` | ~507 | 数据编排器：Doris上下文→预筛选→MCP→回落 |
 | `app/data/campaign_prefilter.py` | ~80 | 硬过滤纯函数 |
-| `app/api/campaign.py` | ~133 | API 端点：`POST /campaign/analyze` + `POST /campaign/confirm`(stub) |
-| `app/llm/client.py` | ~200 | DeepSeek API 客户端 + KeyPool 轮询 |
-| `app/config/settings.py` | ~203 | Campaign 相关配置项 |
-| `demo/campaign_test.html` | ~900 | 调试前端 |
+| `app/api/campaign.py` | ~148 | API 端点：`POST /campaign/analyze`(meta_filter="META_AD_PRODUCT") + `/confirm`(stub) |
+| `app/llm/client.py` | ~200 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
+| `app/config/settings.py` | ~210 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier) |
+| `demo/campaign_test.html` | ~950 | 调试前端 (含组合筛选气泡 + 预算约束卡) |
 | `app/llm/kb_loader.py` | ~155 | KB 加载器，`campaign_adjustment` preset (KB 18/19/21/22) |
+| `app/workflow/steps/campaign_portfolio.py` | ~105 | ★组合分类器：4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
+| `app/workflow/steps/campaign_budget_summary.py` | ~90 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
 
 ### 3.2 关键配置项（settings.py）
 
@@ -118,6 +124,14 @@ campaign_discovery_timeout: float = 90.0
 campaign_mcp_tool_timeout: float = 300.0
 campaign_db_fallback_timeout: float = 60.0
 campaign_prefilter_enabled: bool = True
+
+# Campaign 组合分类与预算
+campaign_portfolio_enabled: bool = True    # 组合分类开关(关闭退化到改前)
+campaign_budget_fallback_multiplier: float = 1.15  # daily_budget 兜底乘数
+campaign_portfolio_share_main: int = 60    # 主推约束占比
+campaign_portfolio_share_test: int = 20    # 测试/新增约束占比
+campaign_portfolio_share_broad: int = 20   # 广泛/自动约束占比
+# 淘汰组不参与约束概念(KB 21 §6 每活动 $1)
 
 # LLM
 llm_timeout: int = 75               # httpx 层超时（秒）
@@ -194,6 +208,20 @@ deepseek_model: str = "deepseek-v4-pro"
 | 06-01 | `db_child_asin_cap` | 80→200 |
 | 06-01 | synthesis `max_tokens` | 3000→4096 |
 | 06-01 | 入口日志 | batch/synthesis/sanity 三处 LLM 入口打 `logger.info` (ASIN/items/temp) |
+| 06-02 | **组合分类器** | `campaign_portfolio.py`: 4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
+| 06-02 | **预算汇总** | `campaign_budget_summary.py`: 3 组约束分配 (主推 60%/测试 20%/广泛 20%),淘汰不参与 |
+| 06-02 | **daily_budget 三级兜底** | `build_campaign_strategy_context`: override → asin_data → `spend/days × 1.15` |
+| 06-02 | 前端组合气泡 + 预算卡 | 筛选气泡按钮(互斥单选)+ 预算约束 vs 勾选汇总卡片 |
+| 06-02 | 组合分类顺序修正 | 广泛/自动提前到测试/新增之前 (BROAD 活动本质是测词,不算"新建测试") |
+| 06-02 | 占比 3 组化 | 淘汰组从约束概念移除;share 60/20/20 (原 50/30/15/5) |
+| 06-02 | 前端预算卡极简化 | 砍掉 4 行表格/占比条;改为 2 个数字:预算约束 + 当前勾选汇总 |
+| 06-03 | **KeyPool RLock 死锁修复** | `threading.Lock`→`RLock`: `next_key()`→`_maybe_log_stats()`→`stats()` 同一锁重入死锁 |
+| 06-03 | **meta_filter 优化** | `api/campaign.py`: fetch 时硬限 `meta_filter=["META_AD_PRODUCT"]`,砍 6 个无用 META |
+| 06-03 | **action 归一化** | `_normalize_action()`: 代码从 proposed vs current derive 权威 action,LLM 只给淘汰判据 |
+| 06-03 | 终态 action 二次归一 | `_resolve_budget_conflicts` 末尾: conservative merge 后补一次归一(keep 语义清理) |
+| 06-03 | Redis 空结果防毒化 | `_save_cached_campaigns`: total=0 或 errors 不空时不入缓存,防 MCP 临时失败毒化缓存 |
+| 06-03 | A1 问题文档化 | api handler 加 TODO(A1): `_ensure_data` meta_filter 不支持缓存,待修复后改走 ctx 路径 |
+| 06-03 | 向导页显示 override | `wizard.py` + `layers.py`: 透传 target_acos_override / daily_budget_override |
 
 ---
 
@@ -218,8 +246,19 @@ deepseek_model: str = "deepseek-v4-pro"
 | `POST /campaign/confirm` 落地 | P2 | MySQL pending 表 + ERP 推送 |
 | `is_core` 真实数据源 | P2 | 替换硬编码 False |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL |
+| **A1 修复** | P1 | `_ensure_data` 不支持 meta_filter+缓存共存,修复后 Campaign 可走 ctx 路径命中 Redis |
 
-### 4.3 已修复的 Bug
+### 4.3 新增设计决策 (v1.3)
+
+| 决策 | 说明 |
+|------|------|
+| action 归一化 | LLM 只给淘汰判据 (`eliminate_to_low_bid_pool`),其余 action 由代码从 proposed vs current 差值 derive |
+| 组合分类顺序 | 淘汰 → 广泛/自动 → 测试/新增 → 主推。广泛(BROAD/PHRASE/AUTO)提前,防止上线 <14 天的广泛活动被误归入测试/新增 |
+| 淘汰组不参与预算约束 | KB 21 §6 每活动固定 $1,与运营策略预算无关。3 组占比(60/20/20)之和 = 100% = 总约束 |
+| meta_filter 优化 | ASIN data 只拉 META_AD_PRODUCT,砍掉 Campaign 用不到的 6 个 META(natural_rankings/flow_keywords 等 150s 慢查询) |
+| 空 CampaignData 不入 Redis | 防 MCP/Doris 临时失败毒化缓存(30min 空窗口) |
+
+### 4.4 已修复的 Bug
 
 | 问题 | 修复 |
 |------|------|
@@ -238,20 +277,28 @@ deepseek_model: str = "deepseek-v4-pro"
 | `asyncio.gather` 默认不 `return_exceptions` | 流级 + batch 级两处加 `return_exceptions=True`，异常隔离 |
 | `_run_round` 解析在 try 之外 | result 形状异常会 AttributeError 外抛；改为全部挪进 try，加 `isinstance(result, dict)` 守卫 |
 | API handler 无顶层 try/except | 任何未捕获异常 → 500 + 堆栈；改为统一返回降级 `CampaignAnalysisResult` |
+| **KeyPool 死锁** | `threading.Lock`→`RLock`: `next_key()` 持有锁时调 `stats()` 再次 acquire 同锁死锁 |
+| **LLM action 不一致** | `_normalize_action()`: LLM 可能 action=keep 但改了值,代码从 proposed vs current derive 权威 action |
+| **Redis 缓存毒化** | 空结果/有 errors 时不入缓存,防 MCP 临时失败导致 30min 空窗口 |
+| **Campaign 分析慢查询超时** | `meta_filter=["META_AD_PRODUCT"]` 砍掉 6 个无用 META(150s 慢查询→<30s) |
 
-### 4.4 失败路径覆盖矩阵（多层防护后）
+### 4.5 失败路径覆盖矩阵（多层防护后）
 
 | 失败点 | 旧行为 | 新行为 |
 |---|---|---|
 | MCP 上下文挂起 | analyze 永远挂 | 300s timeout → 返回空 CampaignData + warning |
 | Doris MySQL 断连 | 500 + 堆栈 | warning「分析失败: OperationalError」+ 空 result |
 | `aggregator.fetch` 120s 超时 | 500 | warning「数据拉取超时」+ 空 result |
+| Dorisfallback 串行慢查询 | 120s 超时断 | meta_filter 砍掉 6 个 META→<30s,不再触及超时 |
 | LLM 单批挂 60s | 该 batch 失败但其他 OK | 同（既有） |
 | LLM 返回非 dict | AttributeError → 整流崩 | 转单批失败 warning |
+| LLM action 不一致 | 投票阶段分歧增多 | `_normalize_action()` 代码 derive,降低无谓 R3 |
 | `TargetAcosRecommender` 内部 AttributeError | 500 | warning「分析失败: AttributeError」+ 空 result |
 | sanity / synthesis | 挂 10 分钟无返回 | flag 禁用 → 跳过 + warning |
 | exact 流抛异常 | broad 流被 cancel | broad 流照常完成，exact warning 入栈 |
 | state 查询 MySQL 抖动 | 500 | warning + 空 result |
+| KeyPool stats 统计死锁 | 8 个 R3 task 全挂 | RLock 可重入 → 不死锁 |
+| MCP 临时失败 → 空 CampaignData 进缓存 | 后续 30min 看空 | 空结果不入缓存,下次重拉 |
 
 ---
 
@@ -261,7 +308,8 @@ deepseek_model: str = "deepseek-v4-pro"
 
 | ASIN | 活动数 | 特点 |
 |------|--------|------|
-| B0B7S3PWWB | 102 | Fishnet Stockings，数据最全，已验证 |
+| B0B7S3PWWB | 102 | Fishnet Stockings，数据最全，已验证 (精准流为主) |
+| B0CGH9QRKK | 58 | 广泛流为主 (29 exact + 29 broad)，已验证预算汇总 |
 
 ### 5.2 启动与调试
 
@@ -284,10 +332,12 @@ http://localhost:8008/demo/campaign_test.html
 Campaign timing [ASIN] +Xs: DONE fetch_campaigns     # 数据拉取耗时
 Campaign timing [ASIN] +Xs: split: exact=N broad=M   # 分流统计
 Campaign timing [ASIN] +Xs: DONE exact+broad streams # LLM 分析耗时
-Campaign timing [ASIN] +Xs: DONE synthesis           # 合成耗时
+Campaign timing [ASIN] +Xs: DONE sanity_check        # Sanity 耗时
+Campaign timing [ASIN] +Xs: DONE budget_summary      # 预算汇总耗时(新增)
 Campaign timing [ASIN] +Xs: DONE total               # 总耗时
 Campaign batch LLM 成功 [ASIN], N items              # 单批 LLM 完成
 Sanity check [ASIN]: 低置信 N/M 条 → K 批            # Sanity 触发
+Batch N [ASIN] action 归一: 改写 N/M 条                # action 归一化(新增)
 ```
 
 ---
@@ -308,4 +358,4 @@ Campaign 分析结果→待确认表的映射关系：
 
 ---
 
-*最后更新：2026-06-01（追加全链路防护改动 + 失败路径覆盖矩阵 + Timeout 配置全景）*
+*最后更新：2026-06-03（v1.3: 组合分类+预算汇总+RLock修复+action归一化+meta_filter优化）*
