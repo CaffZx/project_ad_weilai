@@ -880,8 +880,31 @@ async def _run_round(
     """执行一轮 LLM 调用 (所有 batch 并发，Semaphore 由调用方注入)。"""
 
     async def _call_one(batch_idx: int, batch: list[dict]) -> CampaignBatchResult:
-        # 全局并发上限（跨 ASIN/流，防打满）+ 流内限流（既有）
-        async with _global_llm_sem(), sem:
+        # 纵深防御 1: 信号量获取超时 (避免 TCP 半开 batch 占槽后其他 batch 在 sem 门前饿死)
+        gsem = _global_llm_sem()
+        sem_timeout = settings.campaign_sem_acquire_timeout
+        got_gsem = False
+        got_sem = False
+        try:
+            try:
+                await asyncio.wait_for(gsem.acquire(), timeout=sem_timeout)
+                got_gsem = True
+            except asyncio.TimeoutError:
+                return CampaignBatchResult(
+                    batch_id=batch_idx, round_number=round_number,
+                    llm_success=False, llm_error="sem_acquire_timeout(global)",
+                    temperature=temperature,
+                )
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=sem_timeout)
+                got_sem = True
+            except asyncio.TimeoutError:
+                return CampaignBatchResult(
+                    batch_id=batch_idx, round_number=round_number,
+                    llm_success=False, llm_error="sem_acquire_timeout(stream)",
+                    temperature=temperature,
+                )
+            # 纵深防御 2: 单批 HTTP socket 超时 (httpx 层自断,绕过 asyncio 取消缺陷)
             try:
                 result = await asyncio.wait_for(
                     reasoner.recommend_campaign_batch(
@@ -890,11 +913,11 @@ async def _run_round(
                         strategy_context=strategy_context,
                         temperature=temperature,
                         task_type=task_type,
+                        timeout_override=LLM_TIMEOUT,
                     ),
                     timeout=LLM_TIMEOUT,
                 )
 
-                # 解析挪进 try：result 形状异常也会落到下面的 except，不外抛
                 if not isinstance(result, dict):
                     raise ValueError(f"recommend_campaign_batch 返回非 dict: {type(result).__name__}")
                 parsed = result.get("parsed") or {}
@@ -904,9 +927,6 @@ async def _run_round(
                 for adj in raw_adj:
                     try:
                         item = CampaignAdjustmentItem(**adj)
-                        # action 全程由代码 derive,LLM action 仅作淘汰判据
-                        # (在 _vote 之前归一,让 _same_direction 拿到准确 action,
-                        #  避免 LLM "action=keep 但 proposed 改了" 引发的无谓 R3 触发)
                         if _normalize_action(item):
                             normalized_cnt += 1
                         items.append(item)
@@ -939,10 +959,31 @@ async def _run_round(
                     llm_success=False, llm_error=str(e),
                     temperature=temperature,
                 )
+        finally:
+            if got_sem:
+                sem.release()
+            if got_gsem:
+                gsem.release()
 
     tasks = [_call_one(i, batch) for i, batch in enumerate(batches)]
-    # return_exceptions=True 防御性兜底：_call_one 已自包裹异常，这里再防万一
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    # 纵深防御 3: 单轮 gather 兜底超时 (超时批标 round_timeout,不丢掉已完成的结果)
+    round_timeout = LLM_TIMEOUT * 2 + 30
+    try:
+        raw_results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=round_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Round %d gather 超时 [%s] >%ds: %d/%d 批未完成",
+            round_number, asin, round_timeout,
+            sum(1 for t in tasks if not t.done()), len(tasks),
+        )
+        raw_results = [
+            t.result() if t.done() and not t.cancelled()
+            else BaseException(TimeoutError(f"round_timeout:{round_timeout}s"))
+            for t in tasks
+        ]
     final: list[CampaignBatchResult] = []
     for i, r in enumerate(raw_results):
         if isinstance(r, BaseException):

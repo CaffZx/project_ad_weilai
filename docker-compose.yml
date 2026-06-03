@@ -48,7 +48,7 @@ services:
         condition: service_healthy
       redis-cache:
         condition: service_healthy
-    command: ["python", "ad-direction-agent/start_server.py", "--port", "8010", "--no-reload"]
+    command: ["python", "ad-direction-agent/start_server.py", "--port", "8010", "--no-reload", "--workers", "1"]
 
 volumes:
   mysql_state_data:

@@ -1436,10 +1436,13 @@ class LLMReasoner:
         temperature: float = 0.3,
         *,
         task_type: str = "exact",
+        timeout_override: float | None = None,
     ) -> dict:
         """分析单批活动 (≤6个) 并返回调整建议。
 
         task_type: "exact" → 精准专用 prompt/schema; "broad" → 广泛专用 prompt/schema
+        timeout_override: 单次 HTTP socket 超时 (秒); 不传走 client 默认值。
+            纵深防御: 与 sanity/synthesis 一致,httpx socket 层自断绕过 asyncio 取消缺陷。
 
         Returns:
             {"parsed": dict, "raw_output": str, "success": bool, "error": str, "temperature": float}
@@ -1550,6 +1553,7 @@ class LLMReasoner:
                 temperature=temperature,
                 response_format={"type": "json_object"},
                 max_tokens=8192,
+                timeout_override=timeout_override,
             )
             parsed = self._parse_json(raw)
             adjustments = parsed.get("campaign_adjustments", [])

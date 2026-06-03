@@ -109,18 +109,21 @@ async def campaign_analyze(req: dict):
             asin, days, effective_temp, strat_ctx.target_acos,
         )
 
-        # LLM 分析（内部已有 fetch_campaigns timeout / sanity+synthesis 禁用 flag 等多层防护）
+        # LLM 分析（纵深防御: 任务级总超时,防 Semaphore 饥饿永久挂死）
         fetcher = CampaignFetcher()
-        result = await analyze_campaigns(
-            fetcher=fetcher,
-            reasoner=reasoner,
-            parent_asin=asin,
-            asin_data=asin_data,
-            strategy_context=strat_ctx,
-            days=days,
-            temperature=effective_temp,
-            refresh=refresh,
-            keyword_analysis=keyword_analysis,
+        result = await asyncio.wait_for(
+            analyze_campaigns(
+                fetcher=fetcher,
+                reasoner=reasoner,
+                parent_asin=asin,
+                asin_data=asin_data,
+                strategy_context=strat_ctx,
+                days=days,
+                temperature=effective_temp,
+                refresh=refresh,
+                keyword_analysis=keyword_analysis,
+            ),
+            timeout=settings.campaign_total_timeout,
         )
         return result.model_dump()
 
@@ -128,7 +131,7 @@ async def campaign_analyze(req: dict):
         logger.warning("Campaign analyze 超时 [%s]: %s", asin, e)
         return CampaignAnalysisResult(
             parent_asin=asin, days=days,
-            warnings=[f"分析超时（>120s 数据拉取阶段），请稍后重试"],
+            warnings=[f"分析总超时（>{settings.campaign_total_timeout}s），请稍后重试或联系管理员"],
             sanity_check_passed=False,
             llm_rounds_completed=0,
         ).model_dump()
