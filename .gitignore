@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 敏感信息 — 环境配置
+.env
+*.local.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 数据文件
+*.xlsx
+*.csv
+data/source/csv_output/
+
+# 运行时
+*.log
+agent_checkpoints.db
+
+# 运营配置（运行时生成，按 ASIN 隔离，不提交）
+ad-direction-agent/config/
+
+# 子项目内已有的 .gitignore
+ad-direction-agent/.gitignore
+ad-purpose-agent/.idea/.gitignore
+
+# Claude Code
+.claude/settings.local.json
+.claude/roo/
+
+# 本地调试 / 备份（勿提交）
+*.tar
+ad-assistant-agent-v2.3.tar
+ad_assistant_agent_v2.3.tar
+ad-assistant-agent-v2.4.tar
+ad_assistant_agent_v2.4.tar
+Agent网页端反馈*.md
+**/db_adapter*.txt
+!**/db_adapter.py
+**/pytest-cache-files-*/
+dump_llm_raw.py
+llm_raw*.json
+asin_lookup_mcp.py
+query_mcp.py
+.mcp.json
+_非项目文件/
+
+# 多 Key 文件（敏感，不提交）
+ad-direction-agent/api_keys.txt
+
+# 数据血缘 + 架构文档（本地参考，不提交）
+ad-direction-agent/data/
+ad-direction-agent/docs/
+
+# 调试追踪文件（不推送）
+debug_traces/
+tmp_asin_lookup.json
+
+# P1 废弃文件（不推送）
+ad-purpose-agent/__pycache__/

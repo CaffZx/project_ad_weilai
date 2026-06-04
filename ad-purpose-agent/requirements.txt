@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+openai
+pymysql
+pandas
+python-dotenv
+tomli
+pydantic-settings

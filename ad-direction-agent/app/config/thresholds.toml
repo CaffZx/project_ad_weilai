@@ -1,0 +1,244 @@
+# 规则阈值配置 — 所有规则的可调参数
+# 修改此文件即可调整规则判定标准，无需改代码
+
+[general]
+data_timeout_seconds = 5
+max_retries = 2
+
+# 推进自然位 (push_natural) 规则阈值
+[push_natural]
+
+[push_natural.pn_1]
+description = "检查是否有上升词或优质位词可关注"
+min_candidates = 2
+rising_rank_threshold = 3
+well_positioned_max_rank = 20
+
+[push_natural.pn_2]
+description = "预算倾斜比例合理性"
+max_budget_ratio = 50
+
+[push_natural.pn_3]
+description = "检查广告依赖型关键词（ACOS好但自然位差）"
+max_acos_for_ad_driven = 30
+min_spend_for_ad_driven = 50
+natural_rank_threshold = 20
+
+[push_natural.pn_4]
+description = "检查上升词的 ACOS 是否可接受"
+max_acos_for_rising = 35
+
+[push_natural.pn_5]
+description = "检查核心词自然位是否还有上升空间"
+min_current_rank = 5
+
+# 新增扩词 (expand_keywords) 规则阈值
+[expand_keywords]
+
+[expand_keywords.ke_1]
+description = "检查是否有新词可扩（搜索词报告未收录词）"
+min_qualified_keywords = 2
+max_acos_for_new = 30
+
+[expand_keywords.ke_2]
+description = "检查当前关键词覆盖率"
+max_keyword_count = 10
+
+[expand_keywords.ke_3]
+description = "检查现有词 ACOS 是否健康"
+acos_threshold_factor = 1.2
+
+[expand_keywords.ke_4]
+description = "检查单次新增数量是否合理"
+recommended_new_count = 5
+max_new_count = 15
+
+# 优化 ACOS (optimize_acos) 规则阈值
+[optimize_acos]
+
+[optimize_acos.oa_1]
+description = "检查是否有 ACOS 超标词"
+acos_warning_threshold = 30
+acos_force_threshold = 50
+
+[optimize_acos.oa_2]
+description = "检查有无高花费零转化词"
+high_spend_zero_convert_threshold = 15
+
+[optimize_acos.oa_3]
+description = "检查是否有 Bid 调整空间（Bid vs 实际CPC）"
+bid_reduction_headroom = 1.5
+
+[optimize_acos.oa_4]
+description = "检查否定词机会"
+min_impressions_for_negative = 500
+
+# 平衡维持 (balance_maintain) 规则阈值
+[balance_maintain]
+
+[balance_maintain.bm_1]
+description = "检查指标波动是否在容忍范围内"
+acos_fluctuation_tolerance = 15
+cvr_fluctuation_tolerance = 15
+sales_fluctuation_tolerance = 15
+
+[balance_maintain.bm_2]
+description = "检查是否有异常信号（库存预警、竞品威胁）"
+min_inventory_warning = 50
+
+[balance_maintain.bm_3]
+description = "检查当前参数是否在合理区间"
+acos_upper_bound_factor = 1.2
+acos_lower_bound_factor = 0.5
+
+[balance_maintain.bm_4]
+description = "检查核心词排名稳定性"
+rank_change_threshold = 5
+
+[balance_maintain.bm_5]
+description = "检查子选项 ACOS 容忍阈值是否合理"
+min_acos_tolerance = 3
+max_acos_tolerance = 20
+
+# 标签联动约束 (cross_tag) 阈值
+[cross_tag]
+
+[cross_tag.test_stage_forced_ad_purpose]
+description = "测试阶段广告目的只能是 引流型 或 排名型"
+disallowed_purposes = ["盈利型"]
+
+[cross_tag.harvest_stage_forced_ad_purpose]
+description = "收割/维持阶段推荐广告目的"
+allowed_purposes = ["盈利型", "转化型"]
+
+[cross_tag.broad_keyword_stage]
+description = "Broad 大词需要产品阶段不是测试阶段"
+disallowed_stages = ["测试", "测试期"]
+
+[cross_tag.inventory_warning_directions]
+description = "库存预警时允许的广告方向"
+allowed_directions = ["balance_maintain", "optimize_acos"]
+
+# ── 目标 ACOS 推荐 (P3 Feature 1) ──
+
+[target_acos]
+min_acos = 5
+max_acos = 100
+increment = 5
+max_single_adjustment = 20
+high_natural_ratio_threshold = 50
+low_natural_ratio_threshold = 20
+
+[target_acos.stage_scopes]
+"测试期" = { min = 10, max = 60 }
+"推进期" = { min = 5, max = 50 }
+"收割利润期" = { min = 5, max = 40 }
+"维持期" = { min = 5, max = 35 }
+
+[target_acos.purpose_corrections]
+"排名型" = { direction = "raise", magnitude = 5 }
+"盈利型" = { direction = "lower", magnitude = 5 }
+"引流型" = { direction = "moderate", magnitude = 0 }
+"转化型" = { direction = "moderate", magnitude = 0 }
+
+[target_acos.trend_adjustment]
+improving_relax = 3
+worsening_tighten = 3
+slope_threshold = 1.0
+
+[target_acos.natural_ratio_adjustment]
+high_ratio_bonus = 8
+low_ratio_penalty = 5
+
+# ── 预算和 Bid 推荐 (P3 Feature 2) ──
+
+[budget_bid]
+burn_high_threshold = 85
+burn_low_threshold = 50
+bid_cpc_reduction_ratio = 1.5
+bid_cpc_increase_ratio = 1.1
+max_budget_adjustment_pct = 30
+max_bid_adjustment_pct = 25
+
+[budget_bid.stage_budgets]
+"测试期" = { min = 10, max = 50 }
+"推进期" = { min = 30, max = 150 }
+"收割利润期" = { min = 30, max = 80 }
+"维持期" = { min = 20, max = 60 }
+
+[budget_bid.seasonality]
+"大旺季" = { multiplier = 1.5 }
+"旺季准备" = { multiplier = 1.2 }
+"淡季" = { multiplier = 0.7 }
+"旺季末期" = { multiplier = 0.8 }
+
+# ── 广告方向评分（Recommender）────────────────────────────
+# 与校验规则 [push_natural.pn_*] 分离；修改此处可调整 Tab4 卡片分数
+
+[scoring]
+eligible_min_score = 40
+recommended_min_score = 70
+
+[scoring.push_natural]
+rising_rank_threshold = 3
+candidate_points_each = 8
+candidate_points_max = 30
+ad_driven_min_count = 2
+ad_driven_points = 20
+rank_space_threshold = 5
+rank_space_points = 15
+top_rank_strong_penalty_threshold = 5
+top_rank_strong_penalty = 25
+top_rank_score_cap = 35
+natural_order_ratio_high = 70
+natural_order_ratio_penalty = 15
+
+[scoring.expand_keywords]
+avail_points_per = 3
+avail_points_max = 35
+low_coverage_threshold = 10
+low_coverage_points = 20
+sufficient_coverage_threshold = 20
+sufficient_coverage_penalty = 5
+healthy_acos_threshold = 30
+healthy_acos_points = 15
+non_profit_points = 10
+many_new_keywords_threshold = 20
+many_new_keywords_bonus = 10
+
+[scoring.optimize_acos]
+account_acos_high_threshold = 30
+account_acos_high_points = 30
+account_acos_low_threshold = 20
+account_acos_low_penalty = 5
+over_keyword_acos_threshold = 40
+over_keyword_points_each = 8
+over_keyword_points_max = 25
+wasteful_min_spend = 15
+wasteful_points = 20
+bid_space_points = 10
+word_level_focus_bonus = 15
+
+[scoring.balance_maintain]
+base_score = 50
+healthy_acos_threshold = 25
+healthy_acos_points = 10
+inventory_high_qty = 50
+inventory_high_points = 10
+rank_stable_points = 5
+expand_opportunity_penalty = 10
+high_acos_keyword_threshold = 40
+high_acos_min_keywords = 2
+high_acos_penalty = 8
+
+[scoring.stage_adjustment]
+"测试期" = { push_natural = 0, expand_keywords = 10, optimize_acos = -5, balance_maintain = -10 }
+"推进期" = { push_natural = 5, expand_keywords = 5, optimize_acos = 0, balance_maintain = 0 }
+"收割利润期" = { push_natural = -15, expand_keywords = -5, optimize_acos = 12, balance_maintain = 10 }
+"维持期" = { push_natural = -10, expand_keywords = -5, optimize_acos = 10, balance_maintain = 12 }
+
+[scoring.season_adjustment]
+"旺季末期" = { push_natural = 0, expand_keywords = -5, optimize_acos = 5, balance_maintain = 8 }
+"淡季" = { push_natural = -5, expand_keywords = -5, optimize_acos = 5, balance_maintain = 5 }
+"旺季准备" = { push_natural = 0, expand_keywords = 5, optimize_acos = 0, balance_maintain = 0 }
+"大旺季" = { push_natural = 5, expand_keywords = 5, optimize_acos = -5, balance_maintain = -5 }

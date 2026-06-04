@@ -1,0 +1,143 @@
+# 广告方向标签定义配置
+# 前端根据此配置动态渲染方向选择面板和子选项表单
+
+[ad_direction]
+
+# ─── 推进自然位 ───
+[[ad_direction.directions]]
+id = "push_natural"
+label = "推进自然位"
+description = "重点关注自然位上升词，倾斜预算推进自然排名"
+
+[[ad_direction.directions.sub_options]]
+id = "top_keywords_count"
+type = "integer"
+label = "重点关注 Top___个自然位上升词"
+default = 3
+min = 1
+max = 10
+
+[[ad_direction.directions.sub_options]]
+id = "budget_ratio"
+type = "percent"
+label = "预算倾斜比例___%"
+default = 20
+min = 5
+max = 50
+
+[[ad_direction.directions.constraints]]
+id = "not_with_profit_purpose"
+description = "Profit 模式下不应推自然位"
+condition = "ad_purpose == '盈利型'"
+level = "force_correct"
+
+# ─── 新增扩词 ───
+[[ad_direction.directions]]
+id = "expand_keywords"
+label = "新增扩词"
+description = "从多种来源挖掘新关键词，扩大广告覆盖"
+
+[[ad_direction.directions.sub_options]]
+id = "sources"
+type = "multi_choice"
+label = "扩词来源选择"
+default = ["search_term_report", "auto_campaign"]
+
+[[ad_direction.directions.sub_options.options]]
+id = "search_term_report"
+label = "搜索词报告转化好的词"
+
+[[ad_direction.directions.sub_options.options]]
+id = "competitor_listing"
+label = "竞品 Listing 挖掘的词"
+
+[[ad_direction.directions.sub_options.options]]
+id = "auto_campaign"
+label = "自动广告跑出的高相关词"
+
+[[ad_direction.directions.sub_options.options]]
+id = "llm_generated"
+label = "LLM 基于产品特性生成的新词组合"
+
+[[ad_direction.directions.sub_options]]
+id = "target_count"
+type = "integer"
+label = "今日计划新增关键词数___个"
+default = 5
+min = 1
+max = 30
+
+[[ad_direction.directions.constraints]]
+id = "not_with_profit_purpose"
+description = "扩词初期 ACOS 高，Profit 模式不适用"
+condition = "ad_purpose == '盈利型'"
+level = "force_correct"
+
+# ─── 优化 ACOS ───
+[[ad_direction.directions]]
+id = "optimize_acos"
+label = "优化 ACOS"
+description = "通过否定低效词、调整竞价等手段降低 ACOS"
+
+[[ad_direction.directions.sub_options]]
+id = "methods"
+type = "multi_choice"
+label = "优化手段选择"
+default = ["negative_keywords", "reduce_bid"]
+
+[[ad_direction.directions.sub_options.options]]
+id = "negative_keywords"
+label = "否定低效词"
+threshold_label = "ACOS > ___%"
+threshold_default = 40
+
+[[ad_direction.directions.sub_options.options]]
+id = "reduce_bid"
+label = "降价表现差的关键字"
+threshold_label = "CVR < ___%"
+threshold_default = 3
+
+[[ad_direction.directions.sub_options.options]]
+id = "adjust_bidding_strategy"
+label = "调整竞价策略 (Dynamic-Down Only / Fixed)"
+
+[[ad_direction.directions.sub_options.options]]
+id = "pause_ad_group"
+label = "暂停 ACOS 过高的广告组"
+
+[[ad_direction.directions.sub_options]]
+id = "acos_threshold"
+type = "percent"
+label = "ACOS > ___% 视为需要优化的词"
+default = 40
+min = 20
+max = 80
+
+[[ad_direction.directions.sub_options]]
+id = "cvr_threshold"
+type = "percent"
+label = "CVR < ___% 视为表现差的关键字"
+default = 3
+min = 1
+max = 10
+
+# ─── 平衡维持 ───
+[[ad_direction.directions]]
+id = "balance_maintain"
+label = "平衡维持"
+description = "保持当前广告状态，仅做微调"
+
+[[ad_direction.directions.sub_options]]
+id = "acos_tolerance"
+type = "percent"
+label = "ACOS 波动在___%以内不触发自动调整"
+default = 5
+min = 1
+max = 20
+
+[[ad_direction.directions.constraints]]
+id = "inventory_warning_restriction"
+description = "库存预警时只能选平衡维持或优化ACOS"
+condition = "special_scenario == 'inventory_warning'"
+level = "suggest_optimize"
+
