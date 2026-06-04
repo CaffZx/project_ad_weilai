@@ -64,3 +64,6 @@ tmp_asin_lookup.json
 
 # P1 废弃文件（不推送）
 ad-purpose-agent/__pycache__/
+
+# 本地实验输出（KB/写入报告等，不提交）
+cursor临时文件/
