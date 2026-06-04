@@ -1,7 +1,15 @@
-"""DeepSeek API 异步客户端 — 多 Key 负载均衡"""
+"""DeepSeek API 异步客户端 — 多 Key 负载均衡 + 服务级并发收口
 
+本模块的单例 deepseek_client 是全服务唯一的 LLM 传输层：
+- 1 个共享 httpx 连接池（reasoner 默认复用本单例，不再各自新建）
+- 1 个进程级并发信号量（每个非流式 chat() 调用过闸）
+- Key 轮询/冷却委托 ApiKeyPool
+"""
+
+import asyncio
 import json
 import logging
+import random
 import time
 from collections.abc import AsyncGenerator
 
@@ -12,9 +20,26 @@ from app.llm.key_pool import ApiKeyPool
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 2
+# 重试总执行次数（首次 + 2 次重试）。重试前指数退避 + 抖动，打散高并发雷群。
+MAX_RETRIES = 3
 
 _key_pool: ApiKeyPool | None = None
+
+# 服务级 LLM 并发信号量 —— 进程内，所有非流式 chat() 调用共用。
+# 懒初始化：在运行的事件循环内首次取用时创建（避免 import 期无 loop 绑定）。
+_llm_sem: asyncio.Semaphore | None = None
+
+
+def _global_llm_sem() -> asyncio.Semaphore:
+    global _llm_sem
+    if _llm_sem is None:
+        _llm_sem = asyncio.Semaphore(settings.llm_global_concurrency)
+    return _llm_sem
+
+
+def _retry_backoff(attempt: int) -> float:
+    """重试退避秒数（attempt 从 1 起）：retry1≈0.5s、retry2≈1.0s，叠加 50–200ms 抖动。"""
+    return 0.5 * attempt + random.uniform(0.05, 0.2)
 
 
 def _build_key_pool() -> ApiKeyPool:
@@ -57,7 +82,18 @@ class DeepSeekClient:
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            # 连接池显式配置（默认 max_connections=100，扛不住峰值 100+）；
+            # 超时分离：连接快断（8s），读取给 LLM 生成留足（=llm_timeout）。
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=8.0, read=self.timeout, write=10.0, pool=5.0,
+                ),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+            )
         return self._client
 
     async def close(self):
@@ -98,45 +134,50 @@ class DeepSeekClient:
         client = await self._ensure_client()
         last_exc = None
 
-        for attempt in range(MAX_RETRIES):
-            api_key = pool.next_key()
-            t0 = time.perf_counter()
-            try:
-                resp = await client.post(
-                    f"{self.base_url}/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=timeout_override or self.timeout,
-                    json=body,
-                )
-                if resp.status_code in (429, 401, 403):
-                    pool.mark_failed(api_key, status_code=resp.status_code)
-                    last_exc = httpx.HTTPStatusError(
-                        f"HTTP {resp.status_code}", request=resp.request, response=resp
+        # 服务级并发闸：一个逻辑请求占一个槽，跨重试不释放（不加在 chat_stream）。
+        async with _global_llm_sem():
+            for attempt in range(MAX_RETRIES):
+                if attempt > 0:
+                    # 重试前指数退避 + 抖动，打散高并发雷群
+                    await asyncio.sleep(_retry_backoff(attempt))
+                api_key = pool.next_key()
+                t0 = time.perf_counter()
+                try:
+                    resp = await client.post(
+                        f"{self.base_url}/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=timeout_override or self.timeout,
+                        json=body,
                     )
+                    if resp.status_code in (429, 401, 403):
+                        pool.mark_failed(api_key, status_code=resp.status_code)
+                        last_exc = httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code}", request=resp.request, response=resp
+                        )
+                        continue
+                    resp.raise_for_status()
+                    pool.mark_success(api_key, latency=time.perf_counter() - t0)
+                    data = resp.json()
+                    return data["choices"][0]["message"]["content"]
+                except httpx.TimeoutException as e:
+                    logger.warning("LLM 请求超时 (Key ...%s, 第%d次)", api_key[-8:], attempt + 1)
+                    pool.mark_failed(api_key, status_code=500)
+                    last_exc = e
                     continue
-                resp.raise_for_status()
-                pool.mark_success(api_key, latency=time.perf_counter() - t0)
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            except httpx.TimeoutException as e:
-                logger.warning("LLM 请求超时 (Key ...%s, 第%d次)", api_key[-8:], attempt + 1)
-                pool.mark_failed(api_key, status_code=500)
-                last_exc = e
-                continue
-            except (httpx.ConnectError, httpx.RemoteProtocolError,
-                    httpx.ReadError) as e:
-                logger.warning("LLM 网络错误 (Key ...%s, 第%d次): %s", api_key[-8:], attempt + 1, e)
-                pool.mark_failed(api_key, status_code=500)
-                last_exc = e
-                continue
-            except httpx.HTTPStatusError as e:
-                # 非 429/401/403 HTTP 错误（如 500）
-                pool.mark_failed(api_key, status_code=500)
-                last_exc = e
-                continue
+                except (httpx.ConnectError, httpx.RemoteProtocolError,
+                        httpx.ReadError) as e:
+                    logger.warning("LLM 网络错误 (Key ...%s, 第%d次): %s", api_key[-8:], attempt + 1, e)
+                    pool.mark_failed(api_key, status_code=500)
+                    last_exc = e
+                    continue
+                except httpx.HTTPStatusError as e:
+                    # 非 429/401/403 HTTP 错误（如 500）
+                    pool.mark_failed(api_key, status_code=500)
+                    last_exc = e
+                    continue
 
         raise last_exc or RuntimeError("LLM 调用失败：重试次数耗尽")
 

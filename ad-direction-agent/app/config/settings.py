@@ -122,8 +122,8 @@ class Settings(BaseSettings):
     # Campaign LLM 分析
     # 每流(精准/广泛各一)并发上限。单 ASIN 上限 = exact + broad = 2×该值。
     campaign_llm_concurrency: int = 10
-    # 进程级 LLM 总并发上限（跨 ASIN/流共享）。须 ≥ 单 ASIN 上限(2×campaign_llm_concurrency=20)
-    # 才不限速单 ASIN；24 给点余量并把多 ASIN 并行从 ~60 收到 24。可调。
+    # [DEPRECATED] campaign 不再使用进程级全局闸——全局 LLM 并发已统一收口到
+    # client 层 llm_global_concurrency（见 LLM 配置段）。保留仅兼容旧 .env，无实际作用。
     campaign_global_llm_concurrency: int = 24
     campaign_llm_temperature: float = 0.3
     campaign_batch_size: int = 6
@@ -173,6 +173,9 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-pro"
     llm_timeout: int = 75
+    # 服务级 LLM 总并发上限（进程内，所有非流式 chat() 调用共用一个信号量）。
+    # 需按 Key 数 × 单 Key RPM 调；多 worker 部署时应除以 worker 数（本期单 worker）。
+    llm_global_concurrency: int = 40
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

@@ -134,8 +134,10 @@ campaign_portfolio_share_broad: int = 20   # 广泛/自动约束占比
 # 淘汰组不参与约束概念(KB 21 §6 每活动 $1)
 
 # LLM
-llm_timeout: int = 75               # httpx 层超时（秒）
+llm_timeout: int = 75               # httpx read 超时（秒）
 deepseek_model: str = "deepseek-v4-pro"
+llm_global_concurrency: int = 40    # 服务级 LLM 总并发（client 层信号量，所有 chat() 共用）
+# campaign_global_llm_concurrency: 已 DEPRECATED，全局闸收口到 client 层
 ```
 
 #### Timeout 配置全景（多层级，外层优先级最高）
@@ -147,9 +149,11 @@ deepseek_model: str = "deepseek-v4-pro"
 | 流级单批 LLM | `LLM_TIMEOUT` | 60s | steps/campaign.py `_run_round` |
 | Sanity 单批 LLM | (硬编码) wait_for | 60s | steps/campaign.py `_sanity_check` |
 | Synthesis 单次 LLM | (硬编码) wait_for | 60s | steps/campaign.py `analyze_campaigns` |
-| LLM HTTP 单次 | `llm_timeout` | 75s | llm/client.py `httpx.AsyncClient` |
-| LLM 重试 | `MAX_RETRIES` | 2 | llm/client.py |
-| LLM 单次最坏耗时 | = 75 × 2 重试 | ~150s | 累计 |
+| LLM HTTP 单次 | `llm_timeout`(read) | 75s | llm/client.py `httpx.Timeout` |
+| LLM 连接超时 | (硬编码) connect | 8s | llm/client.py `httpx.Timeout` |
+| LLM 重试 | `MAX_RETRIES` | 3 | llm/client.py（首次+2 重试，重试前退避 0.5/1.0s+抖动） |
+| LLM 单次最坏耗时 | = 75 × 3 + 退避 | ~226s | 累计（受外层 wait_for 截断） |
+| LLM 服务级并发闸 | `llm_global_concurrency` | 40 | llm/client.py `chat()` 内信号量 |
 | MCP 工具 | `mcp_tool_timeout` | 1200s | settings.py |
 | Doris 子 ASIN 上限 | `db_child_asin_cap` | 200 | settings.py → db_sql_helpers.py |
 | MCP 上下文解析 | `mcp_context_timeout` | 30s | settings.py |
@@ -222,6 +226,12 @@ deepseek_model: str = "deepseek-v4-pro"
 | 06-03 | Redis 空结果防毒化 | `_save_cached_campaigns`: total=0 或 errors 不空时不入缓存,防 MCP 临时失败毒化缓存 |
 | 06-03 | A1 问题文档化 | api handler 加 TODO(A1): `_ensure_data` meta_filter 不支持缓存,待修复后改走 ctx 路径 |
 | 06-03 | 向导页显示 override | `wizard.py` + `layers.py`: 透传 target_acos_override / daily_budget_override |
+| 06-04 | **LLM client 单例收口** | `reasoner.py:462` 默认 client → 共享 `deepseek_client`；3 个 httpx 池坍缩为 1，shutdown 泄漏消除（详见主交接文档 §7.5） |
+| 06-04 | **服务级并发闸** | `client.py:_global_llm_sem` Semaphore(`llm_global_concurrency=40`)，在 `chat()` 内过闸；campaign `_GLOBAL_LLM_SEM` 删除，`_call_one` 移除 gsem，保留 per-stream sem |
+| 06-04 | **连接池 + 超时分离** | `client.py:_ensure_client`: `max_connections=200`；`Timeout(connect=8/read=75/write=10/pool=5)` |
+| 06-04 | **重试退避** | `MAX_RETRIES: 2→3`；重试前指数退避 0.5/1.0s + 抖动 50–200ms |
+| 06-04 | **KeyPool 热路径硬化** | `mark_success` 不再写盘（阻塞事件循环）；`mark_failed` debounce（>1s 才写） |
+| 06-04 | **幂等锁迁出** | `_acquire_running`/`_release_running`/`_get_redis` 抽到 `app/persistence/redis_client.py`（通用 `acquire_lock`/`release_lock`，SET NX EX + compare-and-delete Lua + TTL≥`campaign_total_timeout`）；campaign 改 import 调用 |
 
 ---
 
@@ -232,7 +242,7 @@ deepseek_model: str = "deepseek-v4-pro"
 | 问题 | 修复 | 说明 |
 |------|------|------|
 | ProactorEventLoop 下 asyncio 取消 httpx recv 不生效 | `main.py` 切 `SelectorEventLoopPolicy` | 在 `asyncio` 创建前设置，Windows only |
-| 多 ASIN 并行时批量 LLM 打满信号量级联死锁 | Tier 2 全局并发上限 `Semaphore(30)` | 跨 ASIN/流共享，单 ASIN 不限速(20<30) |
+| 多 ASIN 并行时批量 LLM 打满信号量级联死锁 | ~~Tier 2 campaign 全局闸 `Semaphore(30)`~~ → **2026-06-04 收口到 client 层** `Semaphore(llm_global_concurrency)`，所有 `chat()` 过闸（campaign `_GLOBAL_LLM_SEM` 已删，详见主交接文档 §7.5） | 全服务统一，非仅 campaign |
 
 ### 4.2 功能待办
 

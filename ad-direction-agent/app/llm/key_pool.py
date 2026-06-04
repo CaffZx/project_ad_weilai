@@ -139,12 +139,16 @@ class ApiKeyPool:
         else:
             cooldown = COOLDOWN_OTHER
         with self._lock:
+            old_until = self._cooldowns.get(key, 0.0)
             until = time.time() + cooldown
             self._cooldowns[key] = until
             st = self._stats.setdefault(key, _empty_stat())
             st["fail"] += 1
             st["cooldown_count"] += 1
-            self._save_state()
+            # debounce：冷却结束时间实质变化(>1s)才写盘。
+            # 高并发同 key 瞬时多次 429 结果几乎相同，避免重复同步文件 I/O 阻塞事件循环。
+            if until - old_until > 1.0:
+                self._save_state()
             logger.info(
                 "Key ...%s 失败(HTTP %d)，冷却 %ds 至 %s",
                 key[-8:], status_code, cooldown,
@@ -152,14 +156,17 @@ class ApiKeyPool:
             )
 
     def mark_success(self, key: str, latency: float | None = None):
-        """清除冷却（成功调用时加速恢复），可选记录延迟"""
+        """清除冷却（成功调用时加速恢复），可选记录延迟。
+
+        不写盘：成功无需持久化冷却状态，且高并发下每次成功同步写文件会阻塞事件循环
+        （热路径，每个 LLM 成功调用都会触发）。冷却状态仅在 mark_failed 时落盘。
+        """
         with self._lock:
             self._cooldowns.pop(key, None)
             st = self._stats.setdefault(key, _empty_stat())
             st["success"] += 1
             if latency is not None:
                 st["total_latency"] += latency
-            self._save_state()
 
     def stats(self) -> dict:
         """返回池子与各 key 的运行时统计（供日志/调试）"""

@@ -12,7 +12,7 @@ import re
 
 from app.core.metrics_ops_language import format_keyword_acos_change, humanize_ops_text, period_labels
 from app.core.validation_ops import format_validation_item_ops
-from app.llm.client import DeepSeekClient
+from app.llm.client import DeepSeekClient, deepseek_client
 from app.llm.kb_loader import kb
 from app.models.campaign import CampaignUnit
 
@@ -459,7 +459,9 @@ class LLMReasoner:
     """LLM 推理器 —— 组装上下文并调用大模型"""
 
     def __init__(self, client: DeepSeekClient | None = None):
-        self.client = client or DeepSeekClient()
+        # 默认复用全服务共享单例 deepseek_client（1 个连接池 + 服务级并发闸）。
+        # 不再各自 new DeepSeekClient()，否则连接池碎片化、shutdown 漏关。
+        self.client = client or deepseek_client
 
     @staticmethod
     def _parse_json(raw: str) -> dict:

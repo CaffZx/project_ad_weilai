@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from app.config.settings import settings
 from app.data.campaign_fetcher import CampaignFetcher
 from app.models.asin_data import ASINData
+from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.steps.campaign_portfolio import classify as _classify_portfolio
 from app.models.campaign import (
     CampaignAdjustmentItem,
@@ -36,17 +37,8 @@ logger = logging.getLogger(__name__)
 
 LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 
-# Tier 2: 进程级 LLM 并发上限 —— 跨 ASIN/流共享，与 key 容量匹配。
-# 防多个 ASIN 并行时各开各的 Semaphore(10) 把 DeepSeek/连接池打满引发 stall→级联死锁。
-# 懒初始化：在运行的事件循环内首次取用时创建（避免 import 期无 loop 绑定问题）。
-_GLOBAL_LLM_SEM: asyncio.Semaphore | None = None
-
-
-def _global_llm_sem() -> asyncio.Semaphore:
-    global _GLOBAL_LLM_SEM
-    if _GLOBAL_LLM_SEM is None:
-        _GLOBAL_LLM_SEM = asyncio.Semaphore(settings.campaign_global_llm_concurrency)
-    return _GLOBAL_LLM_SEM
+# 进程级 LLM 全局并发已统一收口到 client 层（client._global_llm_sem，每个 chat() 过闸）。
+# campaign 仅保留 per-stream Semaphore(cc) 作单轮内公平限流（见 _analyze_one_stream）。
 
 
 # Sanity / Synthesis 开关（2026-06-01 恢复）
@@ -63,23 +55,19 @@ TYPE_MAP: dict[str, str] = {
 
 # ── 运行互斥 & 数据缓存 ──────────────────────────────────────────────────
 
-# 进程内幂等表：asin → (run_id, start_monotonic)
-# 注意：仅单 worker 有效；多 worker 部署需换 Redis SET NX EX 才能跨进程互斥。
-_running: dict[str, tuple[str, float]] = {}
-_RUNNING_TTL = 600.0  # 僵尸条目兜底：超 10 分钟视为已死，放行新请求
+# 跨 worker 幂等锁与共享 Redis 客户端已抽到 app.persistence.redis_client（通用基础设施）。
+# 本模块只定义 campaign 专属的锁 key 命名与 TTL。
 
 
-async def _get_redis():
-    """懒加载 Redis 客户端，不可用时返回 None。"""
-    import redis.asyncio as aioredis
-    from app.config.settings import settings
+def _running_ttl() -> int:
+    """幂等锁 TTL（秒）。必须 ≥ 单次分析最大时长(campaign_total_timeout)，
+    否则长任务跑到一半锁过期 → 另一 worker 重开一轮 → 重复 LLM。
+    +60s 余量覆盖 API 层 wait_for 边界与释放延迟。"""
+    return settings.campaign_total_timeout + 60
 
-    try:
-        r = aioredis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
-        await r.ping()
-        return r
-    except Exception:
-        return None
+
+def _running_key(asin: str) -> str:
+    return f"campaign:running:{asin}"
 
 
 def _campaign_cache_key(asin: str, days: int) -> str:
@@ -91,7 +79,7 @@ def _campaign_cache_key(asin: str, days: int) -> str:
 async def _load_cached_campaigns(asin: str, days: int) -> CampaignData | None:
     """从 Redis 读取缓存的 CampaignData。"""
     import json as _json
-    r = await _get_redis()
+    r = await get_redis()
     if not r:
         return None
     try:
@@ -124,7 +112,7 @@ async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> No
             asin, data.errors[:3],
         )
         return
-    r = await _get_redis()
+    r = await get_redis()
     if not r:
         return
     try:
@@ -167,19 +155,17 @@ async def analyze_campaigns(
     t_start = time.monotonic()
     _t = lambda label: logger.info("Campaign timing [%s] +%.1fs: %s", parent_asin, time.monotonic() - t_start, label)
 
-    # 0. 幂等检查：同 ASIN 已跑且未超 TTL 则拒绝（超 TTL 视为僵尸条目，放行）
-    now = time.monotonic()
-    existing = _running.get(parent_asin)
-    if existing and (now - existing[1]) < _RUNNING_TTL:
-        logger.warning("Campaign 幂等拦截 [%s]: 已有 run_id=%s 运行中 (%.0fs)",
-                       parent_asin, existing[0], now - existing[1])
+    # 0. 幂等检查：跨 worker 锁（Redis SET NX EX，Redis 不可用降级进程内）。
+    #    TTL ≥ campaign_total_timeout，长任务不会中途失锁；释放走 compare-and-delete 防误删。
+    acquired, holder = await acquire_lock(_running_key(parent_asin), run_id, _running_ttl())
+    if not acquired:
+        logger.warning("Campaign 幂等拦截 [%s]: 已有 run_id=%s 运行中", parent_asin, holder)
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
             total_campaigns=0,
-            warnings=[f"该 ASIN 已有分析正在运行 (run_id={existing[0]})，请等待完成后重试"],
+            warnings=[f"该 ASIN 已有分析正在运行 (run_id={holder})，请等待完成后重试"],
             sanity_check_passed=False,
         )
-    _running[parent_asin] = (run_id, now)
 
     try:
         result = await _analyze_campaigns_impl(
@@ -191,7 +177,7 @@ async def analyze_campaigns(
         )
         return result
     finally:
-        _running.pop(parent_asin, None)
+        await release_lock(_running_key(parent_asin), run_id)
 
 
 async def _analyze_campaigns_impl(
@@ -893,21 +879,11 @@ async def _run_round(
     """执行一轮 LLM 调用 (所有 batch 并发，Semaphore 由调用方注入)。"""
 
     async def _call_one(batch_idx: int, batch: list[dict]) -> CampaignBatchResult:
-        # 纵深防御 1: 信号量获取超时 (避免 TCP 半开 batch 占槽后其他 batch 在 sem 门前饿死)
-        gsem = _global_llm_sem()
+        # 纵深防御 1: per-stream 信号量获取超时 (防 TCP 半开 batch 占槽后其他 batch 在 sem 门前饿死)。
+        # 全局 LLM 并发已由 client 层信号量接管，此处仅控单轮内公平限流。
         sem_timeout = settings.campaign_sem_acquire_timeout
-        got_gsem = False
         got_sem = False
         try:
-            try:
-                await asyncio.wait_for(gsem.acquire(), timeout=sem_timeout)
-                got_gsem = True
-            except asyncio.TimeoutError:
-                return CampaignBatchResult(
-                    batch_id=batch_idx, round_number=round_number,
-                    llm_success=False, llm_error="sem_acquire_timeout(global)",
-                    temperature=temperature,
-                )
             try:
                 await asyncio.wait_for(sem.acquire(), timeout=sem_timeout)
                 got_sem = True
@@ -975,8 +951,6 @@ async def _run_round(
         finally:
             if got_sem:
                 sem.release()
-            if got_gsem:
-                gsem.release()
 
     tasks = [asyncio.ensure_future(_call_one(i, batch)) for i, batch in enumerate(batches)]
     # 纵深防御 3: 单轮 gather 兜底超时
