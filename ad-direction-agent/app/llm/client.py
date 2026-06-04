@@ -33,7 +33,14 @@ _llm_sem: asyncio.Semaphore | None = None
 def _global_llm_sem() -> asyncio.Semaphore:
     global _llm_sem
     if _llm_sem is None:
-        _llm_sem = asyncio.Semaphore(settings.llm_global_concurrency)
+        # 静态切分：每 worker 槽 = 总上限 // worker 数（NUM_WORKERS 须与 --workers 一致）。
+        # 多 worker 下避免 N×总上限 把 DeepSeek 账号打爆。
+        per_worker = max(1, settings.llm_global_concurrency // max(1, settings.num_workers))
+        _llm_sem = asyncio.Semaphore(per_worker)
+        logger.info(
+            "LLM 并发闸初始化: 总上限=%d / worker数=%d → 本 worker 槽=%d",
+            settings.llm_global_concurrency, settings.num_workers, per_worker,
+        )
     return _llm_sem
 
 

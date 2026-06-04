@@ -173,9 +173,13 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-pro"
     llm_timeout: int = 75
-    # 服务级 LLM 总并发上限（进程内，所有非流式 chat() 调用共用一个信号量）。
-    # 需按 Key 数 × 单 Key RPM 调；多 worker 部署时应除以 worker 数（本期单 worker）。
-    llm_global_concurrency: int = 40
+    # 服务级 LLM 总并发上限（全服务，所有非流式 chat() 调用共用）。
+    # 实际每 worker 信号量 = llm_global_concurrency // num_workers（见 client._global_llm_sem）。
+    # 需按 Key 数 × 单 Key/账号 RPM 调；50 key/3 账号场景下定为 240。
+    llm_global_concurrency: int = 240
+    # uvicorn worker 进程数（从 NUM_WORKERS 环境变量读）。必须与启动命令 --workers 一致，
+    # 否则全局并发会被错误切分。用于把 llm_global_concurrency 静态切给各 worker。
+    num_workers: int = 1
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None
