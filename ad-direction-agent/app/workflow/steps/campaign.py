@@ -47,8 +47,12 @@ LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 _SANITY_CHECK_ENABLED = True
 _SYNTHESIS_ENABLED = False   # 临时禁用汇总（第一期上线，待服务器/Linux 验证后再开）
 
+# keyword_class 上游有两种拼写,查表前统一 .lower() 归一:
+#  - purpose-agent LLM 输出首字母大写 (Broad/Long-tail/Competitor/Brand/Custom)
+#  - KB 权威拼写为 generic (大词);兜底都收
 TYPE_MAP: dict[str, str] = {
-    "broad": "大词", "long_tail": "长尾词", "long-tail": "长尾词",
+    "broad": "大词", "generic": "大词",
+    "long_tail": "长尾词", "long-tail": "长尾词",
     "competitor": "竞品词", "brand": "品牌词", "custom": "自定义",
 }
 
@@ -250,7 +254,8 @@ async def _analyze_campaigns_impl(
                         kw = entry.get("keyword", "")
                         st = entry.get("keyword_class", "")
                         if kw and st:
-                            keyword_class_map[kw] = TYPE_MAP.get(st, st)
+                            # .lower() 归一:兼容 purpose-agent 大写(Broad)与 KB 拼写(generic)
+                            keyword_class_map[kw] = TYPE_MAP.get(st.lower(), st)
 
     # 3. LLM 分析前预过滤
     # 3a. 批量词活动：一个活动名下多个关键词，本期暂不处理
