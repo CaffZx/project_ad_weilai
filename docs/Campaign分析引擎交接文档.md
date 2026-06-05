@@ -136,7 +136,9 @@ campaign_portfolio_share_broad: int = 20   # 广泛/自动约束占比
 # LLM
 llm_timeout: int = 75               # httpx read 超时（秒）
 deepseek_model: str = "deepseek-v4-pro"
-llm_global_concurrency: int = 40    # 服务级 LLM 总并发（client 层信号量，所有 chat() 共用）
+llm_global_concurrency: int = 420   # 服务级 LLM 总并发（client 层信号量；46 key 场景,6 worker→每 worker 70）
+num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 worker（须 = 启动 --workers）
+# client.py 连接池 max_connections=600
 # campaign_global_llm_concurrency: 已 DEPRECATED，全局闸收口到 client 层
 ```
 
@@ -153,7 +155,7 @@ llm_global_concurrency: int = 40    # 服务级 LLM 总并发（client 层信号
 | LLM 连接超时 | (硬编码) connect | 8s | llm/client.py `httpx.Timeout` |
 | LLM 重试 | `MAX_RETRIES` | 3 | llm/client.py（首次+2 重试，重试前退避 0.5/1.0s+抖动） |
 | LLM 单次最坏耗时 | = 75 × 3 + 退避 | ~226s | 累计（受外层 wait_for 截断） |
-| LLM 服务级并发闸 | `llm_global_concurrency` | 40 | llm/client.py `chat()` 内信号量 |
+| LLM 服务级并发闸 | `llm_global_concurrency` | 420 | llm/client.py `chat()` 内信号量（多 worker 时 ÷num_workers） |
 | MCP 工具 | `mcp_tool_timeout` | 1200s | settings.py |
 | Doris 子 ASIN 上限 | `db_child_asin_cap` | 200 | settings.py → db_sql_helpers.py |
 | MCP 上下文解析 | `mcp_context_timeout` | 30s | settings.py |
@@ -232,6 +234,11 @@ llm_global_concurrency: int = 40    # 服务级 LLM 总并发（client 层信号
 | 06-04 | **重试退避** | `MAX_RETRIES: 2→3`；重试前指数退避 0.5/1.0s + 抖动 50–200ms |
 | 06-04 | **KeyPool 热路径硬化** | `mark_success` 不再写盘（阻塞事件循环）；`mark_failed` debounce（>1s 才写） |
 | 06-04 | **幂等锁迁出** | `_acquire_running`/`_release_running`/`_get_redis` 抽到 `app/persistence/redis_client.py`（通用 `acquire_lock`/`release_lock`，SET NX EX + compare-and-delete Lua + TTL≥`campaign_total_timeout`）；campaign 改 import 调用 |
+| 06-05 | **组合枚举改名** | 主推/广泛自动/测试新增/淘汰 → **精准主力组/精准测试组/自动广泛组/低价捡漏组**；ERP 码 core/auto_broad/test/eliminate → **exact_core_group/exact_testing_group/auto_broad_group/low_bid_retention_group**。真源 `campaign_portfolio.py` 常量 + `erp_writer/text_utils._CAMPAIGN_GROUP_TYPE_MAP`（含旧值兼容别名）。**分类逻辑保留我方 $5 分界（KB23 §3.1），未采用 v3.0.2 的 14天+$20** |
+| 06-05 | **合并 v3.0.2 ERP 自动写入** | `api/campaign.py:_maybe_push_erp`（默认关，`ERP_AUTO_WRITE=true` 或请求 `write_erp:true` 开）+ settings 7 个 `erp_*` 字段 + `mcp_db_context` known_listings 回落(read_timeout≥90s) + `erp_writer` `build_wizard_direction_content_json`/auto_push 导出 + `listing_context` KNOWN_LISTINGS 集中化 |
+| 06-05 | **KB Clearance 移除** | `docs/knowledge_base/12-输出规范.md` 核心策略标签枚举删 Clearance（是场景/产品阶段，非广告目的；广告目的由 ad-purpose-agent 权威产出仅 4 个）；`kb_loader.py` 注释同步；**Maintain 保留** |
+| 06-05 | **ad_keyword_report 注释** | `mcp_mapping.py` 加注：MCP 拆分→直调返 Unknown tool→按 META_KW_AD 稳定回落 Doris，**非 bug**，暂不动 |
+| 06-05 | **MCP/LLM 并发上调** | `mcp_max_concurrency: 8→80`、`llm_global_concurrency: →420`、连接池 `max_connections: →600`（面向批量并行) |
 
 ---
 
@@ -263,36 +270,12 @@ llm_global_concurrency: int = 40    # 服务级 LLM 总并发（client 层信号
 | 决策 | 说明 |
 |------|------|
 | action 归一化 | LLM 只给淘汰判据 (`eliminate_to_low_bid_pool`),其余 action 由代码从 proposed vs current 差值 derive |
-| 组合分类顺序 | 淘汰 → 广泛/自动 → 测试/新增 → 主推。广泛(BROAD/PHRASE/AUTO)提前,防止上线 <14 天的广泛活动被误归入测试/新增 |
+| 组合分类顺序 | 低价捡漏组 → 自动广泛组 → 精准测试组 → 精准主力组(命中即止)。精准组按 **KB23 §3.1 纯预算 $5 分界**(≥$5 主力 / <$5 测试),**不再用 days_online 判新建**。枚举名 2026-06-05 已改(详见 §3.4) |
 | 淘汰组不参与预算约束 | KB 21 §6 每活动固定 $1,与运营策略预算无关。3 组占比(60/20/20)之和 = 100% = 总约束 |
 | meta_filter 优化 | ASIN data 只拉 META_AD_PRODUCT,砍掉 Campaign 用不到的 6 个 META(natural_rankings/flow_keywords 等 150s 慢查询) |
 | 空 CampaignData 不入 Redis | 防 MCP/Doris 临时失败毒化缓存(30min 空窗口) |
 
-### 4.4 已修复的 Bug
-
-| 问题 | 修复 |
-|------|------|
-| Doris 上下文重复行 | `campaign_budget` 移除 GROUP BY |
-| MCP campaign 工具 budget=0 | `unwrap_tool_payload` 递归拆解双层嵌套 |
-| `_prefetch` UnboundLocalError | `result: dict = {}` 显式初始化 |
-| Sanity check 截断 | max_tokens: 2048→4096 |
-| `_resolve_tiebreaker` key 不一致 | 统一使用 `_vote_key()` |
-| API 错误返回缺字段 | 使用 `CampaignAnalysisResult().model_dump()` |
-| `_resolve_tiebreaker` 全量降级 | 仅遍历 disputed_keys，高置信项不受影响 |
-| `_same_direction` 漏 placement/neg_kw | 精准流比 `_placement_sig`，广泛流比 `_negative_kw_sig` |
-| sanity LLM 失败吞异常 | 改为 raise，`_run_one` 标记 `ok=False` |
-| 淘汰活动字段缺失 | 无条件填 $1/$0.20 + 清空 placement/neg_kw |
-| 预过滤活动不可见 | `skipped_eliminated` 入 `skipped_campaigns`，含 campaign_key 等 |
-| `fetch_campaigns` 无外层 timeout | 包 `wait_for(timeout=300)` + try/except，子调用挂死不连累整链 |
-| `asyncio.gather` 默认不 `return_exceptions` | 流级 + batch 级两处加 `return_exceptions=True`，异常隔离 |
-| `_run_round` 解析在 try 之外 | result 形状异常会 AttributeError 外抛；改为全部挪进 try，加 `isinstance(result, dict)` 守卫 |
-| API handler 无顶层 try/except | 任何未捕获异常 → 500 + 堆栈；改为统一返回降级 `CampaignAnalysisResult` |
-| **KeyPool 死锁** | `threading.Lock`→`RLock`: `next_key()` 持有锁时调 `stats()` 再次 acquire 同锁死锁 |
-| **LLM action 不一致** | `_normalize_action()`: LLM 可能 action=keep 但改了值,代码从 proposed vs current derive 权威 action |
-| **Redis 缓存毒化** | 空结果/有 errors 时不入缓存,防 MCP 临时失败导致 30min 空窗口 |
-| **Campaign 分析慢查询超时** | `meta_filter=["META_AD_PRODUCT"]` 砍掉 6 个无用 META(150s 慢查询→<30s) |
-
-### 4.5 失败路径覆盖矩阵（多层防护后）
+### 4.4 失败路径覆盖矩阵（多层防护后）
 
 | 失败点 | 旧行为 | 新行为 |
 |---|---|---|
@@ -352,9 +335,9 @@ Batch N [ASIN] action 归一: 改写 N/M 条                # action 归一化(�
 
 ---
 
-## 6. ERP 对接（计划）
+## 6. ERP 对接（已接入 auto_push，2026-06-05）
 
-Campaign 分析结果→待确认表的映射关系：
+Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_maybe_push_erp`，`ERP_AUTO_WRITE=true` 或请求 `write_erp:true` 触发；详见主交接文档 §7.6）。结果→待确认表映射：
 
 | Campaign 输出 | 目标表 | 字段 |
 |--------------|--------|------|

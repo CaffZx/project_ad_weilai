@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     mcp_gateway_header_name: str = "Authorization"
     mcp_timeout: float = 1200.0
     mcp_retries: int = 1
-    mcp_max_concurrency: int = 8
+    mcp_max_concurrency: int = 80
     # ad_keyword_report 匹配类型：逗号分隔 EXACT,BROAD,PHRASE；留空/all 则不传 match_type（全类型）
     mcp_keyword_match_types: str = ""
     mcp_default_shop_account: str = ""
@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     campaign_prefilter_enabled: bool = True
     # Campaign LLM 分析
     # 每流(精准/广泛各一)并发上限。单 ASIN 上限 = exact + broad = 2×该值。
-    campaign_llm_concurrency: int = 10
+    campaign_llm_concurrency: int = 50
     # [DEPRECATED] campaign 不再使用进程级全局闸——全局 LLM 并发已统一收口到
     # client 层 llm_global_concurrency（见 LLM 配置段）。保留仅兼容旧 .env，无实际作用。
     campaign_global_llm_concurrency: int = 24

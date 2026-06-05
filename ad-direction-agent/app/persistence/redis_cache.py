@@ -44,6 +44,8 @@ class AsinDataCache:
                 settings.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
+                socket_connect_timeout=3,   # 连接建立超时(秒)
+                socket_timeout=5,           # 单次读写超时:Redis 卡住 5s 快速失败→走 LRU 兜底,不挂死
             )
             await self._redis.ping()
             self._redis_ok = True
