@@ -59,7 +59,7 @@ class CampaignUnit(BaseModel):
     placements: dict[str, dict] = Field(default_factory=dict)     # MCP placement_report (懒加载)
     placement_data_available: bool = False   # 懒加载前为空
     # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
-    #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类(开关关闭或前置阶段)
+    #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类
     portfolio: str = ""
     # 元数据
     source: str = "mcp"                      # "mcp" | "doris" | "mixed"

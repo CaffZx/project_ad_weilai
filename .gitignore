@@ -67,3 +67,7 @@ ad-purpose-agent/__pycache__/
 
 # 本地实验输出（KB/写入报告等，不提交）
 cursor临时文件/
+
+# 规划/思维导图、重复 skill 目录（正式 skill 在 app/config/skills/）
+*.xmind
+.claude/

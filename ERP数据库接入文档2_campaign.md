@@ -123,7 +123,7 @@ Budget: $2.00 → $1.00 ($-1.00)
 | batch_no | VARCHAR(64) | N | 批次号 |
 | suggest_category | VARCHAR(32) | Y | `ELIMINATE` / `ADJUST` / `KEEP` |
 | confidence_level | VARCHAR(32) | N | `high` / `medium` / `low` |
-| campaign_group_type | VARCHAR(32) | N | 组合类型（Java 字段 `campaignGroupType`）：`core` / `auto_broad` / `test` / `eliminate`；来源 Agent `ai_portfolio_class`（主推 / 广泛/自动 / 测试/新增 / 淘汰） |
+| campaign_group_type | VARCHAR(32) | N | 组合类型（Java 字段 `campaignGroupType`）：`exact_core_group` / `exact_testing_group` / `auto_broad_group` / `low_bid_retention_group`；来源 Agent `ai_portfolio_class`（精准主力组 / 精准测试组 / 自动广泛组 / 低价捡漏组） |
 | campaign_id | VARCHAR(64) | Y | 活动 ID，同 decision 下唯一 |
 | campaign_name | VARCHAR(512) | Y | 活动名称（卡片标题） |
 | asin | VARCHAR(64) | N | 投放 ASIN，Meta 行「× B09SGC3YZB」 |

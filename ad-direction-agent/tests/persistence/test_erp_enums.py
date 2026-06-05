@@ -46,20 +46,6 @@ def test_direction_types_json():
     assert map_direction_type("ADD_KEYWORD_EXPANSION") == "EXPAND_KEYWORDS"
 
 
-def test_campaign_group_type_map():
-    # 现行中文标签 → 新 ERP 码
-    assert map_campaign_group_type("精准主力组") == "exact_core_group"
-    assert map_campaign_group_type("精准测试组") == "exact_testing_group"
-    assert map_campaign_group_type("自动广泛组") == "auto_broad_group"
-    assert map_campaign_group_type("低价捡漏组") == "low_bid_retention_group"
-    # 遗留中文标签 / 旧码兼容
-    assert map_campaign_group_type("主推") == "exact_core_group"
-    assert map_campaign_group_type("淘汰") == "low_bid_retention_group"
-    assert map_campaign_group_type("core") == "exact_core_group"
-    assert map_campaign_group_type("exact_core_group") == "exact_core_group"
-    assert map_campaign_group_type(None) is None
-
-
 def test_normalize_advert_direction_types_legacy():
     assert normalize_advert_direction_types_list(
         ["OPTIMIZE_ACOS", "BALANCE_MAINTENANCE", "ADD_KEYWORD_EXPANSION"]
@@ -81,11 +67,21 @@ def test_build_wizard_direction_content_json():
             "tasks": [{"priority": "high", "action": "加预算", "details": "x", "estimated_impact": "y"}],
         },
     )
-    assert body["display_label"] == "推进自然位"
-    assert body["display_reason"] == "暂不适合"
-    assert body["display_tag_zh"] == "暂不建议"
-    assert len(body["display_tasks"]) == 1
-    assert body["direction"]["id"] == "push_natural"
+    assert body == ["暂不适合"]
+
+
+def test_campaign_group_type_map():
+    assert map_campaign_group_type("精准主力组") == "exact_core_group"
+    assert map_campaign_group_type("精准测试组") == "exact_testing_group"
+    assert map_campaign_group_type("自动广泛组") == "auto_broad_group"
+    assert map_campaign_group_type("低价捡漏组") == "low_bid_retention_group"
+    # 遗留中文
+    assert map_campaign_group_type("主推") == "exact_core_group"
+    assert map_campaign_group_type("广泛/自动") == "auto_broad_group"
+    assert map_campaign_group_type("测试/新增") == "exact_testing_group"
+    assert map_campaign_group_type("淘汰") == "low_bid_retention_group"
+    assert map_campaign_group_type("core") == "exact_core_group"
+    assert map_campaign_group_type(None) is None
 
 
 def test_target_keyword_types_json():

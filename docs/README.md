@@ -1,13 +1,42 @@
 # 文档索引
 
+> 仓库：`AD_assistant_agent-v3.0.2` · 主代码在 `ad-direction-agent/`
+
+## ERP 与 WHP 对接
+
 | 文档 | 说明 |
 |------|------|
-| [MCP接入与v2.4演进总结.md](MCP接入与v2.4演进总结.md) | **MCP 接入至今改动全览**（意义、具体实现、当前结构） |
-| [项目整理V0.1.md](项目整理V0.1.md) | **统一架构总览**（LangGraph / MCP / RAG / 记忆 / 批量 / 多智能体 / DB / 排期） |
-| [项目模块与文件说明.md](项目模块与文件说明.md) | **模块 ↔ 文件、引用关系、修改注意** |
-| [广告方向推荐-全链路梳理.md](广告方向推荐-全链路梳理.md) | Tab4 及 API 端到端时序 |
-| [LangGraph与ERP接入完整方案.md](LangGraph与ERP接入完整方案.md) | LangGraph + ERP Job 架构（规划长文） |
-| [LangGraph实施方案.md](LangGraph实施方案.md) | LangGraph 分阶段落地指南（P0–P4，可执行） |
-| [协作指南.md](协作指南.md) | 模块归属、分支与 API 契约 |
-| [announcements/v2.4.md](announcements/v2.4.md) | 当前产品变更公告 |
-| [../交接文档.md](../交接文档.md) | 完整交接（数仓、规则、部署） |
+| **[WHP-前端对接完整说明.md](WHP-前端对接完整说明.md)** | **发给 WHP 前端的一份总文档**（Tab4 绑定 + 全部枚举） |
+| [ERP写入说明.md](ERP写入说明.md) | Agent → ERP 写入、`write_full`、在线 `campaign/analyze` 自动写库 |
+| [ERP数据库设计问题清单.md](ERP数据库设计问题清单.md) | ERP 表结构与设计遗留问题 |
+| [ERP测试库现状说明.md](ERP测试库现状说明.md) | 测试库数据现状 |
+| [ERP方向枚举对照.md](ERP方向枚举对照.md) | （已并入完整说明）枚举 |
+| [WHP-Tab4-方向推荐字段契约.md](WHP-Tab4-方向推荐字段契约.md) | （已并入完整说明）字段契约 |
+| [WHP-Tab4-对接说明（发给WHP）.md](WHP-Tab4-对接说明（发给WHP）.md) | （已并入完整说明）Tab4 对接 |
+| [../ERP数据库接入文档1.md](../ERP数据库接入文档1.md) | pending 基础表 |
+| [../ERP数据库接入文档2_campaign.md](../ERP数据库接入文档2_campaign.md) | 分析建议 Tab |
+| [../交接文档.md](../交接文档.md) | 数仓、规则、部署交接 |
+
+## 运维与排障
+
+| 文档 | 说明 |
+|------|------|
+| [diagnose-timeout-root-cause.md](diagnose-timeout-root-cause.md) | MCP/Doris 超时根因与调参 |
+| [sql/warehouse_index_recommendations.md](sql/warehouse_index_recommendations.md) | 数仓索引建议 |
+
+## LLM 知识库（规则正文）
+
+目录：[knowledge_base/](knowledge_base/) · 索引：[knowledge_base/知识库目录索引.md](knowledge_base/知识库目录索引.md)
+
+执行规则（Campaign 等）：`knowledge_base/执行规则/`（含 15–22 等）
+
+## 版本公告
+
+[announcements/](announcements/)：`v2.2` … `v2.6`
+
+## 脚本与代码索引
+
+| 位置 | 说明 |
+|------|------|
+| `ad-direction-agent/scripts/erp_db/README.md` | ERP 写入/校验脚本一览 |
+| `ad-direction-agent/app/persistence/erp_writer/` | 写入实现（含 `auto_push.py`） |

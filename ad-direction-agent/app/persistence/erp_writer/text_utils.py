@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -272,42 +273,130 @@ def normalize_advert_direction_types_list(values: Any) -> list[str]:
     return [str(x) for x in parsed] if isinstance(parsed, list) else []
 
 
+def split_text_to_semicolon_lines(text: str | None) -> list[str]:
+    """Split prose into JSON string array by ``;`` / ``；``."""
+    if text is None:
+        return []
+    raw = str(text).strip()
+    if not raw:
+        return []
+    parts = re.split(r"[;；]", raw)
+    return [p.strip() for p in parts if p.strip()]
+
+
+_SECTION_HDR_RE = re.compile(r"^【[^】]+】$")
+
+
+def _split_prose_chunk(chunk: str) -> list[str]:
+    lines: list[str] = []
+    for block in re.split(r"\n+", chunk):
+        block = block.strip().lstrip("- ").strip()
+        if not block or _SECTION_HDR_RE.match(block):
+            continue
+        if block.startswith("•") or block.startswith("·"):
+            lines.append(block.lstrip("•·").strip())
+            continue
+        for part in re.split(r"(?<=[。；;])|[;；]", block):
+            part = part.strip().rstrip("。；;")
+            if part:
+                lines.append(part)
+    return lines
+
+
+def split_prose_to_display_lines(text: str | None) -> list[str]:
+    """Split prose into display lines by ``。`` / ``；`` / bullets (WHP bottom summary)."""
+    if text is None:
+        return []
+    raw = str(text).strip()
+    if not raw:
+        return []
+    if "【" in raw:
+        lines: list[str] = []
+        basis, suggest, future = split_reason_sections(raw)
+        for part in (basis, suggest, future):
+            if part:
+                lines.extend(_split_prose_chunk(part))
+        return lines
+    return _split_prose_chunk(raw)
+
+
 def build_wizard_direction_content_json(
     direction: dict[str, Any],
     validation: dict[str, Any] | None,
     decision_package: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """ERP content_json for Tab4 — WHP should read display_* first (see docs/WHP-Tab4渲染与组合枚举说明.md)."""
+) -> list[str]:
+    """ERP content_json for Tab4 — JSON array of reason clauses split by ``;`` / ``；``.
+
+    validation and decision_package are accepted for call-site compatibility but not written.
+    """
     d = direction or {}
-    val = validation or {}
-    pkg = decision_package or {}
-    tag = d.get("suitability") or (
-        "recommended" if d.get("recommended") else "available"
-    )
-    display_tasks: list[dict[str, Any]] = []
-    for t in pkg.get("tasks") or []:
-        if not isinstance(t, dict):
+    return split_text_to_semicolon_lines(d.get("reason"))
+
+
+def split_direction_analysis_to_lines(text: str | None) -> list[str]:
+    """Split LLM direction ``analysis`` prose into string lines for ERP conclusion_json."""
+    if text is None:
+        return []
+    raw = str(text).strip()
+    if not raw:
+        return []
+    lines: list[str] = []
+    for block in re.split(r"\n+", raw):
+        block = block.strip()
+        if not block or _SECTION_HDR_RE.match(block):
             continue
-        display_tasks.append(
-            {
-                "priority": t.get("priority"),
-                "action": t.get("action"),
-                "details": t.get("details"),
-                "estimated_impact": t.get("estimated_impact"),
-            }
-        )
-    score = d.get("suitability_score")
-    return {
-        "display_label": d.get("label"),
-        "display_reason": d.get("reason"),
-        "display_score": score,
-        "display_tag": tag,
-        "display_tag_zh": _RECOMMEND_TAG_ZH.get(str(tag), str(tag)),
-        "display_tasks": display_tasks,
-        "direction": d,
-        "validation": val,
-        "decision_package": pkg or None,
-    }
+        if block.startswith("•") or block.startswith("·"):
+            lines.append(block.lstrip("•·").strip())
+            continue
+        lines.extend(split_text_to_semicolon_lines(block))
+    return lines
+
+
+def build_conclusion_json_for_erp(
+    analysis: dict[str, Any] | None,
+    wizard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """ERP conclusion_json — prose fields as string arrays for WHP bottom summary."""
+    if not isinstance(analysis, dict):
+        return {}
+    out = dict(analysis)
+    oa = out.get("overall_analysis")
+    if isinstance(oa, str):
+        out["overall_analysis"] = split_prose_to_display_lines(oa)
+    elif isinstance(oa, list):
+        out["overall_analysis"] = [str(x).strip() for x in oa if str(x).strip()]
+    new_das: list[dict[str, Any]] = []
+    for da in out.get("direction_analyses") or []:
+        if not isinstance(da, dict):
+            continue
+        item = dict(da)
+        val = item.get("analysis")
+        if isinstance(val, str):
+            item["analysis"] = split_direction_analysis_to_lines(val)
+        elif isinstance(val, list):
+            item["analysis"] = [str(x).strip() for x in val if str(x).strip()]
+        new_das.append(item)
+    out["direction_analyses"] = new_das
+    if isinstance(wizard, dict):
+        p3 = wizard.get("p3") or {}
+        overall_reasoning = p3.get("overall_reasoning") or ""
+        _, suggest, future = split_reason_sections(overall_reasoning)
+        if suggest:
+            out["suggest_lines"] = split_prose_to_display_lines(suggest)
+        elif isinstance(out.get("action_priorities"), list):
+            # Fallback for newer P3 schema where actions are structured.
+            out["suggest_lines"] = [
+                str(x.get("action") or "").strip()
+                for x in out.get("action_priorities") or []
+                if isinstance(x, dict) and str(x.get("action") or "").strip()
+            ]
+        if future:
+            out["future_attention_lines"] = split_prose_to_display_lines(future)
+        elif isinstance(out.get("risk_warnings"), list):
+            out["future_attention_lines"] = [
+                str(x).strip() for x in out.get("risk_warnings") or [] if str(x).strip()
+            ]
+    return out
 
 
 def level_to_score(level: str | None) -> int | None:
@@ -321,13 +410,20 @@ def split_reason_sections(text: str | None) -> tuple[str | None, str | None, str
     if not text:
         return None, None, None
     raw = str(text).strip()
-    markers = [
-        ("【决策依据】", "basis"),
-        ("【建议】", "suggest"),
-        ("【后续关注】", "future"),
+    marker_groups = [
+        (("【决策依据】", "【综合判断】"), "basis"),
+        (("【建议】", "【执行节奏】"), "suggest"),
+        (("【后续关注】", "【风险提示】", "【风险预警】"), "future"),
     ]
+    marker_to_bucket: dict[str, str] = {}
+    all_markers: list[str] = []
+    for markers, bucket in marker_groups:
+        for marker in markers:
+            marker_to_bucket[marker] = bucket
+            all_markers.append(marker)
+
     positions: list[tuple[int, str]] = []
-    for marker, _ in markers:
+    for marker in all_markers:
         idx = raw.find(marker)
         if idx >= 0:
             positions.append((idx, marker))
@@ -338,12 +434,9 @@ def split_reason_sections(text: str | None) -> tuple[str | None, str | None, str
     for i, (start, marker) in enumerate(positions):
         end = positions[i + 1][0] if i + 1 < len(positions) else len(raw)
         body = raw[start + len(marker) : end].strip()
-        if marker == "【决策依据】":
-            sections["basis"] = body
-        elif marker == "【建议】":
-            sections["suggest"] = body
-        else:
-            sections["future"] = body
+        bucket = marker_to_bucket.get(marker)
+        if bucket:
+            sections[bucket] = body
     return sections.get("basis"), sections.get("suggest"), sections.get("future")
 
 

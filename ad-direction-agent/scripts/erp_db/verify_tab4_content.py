@@ -1,4 +1,4 @@
-"""Verify Tab4 direction content_json display_* fields (unit + optional ERP live)."""
+"""Verify Tab4 content_json is semicolon-split string array (unit + optional ERP live)."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ from app.persistence.erp_writer.auto_push import _merge_decision_meta  # noqa: E
 from app.persistence.erp_writer.text_utils import (  # noqa: E402
     build_wizard_direction_content_json,
     normalize_advert_direction_types_list,
+    split_text_to_semicolon_lines,
 )
 
 
@@ -23,6 +24,19 @@ def _load_wizard(path: Path) -> dict:
         if line:
             return json.loads(line)
     raise ValueError(f"empty jsonl: {path}")
+
+
+def _check_lines_body(body: list, d: dict, prefix: str) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(body, list):
+        issues.append(f"{prefix}: content_json must be JSON array")
+        return issues
+    if any(not isinstance(x, str) for x in body):
+        issues.append(f"{prefix}: content_json array must be strings")
+    expected = split_text_to_semicolon_lines(d.get("reason"))
+    if body != expected:
+        issues.append(f"{prefix}: lines mismatch wizard reason split")
+    return issues
 
 
 def test_from_wizard_file(wizard_path: Path) -> list[str]:
@@ -41,19 +55,7 @@ def test_from_wizard_file(wizard_path: Path) -> list[str]:
         body = build_wizard_direction_content_json(
             d, validations.get(dir_id) or {}, pkg
         )
-        for key in (
-            "display_label",
-            "display_reason",
-            "display_tag",
-            "display_tag_zh",
-            "display_tasks",
-        ):
-            if key not in body:
-                issues.append(f"{dir_id}: missing {key}")
-        if not body.get("display_label"):
-            issues.append(f"{dir_id}: empty display_label")
-        if body.get("display_reason") != d.get("reason"):
-            issues.append(f"{dir_id}: display_reason != direction.reason")
+        issues.extend(_check_lines_body(body, d, dir_id))
 
     legacy = ["OPTIMIZE_ACOS", "BALANCE_MAINTENANCE", "ADD_KEYWORD_EXPANSION"]
     norm = normalize_advert_direction_types_list(legacy)
@@ -95,20 +97,18 @@ def test_erp_live(decision_id: str) -> list[str]:
             issues.append(f"ERP: expected 4 rows, got {len(rows)}")
         for r in rows:
             raw = r.get("content_json") or ""
-            if not raw.strip().startswith("{"):
-                issues.append(f"{r['direction_type']}: content_json not object")
+            if not raw.strip().startswith("["):
+                issues.append(f"{r['direction_type']}: content_json not JSON array")
                 continue
-            body = json.loads(raw)
-            if "display_label" not in body:
-                issues.append(f"{r['direction_type']}: ERP row missing display_label")
-            if body.get("display_label") and not body.get("display_reason"):
-                issues.append(f"{r['direction_type']}: display_reason empty")
-            score = r.get("suggest_score")
-            if score is not None and body.get("display_score") is not None:
-                if int(body["display_score"]) != int(score):
-                    issues.append(
-                        f"{r['direction_type']}: display_score {body['display_score']} != suggest_score {score}"
-                    )
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                issues.append(f"{r['direction_type']}: invalid JSON")
+                continue
+            if not isinstance(body, list):
+                issues.append(f"{r['direction_type']}: content_json must be array")
+            elif any(not isinstance(x, str) for x in body):
+                issues.append(f"{r['direction_type']}: array items must be strings")
         cur.execute(
             "SELECT advert_direction_types FROM t_advert_agent_decision WHERE id=%s",
             (decision_id,),
@@ -125,7 +125,7 @@ def test_erp_live(decision_id: str) -> list[str]:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Verify Tab4 display_* content_json")
+    p = argparse.ArgumentParser(description="Verify Tab4 content_json string array")
     p.add_argument("--wizard", type=Path, help="Wizard jsonl for offline test")
     p.add_argument("--decision-id", help="ERP decision_id for live DB check")
     args = p.parse_args()
@@ -139,22 +139,20 @@ def main() -> int:
         if not all_issues:
             w = _load_wizard(args.wizard)
             for d in w.get("directions") or []:
-                body = build_wizard_direction_content_json(
+                lines = build_wizard_direction_content_json(
                     d,
                     (w.get("validations") or {}).get(d["id"]),
                     ((w.get("decisions") or {}).get(d["id"]) or {}).get(
                         "decision_package"
                     ),
                 )
-                print(
-                    f"  OK {d['id']}: label={body['display_label']!r} "
-                    f"tag_zh={body['display_tag_zh']!r} tasks={len(body['display_tasks'])}"
-                )
+                print(f"  OK {d['id']}: {len(lines)} line(s) -> {lines[0][:40]!r}…")
 
     if args.decision_id:
         print(f"\n[ERP live] decision_id: {args.decision_id}")
-        all_issues.extend(test_erp_live(args.decision_id))
-        if not [i for i in all_issues if i.startswith("ERP") or "display" in i]:
+        live_issues = test_erp_live(args.decision_id)
+        all_issues.extend(live_issues)
+        if not live_issues:
             import pymysql
             from _erp_conn import erp_pymysql_conn
 
@@ -162,16 +160,18 @@ def main() -> int:
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT direction_type, suggest_score,
-                       JSON_UNQUOTE(JSON_EXTRACT(content_json,'$.display_label')) AS lbl,
-                       JSON_UNQUOTE(JSON_EXTRACT(content_json,'$.display_tag_zh')) AS tag
+                SELECT direction_type, suggest_score, recommend_tag, content_json
                 FROM t_advert_agent_direction_recommend_detail
                 WHERE decision_id=%s ORDER BY sort_order
                 """,
                 (args.decision_id,),
             )
             for r in cur.fetchall():
-                print(f"  OK {r['direction_type']}: {r['lbl']} | {r['tag']} | {r['suggest_score']}分")
+                lines = json.loads(r["content_json"] or "[]")
+                print(
+                    f"  OK {r['direction_type']}: "
+                    f"{r['recommend_tag']} | {r['suggest_score']}分 | {len(lines)} lines"
+                )
             conn.close()
 
     if all_issues:

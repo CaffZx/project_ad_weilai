@@ -35,7 +35,7 @@ from app.models.layers import (
     TacticsConfirmRequest,
     TargetKeywordStrategy,
 )
-from app.persistence.mysql_state_manager import MySQLStateManager
+from app.persistence.state_factory import get_state_manager
 from app.persistence.erp_writer.text_utils import map_direction_type
 
 logging.basicConfig(
@@ -178,7 +178,7 @@ async def main() -> None:
     orch = WorkflowOrchestrator(
         aggregator=DataAggregator(),
         reasoner=LLMReasoner(),
-        state_manager=MySQLStateManager(),
+        state_manager=get_state_manager(),
     )
 
     for asin in asins:

@@ -1,0 +1,52 @@
+Total rows: 4
+
+--- B0DDWX58G3 | dec83b9efe4350dbb601acc50874268c | 2026-06-05 14:19:24 ---
+decision_basis_json:
+[
+  "当前处于推进期、旺季准备，自然单占比约86%，广告依赖度低",
+  "近4天ACOS从13.9%升至34.6%（05-30→06-02），CVR从25.0%降至0.0%（06-03），效率明显下滑，但整体7日ACOS仍为26.2%，库存充足",
+  "综合来看，宜以新增扩词为主，补充高转化未收录词，同时平衡维持现有投放，暂不激进推自然位或大幅优化ACOS"
+]
+suggest_lines:
+null
+future_attention_lines:
+null
+
+--- B0D8JDVVPT | dec3c4852104f6cf3b0fbfafe4529b55 | 2026-06-05 14:17:50 ---
+decision_basis_json:
+[
+  "当前处于推进期、旺季准备阶段，近5天ACOS从83.1%降至40.1%，CVR从4.9%升至10.2%，整体趋势向好",
+  "但7日整体ACOS仍达51.8%，且存在多个高ACOS词需优化",
+  "自然单占比68.1%，库存充足，建议以优化ACOS为主，同时小批量扩词测试，平衡维持为辅"
+]
+suggest_lines:
+null
+future_attention_lines:
+null
+
+--- B0B7S3PWWB | dec67971de120baaf0a75f9514d6b45f | 2026-06-05 14:16:36 ---
+decision_basis_json:
+[
+  "当前处于推进期、旺季准备阶段，近5天ACOS从25.1%升至31.1%，CVR从26.4%降至20.4%，整体效率承压",
+  "自然单占比68.9%较高，核心词「fishnet stockings for women」后3天ACOS由37.3%恶化至99.0%，需优先处理",
+  "库存充足，有95个高转化词未收录，具备扩词空间",
+  "综合宜以优化ACOS为主，平衡维持为辅，并小批量试投新词"
+]
+suggest_lines:
+null
+future_attention_lines:
+null
+
+--- B0CGH9QRKK | dec680d0154bac0be3764affd9662ed6 | 2026-06-05 14:15:20 ---
+decision_basis_json:
+[
+  "当前ASIN处于推进期、旺季准备阶段，广告目的为转化型",
+  "近5天ACOS从45.9%降至30.2%，CVR从14.3%升至20.0%，整体趋势向好",
+  "但近7天整体ACOS仍达39.7%，存在4个高ACOS词和1个高花费零转化词，优化空间明确",
+  "同时，搜索词报告中有96个高转化词未收录，扩词潜力较大",
+  "综合来看，应以优化ACOS为主，辅以新增扩词和平衡维持，在控制成本的同时拓展有效流量"
+]
+suggest_lines:
+null
+future_attention_lines:
+null

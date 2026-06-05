@@ -8,6 +8,7 @@ from typing import Any
 import pymysql
 from pymysql.cursors import DictCursor
 
+from .erp_display import build_whip_display_fields
 from .models import CanonicalRun, stable_id, warehouse_pending_id
 from .text_utils import (
     build_wizard_direction_content_json,
@@ -897,9 +898,10 @@ class ErpDualWriterRepository:
             data_focus_json=VALUES(data_focus_json),
             update_time=VALUES(update_time)
         """
-        basis = []
-        if isinstance(analysis, dict):
-            basis.append(analysis.get("overall_analysis") or "")
+        display = build_whip_display_fields(
+            analysis if isinstance(analysis, dict) else {},
+            wizard,
+        )
         cur.execute(
             sql_rec,
             (
@@ -910,9 +912,9 @@ class ErpDualWriterRepository:
                 run.parent_seller_sku,
                 run.site_code,
                 run.batch_no,
-                json_dumps(basis),
-                json_dumps(analysis if isinstance(analysis, dict) else {}),
-                json_dumps(validation_report.get("data_summary") or wizard.get("data_summary") or {}),
+                json_dumps(display.decision_basis),
+                json_dumps(display.suggestion),
+                json_dumps(display.future_attention),
                 now,
                 now,
             ),

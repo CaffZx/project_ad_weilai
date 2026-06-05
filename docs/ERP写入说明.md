@@ -14,7 +14,7 @@
 |----|------|
 | 目标库 | `erp_agentadvert`（测试环境默认 `192.168.2.51:3306`） |
 | 驱动 | PyMySQL，手写 SQL，`INSERT ... ON DUPLICATE KEY UPDATE` |
-| 触发方式 | **命令行脚本**（尚未接入 FastAPI 在线接口） |
+| 触发方式 | **命令行脚本**；可选 **`POST /campaign/analyze`** 成功后自动 `write_full`（`ERP_AUTO_WRITE=true` 或请求体 `write_erp: true`） |
 | 数仓依赖 | 写入前需 Doris 提供真实 `campaign_id` / `keyword_id`（见 §5） |
 
 ---
@@ -29,6 +29,7 @@ ad-direction-agent/
 │   ├── mappers.py                     # JSON → CanonicalRun
 │   ├── models.py                      # 数据结构、stable_id / warehouse_pending_id
 │   ├── text_utils.py                  # 枚举与 ERP 字段映射
+│   ├── auto_push.py                   # analyze → write_full（API / 脚本共用）
 │   └── listing_context.py             # shop_id、parent_seller_sku、site_code 解析
 └── scripts/erp_db/                    # ★ 所有 ERP 库相关脚本（写入 + 校验 + schema）
     ├── README.md                      # 脚本索引
@@ -111,6 +112,14 @@ ERP MySQL（单事务 commit / 失败 rollback）
 | `t_advert_agent_ai_suggest` | AI 建议文案（wizard） |
 | `t_advert_agent_direction_recommend` / `_detail` | 向导方向推荐（`_upsert_wizard_direction`） |
 
+**方向推荐字段格式**（WHP 对接必读）：
+
+- [广告方向推荐-ERP存储格式说明.md](./广告方向推荐-ERP存储格式说明.md) — 表/字段/内容、改后 `string[]` 契约、B0CGH9 样例  
+- [WHP-Tab4渲染与组合枚举说明.md](./WHP-Tab4渲染与组合枚举说明.md) — Tab4 渲染问题与组合枚举  
+- [ERP方向枚举对照.md](./ERP方向枚举对照.md) — `direction_type` / `advert_direction_types` 统一码表  
+
+`direction_recommend_detail.content_json` 为 **JSON 字符串数组**（`["句1","句2"]`），由 `direction.reason` 按 `;` / `；` 拆分；标题/分数/状态用列 `direction_type`、`suggest_score`、`recommend_tag`。
+
 ### 4.3 未实现的表
 
 - `t_advert_agent_modify_portfolio_pending`（组合预算待确认）— 当前代码 **无写入**。
@@ -132,7 +141,7 @@ ERP MySQL（单事务 commit / 失败 rollback）
 | `adjustments[].keyword_id` | 建议 | 写 `keyword_pending`；缺则无法调 Amazon 关键词 API |
 | `adjustments[].campaign_name` / `child_asin` / `match_type` / `keyword_text` | 是 | 卡片展示与分组 |
 | `adjustments[].action` | 是 | `eliminate` / `adjust` / `keep` → `suggest_category` |
-| `adjustments[].ai_portfolio_class` | 建议 | 组合标签（主推/广泛/自动/测试/新增/淘汰）→ card.`campaign_group_type`（`core`/`auto_broad`/`test`/`eliminate`） |
+| `adjustments[].ai_portfolio_class` | 建议 | 组合标签 → card.`campaign_group_type`（`campaignGroupType`）：精准主力组/`exact_core_group`、精准测试组/`exact_testing_group`、自动广泛组/`auto_broad_group`、低价捡漏组/`low_bid_retention_group` |
 | `adjustments[].bid_change` / `budget_change` / `placement_changes` | 视情况 | 驱动三类 pending |
 | `shop_id` | 可脚本注入 | `write_erp_all` 通过 `resolve_listing_context` 写入 |
 
@@ -188,6 +197,48 @@ python scripts/erp_db/run_erp_batch_sequential.py --asins B0CGH9QRKK,B0B7S3PWWB
 ```
 
 按 ASIN 依次跑实验 → 生成 kb/wizard → `write_erp_all`。
+
+### 6.4 在线接口自动写入（analyze 完成后）
+
+在 `ad-direction-agent/.env` 中开启：
+
+```env
+ERP_AUTO_WRITE=true
+ERP_HOST=192.168.2.51
+ERP_DATABASE=erp_agentadvert
+```
+
+或单次请求强制写入：
+
+```http
+POST /api/v1/agent/ad-direction/campaign/analyze
+Content-Type: application/json
+
+{
+  "asin": "B0CGH9QRKK",
+  "days": 7,
+  "refresh": true,
+  "write_erp": true
+}
+```
+
+**门禁**（全部满足才写库）：`sanity_check_passed=true`、存在 `adjustments`、至少一条含 `campaign_id`。ERP 失败不导致 analyze 返回 500，错误在响应字段 `erp_write` 中返回。
+
+**响应扩展字段** `erp_write` 示例：
+
+```json
+{
+  "erp_write": {
+    "attempted": true,
+    "ok": true,
+    "decision_id": "dec...",
+    "wizard_partial": false,
+    "modern_card": 12
+  }
+}
+```
+
+实现代码：`app/persistence/erp_writer/auto_push.py`，挂接于 `app/api/campaign.py`。
 
 ---
 
