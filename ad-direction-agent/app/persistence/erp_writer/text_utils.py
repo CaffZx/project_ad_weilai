@@ -105,18 +105,30 @@ _LEVEL_TO_SCORE = {"推荐": 80, "可选": 50, "不推荐": 20, "high": 80, "med
 
 # t_advert_agent_modify_suggest_card.campaign_group_type (Java: campaignGroupType)
 _CAMPAIGN_GROUP_TYPE_MAP = {
-    "主推": "core",
-    "广泛/自动": "auto_broad",
-    "测试/新增": "test",
-    "淘汰": "eliminate",
-    "core": "core",
-    "auto_broad": "auto_broad",
-    "test": "test",
-    "eliminate": "eliminate",
-    "MAIN_PUSH": "core",
-    "BROAD_AUTO": "auto_broad",
-    "TEST_NEW": "test",
-    "ELIMINATE_BUBBLE": "eliminate",
+    # 现行中文标签 → ERP 码
+    "精准主力组": "exact_core_group",
+    "精准测试组": "exact_testing_group",
+    "自动广泛组": "auto_broad_group",
+    "低价捡漏组": "low_bid_retention_group",
+    # 现行 ERP 码（透传）
+    "exact_core_group": "exact_core_group",
+    "exact_testing_group": "exact_testing_group",
+    "auto_broad_group": "auto_broad_group",
+    "low_bid_retention_group": "low_bid_retention_group",
+    # 遗留中文标签（历史 JSON / 旧分析结果）
+    "主推": "exact_core_group",
+    "广泛/自动": "auto_broad_group",
+    "测试/新增": "exact_testing_group",
+    "淘汰": "low_bid_retention_group",
+    # 遗留 ERP 码
+    "core": "exact_core_group",
+    "auto_broad": "auto_broad_group",
+    "test": "exact_testing_group",
+    "eliminate": "low_bid_retention_group",
+    "MAIN_PUSH": "exact_core_group",
+    "BROAD_AUTO": "auto_broad_group",
+    "TEST_NEW": "exact_testing_group",
+    "ELIMINATE_BUBBLE": "low_bid_retention_group",
 }
 
 # Short marketplace codes → WHP site_code enum
@@ -239,6 +251,63 @@ def map_direction_types_json(values: Any) -> str | None:
         return code or None
 
     return to_enum_list(values, _map_dir)
+
+
+_RECOMMEND_TAG_ZH = {
+    "not_recommended": "暂不建议",
+    "available": "可考虑",
+    "recommended": "推荐",
+}
+
+
+def normalize_advert_direction_types_list(values: Any) -> list[str]:
+    """Normalize wizard/decision direction list to canonical ERP codes."""
+    raw = map_direction_types_json(values)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(x) for x in parsed] if isinstance(parsed, list) else []
+
+
+def build_wizard_direction_content_json(
+    direction: dict[str, Any],
+    validation: dict[str, Any] | None,
+    decision_package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """ERP content_json for Tab4 — WHP should read display_* first (see docs/WHP-Tab4渲染与组合枚举说明.md)."""
+    d = direction or {}
+    val = validation or {}
+    pkg = decision_package or {}
+    tag = d.get("suitability") or (
+        "recommended" if d.get("recommended") else "available"
+    )
+    display_tasks: list[dict[str, Any]] = []
+    for t in pkg.get("tasks") or []:
+        if not isinstance(t, dict):
+            continue
+        display_tasks.append(
+            {
+                "priority": t.get("priority"),
+                "action": t.get("action"),
+                "details": t.get("details"),
+                "estimated_impact": t.get("estimated_impact"),
+            }
+        )
+    score = d.get("suitability_score")
+    return {
+        "display_label": d.get("label"),
+        "display_reason": d.get("reason"),
+        "display_score": score,
+        "display_tag": tag,
+        "display_tag_zh": _RECOMMEND_TAG_ZH.get(str(tag), str(tag)),
+        "display_tasks": display_tasks,
+        "direction": d,
+        "validation": val,
+        "decision_package": pkg or None,
+    }
 
 
 def level_to_score(level: str | None) -> int | None:

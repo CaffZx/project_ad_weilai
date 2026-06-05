@@ -19,7 +19,10 @@ from app.config.settings import settings
 from app.data.campaign_fetcher import CampaignFetcher
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
-from app.workflow.steps.campaign_portfolio import classify as _classify_portfolio
+from app.workflow.steps.campaign_portfolio import (
+    PORTFOLIO_ELIMINATE,
+    classify as _classify_portfolio,
+)
 from app.models.campaign import (
     CampaignAdjustmentItem,
     CampaignAnalysisResult,
@@ -308,7 +311,7 @@ async def _analyze_campaigns_impl(
             cu.portfolio = _classify_portfolio(cu)
         # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
         for s in skipped_eliminated:
-            s["portfolio"] = "淘汰"
+            s["portfolio"] = PORTFOLIO_ELIMINATE
 
     ctx_dict = strategy_context.model_dump()
     exact_sem = asyncio.Semaphore(cc)   # 每流并发上限 = campaign_llm_concurrency

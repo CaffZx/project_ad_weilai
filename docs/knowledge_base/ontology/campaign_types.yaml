@@ -1,0 +1,144 @@
+# Ontology 第一期 — Campaign Type 动作合法性
+# 来源: 20-亚马逊广告Ontology补充.md §4, 22-Ontology第一期补充内容清单.md §3
+# 版本: phase_1
+
+version: phase_1
+description: 各 Campaign Type 允许/禁止动作、目标类型、所需报表
+
+campaign_types:
+  exact_keyword:
+    label_zh: 精准关键词广告
+    source: 手动关键词投放
+    object_class: Campaign
+    allowed_targets:
+      - KeywordTarget
+    target_constraints:
+      match_type: EXACT
+    primary_use: 承接已验证词、推自然位、稳定转化
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - placement_adjustment
+      - balance_maintain_no_action
+    forbidden_actions:
+      - mass_negative_keywords
+      - blind_broad_expansion
+    required_reports:
+      - targeting_report
+      - placement_report
+      - inventory_status
+      - organic_rank_signal
+    validation_rule_refs:
+      - ONT-003
+      - ONT-005
+      - ONT-006
+
+  phrase_keyword:
+    label_zh: 词组关键词广告
+    source: 手动关键词投放
+    object_class: Campaign
+    allowed_targets:
+      - KeywordTarget
+    target_constraints:
+      match_type: PHRASE
+    primary_use: 中等范围扩词和搜索词沉淀
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - add_negative_search_term
+      - promote_search_term_to_keyword
+      - balance_maintain_no_action
+    forbidden_actions:
+      - placement_adjustment
+    required_reports:
+      - search_term_report
+      - targeting_report
+      - inventory_status
+    validation_rule_refs:
+      - ONT-002
+
+  broad_keyword:
+    label_zh: 广泛关键词广告
+    source: 手动关键词投放
+    object_class: Campaign
+    allowed_targets:
+      - KeywordTarget
+    target_constraints:
+      match_type: BROAD
+    primary_use: 打开词池、获取搜索词样本
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - add_negative_search_term
+      - promote_search_term_to_keyword
+      - balance_maintain_no_action
+    forbidden_actions:
+      - placement_adjustment
+    required_reports:
+      - search_term_report
+      - targeting_report
+      - inventory_status
+    validation_rule_refs:
+      - ONT-002
+
+  auto_discovery:
+    label_zh: 自动广告
+    source: 自动投放
+    object_class: Campaign
+    allowed_targets:
+      - AutoTarget
+    primary_use: 发现关键词、商品和类目机会
+    allowed_actions:
+      - bid_down_for_acos
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - add_negative_search_term
+      - promote_search_term_to_keyword
+      - balance_maintain_no_action
+    forbidden_actions:
+      - placement_adjustment
+    required_reports:
+      - search_term_report
+      - targeting_report
+      - inventory_status
+    validation_rule_refs:
+      - ONT-002
+      - ONT-009
+
+  product_targeting:
+    label_zh: 商品/类目投放广告
+    source: 手动商品/类目投放
+    object_class: Campaign
+    allowed_targets:
+      - ProductTarget
+    primary_use: 竞品截流、类目拓展、防守自家页面
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - placement_adjustment
+      - balance_maintain_no_action
+    forbidden_actions:
+      - keyword_match_type_adjustment
+    required_reports:
+      - targeting_report
+      - placement_report
+      - inventory_status
+      - listing_quality_signal
+    validation_rule_refs:
+      - ONT-005
+      - ONT-010
+
+# 跨类型汇总：广泛/词组/自动禁止广告位调整
+placement_forbidden_types:
+  - broad_keyword
+  - phrase_keyword
+  - auto_discovery
+validation_rule_ref: ONT-002

@@ -1,0 +1,259 @@
+# Ontology 第一期 — 动作合法性
+# 来源: 20-亚马逊广告Ontology补充.md §7, 22-Ontology第一期补充内容清单.md §5/§6.3
+# 版本: phase_1
+
+version: phase_1
+description: 动作作用对象、是否增长型、必需证据、禁止场景、缺报表策略
+
+actions:
+  bid_up_for_ranking:
+    label_zh: 提价冲排名
+    target_objects:
+      - KeywordTarget
+      - ProductTarget
+    transform: null
+    is_growth_action: true
+    required_reports:
+      - targeting_report
+      - organic_rank_signal
+      - inventory_status
+      - listing_quality_signal
+    required_signals:
+      - organic_rank
+      - acos
+      - cvr
+      - budget_utilization
+      - inventory
+      - return_rating
+    forbidden_objects_or_scenes:
+      - SearchTerm
+      - inventory_missing
+      - inventory_insufficient
+      - high_return_rate
+      - low_rating
+      - organic_rank_missing
+    missing_report_policy:
+      organic_rank_signal: block_ranking_action
+      inventory_status: block_growth_actions
+      listing_quality_signal: block_growth_actions
+    validation_rule_refs:
+      - ONT-001
+      - ONT-004
+      - ONT-006
+
+  bid_down_for_acos:
+    label_zh: 降价优化 ACOS
+    target_objects:
+      - KeywordTarget
+      - ProductTarget
+      - AutoTarget
+    transform: null
+    is_growth_action: false
+    required_reports:
+      - targeting_report
+    required_signals:
+      - acos
+      - clicks
+      - orders
+      - organic_rank_impact
+    forbidden_objects_or_scenes:
+      - SearchTerm
+      - ranking_protected_keyword_within_tolerance
+    missing_report_policy:
+      targeting_report: review_required
+    validation_rule_refs:
+      - ONT-001
+      - ONT-006
+
+  campaign_budget_increase:
+    label_zh: 增加 Campaign 预算
+    target_objects:
+      - Campaign
+    transform: null
+    is_growth_action: true
+    required_reports:
+      - targeting_report
+      - inventory_status
+    required_signals:
+      - budget_utilization
+      - acos
+      - orders
+      - inventory
+    forbidden_objects_or_scenes:
+      - inventory_missing
+      - inventory_insufficient
+      - high_return_rate
+      - core_sku_shortage
+    missing_report_policy:
+      inventory_status: block_growth_actions
+    validation_rule_refs:
+      - ONT-004
+      - GROUP-002
+      - GROUP-003
+    post_conditions:
+      - must_recalculate_ad_budget_group: true
+      - must_recalculate_parent_asin_budget: true
+
+  campaign_budget_decrease:
+    label_zh: 减少 Campaign 预算
+    target_objects:
+      - Campaign
+    transform: null
+    is_growth_action: false
+    required_reports:
+      - targeting_report
+    required_signals:
+      - acos_trend
+      - spend
+      - orders
+      - budget_utilization
+    forbidden_objects_or_scenes:
+      - insufficient_sample_large_decrease
+    missing_report_policy: {}
+    validation_rule_refs:
+      - GROUP-002
+      - GROUP-003
+    post_conditions:
+      - must_recalculate_ad_budget_group: true
+      - must_recalculate_parent_asin_budget: true
+
+  add_negative_search_term:
+    label_zh: 搜索词否词
+    target_objects:
+      - SearchTerm
+    transform: SearchTerm -> NegativeTarget
+    is_growth_action: false
+    required_reports:
+      - search_term_report
+    required_signals:
+      - search_term_clicks
+      - search_term_spend
+      - search_term_orders
+      - search_term_acos
+      - relevance
+    forbidden_objects_or_scenes:
+      - listing_optimization_in_progress
+      - test_period_insufficient_sample
+      - brand_competitor_term_unreviewed
+    missing_report_policy:
+      search_term_report: hard_block
+    validation_rule_refs:
+      - ONT-001
+
+  promote_search_term_to_keyword:
+    label_zh: 搜索词提词
+    target_objects:
+      - SearchTerm
+    transform: SearchTerm -> KeywordTarget
+    is_growth_action: true
+    required_reports:
+      - search_term_report
+      - inventory_status
+      - listing_quality_signal
+    required_signals:
+      - search_term_orders
+      - cvr
+      - acos
+      - relevance
+      - word_root
+    forbidden_objects_or_scenes:
+      - inventory_insufficient
+      - high_return_rate
+      - low_rating
+      - no_relevance
+    missing_report_policy:
+      inventory_status: block_growth_actions
+      listing_quality_signal: block_growth_actions
+    validation_rule_refs:
+      - ONT-001
+      - ONT-004
+      - ONT-009
+
+  placement_adjustment:
+    label_zh: 广告位加价调整
+    target_objects:
+      - Placement
+    transform: null
+    is_growth_action: true
+    required_reports:
+      - placement_report
+      - inventory_status
+      - listing_quality_signal
+    required_signals:
+      - placement_acos
+      - placement_orders
+      - placement_clicks
+      - inventory
+      - rating_return
+    forbidden_objects_or_scenes:
+      - campaign_type_broad_keyword
+      - campaign_type_phrase_keyword
+      - campaign_type_auto_discovery
+      - placement_report_missing
+    missing_report_policy:
+      placement_report: block_only_placement_action
+      inventory_status: block_growth_actions
+      listing_quality_signal: block_growth_actions
+    validation_rule_refs:
+      - ONT-002
+      - ONT-004
+      - ONT-005
+      - ONT-010
+
+  eliminate_to_low_bid_pool:
+    label_zh: 淘汰至低 Bid 池
+    target_objects:
+      - Campaign
+    transform: null
+    is_growth_action: false
+    required_reports:
+      - targeting_report
+    required_signals:
+      - spend_7d
+      - orders_7d
+      - cvr
+      - organic_rank_support
+      - diagnosis_path_complete
+    forbidden_objects_or_scenes:
+      - campaign_age_under_3_days
+      - core_keyword_ranking_support
+      - pre_elimination_diagnosis_incomplete
+    missing_report_policy: {}
+    validation_rule_refs:
+      - GROUP-002
+      - GROUP-003
+      - GROUP-004
+      - GROUP-004A
+    post_conditions:
+      - must_recalculate_ad_budget_group: true
+      - must_recalculate_parent_asin_budget: true
+      - elimination_group_budget_fixed: 1.0
+      - elimination_bid_fixed: 0.20
+
+  balance_maintain_no_action:
+    label_zh: 平衡维持（无策略性大动作）
+    target_objects:
+      - ParentASIN
+      - Campaign
+    transform: null
+    is_growth_action: false
+    required_reports:
+      - targeting_report
+      - inventory_status
+    required_signals:
+      - metrics_stable
+      - budget_normal
+      - inventory_support
+    forbidden_objects_or_scenes:
+      - data_missing_cannot_judge
+    missing_report_policy:
+      any_critical_missing: review_required
+    validation_rule_refs:
+      - ONT-007
+
+# 增长型动作汇总（供 ONT-004 引用）
+growth_actions:
+  - bid_up_for_ranking
+  - campaign_budget_increase
+  - promote_search_term_to_keyword
+  - placement_adjustment

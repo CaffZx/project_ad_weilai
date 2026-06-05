@@ -59,7 +59,7 @@ class CampaignUnit(BaseModel):
     placements: dict[str, dict] = Field(default_factory=dict)     # MCP placement_report (懒加载)
     placement_data_available: bool = False   # 懒加载前为空
     # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
-    #   主推 / 广泛自动 / 测试新增 / 淘汰；空串=未分类(开关关闭或前置阶段)
+    #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类(开关关闭或前置阶段)
     portfolio: str = ""
     # 元数据
     source: str = "mcp"                      # "mcp" | "doris" | "mixed"
@@ -135,7 +135,7 @@ class CampaignAdjustmentItem(BaseModel):
     elimination_values: dict | None = None
     round_votes: dict[str, str] = Field(default_factory=dict)
     review_level: str = "MANUAL_REVIEW"
-    # 组合分类(AI 自造 4 类,非后台 Portfolio): 主推 / 广泛自动 / 测试新增 / 淘汰
+    # 组合分类(AI 自造 4 类,非后台 Portfolio): 精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组
     ai_portfolio_class: str = ""
     # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
     portfolio_or_group: str = ""

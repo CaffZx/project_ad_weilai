@@ -24,6 +24,11 @@ import logging
 
 from app.config.settings import settings
 from app.models.campaign import CampaignAdjustmentItem, CampaignStrategyContext, CampaignUnit
+from app.workflow.steps.campaign_portfolio import (
+    PORTFOLIO_BROAD,
+    PORTFOLIO_MAIN,
+    PORTFOLIO_TEST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +45,9 @@ def build_summary(
         "target_budget": float | None,           # 总约束 (策略上下文 daily_budget)
         "target_budget_source": str,             # "override" | "asin_data" | "fallback_spend_x1.15" | ""
         "portfolio_constraints": {               # 3 组分配 (淘汰不在内);target=None 时整体为 None
-            "主推":    float,
-            "测试/新增": float,
-            "广泛/自动": float,
+            "精准主力组": float,
+            "精准测试组": float,
+            "自动广泛组": float,
         } | None,
       }
     """
@@ -83,8 +88,8 @@ def build_summary(
         "target_budget": round(target_budget, 2),
         "target_budget_source": source,
         "portfolio_constraints": {
-            "主推": main_amount,
-            "测试/新增": test_amount,
-            "广泛/自动": broad_amount,
+            PORTFOLIO_MAIN: main_amount,
+            PORTFOLIO_TEST: test_amount,
+            PORTFOLIO_BROAD: broad_amount,
         },
     }

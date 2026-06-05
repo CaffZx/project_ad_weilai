@@ -1,0 +1,446 @@
+# Ontology 第一期 — 对象层级、枚举与输出字段
+# 来源: 20-亚马逊广告Ontology补充.md §2/§3/§5/§6, 22-Ontology第一期补充内容清单.md §2/§4
+# 版本: phase_1（预算组合层见 budget_groups.yaml phase_1b）
+
+version: phase_1
+description: 广告调整 Agent 对象层级、广告目的/方向枚举、建议输出字段
+
+# ---------------------------------------------------------------------------
+# 商品与类目对象（第一期保留上下文，不展开全量类目图谱）
+# ---------------------------------------------------------------------------
+catalog_entities:
+  ParentASIN:
+    label_zh: 父 ASIN
+    object_type: strategy_aggregate
+    is_adjustable_object: false
+    description: 变体集合；策略标签、预算总盘、库存风险、广告表现汇总主体
+    relations:
+      - hasChildASIN
+      - hasChildSKU
+      - hasAdBudgetGroup
+    budget_fields:
+      parent_target_daily_budget: 父 ASIN 目标日预算
+      current_total_group_budget: 当前各组合预算总和
+      proposed_total_group_budget: 建议组合预算总和
+      net_budget_change: 本轮净预算变化
+    allowed_actions:
+      - balance_maintain_no_action
+    boundary_rules:
+      - CAT-003
+    validation_rule_refs:
+      - GROUP-002
+      - GROUP-003
+
+  ChildASIN:
+    label_zh: 子 ASIN
+    object_type: product_variant
+    is_adjustable_object: false
+    description: 具体变体商品；承接能力、评分、转化表现判断
+    relations:
+      - belongsToParentASIN
+      - hasListing
+    boundary_rules:
+      - CAT-004
+
+  SKU:
+    label_zh: 卖家 SKU
+    object_type: inventory_fulfillment
+    is_adjustable_object: false
+    description: 库存和履约对象；核心 SKU 短缺判断
+    relations:
+      - mapsToChildASIN
+      - hasInventoryStatus
+    boundary_rules:
+      - CAT-004
+
+  Listing:
+    label_zh: 商品详情页
+    object_type: conversion_surface
+    is_adjustable_object: false
+    description: 广告点击后的承接页面
+    relations:
+      - hasRating
+      - hasReturnRisk
+      - hasConversionSignal
+
+  BrowseNode:
+    label_zh: 浏览节点/类目节点
+    object_type: category_context
+    is_adjustable_object: false
+    description: 类目集合节点，不等于 ASIN 或 Product Type
+    boundary_rules:
+      - CAT-001
+
+  ProductTypeDefinition:
+    label_zh: 商品类型定义
+    object_type: listing_schema_context
+    is_adjustable_object: false
+    description: Listing 属性完整性与类目要求判断
+    boundary_rules:
+      - CAT-002
+
+# ---------------------------------------------------------------------------
+# Sponsored Products 广告对象层级
+# ---------------------------------------------------------------------------
+ad_entities:
+  AdsProfile:
+    label_zh: 广告账号配置
+    object_type: account_scope
+    is_adjustable_object: false
+    relations:
+      - ownsCampaign
+      - ownsPortfolio
+
+  Portfolio:
+    label_zh: 广告组合（Amazon/ERP 组织容器）
+    object_type: organization
+    is_adjustable_object: false
+    description: 账号侧 Portfolio 结构；预算控制语义见 AdBudgetGroup（budget_groups.yaml）
+    relations:
+      - containsCampaign
+
+  AdBudgetGroup:
+    label_zh: 广告预算组合
+    object_type: budget_control_layer
+    is_adjustable_object: true
+    description: 父 ASIN 下预算控制层；可映射 Portfolio 或内部预算分组；控制组合预算而非单 Campaign Bid
+    relations:
+      - belongsToParentASIN
+      - containsCampaign
+    group_type_values:
+      - promotion_group
+      - testing_group
+      - auto_broad_group
+      - elimination_group
+    allowed_actions:
+      - group_budget_increase
+      - group_budget_decrease
+    validation_rule_refs:
+      - GROUP-001
+      - GROUP-002
+      - GROUP-003
+      - GROUP-004
+      - GROUP-005
+    detail_file: budget_groups.yaml
+
+  Campaign:
+    label_zh: 广告活动
+    object_type: campaign_container
+    is_adjustable_object: true
+    description: 预算、Campaign Type、广告位加价、投放策略主体
+    relations:
+      - containsAdGroup
+      - hasDailyBudget
+      - belongsToAdBudgetGroup
+    group_fields:
+      belongs_to_group: group_type 枚举，见 budget_groups.yaml
+      group_type: promotion_group | testing_group | auto_broad_group | elimination_group
+    allowed_actions:
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - placement_adjustment
+      - eliminate_to_low_bid_pool
+      - balance_maintain_no_action
+
+  AdGroup:
+    label_zh: 广告组
+    object_type: ad_group_container
+    is_adjustable_object: false
+    description: 承载商品广告和投放目标
+    relations:
+      - containsProductAd
+      - containsTarget
+
+  ProductAd:
+    label_zh: 商品广告
+    object_type: promoted_product
+    is_adjustable_object: false
+    description: 被广告推广的 ASIN / SKU
+    relations:
+      - promotesChildASIN
+      - belongsToAdGroup
+
+  TargetingClause:
+    label_zh: 投放目标（父类）
+    object_type: targeting_parent
+    is_adjustable_object: false
+    description: Keyword / Product / Auto Target 的统一父类
+    relations:
+      - belongsToAdGroup
+      - hasBid
+
+  KeywordTarget:
+    label_zh: 关键词目标
+    object_type: targeting_object
+    is_adjustable_object: true
+    description: 手动关键词投放对象，可调 Bid
+    relations:
+      - hasMatchType
+      - hasBid
+    match_type_values:
+      - EXACT
+      - PHRASE
+      - BROAD
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - pause_or_eliminate_if_allowed
+    forbidden_actions: []
+
+  ProductTarget:
+    label_zh: 商品目标
+    object_type: targeting_object
+    is_adjustable_object: true
+    description: ASIN 或类目投放对象
+    relations:
+      - targetsASIN
+      - targetsCategory
+    allowed_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - pause_or_eliminate_if_allowed
+
+  AutoTarget:
+    label_zh: 自动投放目标
+    object_type: targeting_object
+    is_adjustable_object: true
+    description: 自动广告中的 close_match / loose_match / substitutes / complements
+    relations:
+      - hasAutoTargetType
+    auto_target_type_values:
+      - close_match
+      - loose_match
+      - substitutes
+      - complements
+    allowed_actions:
+      - bid_down_for_acos
+      - promote_search_term_to_keyword
+    boundary_rules:
+      - OBJ-004
+      - ONT-009
+
+  SearchTerm:
+    label_zh: 搜索词
+    object_type: evidence_object
+    is_adjustable_object: false
+    description: 用户实际搜索词；证据对象，不是直接调价对象
+    relations:
+      - canPromoteToKeywordTarget
+      - canCreateNegativeTarget
+    allowed_actions:
+      - add_negative_search_term
+      - promote_search_term_to_keyword
+    forbidden_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - placement_adjustment
+    boundary_rules:
+      - OBJ-001
+      - OBJ-002
+      - ONT-001
+
+  NegativeTarget:
+    label_zh: 否定目标
+    object_type: negative_targeting
+    is_adjustable_object: false
+    description: 由低效或不相关 Search Term 转化而来
+    relations:
+      - excludesTrafficFrom
+
+  Placement:
+    label_zh: 广告位
+    object_type: campaign_setting
+    is_adjustable_object: true
+    description: TOS / RoS / PP；仅在适用 Campaign Type 中调整
+    allowed_placements:
+      - top_of_search
+      - rest_of_search
+      - product_pages
+    required_reports:
+      - placement_report
+    allowed_actions:
+      - placement_adjustment
+    boundary_rules:
+      - OBJ-003
+      - OBJ-005
+      - ONT-002
+      - ONT-005
+
+# ---------------------------------------------------------------------------
+# 对象边界规则（OBJ-*）
+# ---------------------------------------------------------------------------
+object_boundary_rules:
+  OBJ-001:
+    rule: SearchTerm 不是 KeywordTarget，不能直接调 Bid
+  OBJ-002:
+    rule: 搜索词只能用于新增关键词、创建否定词、作为证据
+  OBJ-003:
+    rule: Placement 调整不能绑定到单个 Search Term
+  OBJ-004:
+    rule: KeywordTarget、ProductTarget、AutoTarget 都是投放目标，但可用动作不同
+  OBJ-005:
+    rule: 缺 Placement 数据时仅阻断广告位动作，不阻断 Bid / Budget / 否词
+  CAT-001:
+    rule: BrowseNode 是类目集合节点，不等于 ASIN，也不等于 Product Type
+  CAT-002:
+    rule: ProductTypeDefinition 用于 Listing 属性完整性判断，不直接决定广告 Bid
+  CAT-003:
+    rule: ParentASIN 适合做策略标签、预算、库存风险和父体维度汇总
+  CAT-004:
+    rule: ChildASIN / SKU 适合做变体库存、核心 SKU 短缺、子体承接能力判断
+
+# ---------------------------------------------------------------------------
+# 广告目的 × 广告方向
+# ---------------------------------------------------------------------------
+ad_purpose:
+  allowed_values:
+    - traffic
+    - conversion
+    - ranking
+    - profit
+  forbidden_values:
+    - maintain
+    - balance_maintain
+  labels_zh:
+    traffic: 引流
+    conversion: 转化
+    ranking: 冲排名
+    profit: 利润
+  validation_rule_refs:
+    - ONT-003
+    - ONT-008
+
+ad_direction:
+  allowed_values:
+    - expand_keywords
+    - push_natural_rank
+    - optimize_acos
+    - balance_maintain
+  labels_zh:
+    expand_keywords: 扩词/引流
+    push_natural_rank: 推自然位
+    optimize_acos: 优化 ACOS
+    balance_maintain: 平衡维持
+  note: balance_maintain 是广告方向，不是广告目的；不得输出 ad_purpose=maintain
+  validation_rule_refs:
+    - ONT-008
+
+purpose_direction_mapping:
+  traffic:
+    - expand_keywords
+    - balance_maintain
+  conversion:
+    - expand_keywords
+    - push_natural_rank
+    - balance_maintain
+  ranking:
+    - push_natural_rank
+    - balance_maintain
+  profit:
+    - optimize_acos
+    - balance_maintain
+
+# ---------------------------------------------------------------------------
+# 自动投放类型（AutoTarget 子类型）
+# ---------------------------------------------------------------------------
+auto_target_types:
+  close_match:
+    label_zh: 紧密匹配
+    typical_use: 发现与商品高度相关的搜索词
+  loose_match:
+    label_zh: 宽泛匹配
+    typical_use: 扩展更宽的搜索词样本
+  substitutes:
+    label_zh: 替代品
+    typical_use: 相似商品详情页，竞品截流观察
+  complements:
+    label_zh: 互补品
+    typical_use: 互补商品详情页，场景化拓展
+
+# ---------------------------------------------------------------------------
+# 建议 Agent 输出字段（对齐 12-输出规范 扩展）
+# ---------------------------------------------------------------------------
+output_fields:
+  object_class:
+    type: enum
+    allowed_values:
+      - ParentASIN
+      - AdBudgetGroup
+      - ChildASIN
+      - Campaign
+      - AdGroup
+      - KeywordTarget
+      - ProductTarget
+      - AutoTarget
+      - SearchTerm
+      - Placement
+    description: 当前动作作用的对象类型
+
+  campaign_type:
+    type: enum
+    allowed_values:
+      - exact_keyword
+      - phrase_keyword
+      - broad_keyword
+      - product_targeting
+      - auto_discovery
+    description: 当前广告活动类型
+
+  targeting_type:
+    type: enum
+    allowed_values:
+      - keyword
+      - product
+      - auto
+      - negative
+
+  match_type:
+    type: enum
+    allowed_values:
+      - EXACT
+      - PHRASE
+      - BROAD
+      - N/A
+
+  is_growth_action:
+    type: bool
+    description: 是否增长型动作
+
+  ontology_validation_status:
+    type: enum
+    allowed_values:
+      - passed
+      - blocked
+      - downgraded
+      - review_required
+
+  ontology_rule_refs:
+    type: list
+    description: 命中的 ontology 规则 ID，如 ONT-001
+
+  source_report_refs:
+    type: list
+    description: 使用的证据源，如 search_term_report
+
+  # Phase 1b — 组合预算汇总（见 budget_groups.yaml output_contract）
+  portfolio_budget_summary:
+    type: object
+    required_when: parent_asin_has_multiple_campaign_adjustments
+    description: 父 ASIN 级预算回算汇总；含 requested/released/net、allocation_method
+
+  budget_groups:
+    type: array
+    description: 各 AdBudgetGroup 预算变化明细
+
+  group_type:
+    type: enum
+    allowed_values:
+      - promotion_group
+      - testing_group
+      - auto_broad_group
+      - elimination_group
+    description: Campaign 归属的广告预算组合类型
+
+  group_budget_delta:
+    type: decimal
+    description: 可选；单活动调整后用于组合回算校验

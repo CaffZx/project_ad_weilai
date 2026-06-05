@@ -745,9 +745,9 @@ function renderBudgetSummary(bs) {
   for (const item of _campaignItems) {
     if (item.__skipped) continue;
     totalCount++;
-    const p = item.ai_portfolio_class || '广泛/自动';
+    const p = item.ai_portfolio_class || '自动广泛组';
     if (_selection.has(item.campaign_key)) {
-      execTotal += (p === '淘汰') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
+      execTotal += (p === '低价捡漏组') ? 1.0 : (Number(item.proposed_budget) || Number(item.current_budget) || 0);
       selectedCount++;
     } else {
       execTotal += (Number(item.current_budget) || 0);
@@ -780,7 +780,7 @@ function renderBudgetSummary(bs) {
 // ─── 4 组合筛选气泡 (互斥单选,再点取消) ─────────────────────────────────
 // 气泡内容: 组合名 (活动数) + 组合预算约束金额
 // 淘汰组不在 portfolio_constraints 里(KB 21 §6 每活动 $1,与约束无关) → 显示 "—"
-const PORTFOLIO_NAMES = ['主推', '广泛/自动', '测试/新增', '淘汰'];
+const PORTFOLIO_NAMES = ['精准主力组', '精准测试组', '自动广泛组', '低价捡漏组'];
 function renderPortfolioFilterPills(bs) {
   const el = $('portfolioFilterPills');
   if (!el) return;
@@ -791,7 +791,7 @@ function renderPortfolioFilterPills(bs) {
   for (const name of PORTFOLIO_NAMES) countByName[name] = 0;
   for (const item of _campaignItems) {
     if (item.__skipped) continue;
-    const p = item.ai_portfolio_class || '广泛/自动';
+    const p = item.ai_portfolio_class || '自动广泛组';
     if (countByName[p] != null) countByName[p]++;
   }
 
@@ -801,7 +801,7 @@ function renderPortfolioFilterPills(bs) {
   const pills = PORTFOLIO_NAMES.map(name => {
     const active = (_portfolioFilter === name) ? 'active' : '';
     // 淘汰组不显示约束(不在 portfolio_constraints 里);其它组取后端返回的约束金额
-    const amt = (name === '淘汰') ? '—' : (constraints[name] != null ? money(constraints[name]) : '—');
+    const amt = (name === '低价捡漏组') ? '—' : (constraints[name] != null ? money(constraints[name]) : '—');
     return `<button class="portfolio-pill ${active}" type="button"
        onclick="togglePortfolioFilter('${name.replace(/'/g, "\\'")}')">
       <span class="pp-name">${escapeHTML(name)} (${countByName[name] || 0})</span>

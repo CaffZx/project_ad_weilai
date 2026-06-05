@@ -4,15 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from app.config.settings import BASE_DIR
-from app.skills.loader import load_playbook
+from app.skills.loader import default_skills_dir, load_playbook
 from app.skills.models import SkillPlaybook
 from app.skills.validate import validate_playbook
 
 
 @pytest.fixture
 def skills_dir() -> Path:
-    return BASE_DIR.parent / ".claude" / "skills"
+    return default_skills_dir()
 
 
 def test_load_mcp_query_playbook(skills_dir: Path):

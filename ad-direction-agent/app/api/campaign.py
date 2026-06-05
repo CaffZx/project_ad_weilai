@@ -19,6 +19,12 @@ from app.core.recommender import TargetAcosRecommender
 from app.data.campaign_fetcher import CampaignFetcher
 from app.llm.reasoner import reasoner
 from app.models.campaign import CampaignAnalysisResult, CampaignConfirmRequest
+from app.persistence.erp_writer.auto_push import (
+    analysis_to_kb_payload,
+    push_full_to_erp,
+    should_push_to_erp,
+    wizard_payload_from_state,
+)
 from app.persistence.state_factory import get_state_manager
 from app.workflow.steps.campaign import (
     analyze_campaigns,
@@ -29,6 +35,54 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+async def _maybe_push_erp(
+    result: CampaignAnalysisResult,
+    *,
+    asin: str,
+    days: int,
+    temperature: float,
+    write_erp: bool,
+    state,
+) -> dict:
+    """分析成功后可选写入 ERP；失败不抛异常。"""
+    enabled = write_erp or settings.erp_auto_write
+    if not enabled:
+        return {"attempted": False, "ok": False, "skipped": "erp_auto_write disabled"}
+
+    ok, reason = should_push_to_erp(result)
+    if not ok:
+        return {"attempted": False, "ok": False, "skipped": reason}
+
+    wizard_payload, wizard_partial = wizard_payload_from_state(asin, days, state)
+    kb_payload = analysis_to_kb_payload(result, temperature=temperature)
+    try:
+        report = await asyncio.to_thread(
+            push_full_to_erp,
+            kb_payload,
+            wizard_payload,
+        )
+        out = {
+            "attempted": True,
+            "ok": True,
+            "decision_id": report.decision_id,
+            "wizard_partial": wizard_partial,
+            **report.as_dict(),
+        }
+        logger.info(
+            "ERP write_full OK [%s] decision_id=%s cards=%d",
+            asin, report.decision_id, report.modern_card,
+        )
+        return out
+    except Exception as e:
+        logger.exception("ERP write_full 失败 [%s]: %s", asin, e)
+        return {
+            "attempted": True,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+            "wizard_partial": wizard_partial,
+        }
+
+
 @router.post("/campaign/analyze")
 async def campaign_analyze(req: dict):
     """运行 Campaign LLM 分析（分批 + R1+R2 投票 + 可选 R3 + sanity_check）。
@@ -37,13 +91,16 @@ async def campaign_analyze(req: dict):
         asin        (str, 必填)
         days        (int, 默认 7)
         temperature (float, 可选；默认读 settings.campaign_llm_temperature)
+        refresh     (bool, 可选；True 跳过 Redis 缓存)
+        write_erp   (bool, 可选；True 时本次强制写 ERP，需 ERP_AUTO_WRITE 或此项)
 
-    Response: CampaignAnalysisResult.model_dump()
+    Response: CampaignAnalysisResult.model_dump() + erp_write（若启用）
     """
     asin = str(req.get("asin", "")).strip()
     days = int(req.get("days", 7))
     temp = req.get("temperature", None)
     refresh = bool(req.get("refresh", False))   # True 时跳过 Redis 缓存，强制重新拉数据
+    write_erp = bool(req.get("write_erp", False))
 
     if not asin:
         return CampaignAnalysisResult(
@@ -125,7 +182,16 @@ async def campaign_analyze(req: dict):
             ),
             timeout=settings.campaign_total_timeout,
         )
-        return result.model_dump()
+        body = result.model_dump()
+        body["erp_write"] = await _maybe_push_erp(
+            result,
+            asin=asin,
+            days=days,
+            temperature=effective_temp,
+            write_erp=write_erp,
+            state=state,
+        )
+        return body
 
     except asyncio.TimeoutError as e:
         logger.warning("Campaign analyze 超时 [%s]: %s", asin, e)

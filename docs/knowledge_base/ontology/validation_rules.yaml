@@ -1,0 +1,338 @@
+# Ontology 第一期 — 校验规则
+# 来源: 20-亚马逊广告Ontology补充.md §9, 22-Ontology第一期补充内容清单.md §7
+# 版本: phase_1 + phase_1b（GROUP-* 见 budget_groups.yaml）
+
+version: phase_1
+description: Agent 输出前 ontology 合法性校验规则；预算组合规则见 budget_groups.yaml
+
+severity_levels:
+  hard_block: 必须阻断或放入 blocked_actions，不得作为 proposed_actions 输出
+  review_required: 可输出但须标记 ontology_validation_status=review_required
+  downgraded: 动作降级为观察或替代方向
+
+validation_rules:
+  ONT-001:
+    name: search_term_no_direct_bid
+    rule: SearchTerm 不能直接调 Bid
+    if:
+      object_class: SearchTerm
+      action_code:
+        in:
+          - bid_up_for_ranking
+          - bid_down_for_acos
+    then:
+      status: blocked
+      allowed_alternatives:
+        - add_negative_search_term
+        - promote_search_term_to_keyword
+    severity: hard_block
+
+  ONT-002:
+    name: broad_phrase_auto_no_placement
+    rule: broad / phrase / auto 广告不能做 Placement 调整
+    if:
+      campaign_type:
+        in:
+          - broad_keyword
+          - phrase_keyword
+          - auto_discovery
+      action_code: placement_adjustment
+    then:
+      status: blocked
+      placement_adjustment: N/A
+    severity: hard_block
+
+  ONT-003:
+    name: ad_purpose_allowed_values
+    rule: ad_purpose 只能是 traffic / conversion / ranking / profit
+    if:
+      field: ad_purpose
+      value:
+        in:
+          - maintain
+          - balance_maintain
+    then:
+      status: blocked
+      message: balance_maintain 是广告方向，不是广告目的
+    allowed_values:
+      - traffic
+      - conversion
+      - ranking
+      - profit
+    severity: hard_block
+
+  ONT-003b:
+    name: ranking_missing_organic_rank_signal
+    rule: 精准 Ranking 缺自然排名数据时阻断 push_natural_rank
+    if:
+      campaign_type: exact_keyword
+      ad_purpose: ranking
+      signal_missing: organic_rank_signal
+      ad_direction: push_natural_rank
+    then:
+      status: blocked
+      suggest_direction:
+        - conversion
+        - balance_maintain
+    severity: hard_block
+    note: 与 20 §9 ONT-003 场景规则合并编号为 ONT-003b，避免与取值校验 ONT-003 混淆
+
+  ONT-004:
+    name: missing_inventory_blocks_growth
+    rule: 缺库存数据时，阻断所有增长型动作
+    if:
+      signal_missing: inventory_status
+      action_code:
+        in_growth_actions: true
+    then:
+      status: blocked
+      non_growth_actions: mark_data_quality_risk
+    severity: hard_block
+    references:
+      growth_actions_file: actions.yaml
+
+  ONT-005:
+    name: missing_placement_report_scope
+    rule: 缺 Placement 数据时，只阻断 Placement 调整，不阻断 Bid / Budget / 否词
+    if:
+      signal_missing: placement_report
+      action_code: placement_adjustment
+    then:
+      status: blocked
+    if_else:
+      signal_missing: placement_report
+      action_code:
+        not_in:
+          - placement_adjustment
+    then:
+      status: allowed_with_note
+      note: 非广告位动作不受影响
+    severity: hard_block
+
+  ONT-006:
+    name: ranking_action_requires_organic_rank
+    rule: Ranking 动作缺自然排名数据时，阻断 push_natural_rank 及相关 bid_up_for_ranking
+    if:
+      ad_direction: push_natural_rank
+      signal_missing: organic_rank_signal
+    then:
+      status: blocked
+    if:
+      action_code: bid_up_for_ranking
+      ad_purpose: ranking
+      signal_missing: organic_rank_signal
+    then:
+      status: blocked
+    if:
+      signal_present: product_type_definition
+      listing_required_attributes_missing: true
+      cvr_below_category_mean: true
+    then:
+      status: downgraded
+      prefer: listing_diagnosis_over_aggressive_expansion
+    severity: hard_block
+
+  ONT-007:
+    name: no_fake_balance_maintain_on_missing_data
+    rule: 数据缺失不能输出 balance_maintain_no_action 伪装成健康维持
+    if:
+      action_code: balance_maintain_no_action
+      critical_data_missing: true
+    then:
+      status: review_required
+      message: 不得将数据缺失误判为健康维持
+    if:
+      signal_missing: browse_node_context
+    then:
+      status: downgraded
+      fallback: account_mean_conservative
+      audit_level: elevated
+    severity: review_required
+
+  ONT-008:
+    name: balance_maintain_is_direction_not_purpose
+    rule: ad_direction=balance_maintain 不得推导为 ad_purpose=maintain
+    if:
+      ad_direction: balance_maintain
+      inferred_ad_purpose: maintain
+    then:
+      status: blocked
+      keep_ad_purpose_in:
+        - traffic
+        - conversion
+        - ranking
+        - profit
+    severity: hard_block
+
+  ONT-009:
+    name: auto_target_promote_before_bid_up
+    rule: 自动投放跑出有效 SearchTerm 时优先提词而非持续提高 Auto Bid
+    if:
+      object_class: AutoTarget
+      evidence: effective_search_term_from_auto
+      suggested_action: bid_up_for_ranking
+    then:
+      status: downgraded
+      prefer_action: promote_search_term_to_keyword
+      prefer_match_type:
+        - EXACT
+        - long_tail
+    severity: downgraded
+
+  ONT-010:
+    name: product_target_pp_better_than_tos_ros
+    rule: ProductTarget 的 PP 表现优于 TOS/RoS 时允许 PP 方向加价，仍需通过护栏
+    if:
+      campaign_type: product_targeting
+      placement_signal: pp_outperforms_tos_ros
+      action_code: placement_adjustment
+      placement: product_pages
+    then:
+      status: passed_with_guardrails
+    required_pass:
+      - inventory_status
+      - listing_quality_signal
+      - budget_guardrail
+    severity: hard_block
+
+# ---------------------------------------------------------------------------
+# 广告组合与预算分配（Phase 1b，来源 23-广告组合与预算分配规则.md）
+# ---------------------------------------------------------------------------
+group_validation_rules:
+  GROUP-001:
+    name: campaign_must_belong_to_budget_group
+    rule: 每个 Campaign 必须归属一个 AdBudgetGroup
+    if:
+      field: belongs_to_group
+      missing: true
+    then:
+      status: review_required
+      action: MANUAL_REVIEW
+    severity: review_required
+    detail_file: budget_groups.yaml
+
+  GROUP-002:
+    name: recalculate_group_after_campaign_budget
+    rule: Campaign 预算调整后必须回算所属组合预算
+    if:
+      action_applied:
+        in:
+          - campaign_budget_increase
+          - campaign_budget_decrease
+          - eliminate_to_low_bid_pool
+      portfolio_budget_summary_present: false
+    then:
+      status: blocked
+      message: 未回算组合预算则不得输出
+    severity: hard_block
+    maps_to_principle: GROUP-BUDGET-001
+
+  GROUP-003:
+    name: recalculate_parent_after_group_budget
+    rule: 组合预算调整后必须回算父 ASIN 总预算
+    if:
+      group_budget_recalculated: true
+      parent_budget_recalculated: false
+    then:
+      status: blocked
+    severity: hard_block
+    maps_to_principle: GROUP-BUDGET-002
+
+  GROUP-004:
+    name: elimination_group_no_increase_allocation
+    rule: 淘汰组不得参与新增预算分配
+    if:
+      group_type: elimination_group
+      group_requested_positive_delta: "> 0"
+    then:
+      status: blocked
+    severity: hard_block
+    maps_to_principle: GROUP-BUDGET-005
+
+  GROUP-004A:
+    name: elimination_group_fixed_budget_and_bid
+    rule: 淘汰组组合预算必须固定 $1，Bid 必须固定 $0.20
+    if:
+      group_type: elimination_group
+      any_of:
+        - proposed_group_budget: "!= 1"
+        - proposed_bid: "!= 0.20"
+    then:
+      status: blocked
+    severity: hard_block
+
+  GROUP-005:
+    name: promotion_group_no_starvation
+    rule: 推广组不得因测试组或自动广泛组扩张而断供
+    if:
+      promotion_group_protected: true
+      testing_or_auto_increase: true
+      promotion_group_decreased: true
+    then:
+      status: review_required
+      alt_status: blocked
+    severity: hard_block
+    maps_to_principle: GROUP-BUDGET-004
+    detail_ref: group_budget_004
+
+  GROUP-006:
+    name: compress_when_parent_net_increase_disallowed
+    rule: 父 ASIN 不允许净增预算时，所有正向增量必须按比例或加权比例压缩
+    if:
+      parent_net_increase_allowed: false
+      positive_deltas_uncompressed: true
+    then:
+      status: review_required
+    severity: review_required
+
+  GROUP-007:
+    name: surplus_release_not_forced_allocated
+    rule: 释放预算大于新增需求时，不得强行分配完，多余部分进入预算缓冲
+    if:
+      released_budget: "> net_required_increase"
+      forced_full_allocation: true
+    then:
+      status: review_required
+    severity: review_required
+
+# 第一期验收自检清单（对应 21 §7 / 22 §10 + Phase 1b）
+acceptance_checklist:
+  - id: AC-01
+    check: 不会对 SearchTerm 直接调 Bid
+    rule_ref: ONT-001
+  - id: AC-02
+    check: 不会对 broad/phrase/auto 输出 Placement 调整
+    rule_ref: ONT-002
+  - id: AC-03
+    check: 不会输出 ad_purpose=maintain
+    rule_ref: ONT-003
+  - id: AC-04
+    check: 缺库存时不输出增长型动作
+    rule_ref: ONT-004
+  - id: AC-05
+    check: 缺 Placement 时只阻断 Placement，不阻断 Bid/Budget/否词
+    rule_ref: ONT-005
+  - id: AC-06
+    check: 每条动作可说明 object_class、证据源、ontology_validation_status
+    rule_ref: entities.yaml output_fields
+  - id: AC-07
+    check: 每个 Campaign 调整后归属明确 group_type
+    rule_ref: GROUP-001
+  - id: AC-08
+    check: Campaign 预算变更后输出含 portfolio_budget_summary 且回算组合预算
+    rule_ref: GROUP-002
+  - id: AC-09
+    check: 组合变更后回算父 ASIN 总预算（proposed_total_group_budget / net_budget_change）
+    rule_ref: GROUP-003
+  - id: AC-10
+    check: 淘汰组组合预算 $1、Bid $0.20，且不参与增预算分配
+    rule_ref: GROUP-004
+  - id: AC-11
+    check: 推广组有稳定花费时不得被测试/广泛组挤断供
+    rule_ref: GROUP-005
+  - id: AC-12
+    check: 父 ASIN 不允许净增时正向增量已按比例或 60/20/20 加权压缩
+    rule_ref: GROUP-006
+  - id: AC-13
+    check: 输出含 budget_groups[] 与各组合 requested_delta / actual_delta
+    rule_ref: budget_groups.yaml output_contract

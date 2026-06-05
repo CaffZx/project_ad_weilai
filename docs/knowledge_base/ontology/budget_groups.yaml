@@ -1,0 +1,347 @@
+# Ontology Phase 1b — 广告组合与预算分配
+# 来源: docs/knowledge_base/执行规则/23-广告组合与预算分配规则.md
+# 版本: phase_1b（在 phase_1 对象/动作合法性之上扩展预算控制层）
+
+version: phase_1b
+description: ParentASIN → AdBudgetGroup → Campaign 三层预算控制、组合归类、回算与二次分配
+
+# AdBudgetGroup 可映射 Amazon Portfolio、ERP 广告组合或内部预算分组。
+# 与 entities.yaml 中 Portfolio（组织容器）区分：Portfolio 偏账号结构，AdBudgetGroup 偏预算控制语义。
+
+hierarchy:
+  - ParentASIN
+  - AdBudgetGroup
+  - Campaign
+
+entities:
+  ParentASIN:
+    fields:
+      parent_asin: { type: string, required: true }
+      parent_target_daily_budget: { type: decimal, description: 父 ASIN 目标日预算 }
+      current_total_group_budget: { type: decimal, description: 当前各组合预算总和 }
+      proposed_total_group_budget: { type: decimal, description: 建议组合预算总和 }
+      net_budget_change: { type: decimal, description: 本轮调整后净预算变化 }
+
+  AdBudgetGroup:
+    fields:
+      group_id: { type: string }
+      group_name: { type: string }
+      group_type:
+        type: enum
+        allowed_values:
+          - promotion_group
+          - testing_group
+          - auto_broad_group
+          - elimination_group
+      current_group_budget: { type: decimal }
+      proposed_group_budget: { type: decimal }
+      group_budget_delta: { type: decimal }
+      campaigns: { type: list, item: Campaign_ref }
+
+  Campaign:
+    budget_fields:
+      campaign_id: { type: string }
+      campaign_name: { type: string }
+      campaign_type:
+        allowed_values:
+          - exact_keyword
+          - broad_keyword
+          - phrase_keyword
+          - auto_discovery
+          - product_targeting
+      current_daily_budget: { type: decimal }
+      proposed_daily_budget: { type: decimal }
+      campaign_budget_delta: { type: decimal }
+      belongs_to_group: { type: string, ref: group_type }
+
+group_types:
+  promotion_group:
+    label_zh: 推广组
+    purpose: 已验证关键词、核心词、主推词、稳定承接词
+    campaign_type_restriction:
+      only:
+        - exact_keyword
+    budget_trait: 活动预算 ≥ $5
+    allocation_weight_default: 0.60
+
+  testing_group:
+    label_zh: 测试组
+    purpose: 精准测试词、待验证词、未进入推广组的活动
+    campaign_type_restriction:
+      only:
+        - exact_keyword
+    budget_trait: 活动预算 < $5
+    allocation_weight_default: 0.20
+
+  auto_broad_group:
+    label_zh: 自动广泛组
+    purpose: 自动、广泛、词组，跑搜索词与发现流量
+    campaign_type_restriction:
+      only:
+        - broad_keyword
+        - phrase_keyword
+        - auto_discovery
+    budget_trait: 不因预算大小进入推广组；只管理广泛类型
+    allocation_weight_default: 0.20
+
+  elimination_group:
+    label_zh: 淘汰组
+    purpose: 本轮放弃、不主推、低预算低 Bid 保留
+    campaign_type_restriction: all_types_allowed
+    budget_trait:
+      group_budget_fixed: 1.0
+      bid_fixed: 0.20
+    allocation_weight_default: 0.0
+    participates_in_increase_allocation: false
+    participates_in_reallocation_receive: false
+
+classification_rules:
+  table:
+    - condition: campaign_type=exact_keyword AND daily_budget>=5 AND validated_effective
+      group: promotion_group
+      note: 有出单或 ACOS 达标视为已验证有效
+    - condition: campaign_type=exact_keyword AND daily_budget<5
+      group: testing_group
+    - condition: campaign_type IN [broad_keyword, phrase_keyword, auto_discovery]
+      group: auto_broad_group
+      note: 无论预算多少，永不进入推广组或测试组
+    - condition: eliminated_or_abandoned_or_low_bid_pool
+      group: elimination_group
+
+  priority_chain:
+    - elimination_group
+    - auto_broad_group
+    - promotion_group
+    - testing_group
+  priority_notes:
+    - 本轮淘汰则无论原组合一律进入淘汰组
+    - Broad/Phrase/Auto 始终自动广泛组
+    - 已验证精准且预算≥$5 进推广组
+    - 精准测试且预算<$5 进测试组
+
+group_presence:
+  rules:
+    - scenario: 新品起步未跑出有效词
+      may_exist: [auto_broad_group]
+      may_absent: [promotion_group, testing_group]
+      normal: true
+    - scenario: 推广组已在消耗
+      constraint: 测试组与自动广泛组不得挤占推广组预算；测试组优先压缩
+    - scenario: 无淘汰活动
+      elimination_group: optional
+    - scenario: 存在淘汰组
+      elimination_group_budget: fixed_1_usd
+
+promotion_signals:
+  signal_1_search_term_direct:
+    description: 搜索词报告直接信号
+    all_required:
+      - search_term_orders_7d >= 3
+      - search_term_acos_7d <= target_acos
+      - no_existing_exact_campaign_for_term
+    action: 新建 Exact 精准活动，初始预算 < $5，归属 testing_group
+
+  signal_2_word_root:
+    description: 同词根验证信号
+    prerequisite:
+      - no_existing_exact_campaign_for_root
+    performance_any_one:
+      - root_search_terms_orders_7d_sum >= 3
+      - root_acos_7d_sum <= target_acos
+    action: 新建以词根为目标的 Exact 活动，初始预算 < $5，归属 testing_group
+
+promotion_upgrade:
+  from: testing_group
+  to: promotion_group
+  all_required:
+    - campaign_type: exact_keyword
+    - current_daily_budget: ">= 5"
+    - acos_3d: "<= target_acos"
+  note: 自动广泛组不因预算≥$5 升入推广组
+
+group_budget_004:
+  rule_id: GROUP-BUDGET-004
+  trigger_basis: promotion_group_actual_spend
+  not_trigger_basis: product_stage_label
+  tiers:
+    - name: no_actual_spend
+      criteria: 推广组为空 OR 推广组所有活动 7d 花费 = 0
+      policy: 测试组+自动广泛组可自由使用父 ASIN 预算；GROUP-BUDGET-004 暂不生效
+    - name: low_spend
+      criteria: 推广组 7d 花费 > 0 且 < 5
+      policy: GROUP-BUDGET-004 轻度生效；推广组优先保障，测试组无需大幅压缩
+    - name: stable_spend
+      criteria: 推广组 7d 花费 >= 5 且有出单
+      policy: GROUP-BUDGET-004 完全生效；推广组不得断供，测试组优先压缩，自动广泛组次之
+
+budget_principles:
+  GROUP-BUDGET-001:
+    rule: Campaign 预算调整后，必须回算所属组合预算
+  GROUP-BUDGET-002:
+    rule: 组合预算调整后，必须回算 ParentASIN 总预算
+  GROUP-BUDGET-003:
+    rule: 淘汰活动释放的预算发生在 Campaign 活动层，不以淘汰组组合预算作为释放来源
+  GROUP-BUDGET-004:
+    rule: 推广组不得因测试组或自动广泛组扩张而断供
+    detail_ref: group_budget_004
+  GROUP-BUDGET-005:
+    rule: 淘汰组组合预算固定 $1，Bid 固定 $0.20，不参与预算增加和二次分配
+
+campaign_budget_sum_note:
+  can_exceed_parent_target_budget: true
+  reason: Campaign 日预算是上限，多数活动实际花费低于日预算
+  must_control_by:
+    - parent_target_daily_budget
+    - group_budget
+    - expected_spend
+  agent_must_not: 仅用 Campaign 预算总和判断是否超预算
+
+delta_formulas:
+  campaign_budget_delta: proposed_daily_budget - current_daily_budget
+  group_requested_delta: sum(campaign_budget_delta for campaigns in group, exclude elimination_group from increase pool)
+  eliminated_campaign_release: sum(current_daily_budget - 1 for campaigns moved_to elimination_group)
+  parent_requested_delta:
+    expression: sum(positive group_requested_delta) - eliminated_campaign_release - other_campaign_budget_decrease
+  delta_types:
+    positive_delta: 本轮需要追加的预算
+    negative_delta: 本轮释放或回收的预算
+    net_delta: 正负抵扣后的净预算变化
+
+reallocation:
+  processing_order:
+    - Step1: 计算推广组、测试组、自动广泛组的 requested_delta
+    - Step2: 单独计算 eliminated_campaign_release
+    - Step3: 判断父 ASIN 是否允许净增加预算
+    - Step4: 可用预算不足时按组合增量比例或加权比例压缩
+    - Step5: 输出组合预算变化与解释
+
+  net_when_mixed:
+    released_budget: eliminated_campaign_release + sum(abs(group_delta) where group_delta<0 and group!=elimination_group)
+    requested_increase: sum(group_delta where group_delta>0)
+    net_required_increase: requested_increase - released_budget
+
+  proportional_allocation:
+    method: proportional_by_requested_delta
+    formula: group_actual_increase = available_increase * group_requested_positive_delta / total_requested_positive_delta
+    when: 数据健康、无强护栏、各组合都允许预算增加、仅预算重分配
+
+  weighted_allocation:
+    method: weighted_by_fixed_ratio
+    fixed_ratios:
+      promotion_group: 0.60
+      testing_group: 0.20
+      auto_broad_group: 0.20
+      elimination_group: 0.0
+    when:
+      - parent_budget_insufficient
+      - P0_P1_core_push
+      - poor_test_quality
+      - inventory_risk
+      - high_return_low_rating
+    steps:
+      - initial_allocation_i = available * group_target_ratio_i
+      - actual_i = min(requested_positive_delta_i, initial_allocation_i)
+      - leftover redistributed to groups with unmet demand by requested delta ratio
+
+group_action_policies:
+  promotion_group:
+    - core_stable_low_budget: 优先加预算
+    - ranking_task: 不得断供
+    - acos_within_tolerance: 可保留或小幅增加
+    - acos_over_no_rank_support: 降非核心词，核心词谨慎
+  testing_group:
+    - new_exact_testing: 小预算观察
+    - effective_term: 提取到推广组
+    - poor_search_quality: 降预算或否词
+    - budget_tight: 可压缩
+    - promotion_consuming: 测试组优先压缩
+  auto_broad_group:
+    - valuable_search_terms: 保留预算，提词到精准
+    - high_click_no_order: 否词 → 降预算 → 降 Bid → 7天仍差可淘汰
+    - cannot_spend: 先查 Bid 和词覆盖，不直接加大预算
+    - budget_tight: 优先压缩，让位推广组
+  elimination_group:
+    - group_budget: fixed_1
+    - bid: fixed_0.20
+    - no_increase_allocation: true
+    - no_reallocation_receive: true
+    - release_source: campaign_layer_only
+
+output_contract:
+  portfolio_budget_summary:
+    required_after_campaign_adjustments: true
+    fields:
+      parent_asin: string
+      parent_target_daily_budget: decimal
+      current_total_group_budget: decimal
+      proposed_total_group_budget: decimal
+      requested_increase_budget: decimal
+      released_budget: decimal
+      net_required_increase: decimal
+      available_increase_budget: decimal
+      allocation_method:
+        enum:
+          - proportional_by_requested_delta
+          - weighted_by_fixed_ratio
+      budget_reallocation_explanation: string
+
+  budget_groups:
+    type: array
+    item_fields:
+      group_type: string
+      group_name: string
+      current_group_budget: decimal
+      requested_group_budget: decimal
+      proposed_group_budget: decimal
+      requested_delta: decimal
+      actual_delta: decimal
+      released_at_campaign_level: decimal
+      reason: string
+
+  per_campaign_optional:
+    - group_type
+    - group_budget_delta
+
+  kb_alignment: docs/knowledge_base/12-输出规范.md
+
+validation_rule_refs:
+  - GROUP-001
+  - GROUP-002
+  - GROUP-003
+  - GROUP-004
+  - GROUP-004A
+  - GROUP-005
+  - GROUP-006
+  - GROUP-007
+
+kb_cross_refs:
+  - path: docs/knowledge_base/02-标签维度定义.md
+    role: 可补充 AdBudgetGroup 作为预算控制对象
+  - path: docs/knowledge_base/05-动作规则.md
+    role: 预算增减动作引用组合回算
+  - path: docs/knowledge_base/10-安全护栏.md
+    role: 组合/父 ASIN 预算超限护栏
+  - path: docs/knowledge_base/12-输出规范.md
+    role: portfolio_budget_summary 与 budget_groups 输出
+  - path: docs/knowledge_base/执行规则/17-问题诊断与动作优先级.md
+    role: Campaign 动作后进入组合二次分配
+  - path: docs/knowledge_base/执行规则/18-广告执行调整流程.md
+    role: Step 9 后增加组合预算回算
+  - path: docs/knowledge_base/执行规则/21-淘汰广告活动规则.md
+    role: 淘汰释放预算进入回算
+  - path: docs/knowledge_base/执行规则/23-广告组合与预算分配规则.md
+    role: 权威 SOP 全文
+
+example_case_11:
+  parent_asin: B0XXXX
+  parent_target_daily_budget: 100
+  available_increase_budget: 10
+  group_requested_deltas:
+    promotion_group: 20
+    testing_group: 3
+    auto_broad_group: 7
+  eliminated_campaign_release: 20
+  calculation:
+    total_requested_increase: 30
+    net_required_increase: 10
+  conclusion: 淘汰释放 $20 抵扣部分需求，父 ASIN 净增 $10，可按请求增量执行各组合调整

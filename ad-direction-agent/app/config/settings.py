@@ -181,6 +181,15 @@ class Settings(BaseSettings):
     # 否则全局并发会被错误切分。用于把 llm_global_concurrency 静态切给各 worker。
     num_workers: int = 1
 
+    # ERP 测试库（Campaign 分析完成后可选自动 write_full）
+    erp_auto_write: bool = False
+    erp_host: str = "192.168.2.51"
+    erp_port: int = 3306
+    erp_user: str = "erp_agentadvert"
+    erp_password: str = "erp_agentadvert#weilai123"
+    erp_database: str = "erp_agentadvert"
+    erp_write_timeout: int = 30
+
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None
     _raw_thresholds: dict | None = None

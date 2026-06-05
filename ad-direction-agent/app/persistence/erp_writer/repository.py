@@ -10,6 +10,7 @@ from pymysql.cursors import DictCursor
 
 from .models import CanonicalRun, stable_id, warehouse_pending_id
 from .text_utils import (
+    build_wizard_direction_content_json,
     json_dumps,
     level_to_score,
     map_direction_type,
@@ -950,11 +951,11 @@ class ErpDualWriterRepository:
             detail_id = stable_id("det", run.decision_id, dir_id)
             val = validations.get(dir_id) or {}
             dec = decisions.get(dir_id) or {}
-            content = {
-                "direction": d,
-                "validation": val,
-                "decision_package": dec.get("decision_package"),
-            }
+            content = build_wizard_direction_content_json(
+                d,
+                val,
+                dec.get("decision_package"),
+            )
             score = d.get("suitability_score")
             if score is not None:
                 try:

@@ -10,6 +10,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from app.config.settings import settings
+from app.data.known_listings import known_mcp_context
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,28 @@ def _db_connect_kwargs() -> dict:
         "charset": "utf8mb4",
         "cursorclass": DictCursor,
         "connect_timeout": 10,
-        "read_timeout": 20,
+        "read_timeout": max(90, int(settings.mcp_context_timeout or 30)),
     }
+
+
+def _context_from_known(asin: str) -> McpDbContext | None:
+    raw = known_mcp_context(asin)
+    if not raw:
+        return None
+    ctx = McpDbContext(
+        parent_asin=str(raw["parent_asin"]),
+        parent_seller_sku=raw["parent_seller_sku"],
+        shop_account=raw["shop_account"],
+        shop_id=raw["shop_id"],
+        site_code=raw["site_code"],
+    )
+    logger.info(
+        "MCP 上下文(缓存) [%s] sku=%s shop=%s",
+        asin,
+        ctx.parent_seller_sku,
+        ctx.shop_account,
+    )
+    return ctx
 
 
 def _lookup_sync(asin: str, shop_account: str | None) -> dict | None:
@@ -118,14 +139,14 @@ async def resolve_mcp_context_from_db(asin: str) -> McpDbContext | None:
             asin,
             e,
         )
-        return None
+        return _context_from_known(asin)
     except Exception as e:  # noqa: BLE001
         logger.warning("MCP 上下文 DB 查询失败 [%s]: %s", asin, e)
-        return None
+        return _context_from_known(asin)
 
     if not row:
         logger.warning("MCP 上下文：listing 无记录 asin=%s shop=%s", asin, shop_hint or "*")
-        return None
+        return _context_from_known(asin)
 
     site_code = str(row.get("site_code") or settings.mcp_default_site_code or "")
     ctx = McpDbContext(

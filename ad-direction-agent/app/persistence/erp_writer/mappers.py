@@ -7,6 +7,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from app.workflow.steps.campaign_portfolio import (
+    ALL_PORTFOLIOS,
+    PORTFOLIO_BROAD,
+    PORTFOLIO_ELIMINATE,
+    PORTFOLIO_MAIN,
+    PORTFOLIO_TEST,
+)
+
 from .text_utils import map_campaign_group_type
 
 from .models import (
@@ -49,7 +57,7 @@ _ACTION_TO_CATEGORY = {
 
 _CATEGORY_PRIORITY = {"ELIMINATE": 0, "ADJUST": 1, "KEEP": 2}
 
-_PORTFOLIO_LABELS = ("主推", "广泛/自动", "测试/新增", "淘汰")
+_PORTFOLIO_LABELS = ALL_PORTFOLIOS
 
 
 def _warehouse_id(value: Any) -> str:
@@ -108,18 +116,20 @@ def _portfolio_groups_from_payload(
             pass
     constraints = (budget_summary or {}).get("portfolio_constraints") or {}
     return {
-        "main_push_count": counts["主推"],
-        "main_push_budget": constraints.get("主推") if constraints.get("主推") is not None else round(budget_sums["主推"], 2),
-        "broad_auto_count": counts["广泛/自动"],
-        "broad_auto_budget": constraints.get("广泛/自动")
-        if constraints.get("广泛/自动") is not None
-        else round(budget_sums["广泛/自动"], 2),
-        "test_new_count": counts["测试/新增"],
-        "test_new_budget": constraints.get("测试/新增")
-        if constraints.get("测试/新增") is not None
-        else round(budget_sums["测试/新增"], 2),
-        "eliminate_bubble_count": counts["淘汰"],
-        "eliminate_bubble_budget": round(budget_sums["淘汰"], 2),
+        "main_push_count": counts[PORTFOLIO_MAIN],
+        "main_push_budget": constraints.get(PORTFOLIO_MAIN)
+        if constraints.get(PORTFOLIO_MAIN) is not None
+        else round(budget_sums[PORTFOLIO_MAIN], 2),
+        "broad_auto_count": counts[PORTFOLIO_BROAD],
+        "broad_auto_budget": constraints.get(PORTFOLIO_BROAD)
+        if constraints.get(PORTFOLIO_BROAD) is not None
+        else round(budget_sums[PORTFOLIO_BROAD], 2),
+        "test_new_count": counts[PORTFOLIO_TEST],
+        "test_new_budget": constraints.get(PORTFOLIO_TEST)
+        if constraints.get(PORTFOLIO_TEST) is not None
+        else round(budget_sums[PORTFOLIO_TEST], 2),
+        "eliminate_bubble_count": counts[PORTFOLIO_ELIMINATE],
+        "eliminate_bubble_budget": round(budget_sums[PORTFOLIO_ELIMINATE], 2),
     }
 
 

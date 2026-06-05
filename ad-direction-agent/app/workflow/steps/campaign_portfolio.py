@@ -35,11 +35,12 @@ from __future__ import annotations
 
 from app.models.campaign import CampaignUnit
 
-# 组合标签常量 (中文 — 前端直接显示)
-PORTFOLIO_MAIN = "主推"
-PORTFOLIO_BROAD = "广泛/自动"
-PORTFOLIO_TEST = "测试/新增"
-PORTFOLIO_ELIMINATE = "淘汰"
+# 组合标签常量 (中文 — 前端直接显示)；ERP 英文码映射见 erp_writer/text_utils._CAMPAIGN_GROUP_TYPE_MAP
+# 2026-06-04 改名：主推→精准主力组 / 广泛自动→自动广泛组 / 测试新增→精准测试组 / 淘汰→低价捡漏组
+PORTFOLIO_MAIN = "精准主力组"
+PORTFOLIO_BROAD = "自动广泛组"
+PORTFOLIO_TEST = "精准测试组"
+PORTFOLIO_ELIMINATE = "低价捡漏组"
 
 ALL_PORTFOLIOS = (PORTFOLIO_MAIN, PORTFOLIO_BROAD, PORTFOLIO_TEST, PORTFOLIO_ELIMINATE)
 

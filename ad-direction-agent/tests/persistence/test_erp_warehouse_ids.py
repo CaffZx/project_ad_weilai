@@ -19,7 +19,7 @@ def test_pending_uses_doris_ids_not_stable_hash():
                 "match_type": "EXACT",
                 "child_asin": "B0CHILD",
                 "action": "adjust_bid",
-                "ai_portfolio_class": "主推",
+                "ai_portfolio_class": "精准主力组",
                 "current_bid": 1.0,
                 "proposed_bid": 0.8,
                 "confidence": 80,
@@ -29,8 +29,8 @@ def test_pending_uses_doris_ids_not_stable_hash():
     run = canonicalize_payload(payload, shop_id=1622)
     card = run.cards[0]
     assert card.campaign_id == "111222333"
-    assert card.campaign_group_type == "core"
-    assert card.campaign_group_type == "core"
+    assert card.campaign_group_type == "exact_core_group"
+    assert card.campaign_group_type == "exact_core_group"
     assert len(card.keyword_pending) == 1
     assert card.keyword_pending[0].keyword_id == "999888777"
     assert not card.keyword_pending[0].keyword_id.startswith("kwd")

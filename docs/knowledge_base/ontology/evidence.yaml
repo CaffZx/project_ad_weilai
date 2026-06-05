@@ -1,0 +1,185 @@
+# Ontology 第一期 — 报表与证据
+# 来源: 20-亚马逊广告Ontology补充.md §8, 22-Ontology第一期补充内容清单.md §6
+# 版本: phase_1
+
+version: phase_1
+description: 证据源可证明内容与可触发动作；动作→证据反向索引见 actions.yaml
+
+reports_and_signals:
+  search_term_report:
+    label_zh: 搜索词报告
+    tier: primary
+    proves:
+      - user_actual_query
+      - search_term_orders
+      - search_term_spend
+      - search_term_acos
+    triggers_actions:
+      - add_negative_search_term
+      - promote_search_term_to_keyword
+      - exact_keyword_acquisition
+    used_by_campaign_types:
+      - phrase_keyword
+      - broad_keyword
+      - auto_discovery
+
+  targeting_report:
+    label_zh: 投放目标报告
+    tier: primary
+    proves:
+      - keyword_target_performance
+      - product_target_performance
+      - auto_target_performance
+    triggers_actions:
+      - bid_up_for_ranking
+      - bid_down_for_acos
+      - target_retain
+      - target_downgrade
+      - campaign_budget_increase
+      - campaign_budget_decrease
+      - eliminate_to_low_bid_pool
+    used_by_campaign_types:
+      - exact_keyword
+      - phrase_keyword
+      - broad_keyword
+      - auto_discovery
+      - product_targeting
+
+  advertised_product_report:
+    label_zh: 被广告商品报告
+    tier: primary
+    proves:
+      - child_asin_ad_performance
+      - sku_ad_performance
+      - variant_conversion_capacity
+    triggers_actions:
+      - child_variant_carry_judgment
+      - core_sku_risk_judgment
+    used_by_campaign_types: all
+
+  placement_report:
+    label_zh: 广告位报告
+    tier: primary
+    proves:
+      - tos_exposure_clicks_orders_acos
+      - ros_exposure_clicks_orders_acos
+      - pp_exposure_clicks_orders_acos
+    triggers_actions:
+      - placement_adjustment
+      - placement_bid_increase
+      - placement_bid_decrease
+      - block_placement_action_when_missing
+    used_by_campaign_types:
+      - exact_keyword
+      - product_targeting
+    missing_policy: block_only_placement_action
+    validation_rule_refs:
+      - ONT-005
+
+  inventory_status:
+    label_zh: 库存状态
+    tier: guardrail
+    proves:
+      - parent_asin_inventory_health
+      - core_sku_availability
+      - growth_action_feasibility
+    triggers_actions:
+      - block_growth_actions
+      - downgrade_growth_actions
+    missing_policy: block_growth_actions
+    validation_rule_refs:
+      - ONT-004
+
+  organic_rank_signal:
+    label_zh: 自然排名信号
+    tier: guardrail
+    proves:
+      - ranking_opportunity
+      - ranking_decline
+      - main_keyword_protection_need
+    triggers_actions:
+      - push_natural_rank
+      - protect_main_keyword
+      - block_misleading_bid_down
+    missing_policy: block_ranking_action
+    validation_rule_refs:
+      - ONT-006
+
+  listing_quality_signal:
+    label_zh: Listing 承接信号
+    tier: guardrail
+    proves:
+      - rating_health
+      - return_risk
+      - page_conversion_support
+    triggers_actions:
+      - block_keyword_expansion
+      - block_tos_increase
+      - shift_to_diagnostic_traffic
+    missing_policy: block_growth_actions
+
+  browse_node_context:
+    label_zh: 类目节点上下文
+    tier: contextual
+    phase: optional_context
+    proves:
+      - category_competition
+      - category_cpc_baseline
+      - category_seasonality
+    triggers_actions:
+      - threshold_selection
+      - category_mean_selection
+    validation_rule_refs:
+      - ONT-007
+
+  product_type_definition:
+    label_zh: 商品类型定义
+    tier: contextual
+    phase: optional_context
+    proves:
+      - listing_required_attributes_complete
+      - conditional_attributes_status
+    triggers_actions:
+      - listing_diagnosis
+      - data_quality_hint
+    validation_rule_refs:
+      - ONT-006
+
+# 动作 → 必需证据（与 actions.yaml 对齐，便于检索 Ontology Card）
+action_evidence_index:
+  bid_up_for_ranking:
+    required:
+      - targeting_report
+      - organic_rank_signal
+      - inventory_status
+      - listing_quality_signal
+  bid_down_for_acos:
+    required:
+      - targeting_report
+  campaign_budget_increase:
+    required:
+      - targeting_report
+      - inventory_status
+  campaign_budget_decrease:
+    required:
+      - targeting_report
+  add_negative_search_term:
+    required:
+      - search_term_report
+  promote_search_term_to_keyword:
+    required:
+      - search_term_report
+      - inventory_status
+      - listing_quality_signal
+  placement_adjustment:
+    required:
+      - placement_report
+      - inventory_status
+      - listing_quality_signal
+  eliminate_to_low_bid_pool:
+    required:
+      - targeting_report
+  balance_maintain_no_action:
+    required:
+      - targeting_report
+      - inventory_status

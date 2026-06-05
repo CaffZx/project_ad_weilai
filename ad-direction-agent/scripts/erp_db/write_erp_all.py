@@ -10,13 +10,8 @@ from _bootstrap import bootstrap_sys_path
 
 bootstrap_sys_path()
 
-from _erp_conn import ERP_DEFAULT  # noqa: E402
-
-from app.persistence.erp_writer import (  # noqa: E402
-    ErpDualWriterRepository,
-    canonicalize_payload,
-    resolve_listing_context,
-)
+from app.persistence.erp_writer.auto_push import erp_connection_kwargs, push_full_to_erp  # noqa: E402
+from app.persistence.erp_writer import resolve_listing_context  # noqa: E402
 
 
 def _parse_args() -> argparse.Namespace:
@@ -25,11 +20,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--kb", required=True, help="Campaign kb.jsonl path")
     p.add_argument("--wizard", default="", help="Wizard jsonl path")
     p.add_argument("--report", required=True)
-    p.add_argument("--host", default=ERP_DEFAULT["host"])
-    p.add_argument("--port", type=int, default=ERP_DEFAULT["port"])
-    p.add_argument("--user", default=ERP_DEFAULT["user"])
-    p.add_argument("--password", default=ERP_DEFAULT["password"])
-    p.add_argument("--database", default=ERP_DEFAULT["database"])
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--user", default=None)
+    p.add_argument("--password", default=None)
+    p.add_argument("--database", default=None)
     return p.parse_args()
 
 
@@ -47,38 +42,19 @@ def main() -> None:
     kb_payload = _read_jsonl(Path(args.kb))
     wizard_payload = _read_jsonl(Path(args.wizard)) if args.wizard else {}
 
-    decision_meta = wizard_payload.get("decision_meta") or {}
-    if wizard_payload.get("long_term_config"):
-        lt = wizard_payload["long_term_config"]
-        decision_meta.setdefault("product_position", lt.get("product_level"))
-        decision_meta.setdefault("product_stage", lt.get("product_stage"))
-        decision_meta.setdefault("season_type", lt.get("season_stage"))
-        decision_meta.setdefault("ad_purposes", lt.get("ad_purposes"))
-        decision_meta.setdefault("target_keyword_types", lt.get("target_keyword_strategy"))
+    conn = erp_connection_kwargs()
+    if args.host:
+        conn["host"] = args.host
+    if args.port is not None:
+        conn["port"] = args.port
+    if args.user:
+        conn["user"] = args.user
+    if args.password:
+        conn["password"] = args.password
+    if args.database:
+        conn["database"] = args.database
 
-    kb_payload["decision_meta"] = decision_meta
-    kb_payload["shop_id"] = listing.shop_id
-
-    run = canonicalize_payload(
-        kb_payload,
-        shop_id=listing.shop_id,
-        parent_seller_sku=listing.parent_seller_sku,
-        site_code=listing.site_code,
-    )
-    decision_meta["site_code"] = listing.site_code
-
-    repo = ErpDualWriterRepository(
-        host=args.host,
-        port=args.port,
-        user=args.user,
-        password=args.password,
-        database=args.database,
-    )
-    report = repo.write_full(
-        run,
-        wizard_payload=wizard_payload or None,
-        decision_meta=decision_meta,
-    )
+    report = push_full_to_erp(kb_payload, wizard_payload, conn_kwargs=conn)
 
     report_path = Path(args.report)
     report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,12 +10,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _bootstrap import AD_DIRECTION_AGENT, ERP_DB_DIR, SCRIPTS_DIR, bootstrap_sys_path
+from _bootstrap import AD_DIRECTION_AGENT, ERP_DB_DIR, REPO_ROOT, SCRIPTS_DIR, bootstrap_sys_path
 
 bootstrap_sys_path()
 
-_ROOT = AD_DIRECTION_AGENT.parent
+_ROOT = REPO_ROOT
 _OUT = _ROOT / "cursor临时文件"
+
+
+def _script_path(name: str) -> Path:
+    return SCRIPTS_DIR / name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +47,7 @@ def _run_script(path: Path, *argv: str) -> int:
 
 
 def _run_scripts_dir(script: str, *argv: str) -> int:
-    return _run_script(SCRIPTS_DIR / script, *argv)
+    return _run_script(_script_path(script), *argv)
 
 
 def _run_erp_db(script: str, *argv: str) -> int:

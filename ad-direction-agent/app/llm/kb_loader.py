@@ -57,8 +57,10 @@ class KnowledgeBase:
         "conversion": "转化型",
         "ranking": "排名型",
         "profit": "盈利型",
-        # 注意：clearance/清货型 不是广告目的（清货是产品阶段 liquidating/清货期）。
-        # 不在此翻译，避免在广告目的语境中引入"清货型"。
+        # 注意：clearance/清货型 不是广告目的，也不是核心策略标签。
+        # 广告目的由 ad-purpose-agent 权威产出，只有 4 个：traffic/conversion/ranking/profit。
+        # 清货是场景(scenario=clearance「清仓止损」)与产品阶段(liquidating/清货期)。
+        # 已从 KB 12-输出规范.md 枚举中移除 Clearance(2026-06-05)；此处不翻译，双重防止它混入广告目的语境。
         # season（KB 英文 → config 中文）
         "off_season": "淡季",
         "peak_preparation": "旺季准备",
