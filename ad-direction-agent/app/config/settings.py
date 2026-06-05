@@ -176,7 +176,7 @@ class Settings(BaseSettings):
     # 服务级 LLM 总并发上限（全服务，所有非流式 chat() 调用共用）。
     # 实际每 worker 信号量 = llm_global_concurrency // num_workers（见 client._global_llm_sem）。
     # 需按 Key 数 × 单 Key/账号 RPM 调；50 key/3 账号场景下定为 240。
-    llm_global_concurrency: int = 240
+    llm_global_concurrency: int = 420
     # uvicorn worker 进程数（从 NUM_WORKERS 环境变量读）。必须与启动命令 --workers 一致，
     # 否则全局并发会被错误切分。用于把 llm_global_concurrency 静态切给各 worker。
     num_workers: int = 1

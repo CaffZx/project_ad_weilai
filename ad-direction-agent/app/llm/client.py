@@ -96,7 +96,7 @@ class DeepSeekClient:
                     connect=8.0, read=self.timeout, write=10.0, pool=5.0,
                 ),
                 limits=httpx.Limits(
-                    max_connections=200,
+                    max_connections=600,
                     max_keepalive_connections=50,
                     keepalive_expiry=30.0,
                 ),
