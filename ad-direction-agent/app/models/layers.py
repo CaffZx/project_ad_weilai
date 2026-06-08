@@ -15,9 +15,10 @@ from pydantic import BaseModel, Field
 
 
 class ProductLevel(StrEnum):
-    TOP = "头部"       # 核心爆款
-    MID = "腰部"       # 主力款/腰部产品
-    TAIL = "长尾"      # 长尾产品
+    P0 = "战略级产品"   # 全年核心主推/旺季爆款，准入：月订单≥3000 + BSR Top50 + 评≥4.0 + 退货率≤25% + 库存≥30天
+    P1 = "重点产品"     # 市场已验证可推主力款，P2→P1需满足任意3条：日均订单≥50/环比≥20%/自然单>30%/核心词Top50/退货率≤30%
+    P2 = "常规产品"     # 稳定出单、控制成本、保护利润（兜底类型）
+    P3 = "长尾产品"     # 高毛利/小众/风格化，不追大词排名，ACOS通常≤30%
 
 
 class ProductStage(StrEnum):
@@ -43,6 +44,27 @@ STAGE_OLD_TO_NEW: dict[str, str] = {
     "清货": "清货期",
     "清仓": "清货期",
 }
+
+# 产品定位旧值 → 新值透明迁移（2026-06 3 档→4 档）
+LEVEL_OLD_TO_NEW: dict[str, str] = {
+    "头部": "战略级产品",
+    "腰部": "重点产品",
+    "长尾": "长尾产品",
+}
+
+# 产品定位 → ERP code（与 text_utils._PRODUCT_POSITION_MAP 共用真源）
+PRODUCT_LEVEL_TO_CODE: dict[str, str] = {
+    "战略级产品": "P0_PRODUCT",
+    "重点产品": "P1_PRODUCT",
+    "常规产品": "P2_PRODUCT",
+    "长尾产品": "P3_PRODUCT",
+}
+
+
+def product_level_with_code(value: str) -> str:
+    """产品定位→LLM 双写格式：'战略级产品 (P0_PRODUCT)'，确保 KB 规则命中。"""
+    code = PRODUCT_LEVEL_TO_CODE.get(value, "")
+    return f"{value} ({code})" if code else value
 
 
 class SeasonStage(StrEnum):

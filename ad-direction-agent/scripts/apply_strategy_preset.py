@@ -12,7 +12,7 @@ if str(_PROJ) not in sys.path:
 from app.persistence.mysql_state_manager import MySQLStateManager
 
 PRESET = {
-    "product_level": "腰部",
+    "product_level": "重点产品",
     "product_stage": "推进期",
     "season_stage": "旺季准备",
 }

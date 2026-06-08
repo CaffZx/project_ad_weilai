@@ -72,7 +72,7 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
 
     # LLM 推荐
     strategy = {
-        "product_level": long_term.get("product_level", "腰部"),
+        "product_level": long_term.get("product_level", "常规产品"),
         "product_stage": long_term.get("product_stage", ""),
         "season_stage": long_term.get("season_stage", ""),
     } if long_term else {}
@@ -140,7 +140,7 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
 
     strategy_ctx = StrategyConfirmRequest(
         asin=asin,
-        product_level=long_term.get("product_level", "腰部"),
+        product_level=long_term.get("product_level", "常规产品"),
         product_stage=long_term.get("product_stage", "推进期"),
         season_stage=long_term.get("season_stage", "淡季"),
     ) if long_term else None

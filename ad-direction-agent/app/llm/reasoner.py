@@ -15,6 +15,7 @@ from app.core.validation_ops import format_validation_item_ops
 from app.llm.client import DeepSeekClient, deepseek_client
 from app.llm.kb_loader import kb
 from app.models.campaign import CampaignUnit
+from app.models.layers import product_level_with_code
 
 # 运营正文禁止出现的规则编号 / 内部等级词
 _RULE_ID_PATTERN = re.compile(
@@ -878,7 +879,7 @@ class LLMReasoner:
         # 战略层上下文
         if strategy:
             parts.append("## 战略层（人工选择）")
-            parts.append(f"  - 产品定位: {strategy.get('product_level', '?')}")
+            parts.append(f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}")
             parts.append(f"  - 产品阶段: {strategy.get('product_stage', '?')}")
             parts.append(f"  - 淡旺季: {strategy.get('season_stage', '?')}")
             parts.append("")
@@ -1077,7 +1078,7 @@ class LLMReasoner:
 
         context_parts = [
             "## 战略层",
-            f"  - 产品定位: {strategy.get('product_level', '?')}",
+            f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
             f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
             "",
@@ -1200,7 +1201,7 @@ class LLMReasoner:
         """P3 统一推荐：LLM 同时给出目标 ACOS 和预算/Bid 建议"""
         parts = [
             "## 战略层",
-            f"  - 产品定位: {strategy.get('product_level', '?')}",
+            f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
             f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
             "",
@@ -1457,7 +1458,7 @@ class LLMReasoner:
         ctx_parts = [
             "## 策略上下文 (ASIN 级，全批次共享)",
             f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
-            f"  - 产品定位: {strategy_context.get('product_level', '?')}",
+            f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
             f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
@@ -1608,7 +1609,7 @@ class LLMReasoner:
         ctx_lines = [
             "## 策略上下文",
             f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
-            f"  - 产品定位: {strategy_context.get('product_level', '?')}",
+            f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
             f"  - 广告方向(运营已选): {strategy_context.get('ad_directions', []) or '未选'}",

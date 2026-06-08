@@ -130,12 +130,12 @@ async def peak_season_brand_defense(data: ASINData, thresholds: dict) -> Validat
     rule_id="CROSS-8",
     direction="cross_tag",
     priority=1,
-    description="收割/维持阶段 + 头部/腰部产品重点关注利润",
+    description="收割/维持阶段 + 战略级/重点产品重点关注利润",
 )
 async def harvest_core_product_profit(data: ASINData, thresholds: dict) -> ValidationItem | None:
     if data.product_stage not in ("收割利润期", "维持期"):
         return None
-    if data.product_level not in ("头部", "腰部"):
+    if data.product_level not in ("战略级产品", "重点产品"):
         return None
     if data.ad_purpose and "盈利型" not in (data.ad_purpose or ""):
         return ValidationItem(

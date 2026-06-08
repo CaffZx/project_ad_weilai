@@ -55,7 +55,7 @@ def run_get_wizard_state(ctx: WorkflowContext, asin: str) -> WizardStateResponse
     if lt.get("product_level") or lt.get("product_stage"):
         strategy = StrategyConfirmRequest(
             asin=asin,
-            product_level=lt.get("product_level", "腰部"),
+            product_level=lt.get("product_level", "常规产品"),
             product_stage=lt.get("product_stage", "收割利润期"),
             season_stage=lt.get("season_stage", "淡季"),
         )

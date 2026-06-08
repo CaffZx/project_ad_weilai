@@ -6,19 +6,24 @@ label = "产品定位"
 description = "根据产品在店铺中的战略地位划分，决定广告投入力度"
 selection_type = "radio"
 [[strategy.product_level.options]]
-id = "头部"
-label = "头部"
-description = "店铺TOP销量/利润贡献品，占据核心流量位，需要全力防守"
+id = "战略级产品"
+label = "战略级产品 (P0)"
+description = "全年核心主推或旺季爆款。准入：月订单≥3000 + BSR Top50 + 评≥4.0 + 退货率≤25% + 库存≥30天"
 
 [[strategy.product_level.options]]
-id = "腰部"
-label = "腰部"
-description = "有稳定销量和利润贡献，具备上升潜力，需要持续投入"
+id = "重点产品"
+label = "重点产品 (P1)"
+description = "市场已验证，有机会推成主力款。P2→P1需满足任意3条：日均订单≥50 / 环比≥20% / 自然单>30% / 核心词Top50 / 退货率≤30%"
 
 [[strategy.product_level.options]]
-id = "长尾"
-label = "长尾"
-description = "低销量或长尾产品，控制广告成本为主"
+id = "常规产品"
+label = "常规产品 (P2)"
+description = "稳定出单、控制成本、保护利润（兜底类型）"
+
+[[strategy.product_level.options]]
+id = "长尾产品"
+label = "长尾产品 (P3)"
+description = "高毛利、小众或风格化，不追大词排名，ACOS通常≤30%"
 
 [strategy.product_stage]
 label = "产品阶段"

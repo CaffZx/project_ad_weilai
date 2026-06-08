@@ -44,7 +44,7 @@ class MockAdapter(DataSourceAdapter):
         data.natural_order_ratio = None  # 数仓暂无此字段
         data.rating = 4.3
         data.review_count = 35
-        data.product_level = "腰部"
+        data.product_level = "重点产品"
         data.product_stage = "推进期"
         data.season_stage = "旺季准备"
         data.brand = "TestBrand"
@@ -113,7 +113,7 @@ class MockAdapter(DataSourceAdapter):
         data.natural_order_ratio = None
         data.rating = 3.9
         data.review_count = 18
-        data.product_level = "腰部"
+        data.product_level = "重点产品"
         data.product_stage = "推进期"
         data.season_stage = "大旺季"
         data.brand = "TestBrand"
@@ -179,7 +179,7 @@ class MockAdapter(DataSourceAdapter):
         data.natural_order_ratio = None
         data.rating = 4.5
         data.review_count = 128
-        data.product_level = "头部"
+        data.product_level = "战略级产品"
         data.product_stage = "收割利润期"
         data.season_stage = "淡季"
         data.brand = "TestBrand"
@@ -243,7 +243,7 @@ class MockAdapter(DataSourceAdapter):
         data.natural_order_ratio = None
         data.rating = 4.0
         data.review_count = 5
-        data.product_level = "长尾"
+        data.product_level = "长尾产品"
         data.product_stage = "测试期"
         data.season_stage = "淡季"
         data.days_since_launch = 10

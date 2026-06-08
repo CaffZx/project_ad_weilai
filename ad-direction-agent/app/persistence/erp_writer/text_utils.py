@@ -51,13 +51,20 @@ _AD_PURPOSE_MAP = {
 }
 
 _PRODUCT_POSITION_MAP = {
-    "头部": "TOP",
-    "腰部": "WAIST",
-    "长尾": "LONG_TAIL",
-    "同步": "WAIST",
-    "TOP": "TOP",
-    "WAIST": "WAIST",
-    "LONG_TAIL": "LONG_TAIL",
+    "战略级产品": "P0_PRODUCT",
+    "重点产品": "P1_PRODUCT",
+    "常规产品": "P2_PRODUCT",
+    "长尾产品": "P3_PRODUCT",
+    # 旧值兼容别名（2026-06 迁移过渡期）
+    "头部": "P0_PRODUCT",
+    "腰部": "P1_PRODUCT",
+    "长尾": "P3_PRODUCT",
+    "同步": "P1_PRODUCT",
+    # self-map（code 透传）
+    "P0_PRODUCT": "P0_PRODUCT",
+    "P1_PRODUCT": "P1_PRODUCT",
+    "P2_PRODUCT": "P2_PRODUCT",
+    "P3_PRODUCT": "P3_PRODUCT",
 }
 
 _PRODUCT_STAGE_MAP = {

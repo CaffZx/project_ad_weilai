@@ -16,6 +16,7 @@ if str(_sys_root) not in sys.path:
 from app.data.db_adapter import DbAdapter           # noqa: E402
 from app.data.field_mapping import asin_data_to_metrics  # noqa: E402
 from app.llm.client import get_key_pool             # noqa: E402
+from app.models.layers import product_level_with_code  # noqa: E402
 
 _openai_clients: dict[str, OpenAI] = {}
 
@@ -121,7 +122,7 @@ async def determine_ad_targets_from_metrics(
 Please strictly follow the knowledge base rules to diagnose this ASIN:
 
 [Current Product Data] (All below are {days}-day window aggregates unless noted otherwise)
-- 产品定位: {position}
+- 产品定位: {product_level_with_code(position) if position else '?'}
 - 产品阶段: {stage}
 - 淡旺季: {season}
 - {days}日平均自然排名: {(metrics.get('avg_nature_rank') or 100):.1f}

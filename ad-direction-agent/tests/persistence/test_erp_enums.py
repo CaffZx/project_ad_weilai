@@ -24,7 +24,7 @@ def test_site_code_normalize():
 
 
 def test_product_enums():
-    assert map_product_position("腰部") == "WAIST"
+    assert map_product_position("重点产品") == "P1_PRODUCT"
     assert map_product_stage("推进期") == "PROMOTING"
     assert map_season_type("旺季准备") == "PEAK_SEASON_PREPARE"
 

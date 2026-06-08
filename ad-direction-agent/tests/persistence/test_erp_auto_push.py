@@ -16,7 +16,7 @@ from app.persistence.erp_writer.repository import WriteReport
 class _FakeState:
     def get_long_term_config(self, asin: str) -> dict:
         return {
-            "product_level": "腰部",
+            "product_level": "重点产品",
             "product_stage": "推进期",
             "season_stage": "旺季准备",
             "ad_purposes": ["转化型"],
@@ -61,7 +61,7 @@ def test_wizard_payload_from_state():
     assert wizard["parent_asin"] == "B0TEST"
     assert len(wizard["target_scores"]) == 1
     assert len(wizard["keyword_analysis"]) == 1
-    assert wizard["decision_meta"]["product_position"] == "腰部"
+    assert wizard["decision_meta"]["product_position"] == "重点产品"
     assert partial is False
 
 

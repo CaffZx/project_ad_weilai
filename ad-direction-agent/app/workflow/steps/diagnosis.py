@@ -70,7 +70,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
 
     strategy_ctx = StrategyConfirmRequest(
         asin=asin,
-        product_level=long_term.get("product_level", "腰部"),
+        product_level=long_term.get("product_level", "常规产品"),
         product_stage=long_term.get("product_stage", "推进期"),
         season_stage=long_term.get("season_stage", "淡季"),
     ) if long_term else None
@@ -122,7 +122,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
             from app.llm.purpose_adapter import recommend_tactics_from_purpose
             rec = await recommend_tactics_from_purpose(
                 data=data,
-                position=long_term.get("product_level", "腰部"),
+                position=long_term.get("product_level", "常规产品"),
                 stage=long_term.get("product_stage", "推进期"),
                 season=long_term.get("season_stage", "淡季"),
                 days=days,

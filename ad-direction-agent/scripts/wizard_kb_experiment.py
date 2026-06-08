@@ -17,7 +17,7 @@ for _p in (_PROJ, _PURPOSE):
         sys.path.insert(0, str(_p))
 
 STRATEGY_PRESET = {
-    "product_level": "腰部",
+    "product_level": "重点产品",
     "product_stage": "推进期",
     "season_stage": "旺季准备",
 }
