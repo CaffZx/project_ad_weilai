@@ -1730,7 +1730,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                max_tokens=4096,
+                max_tokens=8192,
                 timeout_override=timeout_override or 55,
             )
             parsed = self._parse_json(raw)
