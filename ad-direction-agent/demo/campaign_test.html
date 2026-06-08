@@ -245,6 +245,21 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 .budget-summary-totals .stat strong {
   color: var(--text); font-size: 16px; font-weight: 700; margin: 0 4px;
 }
+
+/* ─── 明细/汇总 Tab 切换 ─── */
+.campaign-tabs {
+  display: flex; gap: 0; margin-bottom: 12px;
+  border-bottom: 2px solid var(--border);
+}
+.ctab-btn {
+  padding: 7px 18px; font-size: 13px; font-weight: 500;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--muted-fg); border-bottom: 2px solid transparent;
+  margin-bottom: -2px; transition: all 0.12s ease;
+}
+.ctab-btn:hover { color: var(--foreground); }
+.ctab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+
 </style>
 </head>
 <body>
@@ -335,17 +350,14 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <div class="text-sm" style="color:#DC2626; margin-top:6px; cursor:help;" id="sumWarnings"></div>
     </div>
 
-    <!-- AI 汇总叙事卡 -->
-    <div class="card hidden" id="campaignSynthesis">
-      <div class="card-title">AI 汇总分析（按共同原因分组）</div>
-      <div id="synthesisBody"></div>
+    <!-- 明细 / 汇总 tab 栏 -->
+    <div class="campaign-tabs hidden" id="campaignTabs">
+      <button class="ctab-btn active" data-tab="detail" onclick="switchCampaignTab('detail')">明细</button>
+      <button class="ctab-btn" data-tab="summary" onclick="switchCampaignTab('summary')">汇总</button>
     </div>
 
-    <!-- 4 组合预算汇总卡 -->
-    <div class="card hidden" id="campaignBudgetSummary">
-      <div class="card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
-      <div id="budgetSummaryBody"></div>
-    </div>
+    <!-- tab=明细 容器 -->
+    <div id="tabDetail">
 
     <!-- 多维筛选 + 搜索 -->
     <div class="card hidden" id="campaignFilters">
@@ -393,6 +405,26 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 
     <div id="campaignList"></div>
 
+    </div><!-- /tabDetail -->
+
+    <!-- tab=汇总 容器 -->
+    <div id="tabSummary" class="hidden">
+
+    <!-- AI 汇总叙事卡 -->
+    <div class="card hidden" id="campaignSynthesis">
+      <div class="card-title">AI 汇总分析（按共同原因分组）</div>
+      <div id="synthesisBody"></div>
+    </div>
+
+    <!-- 4 组合预算汇总卡 -->
+    <div class="card hidden" id="campaignBudgetSummary">
+      <div class="card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
+      <div id="budgetSummaryBody"></div>
+    </div>
+
+    </div><!-- /tabSummary -->
+
+    <!-- loader (tab 外，分析运行时覆盖全区域) -->
     <div id="campaignLoader" class="hidden" style="text-align:center; padding:60px 20px;">
       <span class="spinner"></span>
       <div style="margin-top:12px; color:var(--muted-fg);">正在分析广告活动，预计 15~30 分钟…</div>
@@ -434,6 +466,16 @@ function _saveReviewState(asin, days, runId, state) {
   try {
     localStorage.setItem(_reviewStorageKey(asin, days, runId), JSON.stringify(state));
   } catch (e) { console.warn('localStorage 写入失败', e); }
+}
+
+// ═══════════════ Tab 切换 ═══════════════
+function switchCampaignTab(name) {
+  document.querySelectorAll('.ctab-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  const detail = $('tabDetail');
+  const summary = $('tabSummary');
+  if (name === 'summary') { detail.classList.add('hidden'); summary.classList.remove('hidden'); }
+  else { summary.classList.add('hidden'); detail.classList.remove('hidden'); }
 }
 // 启动时清理 7 天前的旧 key (轻量 GC)
 function _gcOldReviewKeys() {
@@ -580,10 +622,12 @@ async function runCampaignAnalysis() {
 
   $('btnCampaignAnalyze').disabled = true;
   show('campaignLoader');
+  hide('campaignTabs');
   hide('campaignOverview');
   hide('campaignSummary'); hide('campaignFilters');
   hide('campaignSynthesis'); hide('batchToolbar');
   $('campaignList').innerHTML = '';
+  switchCampaignTab('detail');
 
   try {
     const result = await callAPI(
@@ -680,6 +724,7 @@ function renderResult(r) {
   bindFilterEvents();
   applyFilters();
   updateSelectionCount();
+  show('campaignTabs');
 }
 
 function renderSynthesis(synthesis) {

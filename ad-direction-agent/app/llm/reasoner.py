@@ -380,11 +380,11 @@ def _build_campaign_system_prompt(task_type: str = "exact") -> str:
 
 _CAMPAIGN_SYNTHESIS_PROMPT = """你是亚马逊广告运营专家。把若干单活动调整建议合成为运营可读的「分组叙事 + 特殊调整尾部清单」。
 
-## 业务知识（仅作背景参考，不需复述）
-{kb_content}
+本任务**不做广告决策**——每条建议的动作(action)和理由(reason)已在上游确定。你只需读懂已有结论，按语义把"同动作 + 同理由"的建议聚类，并为每组写运营叙事。无需任何额外的广告领域规则。
 
 ## 任务
-按"共同原因"把建议聚成 4-7 组（不超过 7 组），每组给出标题 + 一段 2-4 句运营叙事；
+按"共同原因"把建议聚成 4-10 组（不超过 10 组），每组给出标题 + 一段 2-4 句运营叙事；
+宁可多分一组，也不要把原因明显不同的建议揉进同一组。
 剩下少数难以归组的特殊建议放进 `special_cases` 尾部清单。
 
 ## 分组依据（按优先级）
@@ -424,7 +424,9 @@ _CAMPAIGN_SYNTHESIS_PROMPT = """你是亚马逊广告运营专家。把若干单
 
 
 def _build_campaign_synthesis_prompt() -> str:
-    return _CAMPAIGN_SYNTHESIS_PROMPT.replace("{kb_content}", kb.build("campaign_adjustment"))
+    # synthesis 只做语义分组 + 叙事，不做广告判断，不需要任何 KB（2026-06-08）
+    # 删除 26K 的 campaign_adjustment KB → 降输入 token / 延迟 / 超时风险
+    return _CAMPAIGN_SYNTHESIS_PROMPT
 
 
 # ── Campaign 策略总览(执行总纲) Prompt ───────────────────────────────────────
@@ -1700,7 +1702,7 @@ class LLMReasoner:
                 "proposed_bid": d.get("proposed_bid"),
                 "current_budget": d.get("current_budget"),
                 "proposed_budget": d.get("proposed_budget"),
-                "reason_excerpt": (d.get("reason") or "")[:80],
+                "reason": d.get("reason") or "",  # 完整理由：分组命脉，不截断
                 "confidence": d.get("confidence", "medium"),
             })
 
