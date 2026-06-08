@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeBase:
-    VERSION = "v3.1.0"
+    VERSION = "v3.2.0"
 
     # parents[0]=app/llm, parents[1]=app, parents[2]=ad-direction-agent, parents[3]=repo root
     ROOT = Path(__file__).resolve().parents[3] / "docs" / "knowledge_base"
@@ -95,7 +95,7 @@ class KnowledgeBase:
         "10": "10-安全护栏.md",
         "11": "11-风险评分.md",
         "12": "12-输出规范.md",
-        "13": "13-记忆结构.md",
+        "13": "13-记忆系统规则.md",
         "14": "14-名词定义.md",
         "15": "执行规则/15-策略约束值规则.md",
         "16": "执行规则/16-新增活动规则.md",
@@ -104,8 +104,8 @@ class KnowledgeBase:
         "19": "执行规则/19-执行层数值规则.md",
         "21": "执行规则/21-淘汰广告活动规则.md",
         "22": "执行规则/22-调整广告活动规则.md",
-        # # 23-30 预留槽位（文件暂未创建，启动时 logger.error 提示缺失，缓存空串不崩）
-        # "23": "执行规则/23-预留.md",
+        "23": "执行规则/23-广告组合与预算分配规则.md",
+        # # 24-30 预留槽位（文件暂未创建，启动时 logger.error 提示缺失，缓存空串不崩）
         # "24": "执行规则/24-预留.md",
         # "25": "执行规则/25-预留.md",
         # "26": "执行规则/26-预留.md",
