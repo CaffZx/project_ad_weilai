@@ -249,6 +249,8 @@ class DbAdapter(DataSourceAdapter):
         # DB 值可能为旧枚举（7值），映射为新 5 值
         from app.models.layers import STAGE_OLD_TO_NEW
         data.product_stage = STAGE_OLD_TO_NEW.get(data.product_stage, data.product_stage)
+        from app.models.layers import LEVEL_OLD_TO_NEW
+        data.product_level = LEVEL_OLD_TO_NEW.get(data.product_level, data.product_level)
         data.season_stage = listing.get("seasonality")
         data.brand = listing.get("brand")
         data.product_line = listing.get("product_line")
