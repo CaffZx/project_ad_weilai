@@ -175,7 +175,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
 
     strategy_context = StrategyConfirmRequest(
         asin=asin,
-        product_level=long_term.get("product_level", "常规产品"),
+        product_level=long_term.get("product_level", "常规产品 (P2)"),
         product_stage=long_term.get("product_stage", "推进期"),
         season_stage=long_term.get("season_stage", "淡季"),
     ) if strategy_saved else None
@@ -386,7 +386,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
         rec = await asyncio.wait_for(
             recommend_tactics_from_purpose(
                 data=data,
-                position=long_term.get("product_level", "常规产品"),
+                position=long_term.get("product_level", "常规产品 (P2)"),
                 stage=long_term.get("product_stage", "推进期"),
                 season=long_term.get("season_stage", "淡季"),
                 days=days,

@@ -61,8 +61,9 @@ class StateManager:
                     from app.models.layers import STAGE_OLD_TO_NEW
                     data["product_stage"] = STAGE_OLD_TO_NEW.get(data["product_stage"], data["product_stage"])
                 if "product_level" in data:
-                    from app.models.layers import LEVEL_OLD_TO_NEW
-                    data["product_level"] = LEVEL_OLD_TO_NEW.get(data["product_level"], data["product_level"])
+                    from app.models.layers import LEVEL_OLD_TO_NEW, normalize_product_level
+                    pl = normalize_product_level(data["product_level"])
+                    data["product_level"] = LEVEL_OLD_TO_NEW.get(pl, pl)
                 return data
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("读取长期配置失败 [%s]: %s", asin, e)

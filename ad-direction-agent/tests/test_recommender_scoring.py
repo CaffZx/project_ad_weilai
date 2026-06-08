@@ -26,7 +26,7 @@ def _harvest_peak_end_asin() -> ASINData:
         natural_order_ratio=76.2,
         product_stage="收割利润期",
         season_stage="旺季末期",
-        product_level="战略级产品",
+        product_level="战略级产品 (P0)",
         ad_purpose="盈利型",
         ad_data=AdData(acos=22.0, spend=500, orders=40),
         signals=SpecialSignals(inventory_qty=100, inventory_days=45),

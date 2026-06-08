@@ -135,7 +135,7 @@ async def peak_season_brand_defense(data: ASINData, thresholds: dict) -> Validat
 async def harvest_core_product_profit(data: ASINData, thresholds: dict) -> ValidationItem | None:
     if data.product_stage not in ("收割利润期", "维持期"):
         return None
-    if data.product_level not in ("战略级产品", "重点产品"):
+    if data.product_level not in ("战略级产品 (P0)", "重点产品 (P1)"):
         return None
     if data.ad_purpose and "盈利型" not in (data.ad_purpose or ""):
         return ValidationItem(

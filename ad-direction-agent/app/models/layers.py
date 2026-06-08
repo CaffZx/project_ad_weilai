@@ -6,6 +6,7 @@ Layer 1.3 诊断层 — 产品数据摘要（只读）
 Layer 1.4 执行层 — 广告方向（多选，有AI推荐，不持久化）
 """
 
+import re
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -14,11 +15,41 @@ from pydantic import BaseModel, Field
 # ── 枚举定义 ────────────────────────────────────────────────
 
 
+def normalize_product_level(value):
+    """归一化产品定位原始输入，防全角/空格漂移导致枚举校验失败。
+
+    处理：全角括号（）→ 半角()、全角空格(U+3000)→半角、首尾 trim、
+    规范"中文(Px)"为"中文 (Px)"（括号前单空格）。
+    仅做格式归一，不做旧值→新值映射（后者由 LEVEL_OLD_TO_NEW 负责）。
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.replace("（", "(").replace("）", ")").replace("　", " ").strip()
+    s = re.sub(r"\s*\(\s*", " (", s)   # 左括号前规范为单空格、去括号内前导空格
+    s = re.sub(r"\s*\)", ")", s)        # 去右括号前空格
+    return s.strip()
+
+
 class ProductLevel(StrEnum):
-    P0 = "战略级产品"   # 全年核心主推/旺季爆款，准入：月订单≥3000 + BSR Top50 + 评≥4.0 + 退货率≤25% + 库存≥30天
-    P1 = "重点产品"     # 市场已验证可推主力款，P2→P1需满足任意3条：日均订单≥50/环比≥20%/自然单>30%/核心词Top50/退货率≤30%
-    P2 = "常规产品"     # 稳定出单、控制成本、保护利润（兜底类型）
-    P3 = "长尾产品"     # 高毛利/小众/风格化，不追大词排名，ACOS通常≤30%
+    P0 = "战略级产品 (P0)"   # 全年核心主推/旺季爆款，准入：月订单≥3000 + BSR Top50 + 评≥4.0 + 退货率≤25% + 库存≥30天
+    P1 = "重点产品 (P1)"     # 市场已验证可推主力款，P2→P1需满足任意3条：日均订单≥50/环比≥20%/自然单>30%/核心词Top50/退货率≤30%
+    P2 = "常规产品 (P2)"     # 稳定出单、控制成本、保护利润（兜底类型）
+    P3 = "长尾产品 (P3)"     # 高毛利/小众/风格化，不追大词排名，ACOS通常≤30%
+
+    @classmethod
+    def _missing_(cls, value):
+        """枚举层统一容错：全角括号/空格漂移、旧 3 档值 → 归一到合法成员，防 422。
+
+        任何 ProductLevel(value)（含 Pydantic 校验）走标准查找失败时触发。
+        """
+        if not isinstance(value, str):
+            return None
+        v = normalize_product_level(value)
+        v = LEVEL_OLD_TO_NEW.get(v, v)
+        for member in cls:
+            if member.value == v:
+                return member
+        return None
 
 
 class ProductStage(StrEnum):
@@ -45,26 +76,39 @@ STAGE_OLD_TO_NEW: dict[str, str] = {
     "清仓": "清货期",
 }
 
-# 产品定位旧值 → 新值透明迁移（2026-06 3 档→4 档）
+# 产品定位旧值 → 新值透明迁移（2026-06 3 档→4 档，枚举值带 (Px) 后缀）
+# 同时兼容「中间态裸中文 4 档」（无后缀）以防早期存量
 LEVEL_OLD_TO_NEW: dict[str, str] = {
-    "头部": "战略级产品",
-    "腰部": "重点产品",
-    "长尾": "长尾产品",
+    # 旧 3 档 → 4 档（腰部统一迁 P2 常规产品，与兜底默认一致）
+    "头部": "战略级产品 (P0)",
+    "腰部": "常规产品 (P2)",
+    "长尾": "长尾产品 (P3)",
+    # 中间态裸中文 → 带后缀标准值
+    "战略级产品": "战略级产品 (P0)",
+    "重点产品": "重点产品 (P1)",
+    "常规产品": "常规产品 (P2)",
+    "长尾产品": "长尾产品 (P3)",
 }
 
-# 产品定位 → ERP code（与 text_utils._PRODUCT_POSITION_MAP 共用真源）
+# 产品定位（带后缀枚举值）→ ERP code（与 text_utils._PRODUCT_POSITION_MAP 共用真源）
 PRODUCT_LEVEL_TO_CODE: dict[str, str] = {
-    "战略级产品": "P0_PRODUCT",
-    "重点产品": "P1_PRODUCT",
-    "常规产品": "P2_PRODUCT",
-    "长尾产品": "P3_PRODUCT",
+    "战略级产品 (P0)": "P0_PRODUCT",
+    "重点产品 (P1)": "P1_PRODUCT",
+    "常规产品 (P2)": "P2_PRODUCT",
+    "长尾产品 (P3)": "P3_PRODUCT",
 }
 
 
 def product_level_with_code(value: str) -> str:
-    """产品定位→LLM 双写格式：'战略级产品 (P0_PRODUCT)'，确保 KB 规则命中。"""
-    code = PRODUCT_LEVEL_TO_CODE.get(value, "")
-    return f"{value} ({code})" if code else value
+    """产品定位→LLM 展示格式，确保 KB 规则命中。
+
+    枚举值已自带 (Px)，直接返回；若传入裸中文/旧值则归一为带后缀标准值。
+    """
+    if not value:
+        return value
+    if value in PRODUCT_LEVEL_TO_CODE:
+        return value
+    return LEVEL_OLD_TO_NEW.get(value, value)
 
 
 class SeasonStage(StrEnum):

@@ -133,7 +133,7 @@ class Settings(BaseSettings):
     campaign_sem_acquire_timeout: int = 120
     # 策略总览(执行总纲)：明细前的宏观方向 AI 文本 + 定性 preamble 注入分批
     # 在主链上，必须 fail-open；Windows 本机有 asyncio 取消缺陷风险，建议仅服务器(Linux)开启
-    campaign_overview_enabled: bool = False  # 临时禁用(2026-06-02)：KB 15/17 注入后先验明细流，总览待后续单独验
+    campaign_overview_enabled: bool = True   # 恢复(2026-06-08)：禁用根因(Win asyncio 取消挂死)已由 main.py SelectorEventLoopPolicy 根治；_run_overview 带 timeout_override=55 + fail-open
     # Campaign 组合(Portfolio)分类与预算汇总(2026-06-02)
     # 4 类 AI 自造逻辑分类: 主推/广泛自动/测试新增/淘汰；非亚马逊后台 Portfolio。
     # 关闭后 ai_portfolio_class 留空、result.budget_summary=None，行为退化到改前。

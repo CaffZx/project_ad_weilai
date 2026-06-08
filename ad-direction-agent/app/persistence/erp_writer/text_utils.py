@@ -51,15 +51,21 @@ _AD_PURPOSE_MAP = {
 }
 
 _PRODUCT_POSITION_MAP = {
+    # 带后缀枚举值（权威）
+    "战略级产品 (P0)": "P0_PRODUCT",
+    "重点产品 (P1)": "P1_PRODUCT",
+    "常规产品 (P2)": "P2_PRODUCT",
+    "长尾产品 (P3)": "P3_PRODUCT",
+    # 裸中文兼容（中间态）
     "战略级产品": "P0_PRODUCT",
     "重点产品": "P1_PRODUCT",
     "常规产品": "P2_PRODUCT",
     "长尾产品": "P3_PRODUCT",
-    # 旧值兼容别名（2026-06 迁移过渡期）
+    # 旧值兼容别名（2026-06 迁移过渡期，腰部统一 P2）
     "头部": "P0_PRODUCT",
-    "腰部": "P1_PRODUCT",
+    "腰部": "P2_PRODUCT",
     "长尾": "P3_PRODUCT",
-    "同步": "P1_PRODUCT",
+    "同步": "P2_PRODUCT",
     # self-map（code 透传）
     "P0_PRODUCT": "P0_PRODUCT",
     "P1_PRODUCT": "P1_PRODUCT",
