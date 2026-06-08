@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-03
-> **版本**: v1.3
+> **最后更新**: 2026-06-06
+> **版本**: v1.4
 > **分支**: chenv3.0
 
 ---
@@ -255,13 +255,15 @@ num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 wor
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| Synthesis 恢复 | P0 | 当前 `_SYNTHESIS_ENABLED=False`（第一期上线），Linux 验证后开启 |
+| 策略总览(执行总纲)恢复 | P0 | 当前 `campaign_overview_enabled=False`（settings.py L136，2026-06-02 禁用）。调用 `recommend_campaign_overview()` → 产出三段 `posture_brief` 注入各批 prompt 作定性框架。KB preset=`campaign_overview: ["02","04","09"]`。禁用原因：KB 15/17 注入后先验明细流，总览待单独验证。**恢复即恢复，无需代码改动；需构造用例端到端验证三段输出质量** |
+| Synthesis 汇总合成恢复 | P0 | 当前 `_SYNTHESIS_ENABLED=False`（campaign.py L51，第一期上线临时禁用）。调用 `recommend_campaign_synthesis()` 把 N 条单活动建议合成为「分组叙事 + 特殊调整尾部清单」。**恢复时去掉 `asyncio.wait_for` 外层、改用 `chat(timeout_override=55)` 绕过 Windows asyncio 取消缺陷；需 Linux 服务器端到端验证** |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
+| **新增广告活动分析** | P1 | KB 16（新增活动规则）已存在但**未接入任何 preset**，当前 campaign 模块仅分析**已有**活动的调优/淘汰，无法给出"应新建哪些活动"的建议。需：(a) 将 KB 16 加入 preset（如 `campaign_adjustment`）；(b) 在 reasoner.py 新增 `recommend_new_campaigns()` 或扩展现有 prompt；(c) 新增 campaign.py 编排步骤（在已有活动分析后运行，基于策略上下文 + KB 16 规则） |
 | DB 落库 | P1 | `t_advert_agent_campaign_analysis` + `_adjustment` 表 |
 | L420 投票 key 同源化 | P1 | `tiebreaker_summaries` 依赖 LLM 回显 campaign_key |
+| **`is_core` 核心词真实数据源** | P1 | 模型字段 `CampaignUnit.is_core: bool` 已定义（model L122），reasoner 已透传至 LLM prompt（reasoner.py L1428-1429）+ synthesis 输出。但**写入端硬编码 `False`**（campaign.py L770：`is_core=False`）。需 (a) 确定数据源（Doris keyword_library 字段 / LLM 从 purpose-agent keyword_class 判定 / 运营手动标注）；(b) 填充 `_campaign_to_prompt_dict` 调用处的真实值 |
 | `POST /campaign/confirm` 落地 | P2 | MySQL pending 表 + ERP 推送 |
-| `is_core` 真实数据源 | P2 | 替换硬编码 False |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL |
 | **A1 修复** | P1 | `_ensure_data` 不支持 meta_filter+缓存共存,修复后 Campaign 可走 ctx 路径命中 Redis |
 
@@ -351,4 +353,4 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 
 ---
 
-*最后更新：2026-06-03（v1.3: 组合分类+预算汇总+RLock修复+action归一化+meta_filter优化）*
+*最后更新：2026-06-06（v1.4: 待办细化——策略总览/汇总合成/新增活动分析/is_core核心词）*
