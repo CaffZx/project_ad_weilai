@@ -218,8 +218,11 @@ actions:
       - campaign_age_under_3_days
       - core_keyword_ranking_support
       - pre_elimination_diagnosis_incomplete
+      - target_group_not_elimination_group
+      - elimination_group_already_full_and_budget_exceeded
     missing_report_policy: {}
     validation_rule_refs:
+      - ONT-013
       - GROUP-002
       - GROUP-003
       - GROUP-004
@@ -229,6 +232,7 @@ actions:
       - must_recalculate_parent_asin_budget: true
       - elimination_group_budget_fixed: 1.0
       - elimination_bid_fixed: 0.20
+      - target_group_must_be: elimination_group
 
   balance_maintain_no_action:
     label_zh: 平衡维持（无策略性大动作）

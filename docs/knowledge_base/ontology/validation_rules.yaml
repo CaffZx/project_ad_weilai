@@ -195,6 +195,84 @@ validation_rules:
       - budget_guardrail
     severity: hard_block
 
+  # ---------------------------------------------------------------------------
+  # Phase 1b — 广告组合对象边界规则（来源 20 §9 ONT-011~014）
+  # 这 4 条是对象级硬约束，与 GROUP-* 预算算术校验不同：
+  #   ONT-011/012 约束对象身份混用，ONT-013/014 约束淘汰动作目标与淘汰组不变属性
+  # ---------------------------------------------------------------------------
+  ONT-011:
+    name: portfolio_not_equal_ad_budget_group
+    rule: Portfolio 是广告组织对象（账号侧容器），不等于 AdBudgetGroup（预算控制层）；二者不得混用
+    if:
+      object_class: Portfolio
+      usage:
+        in:
+          - budget_control
+          - group_budget_reallocation
+          - eliminated_campaign_release
+    then:
+      status: blocked
+      message: Portfolio 仅用于组织 Campaign，预算控制必须使用 AdBudgetGroup
+      correct_object: AdBudgetGroup
+    severity: hard_block
+    maps_to:
+      - entities.yaml:94-100     # Portfolio 定义
+      - entities.yaml:102-124    # AdBudgetGroup 定义
+      - budget_groups.yaml:8-9   # Portfolio ≠ AdBudgetGroup 注释
+
+  ONT-012:
+    name: campaign_must_belong_to_exactly_one_budget_group
+    rule: 每个 Campaign 必须且只能归属 1 个 AdBudgetGroup
+    if:
+      object_class: Campaign
+      any_of:
+        - belongs_to_group_missing: true
+        - belongs_to_group_count: "> 1"
+    then:
+      status: blocked
+      message: Campaign 必须归属唯一一个 AdBudgetGroup，缺失或多归属均阻断输出
+    severity: hard_block
+    maps_to:
+      - budget_groups.yaml:55      # Campaign.belongs_to_group
+      - 23-广告组合与预算分配规则.md §3.2  # 归类优先级（冲突时只能落一个组）
+
+  ONT-013:
+    name: eliminate_target_must_be_elimination_group
+    rule: eliminate_to_low_bid_pool 动作的目标组合必须是 elimination_group（低价捡漏组）
+    if:
+      action_code: eliminate_to_low_bid_pool
+      target_group_type:
+        not_in:
+          - elimination_group
+    then:
+      status: blocked
+      message: 淘汰动作只能移入低价捡漏组（elimination_group），不得移入推广组/测试组/自动广泛组
+    severity: hard_block
+    maps_to:
+      - 23-广告组合与预算分配规则.md §3.2  # 优先级：低价捡漏组 > 自动广泛组 > 精准主力组 > 精准测试组
+      - 23-广告组合与预算分配规则.md §8.4  # 淘汰组动作规则
+      - 21-淘汰广告活动规则.md:L14           # 淘汰统一使用 eliminate_to_low_bid_pool
+
+  ONT-014:
+    name: elimination_group_immutable_properties
+    rule: 低价捡漏组（elimination_group）的预算固定 $1、Bid 固定 $0.20，且不参与增长预算分配；这些属性不可被任何动作覆盖
+    if:
+      object_class: AdBudgetGroup
+      group_type: elimination_group
+      any_of:
+        - proposed_group_budget: "!= 1"
+        - proposed_bid: "!= 0.20"
+        - participates_in_increase_allocation: true
+    then:
+      status: blocked
+      message: 低价捡漏组预算锁死 $1、Bid 锁死 $0.20，不可参与新增预算分配或二次分配接收
+    severity: hard_block
+    note: 本规则与 GROUP-004/004A 共同构成淘汰组双层防线；ONT-014 属对象层不可变属性校验，GROUP-004/004A 属预算层算术校验
+    maps_to:
+      - 20-亚马逊广告Ontology补充.md §9 ONT-014
+      - budget_groups.yaml:87-96  # elimination_group budget_trait
+      - 23-广告组合与预算分配规则.md §8.4
+
 # ---------------------------------------------------------------------------
 # 广告组合与预算分配（Phase 1b，来源 23-广告组合与预算分配规则.md）
 # ---------------------------------------------------------------------------
@@ -336,3 +414,15 @@ acceptance_checklist:
   - id: AC-13
     check: 输出含 budget_groups[] 与各组合 requested_delta / actual_delta
     rule_ref: budget_groups.yaml output_contract
+  - id: AC-14
+    check: Portfolio 仅用于组织 Campaign，预算控制不得混用 Portfolio 替代 AdBudgetGroup
+    rule_ref: ONT-011
+  - id: AC-15
+    check: 每个 Campaign 归属唯一一个 AdBudgetGroup，不出现多归属或缺失
+    rule_ref: ONT-012
+  - id: AC-16
+    check: eliminate_to_low_bid_pool 目标组必须是 elimination_group
+    rule_ref: ONT-013
+  - id: AC-17
+    check: elimination_group 预算锁死 $1 + Bid $0.20，不可参与增长分配
+    rule_ref: ONT-014

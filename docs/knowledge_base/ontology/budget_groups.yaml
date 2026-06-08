@@ -91,6 +91,9 @@ group_types:
     budget_trait:
       group_budget_fixed: 1.0
       bid_fixed: 0.20
+    immutable_properties:
+      rule_ref: ONT-014
+      description: 预算 $1 + Bid $0.20 为对象层不变属性，不可被任何动作覆盖；与 GROUP-004/004A 构成双层防线
     allocation_weight_default: 0.0
     participates_in_increase_allocation: false
     participates_in_reallocation_receive: false
@@ -174,6 +177,139 @@ group_budget_004:
       criteria: 推广组 7d 花费 >= 5 且有出单
       policy: GROUP-BUDGET-004 完全生效；推广组不得断供，测试组优先压缩，自动广泛组次之
 
+# ---------------------------------------------------------------------------
+# 全局广告目标 — 自然流量优先级评分（GROUP-BUDGET-006 核心依赖）
+# 来源: 23 §3.1A
+# ---------------------------------------------------------------------------
+natural_traffic_priority_score:
+  description: 当多个活动同时表现较好但预算不能全部满足时，Agent 必须先计算此分数，优先给最高分活动分配预算
+  formula:
+    expression: "search_volume_score * 3 + current_position_score * 3 + page_uplift_score * 3 + relevance_score * 2 + acos_score * 1"
+    max_possible: 60
+  dimensions:
+    search_volume_score:
+      label_zh: 搜索量评分
+      weight: 3
+      scale:
+        - score: 5; condition: 搜索量 Top 20% 或明显大流量词
+        - score: 3; condition: 搜索量 Top 20%–50%
+        - score: 2; condition: 搜索量缺失但词高度相关
+        - score: 1; condition: 低搜索量词
+    current_position_score:
+      label_zh: 当前自然位评分
+      weight: 3
+      scale:
+        - score: 5; condition: 第1页 / Top20
+        - score: 4; condition: 第2页 / Top21–40
+        - score: 3; condition: 第3页 / Top41–60
+        - score: 2; condition: 第4–5页
+        - score: 1; condition: 第6页以后
+        - score: 0; condition: 无自然排名
+    page_uplift_score:
+      label_zh: 排名上升评分
+      weight: 3
+      scale:
+        - score: 5; condition: 本轮进入第1页 / Top20
+        - score: 4; condition: 本轮进入第2页
+        - score: 3; condition: 本轮进入第3页
+        - score: 2; condition: 仍在第4页以后但有上升
+        - score: 1; condition: 轻微上升但仍无有效流量位置
+        - score: 0; condition: 无上升或下滑
+    relevance_score:
+      label_zh: 词相关性评分
+      weight: 2
+      scale:
+        - score: 5; condition: 核心精准词，直接对应产品主卖点
+        - score: 4; condition: 强相关长尾词
+        - score: 3; condition: 中相关词
+        - score: 2; condition: 弱相关但可观察
+        - score: 1; condition: 泛词 / 相关性低
+        - score: 0; condition: 明显不相关
+    acos_score:
+      label_zh: ACOS 评分
+      weight: 1
+      scale:
+        - score: 5; condition: ACOS ≤ 目标 ACOS
+        - score: 3; condition: ACOS ≤ 有效容忍上限
+        - score: 1; condition: ACOS 接近容忍上限且有订单
+        - score: 0; condition: ACOS 超容忍上限或无转化支持
+  execution_rules:
+    - 预算优先给 natural_traffic_priority_score 最高的活动
+    - 不得仅因某词从第7页升到第4页，就优先于从第2页升到第1页的词（后者通常能带来更高自然流量）
+    - 不得仅按排名提升幅度判断；不同搜索量词同样提升一页，带来的自然流量不同
+    - ACOS 是成本约束而非第一优先级；只要 ACOS 在有效容忍范围内，优先考虑自然流量机会
+    - 若关键字段缺失（搜索量/自然位/相关性/ACOS），不得自动大幅加预算 → MANUAL_REVIEW 或小预算观察
+    - 不得因为多个活动都表现好就平均加预算（平均加预算稀释推词预算，削弱自然位推进效果）
+
+# ---------------------------------------------------------------------------
+# 活动预算总和与组合预算健康比例 + 瓶颈判断（GROUP-BUDGET-007 核心依赖）
+# 来源: 23 §4.3
+# ---------------------------------------------------------------------------
+health_ratio_bottleneck:
+  description: 组合预算是当天总花费上限，一旦触达组内所有活动当日全部停止；Agent 必须先检查组合利用率再决定是否调整活动层
+  pitfall: |
+    当活动总和$100、组合预算$50时，亚马逊按竞价逻辑先到先得，组合花到$50后当日关停所有活动。
+    某活动花了$10就停了，Agent 看到预算利用率33%会误判"花不出去"，然后提Bid或扩词。
+    实际原因是组合预算不足，不是活动本身的问题。
+  health_tiers:
+    - tier: 健康
+      criteria: 活动总和 ≤ 组合预算 × 1.5
+      action: 正常执行
+    - tier: 预警
+      criteria: 活动总和 > 组合预算 × 1.5
+      action: 标记提示，优先通过组内挪移降低比例
+    - tier: 危险
+      criteria: 活动总和 > 组合预算 × 2.0
+      action: MANUAL_REVIEW，不做自动调整，等待人工确认是否提升组合预算
+  bottleneck_diagnosis:
+    description: 每次调整前必执行；先判断瓶颈在哪一层，再决定动作
+    rules:
+      - condition: 组合利用率 = 100% AND 活动平均利用率 < 80%
+        bottleneck_layer: 组合层
+        correct_action: 建议提升组合预算，不调整单个活动预算
+      - condition: 活动利用率 = 100% AND 组合利用率 < 80%
+        bottleneck_layer: 活动层
+        correct_action: 按正常逻辑调整活动预算
+      - condition: 组合利用率 = 100% AND 活动平均利用率 ≈ 100%
+        bottleneck_layer: 父 ASIN 层
+        correct_action: 建议提升父 ASIN 总预算
+
+# ---------------------------------------------------------------------------
+# 精准主力组内预算挪移规则（GROUP-BUDGET-008 核心依赖）
+# 来源: 23 §4.4
+# ---------------------------------------------------------------------------
+promotion_internal_reallocation:
+  description: 推广组内有活动命中 push_natural_rank + RANK_OPPORTUNITY 但组合预算受限时，执行组内挪移
+  core_principle: 广告核心目的是推出词的自然位和自然流量，不是词越多越好；预算流向始终优先给 natural_traffic_priority_score 最高的活动
+  step_1_identify_sources:
+    description: 识别可释放活动（组内挪移来源）
+    conditions:
+      - ad_direction IN [balance_maintain, profit]
+      - budget_utilization < 50%
+    release_amount_formula: 当前预算 - 实际花费 × 1.3
+    buffer_note: 保留 30% 缓冲，不全砍
+  step_2_identify_targets:
+    description: 识别优先增加活动（组内挪移目标）
+    priority_order:
+      - priority: 1; criterion: natural_traffic_priority_score 最高
+      - priority: 2; criterion: 分数接近时，优先当前自然位更接近第1页 / Top20 的词
+      - priority: 3; criterion: 再优先词更精准 / 相关性更强的词
+      - priority: 4; criterion: 最后比较 ACOS、订单数、CVR 等成本和转化指标
+  step_3_execution:
+    - "Step 3-1: 从可释放活动砍预算，汇入挪移池"
+    - "Step 3-2: 按优先级依次补给 ranking push 活动，每个活动不超过其 requested_delta"
+    - "Step 3-3: 若挪移池仍不足 → 提升组合预算"
+    - "Step 3-4: 若组合预算提升后仍不足 → 提升父 ASIN 总预算"
+  layer_rule:
+    description: GROUP-BUDGET-008 两层规则
+    layer_1_activity:
+      description: 活动层 — balance_maintain / profit 方向的活动，若预算利用率低且自然位无有效提升，不对其加预算；预算自然向 natural_traffic_priority_score 高的 ranking push 活动集中
+    layer_2_reallocation:
+      description: 挪移层 — 当高分 ranking push 活动预算已满但组合预算仍紧张时，执行内部挪移：利用率<50%的非ranking活动压缩至实际花费×1.3，释放给高分 ranking push 活动
+
+# ---------------------------------------------------------------------------
+# 预算原则（来源 23 §4.1 / §4.2 / §4.3 / §4.4）
+# ---------------------------------------------------------------------------
 budget_principles:
   GROUP-BUDGET-001:
     rule: Campaign 预算调整后，必须回算所属组合预算
@@ -186,6 +322,31 @@ budget_principles:
     detail_ref: group_budget_004
   GROUP-BUDGET-005:
     rule: 淘汰组组合预算固定 $1，Bid 固定 $0.20，不参与预算增加和二次分配
+  GROUP-BUDGET-006:
+    rule: 所有预算增加和预算挪移均遵循全局广告目标，优先给 natural_traffic_priority_score 最高的活动；balance_maintain 类活动最后，预算紧张时可不加
+    detail_ref: natural_traffic_priority_score
+    agent_must_not:
+      - 不得平均加预算（稀释推词预算）
+      - 不得仅按排名提升幅度判断优先级（须结合搜索量）
+      - 不得在 ACOS 容忍范围内因 ACOS 略高而拒绝优先给高分活动预算
+      - 不得在关键字段缺失时自动大幅加预算 → MANUAL_REVIEW
+  GROUP-BUDGET-007:
+    rule: Agent 每次调整前必须判断瓶颈层级；组合利用率=100% 且活动平均利用率<80% 说明组合是瓶颈，不得调整单个活动预算，应先提升组合预算
+    detail_ref: health_ratio_bottleneck
+    agent_must_do:
+      - 每次调整前先执行 bottleneck_diagnosis
+      - 组合瓶颈时提升组合预算，不动活动层
+      - 活动瓶颈时按正常逻辑调活动预算
+      - 整体瓶颈时提升父 ASIN 总预算
+    agent_must_not:
+      - 不得在组合瓶颈时调整单个活动 Bid 或扩词（会加剧关停后的误判循环）
+      - 不得仅用 Campaign 预算总和判断是否超预算
+  GROUP-BUDGET-008:
+    rule: 精准主力组内预算集中规则 — ① 活动层：balance_maintain / profit 方向活动若预算利用率低且自然位无有效提升，不对其加预算，预算自然向 natural_traffic_priority_score 高的 ranking push 活动集中；② 挪移层：当高分 ranking push 活动预算已满但组合预算仍紧张时，执行内部挪移，将利用率<50%的非ranking活动压缩至实际花费×1.3，释放给高分 ranking push 活动
+    detail_ref: promotion_internal_reallocation
+  GROUP-BUDGET-009:
+    rule: 父 ASIN 总预算需要降低时，各组合按当前预算占比等比例压缩，维持原有结构比例不变；推广组内的 ranking push 保护（GROUP-BUDGET-006/008）在组合层等比例降低后，仍在组内层面继续生效
+    method: proportional_by_current_group_budget_ratio
 
 campaign_budget_sum_note:
   can_exceed_parent_target_budget: true
@@ -305,6 +466,7 @@ output_contract:
   kb_alignment: docs/knowledge_base/12-输出规范.md
 
 validation_rule_refs:
+  - ONT-014
   - GROUP-001
   - GROUP-002
   - GROUP-003
@@ -313,6 +475,8 @@ validation_rule_refs:
   - GROUP-005
   - GROUP-006
   - GROUP-007
+  - GROUP-008
+  - GROUP-009
 
 kb_cross_refs:
   - path: docs/knowledge_base/02-标签维度定义.md

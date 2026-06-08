@@ -260,6 +260,36 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 .ctab-btn:hover { color: var(--foreground); }
 .ctab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
 
+/* 汇总→明细 联动：全选本组按钮 / 特殊调整跳转链接 / 跳转高亮 / toast */
+.group-select-btn {
+  margin-left: 8px; font-size: 11px; padding: 2px 10px;
+  border: 1px solid var(--primary); color: var(--primary);
+  background: transparent; border-radius: 5px; cursor: pointer;
+  transition: all .12s ease;
+}
+.group-select-btn:hover { background: var(--primary); color: #fff; }
+.special-jump {
+  color: var(--primary); cursor: pointer; text-decoration: underline;
+  word-break: break-all;
+}
+.special-jump:hover { opacity: .75; }
+@keyframes flashHighlight {
+  0%, 100%      { background: var(--card-bg); box-shadow: none; }
+  10%, 40%, 70% { background: #FDE68A; box-shadow: 0 0 0 3px #F59E0B; }              /* 强闪：黄底 + 橙描边 */
+  25%, 55%, 85% { background: #FFFBEB; box-shadow: 0 0 0 3px rgba(245,158,11,.3); }  /* 弱闪 */
+}
+.campaign-card.flash {
+  animation: flashHighlight 2s ease-in-out;
+  position: relative; z-index: 1;   /* 描边压在相邻卡之上，不被遮挡 */
+}
+.mini-toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #111827; color: #fff; padding: 8px 16px; border-radius: 8px;
+  font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s;
+  z-index: 9999;
+}
+.mini-toast.show { opacity: .95; }
+
 </style>
 </head>
 <body>
@@ -350,6 +380,12 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <div class="text-sm" style="color:#DC2626; margin-top:6px; cursor:help;" id="sumWarnings"></div>
     </div>
 
+    <!-- 4 组合预算汇总卡（全局可见）-->
+    <div class="card hidden" id="campaignBudgetSummary">
+      <div class="card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
+      <div id="budgetSummaryBody"></div>
+    </div>
+
     <!-- 明细 / 汇总 tab 栏 -->
     <div class="campaign-tabs hidden" id="campaignTabs">
       <button class="ctab-btn active" data-tab="detail" onclick="switchCampaignTab('detail')">明细</button>
@@ -416,12 +452,6 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <div id="synthesisBody"></div>
     </div>
 
-    <!-- 4 组合预算汇总卡 -->
-    <div class="card hidden" id="campaignBudgetSummary">
-      <div class="card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
-      <div id="budgetSummaryBody"></div>
-    </div>
-
     </div><!-- /tabSummary -->
 
     <!-- loader (tab 外，分析运行时覆盖全区域) -->
@@ -451,6 +481,8 @@ let _reviewState = {};            // {campaign_key: 'approve' | 'reject'}
 let _selection = new Set();       // 当前选中的 campaign_keys
 let _budgetSummary = null;        // 后端返回的 4 组合预算汇总 (run 级缓存)
 let _portfolioFilter = '';        // 当前激活的组合筛选器名;'' = 不过滤
+let _synthesisGroups = [];        // 当前 run 的 synthesis 分组 (供"全选本组"按索引取)
+let _synthesisSpecials = [];      // 当前 run 的特殊调整 (供跳转按索引取)
 
 // localStorage helpers (key 含 run_id，自动隔离不同次分析)
 function _reviewStorageKey(asin, days, runId) {
@@ -626,6 +658,7 @@ async function runCampaignAnalysis() {
   hide('campaignOverview');
   hide('campaignSummary'); hide('campaignFilters');
   hide('campaignSynthesis'); hide('batchToolbar');
+  hide('campaignBudgetSummary');   // 已移出 tab 容器(固定区)，须显式隐藏，否则重跑/失败时残留上一轮数据
   $('campaignList').innerHTML = '';
   switchCampaignTab('detail');
 
@@ -735,6 +768,8 @@ function renderSynthesis(synthesis) {
   }
   const groups = synthesis.groups || [];
   const specials = synthesis.special_cases || [];
+  _synthesisGroups = groups;        // 存全局，供"全选本组"按索引取 campaign_keys
+  _synthesisSpecials = specials;    // 存全局，供特殊调整跳转按索引取 campaign_key
 
   if (!groups.length && !specials.length) {
     $('synthesisBody').innerHTML = '<div class="text-xs muted">AI 未产出汇总分组，请查看下方明细清单。</div>';
@@ -748,6 +783,7 @@ function renderSynthesis(synthesis) {
         <span class="badge badge-${g.action === 'eliminate_to_low_bid_pool' ? 'eliminate' : (g.action || '').startsWith('adjust') ? 'adjust' : 'keep'}" style="margin-left:6px;">
           ${actionLabel(g.action)} · ${g.count ?? (g.campaign_keys || []).length}
         </span>
+        <button class="group-select-btn" onclick="selectGroup(${i})">☑ 全选本组到明细</button>
       </div>
       <div class="group-narrative">${escapeHTML(g.narrative || '')}</div>
       <div class="group-keys">
@@ -763,7 +799,7 @@ function renderSynthesis(synthesis) {
     <div class="synthesis-special">
       <div class="group-title">特殊调整 (${specials.length})</div>
       <ul style="margin:4px 0 0 0; padding-left:18px; font-size:12px;">
-        ${specials.map(sc => `<li><strong>${escapeHTML(sc.campaign_key || '?')}</strong>：${escapeHTML(sc.why_special || '')}</li>`).join('')}
+        ${specials.map((sc, i) => `<li><a class="special-jump" onclick="jumpToSpecial(${i})" title="点击跳转到明细对应活动">${escapeHTML(sc.campaign_key || '?')}</a>：${escapeHTML(sc.why_special || '')}</li>`).join('')}
       </ul>
     </div>` : '';
 
@@ -932,7 +968,7 @@ function renderCards(items) {
     // 丢失活动 占位卡（无 LLM 输出，只显示原信息 + 警示）
     if (adj.__skipped) {
       return `
-        <div class="campaign-card skipped">
+        <div class="campaign-card skipped" data-key="${escapeHTML(adj.campaign_key || '')}">
           <div class="card-checkbox">
             <input type="checkbox" disabled title="丢失活动无法审核">
           </div>
@@ -967,7 +1003,7 @@ function renderCards(items) {
     const checked = _selection.has(adj.campaign_key) ? 'checked' : '';
 
     return `
-      <div class="campaign-card ${klass}">
+      <div class="campaign-card ${klass}" data-key="${escapeHTML(adj.campaign_key || '')}">
         <div class="card-checkbox">
           <input type="checkbox" data-key="${escapeHTML(adj.campaign_key || '')}"
                  ${checked} onchange="toggleSelection(this)">
@@ -1043,6 +1079,89 @@ function clearSelection() {
   _selection.clear();
   applyFilters();
   updateSelectionCount();
+}
+
+// ─── 汇总 → 明细 联动（全选本组 / 跳转）────────────────────────────────
+function selectGroup(i) {
+  const g = _synthesisGroups[i];
+  if (!g) return;
+  const keys = g.campaign_keys || [];
+  keys.forEach(k => _selection.add(k));   // 纯数据层勾选，不切 tab（停留在汇总）
+  applyFilters();                          // 重渲明细 checkbox（当前不可见，切到明细时正确显示）
+  updateSelectionCount();                  // 计数 + 预算汇总(固定区)实时更新
+  _toast(`已勾选本组 ${keys.length} 个活动`);
+}
+
+function jumpToSpecial(i) {
+  const sc = _synthesisSpecials[i];
+  if (sc) jumpToDetail(sc.campaign_key);
+}
+
+function jumpToDetail(key) {
+  if (!key) return;
+  switchCampaignTab('detail');
+  _selection.add(key);         // 跳转即勾选对应活动（优化2）
+  applyFilters();              // 重渲，使勾选反映到 checkbox（仍按当前筛选，优先当前视图）
+  let card = _findCard(key);
+  if (!card) {                 // 目标被当前筛选藏住 → 临时重置筛选再渲再找
+    _resetFilters();
+    applyFilters();
+    card = _findCard(key);
+  }
+  updateSelectionCount();      // 计数 + 预算汇总(固定区)实时更新
+  if (!card) { _toast('未在明细中找到该活动'); return; }
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  _flashCard(card);   // 等卡片滚动进入视口后再闪，避免被下拉过程掩盖（时序修复）
+}
+
+// 高亮目标卡：等它真正滚进视口(≥60%可见)再播放，规避 smooth 滚动途中动效被浪费
+function _flashCard(card) {
+  let fired = false;
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    card.classList.remove('flash');
+    void card.offsetWidth;       // 强制重排以重启动画（重复点同一卡也能重闪）
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 2000);  // 与 2s 动画时长一致
+  };
+  const io = new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting && e.intersectionRatio >= 0.6)) {
+      io.disconnect();
+      fire();
+    }
+  }, { threshold: [0.6] });
+  io.observe(card);
+  setTimeout(() => { io.disconnect(); fire(); }, 1500);  // 兜底：滚动异常/卡片过高时强制闪
+}
+
+function _findCard(key) {
+  const cards = document.querySelectorAll('#campaignList .campaign-card');
+  for (const c of cards) if (c.dataset.key === key) return c;
+  return null;
+}
+
+function _resetFilters() {
+  $('filterAction').value = 'all';
+  $('filterStatus').value = 'all';
+  $('filterMatch').value = 'all';
+  const s = $('campaignSearch'); if (s) s.value = '';
+  _portfolioFilter = '';
+  if (_budgetSummary) renderPortfolioFilterPills(_budgetSummary);  // 复位气泡高亮
+}
+
+function _toast(msg) {
+  let t = $('miniToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'miniToast';
+    t.className = 'mini-toast';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 1800);
 }
 
 async function batchConfirm(decision) {

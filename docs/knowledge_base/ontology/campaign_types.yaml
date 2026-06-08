@@ -21,6 +21,7 @@ campaign_types:
       - campaign_budget_increase
       - campaign_budget_decrease
       - placement_adjustment
+      - eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - mass_negative_keywords
@@ -51,6 +52,7 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
+      - eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -77,6 +79,7 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
+      - eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -100,6 +103,7 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
+      - eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -124,6 +128,7 @@ campaign_types:
       - campaign_budget_increase
       - campaign_budget_decrease
       - placement_adjustment
+      - eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - keyword_match_type_adjustment

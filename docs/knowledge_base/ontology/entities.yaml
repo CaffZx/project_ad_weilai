@@ -98,6 +98,10 @@ ad_entities:
     description: 账号侧 Portfolio 结构；预算控制语义见 AdBudgetGroup（budget_groups.yaml）
     relations:
       - containsCampaign
+    boundary_rules:
+      - ONT-011
+    validation_rule_refs:
+      - ONT-011
 
   AdBudgetGroup:
     label_zh: 广告预算组合
@@ -112,10 +116,16 @@ ad_entities:
       - testing_group
       - auto_broad_group
       - elimination_group
+    immutable_when_elimination:
+      rule: ONT-014
+      group_budget: 1.0
+      bid: 0.20
+      participates_in_increase_allocation: false
     allowed_actions:
       - group_budget_increase
       - group_budget_decrease
     validation_rule_refs:
+      - ONT-014
       - GROUP-001
       - GROUP-002
       - GROUP-003
@@ -135,12 +145,15 @@ ad_entities:
     group_fields:
       belongs_to_group: group_type 枚举，见 budget_groups.yaml
       group_type: promotion_group | testing_group | auto_broad_group | elimination_group
+      constraint: 必须且只能归属 1 个 AdBudgetGroup（ONT-012）
     allowed_actions:
       - campaign_budget_increase
       - campaign_budget_decrease
       - placement_adjustment
       - eliminate_to_low_bid_pool
       - balance_maintain_no_action
+    boundary_rules:
+      - ONT-012 
 
   AdGroup:
     label_zh: 广告组
