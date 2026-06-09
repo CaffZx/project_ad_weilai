@@ -687,6 +687,7 @@ def _build_overview_facts(
         "product_level": strat_ctx.product_level,
         "season_stage": strat_ctx.season_stage,
         "ad_purposes": strat_ctx.ad_purposes,
+        "target_keyword_strategy": strat_ctx.target_keyword_strategy,
         "ad_directions": strat_ctx.ad_directions,
         "target_acos": target,
         "daily_budget": strat_ctx.daily_budget,
@@ -723,8 +724,7 @@ async def _run_overview(
             return CampaignStrategicOverview(facts=facts, generated_by="fallback")
         return CampaignStrategicOverview(
             facts=facts,
-            status_text=res.get("status_text", ""),
-            purpose_text=res.get("purpose_text", ""),
+            assessment_text=res.get("assessment_text", ""),
             direction_text=res.get("direction_text", ""),
             posture_brief=res.get("posture_brief", ""),
             generated_by="ai",

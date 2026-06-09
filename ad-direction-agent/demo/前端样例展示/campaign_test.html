@@ -339,7 +339,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
           </select>
         </div>
         <div style="flex:1; display:flex; align-items:flex-end;">
-          <button class="btn btn-primary btn-block" onclick="loadContext()">加载状态</button>
+          <button class="btn btn-primary btn-block" onclick="loadDebugResult()">⚡ 加载样例展示</button>
         </div>
       </div>
     </div>
@@ -348,7 +348,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
     <div class="card" id="cardContext">
       <div class="card-title">当前状态（只读）</div>
       <div id="contextBody">
-        <div class="muted text-xs">请先「加载状态」</div>
+        <div class="muted text-xs">点左上「⚡ 加载样例展示」查看</div>
       </div>
       <div class="text-xs muted" style="margin-top:8px; border-top:1px dashed var(--border); padding-top:6px;">
         如需修改战略/策略/目标 ACOS，请去主应用
@@ -357,22 +357,20 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       </div>
     </div>
 
-    <!-- 活动分析触发 -->
+    <!-- 活动分析触发（展示版已禁用：不连后端） -->
     <div class="card">
-      <div class="card-title">★ 活动分析触发</div>
+      <div class="card-title">★ 活动分析触发（展示版已禁用）</div>
       <label>LLM 温度</label>
-      <select id="campaignTemp">
+      <select id="campaignTemp" disabled>
         <option value="0">0 (确定性)</option>
         <option value="0.3" selected>0.3 (默认)</option>
         <option value="0.7">0.7 (发散)</option>
       </select>
-      <button id="btnCampaignAnalyze" class="btn btn-primary btn-block" style="margin-top:10px;"
-              onclick="runCampaignAnalysis()">运行活动分析</button>
-      <button class="btn btn-ghost btn-block" style="margin-top:8px;"
-              onclick="loadDebugResult()">⚡ 免跑加载（上次结果/样例 · 调前端用）</button>
+      <button id="btnCampaignAnalyze" class="btn btn-primary btn-block" style="margin-top:10px;" disabled
+              title="展示版不连后端，分析已禁用">运行活动分析（已禁用）</button>
       <div class="text-xs muted" style="margin-top:6px;">
-        全流程约 15~30 分钟（视父 ASIN 活动数量而定），期间可继续浏览。<br>
-        调前端时点「免跑加载」可秒看效果，无需重跑分析。
+        展示版不连后端：「加载状态 / 运行分析 / 温度」均已禁用。<br>
+        点左上「⚡ 加载样例展示」即可查看完整效果。
       </div>
     </div>
 
@@ -483,6 +481,8 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
   </main>
 </div>
 
+<!-- 样例数据(同目录 campaign_sample.js)：script 引入不受 file:// 限制，双击即可读 -->
+<script src="./campaign_sample.js"></script>
 <script>
 // ═══════════════ 全局 ═══════════════
 const API = window.location.origin + '/api/v1/agent/ad-direction';
@@ -720,18 +720,14 @@ function renderOverview(ov) {
 // 仅用于调前端：刷新页面后点一下即可秒看渲染效果，不重跑分析。
 async function loadDebugResult() {
   let result = null;
-  try {
-    const cached = localStorage.getItem('campaign_debug_result');
-    if (cached) result = JSON.parse(cached);
-  } catch (_) {}
+  // 1) 内联样例(campaign_sample.js → window.CAMPAIGN_SAMPLE)：file:// 双击也能读，无需端口
+  if (window.CAMPAIGN_SAMPLE) result = window.CAMPAIGN_SAMPLE;
+  // 2) 上次真跑缓存
+  if (!result) { try { const c = localStorage.getItem('campaign_debug_result'); if (c) result = JSON.parse(c); } catch (_) {} }
+  // 3) http 场景兜底：fetch 同目录 json
+  if (!result) { try { const resp = await fetch('./campaign_sample.json'); if (resp.ok) result = await resp.json(); } catch (_) {} }
   if (!result) {
-    try {
-      const resp = await fetch('./campaign_sample.json');
-      if (resp.ok) result = await resp.json();
-    } catch (_) {}
-  }
-  if (!result) {
-    alert('无可用结果：先正常跑一次分析(会自动缓存)，或确认 demo/campaign_sample.json 存在');
+    alert('无可用结果：确认同目录 campaign_sample.js 存在，或先跑一次分析');
     return;
   }
   // renderResult 依赖全局 asin/days（审核态隔离等）

@@ -158,11 +158,10 @@ class CampaignStrategicOverview(BaseModel):
     数字(facts)由 Python 确定性算；三段叙事 + posture_brief 由 LLM 生成。
     LLM 失败时 generated_by='fallback'，仅 facts 可用、文本段为空。
     """
-    facts: dict = Field(default_factory=dict)        # 现状数字(确定性)：总预算/活动分布/当前ACOS分桶等
-    status_text: str = ""                            # 1. 现状(叙事)
-    purpose_text: str = ""                           # 2. 调整目的 + 原因
-    direction_text: str = ""                         # 3. 调整方向 + 原因
-    posture_brief: str = ""                          # 注入明细分批的精炼框架(2-4句)
+    facts: dict = Field(default_factory=dict)        # 现状数字(确定性)：仅作 LLM 判断输入，不在总览展示
+    assessment_text: str = ""                        # 1. 核心判断(KB×现状匹配 → 关键矛盾/机会 + 定调)
+    direction_text: str = ""                         # 2. 宏观方向 + 原因
+    posture_brief: str = ""                          # 注入后续逐活动分析的判断基准(指令式)
     generated_by: str = "ai"                         # "ai" | "fallback"
 
 

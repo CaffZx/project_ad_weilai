@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-06
-> **版本**: v1.4
+> **最后更新**: 2026-06-09
+> **版本**: v1.5
 > **分支**: chenv3.0
 
 ---
@@ -255,8 +255,8 @@ num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 wor
 
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
-| 策略总览(执行总纲)恢复 | P0 | 当前 `campaign_overview_enabled=False`（settings.py L136，2026-06-02 禁用）。调用 `recommend_campaign_overview()` → 产出三段 `posture_brief` 注入各批 prompt 作定性框架。KB preset=`campaign_overview: ["02","04","09"]`。禁用原因：KB 15/17 注入后先验明细流，总览待单独验证。**恢复即恢复，无需代码改动；需构造用例端到端验证三段输出质量** |
-| Synthesis 汇总合成恢复 | P0 | 当前 `_SYNTHESIS_ENABLED=False`（campaign.py L51，第一期上线临时禁用）。调用 `recommend_campaign_synthesis()` 把 N 条单活动建议合成为「分组叙事 + 特殊调整尾部清单」。**恢复时去掉 `asyncio.wait_for` 外层、改用 `chat(timeout_override=55)` 绕过 Windows asyncio 取消缺陷；需 Linux 服务器端到端验证** |
+| ~~策略总览(执行总纲)恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `campaign_overview_enabled=True`，并改造为"判断驱动"(去现状数字复述)。详见 §7.1 |
+| ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `_SYNTHESIS_ENABLED=True`，并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
 | **新增广告活动分析** | P1 | KB 16（新增活动规则）已存在但**未接入任何 preset**，当前 campaign 模块仅分析**已有**活动的调优/淘汰，无法给出"应新建哪些活动"的建议。需：(a) 将 KB 16 加入 preset（如 `campaign_adjustment`）；(b) 在 reasoner.py 新增 `recommend_new_campaigns()` 或扩展现有 prompt；(c) 新增 campaign.py 编排步骤（在已有活动分析后运行，基于策略上下文 + KB 16 规则） |
@@ -350,6 +350,64 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 | `negative_keywords` | `t_advert_agent_modify_keyword_pending` | STATE: NEGATIVE |
 
 所有记录通过 `decision_id` + `batch_no` 与 `t_advert_agent_decision` 关联，走 `PENDING→CONFIRMED` 审批流。
+
+---
+
+## 7. 2026-06-08/09 迭代：总览/汇总恢复 + 前端重构 + 免跑加载
+
+### 7.1 overview + synthesis 恢复并改造
+
+**恢复**：`campaign_overview_enabled=True`(settings.py)、`_SYNTHESIS_ENABLED=True`(campaign.py)。禁用根因(Windows asyncio 取消挂死)已由 `main.py` SelectorEventLoopPolicy 根治；两者均带 `timeout_override=55` + fail-open(失败仅 warning，不影响明细)。
+
+**synthesis 改造**(`reasoner.py recommend_campaign_synthesis` / `_CAMPAIGN_SYNTHESIS_PROMPT`)：
+- **删 KB**：synthesis 只做"读已有 action/reason → 语义聚类 → 写叙事"，不做广告判断，不需要 `campaign_adjustment` 那 26K KB；降 token / 延迟 / 超时风险。
+- **reason 完整不截断**(原 `[:80]`)——理由是分组命脉。
+- **max_tokens 4096→8192**——容纳 100 个 campaign_key 互斥铺到各组 + 叙事。
+- **组数 "5-7 组"**：按实际共同原因数决定，不为凑满硬拆、不把不同原因硬并；严禁产出理由实质相同的冗余组。
+- **special_cases 硬编码"控制在 5-15 条"**(运营反馈特殊调整 20-30 条处理不过来；曾试动态 ≤总数10%，最终改回硬编码)。
+
+**overview 改造**(`reasoner.py` + `campaign.py _run_overview` + `models/campaign.py`)：
+- 从"现状数字复述"改为 **"KB×现状 → 判断 → 定调"**。
+- 输出字段 `status/purpose/direction` → **`assessment`(判断) + `direction`(方向) + `posture_brief`(给后续逐活动 LLM 的指令基准)**；模型 `CampaignStrategicOverview` 删 `status_text/purpose_text`、加 `assessment_text`。
+- prompt 硬约束：重判断轻数字、**禁复述现状数字**、缺数据(N/A)不臆测。
+- `_build_overview_facts` **补 `target_keyword_strategy`**——让 `facts` 成为前端"当前状态(只读)"面板的**统一数据源**(原缺该字段)。
+
+### 7.2 前端重构(`demo/campaign_test.html`)
+
+- **双 Tab**：策略总览(执行总纲) + 分析概览 **固定顶部**(不随 tab 切换)；其下「明细 / 汇总」tab(`switchCampaignTab`)。明细=多维筛选+组合气泡+批量审核+活动列表；汇总=AI 汇总叙事。
+- **组合预算汇总卡移到固定区**(原在汇总 tab)——勾选时实时可见；配套修复"重跑清场漏 `hide('campaignBudgetSummary')` 导致旧数据残留"。
+- 总览只展示「判断 + 方向」，`posture_brief` 不展示给运营(它是写给后续 LLM 的，注入各批 preamble)。
+- 明细卡 Bid/Budget 由左右两列改 **单列紧凑**(原分太开，运营视线飘)。
+
+### 7.3 汇总 ↔ 明细 联动
+
+- **汇总组**：`1.2.3` 序号 + 「☑ 全选本组到明细」(`selectGroup`，纯勾选不跳转) + 「查看成员活动」每个 key 可点跳转(`jumpToGroupMember`)。
+- **特殊调整**：`1.2.` 序号 + 活动名做成可点链接(`jumpToSpecial`)，**跳转即自动勾选**。
+- **跳转高亮**(`jumpToDetail`)：切明细 tab + 滚动定位 + **`IntersectionObserver` 等卡片真正滚进视口(≥60%)才播放**浅黄闪烁(2 次、1.2s)——规避平滑滚动途中动效被掩盖；目标被筛选藏住则临时重置筛选保证跳得过去。
+
+### 7.4 组合气泡增强
+
+- 每气泡内加 **「调整前 $X | 调整后 $Y」**：调整后与"执行后预计总预算"**同逻辑**(勾选→proposed / 未勾→current)，随勾选动态重算；低价捡漏组不参与(占位"—")。
+- **约束 = AI 推荐 + 运营改/执行(占位)**：仅**选中(active)**气泡才显示 [改]/[执行]；[改] 为 inline 编辑([保存]用 `onmousedown+preventDefault` 抢在 blur 前、失焦不保存)；[执行] 占位 stub(后端 override 表待接)；覆盖值前端临时态 `_portfolioOverride`。
+- 4 气泡统一大小(flex 等分 + 圆角矩形)、**浅天蓝底黑字**。
+
+### 7.5 免跑加载(调前端提效)
+
+- 痛点：每次调前端都要等几十分钟真分析。
+- `loadDebugResult`：优先 localStorage(上次真跑缓存) → fetch 同目录 `campaign_sample.json` → `renderResult`，**跳过 analyze**；analyze 成功自动写 localStorage。
+- 样例 `demo/campaign_sample.json`：完整 result，含手动注入的 synthesis(真实 campaign_key)/overview(新字段)/facts(完整策略上下文)/budget_summary。
+
+### 7.6 独立展示版 `demo/前端样例展示/`
+
+- **自包含、双击 `file://` 即用**(不依赖端口/后端)。关键：浏览器在 `file://` 下禁止 `fetch` 本地 json(CORS)，故把数据包成 **`campaign_sample.js`**(`window.CAMPAIGN_SAMPLE = {…}`)，用 `<script src>` 引入(script 标签不受 file:// 限制)。
+- 「加载状态 / 运行分析 / LLM 温度」**禁用**；左上「加载状态」位换成 **「⚡ 加载样例展示」**。
+- **数据更新需同步** json→js：
+  ```bash
+  cd demo/前端样例展示
+  python -c "raw=open('campaign_sample.json',encoding='utf-8').read(); open('campaign_sample.js','w',encoding='utf-8').write('window.CAMPAIGN_SAMPLE = '+raw+';\n')"
+  ```
+
+> **注**：7.1 的 overview/synthesis 改造与 7.4 的约束 override 后端落库，均需真跑(走真实 LLM)/接后端 override 表后再端到端验证。
 
 ---
 
