@@ -71,5 +71,6 @@ cursor临时文件/
 # 规划/思维导图、重复 skill 目录（正式 skill 在 app/config/skills/）
 *.xmind
 .claude/
+.agents/
 ad-direction-agent/demo/前端样例展示.7z
 ad-direction-agent/demo/前端样例展示/
