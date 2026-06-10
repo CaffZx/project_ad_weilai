@@ -1647,13 +1647,17 @@ class LLMReasoner:
             {"role": "user", "content": user_message},
         ]
 
+        from app.config.settings import settings  # 强档(pro+思考)配置
         try:
             raw = await self.client.chat(
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
                 max_tokens=2048,
-                timeout_override=timeout_override or 55,
+                timeout_override=max(timeout_override or 0, 180),   # 强档慢，至少 180s
+                model=settings.llm_model_strong,                    # 总览=重要节点→强档
+                thinking=True,
+                reasoning_effort=settings.llm_strong_reasoning_effort,
             )
             parsed = self._parse_json(raw)
             out = {
@@ -1730,13 +1734,17 @@ class LLMReasoner:
             {"role": "user", "content": user_message},
         ]
 
+        from app.config.settings import settings  # 强档(pro+思考)配置
         try:
             raw = await self.client.chat(
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
                 max_tokens=8192,
-                timeout_override=timeout_override or 55,
+                timeout_override=max(timeout_override or 0, 180),   # 强档慢，至少 180s
+                model=settings.llm_model_strong,                    # 汇总=重要节点→强档
+                thinking=True,
+                reasoning_effort=settings.llm_strong_reasoning_effort,
             )
             parsed = self._parse_json(raw)
             groups = parsed.get("groups", []) or []

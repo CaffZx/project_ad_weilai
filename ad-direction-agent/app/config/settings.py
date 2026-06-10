@@ -171,7 +171,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_api_keys: str = ""  # 多 Key 逗号分隔，优先于 deepseek_api_key
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_model: str = "deepseek-v4-flash"        # 快档(默认)：其余调用点用，非思考
+    # LLM 分级：重要节点(总览/汇总)用强档 = flash + 思考模式；其余沿用 deepseek_model(flash)非思考
+    llm_model_strong: str = "deepseek-v4-flash"
+    llm_strong_reasoning_effort: str = "high"        # 思考强度：high / max
     llm_timeout: int = 75
     # 服务级 LLM 总并发上限（全服务，所有非流式 chat() 调用共用）。
     # 实际每 worker 信号量 = llm_global_concurrency // num_workers（见 client._global_llm_sem）。

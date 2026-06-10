@@ -116,6 +116,9 @@ class DeepSeekClient:
         max_tokens: int | None = None,
         *,
         timeout_override: float | None = None,
+        model: str | None = None,
+        thinking: bool = False,
+        reasoning_effort: str | None = None,
     ) -> str:
         """调用 DeepSeek Chat API，自动轮询 Key + 失败重试。
         timeout_override: 单次 HTTP 超时，不传则用实例默认值。"""
@@ -129,10 +132,14 @@ class DeepSeekClient:
             })
 
         body = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": messages,
             "temperature": temperature,
+            # 思考模式开关(DeepSeek OpenAI 格式)：强档调用点传 thinking=True
+            "thinking": {"type": "enabled" if thinking else "disabled"},
         }
+        if thinking and reasoning_effort:
+            body["reasoning_effort"] = reasoning_effort
         if response_format:
             body["response_format"] = response_format
         if max_tokens:
