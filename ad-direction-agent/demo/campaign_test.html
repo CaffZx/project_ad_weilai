@@ -758,15 +758,19 @@ function renderResult(r) {
   _currentRunId = r.run_id || '';
   renderOverview(r.strategic_overview);
 
-  // 合并 adjustments + skipped 占位项（标 __skipped: true）
-  const skipped = (r.skipped_campaigns || []).map(s => Object.assign({}, s, {
+  // skipped_campaigns 分两类：预过滤(__prefiltered，灰卡无悬停) vs LLM 丢失(红色⚠悬停)
+  const allSkipped = r.skipped_campaigns || [];
+  const prefiltered = allSkipped.filter(s => s.__prefiltered).map(s => Object.assign({}, s, {
+    __prefiltered: true, action: 'prefiltered', confidence: '',
+  }));
+  const lost = allSkipped.filter(s => !s.__prefiltered).map(s => Object.assign({}, s, {
     __skipped: true, action: 'skipped', confidence: 'low', reason: s.reason || '未被分析',
   }));
   const newItems = (r.new_campaigns || []).map(n => ({
     campaign_key: n.campaign_name || n.keyword_text,
     campaign_name: n.campaign_name,
     campaign_id: '',
-    child_asin: r.parent_asin,
+    child_asin: n.child_asin || r.parent_asin,   // 后端已选主力子ASIN，回退父ASIN
     keyword_text: n.keyword_text,
     match_type: n.match_type,
     keyword_class: n.keyword_class || '',
@@ -778,14 +782,16 @@ function renderResult(r) {
     reason: n.reason || '',
     evidence: n.evidence || [],
     triggered_rule: n.trigger_scene || '',
-    placement_adjustments: n.primary_placement && n.primary_placement !== 'N/A'
-      ? [{ placement: n.primary_placement, current_pct: 0, proposed_pct: 100 }] : [],
-    negative_keywords: n.negative_strategy
-      ? [{ keyword_text: '', reason: n.negative_strategy }] : [],
+    // KB 16 §5：新增活动首轮不输出广告位加价 → 不套用调整型的 placement/否词模板，
+    // 改用 new_primary_placement / new_negative_strategy 走专用渲染（renderNewCampaignExtras）
+    placement_adjustments: [],
+    negative_keywords: [],
+    new_primary_placement: n.primary_placement || '',
+    new_negative_strategy: n.negative_strategy || '',
     ai_portfolio_class: n.ai_portfolio_class || '',
     review_level: n.review_level || 'MANUAL_REVIEW',
   }));
-  _campaignItems = (r.adjustments || []).concat(newItems).concat(skipped);
+  _campaignItems = (r.adjustments || []).concat(newItems).concat(prefiltered).concat(lost);
 
   // 恢复审核态（按当前 run_id 隔离）
   _reviewState = _loadReviewState(asin, days, _currentRunId);
@@ -1075,8 +1081,8 @@ function applyFilters() {
   const q = ($('campaignSearch').value || '').toLowerCase().trim();
 
   let items = _campaignItems.filter(a => {
-    // 状态维度
-    const isSkipped = !!a.__skipped;
+    // 状态维度（预过滤与丢失同属"不可操作/已排除"，状态与动作筛选时一并按 skipped 处理）
+    const isSkipped = !!a.__skipped || !!a.__prefiltered;
     if (fStatus === 'ok' && isSkipped) return false;
     if (fStatus === 'skipped' && !isSkipped) return false;
     // 动作维度（skipped 视为不参与动作筛选，除非选了"全部"）
@@ -1125,6 +1131,28 @@ function renderCards(items) {
   }
   $('campaignList').innerHTML = items.map(adj => {
     // 丢失活动 占位卡（无 LLM 输出，只显示原信息 + 警示）
+    // 预过滤活动（已淘汰池 / 多关键词）：灰色、不可操作、无数据、无悬停警告，仅标签 + 过滤原因
+    if (adj.__prefiltered) {
+      return `
+        <div class="campaign-card skipped" data-key="${escapeHTML(adj.campaign_key || '')}">
+          <div style="flex:1; min-width:0;">
+            <div class="head">
+              <span class="badge badge-skipped">预过滤</span>
+              <strong style="word-break:break-all;">${escapeHTML(adj.campaign_name || '?')}</strong>
+            </div>
+            <div class="meta">
+              × ${escapeHTML(adj.child_asin || '?')}
+              | ${escapeHTML(adj.match_type || '?')}
+              | 关键词: ${escapeHTML(adj.keyword_text || '?')}
+              ${adj.keyword_count ? '| 词数: ' + adj.keyword_count : ''}
+            </div>
+            <div class="text-sm muted" style="margin-top:6px;">
+              过滤原因：${escapeHTML(adj.reason || '')}
+            </div>
+          </div>
+        </div>`;
+    }
+
     if (adj.__skipped) {
       return `
         <div class="campaign-card skipped" data-key="${escapeHTML(adj.campaign_key || '')}">
@@ -1192,6 +1220,7 @@ function renderCards(items) {
             ${renderEvidence(adj)}
             ${renderPlacements(adj)}
             ${renderNegKeywords(adj)}
+            ${renderNewCampaignExtras(adj)}
             ${fullReason.length > 250 ? `<div class="text-xs" style="margin-top:8px;"><strong>完整理由:</strong><div class="reason" style="margin-top:4px;">${escapeHTML(fullReason)}</div></div>` : ''}
             <div class="text-xs muted" style="margin-top:8px;">
               审核等级: ${escapeHTML(adj.review_level || 'MANUAL_REVIEW')}
@@ -1400,6 +1429,24 @@ function renderPlacements(adj) {
     </div>`).join('')}
     </div>
   </div>`;
+}
+
+function renderNewCampaignExtras(adj) {
+  // 新增活动专用：主投广告位（KB 16 §4 首轮只声明主投位，不加价）+ 否词策略文本
+  if (adj.action !== 'create_campaign') return '';
+  let html = '';
+  const pp = adj.new_primary_placement;
+  if (pp && pp !== 'N/A') {
+    html += `<div class="text-sm" style="margin-top:6px;">
+      <strong>主投广告位:</strong> ${escapeHTML(pp)}
+      <span class="text-xs muted">(首轮仅声明主投位，不加价)</span></div>`;
+  }
+  const ns = adj.new_negative_strategy;
+  if (ns) {
+    html += `<div class="text-sm" style="margin-top:6px;">
+      <strong>否词策略:</strong> <span class="text-xs">${escapeHTML(ns)}</span></div>`;
+  }
+  return html;
 }
 
 function renderNegKeywords(adj) {

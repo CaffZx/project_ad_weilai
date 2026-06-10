@@ -116,6 +116,29 @@ def _derive_match_type(keyword_class: str, cand: NewCampaignCandidate) -> str:
     return "EXACT" if cand.natural_rank is not None else "BROAD"
 
 
+def pick_target_child_asin(campaigns: list) -> str:
+    """新增活动的投放目标子 ASIN。
+
+    新建活动须挂到一个具体子 ASIN 投放，不能用父 ASIN 占位。
+    选「历史活动数最多」的子 ASIN（主力投放变体）；活动数平手时按 7 天总花费最高。
+    campaigns 为空或均无 child_asin 时返回 ""（前端再回退父 ASIN 占位）。
+    """
+    from collections import defaultdict
+
+    stat: dict[str, list] = defaultdict(lambda: [0, 0.0])  # child_asin -> [活动数, 总花费]
+    for cu in campaigns:
+        ca = (getattr(cu, "child_asin", "") or "").strip()
+        if not ca:
+            continue
+        stat[ca][0] += 1
+        perf = getattr(cu, "perf_7d", None)
+        stat[ca][1] += (getattr(perf, "cost", 0.0) or 0.0) if perf else 0.0
+    if not stat:
+        return ""
+    best = max(stat.items(), key=lambda kv: (kv[1][0], kv[1][1]))  # 活动数 desc, 花费 desc
+    return best[0]
+
+
 _CAMPAIGN_NAME_INVALID_RE = re.compile(r"[\\/:*?\"<>|]")
 
 
@@ -146,6 +169,7 @@ async def analyze_new_campaigns(
     ctx_dict: dict,
     temperature: float,
     *,
+    target_child_asin: str = "",
     days: int = 7,
     sem: asyncio.Semaphore | None = None,
 ) -> tuple[list[NewCampaignItem], list[str]]:
@@ -292,6 +316,7 @@ async def analyze_new_campaigns(
         bid, src = _calc_initial_bid(cand)
         items.append(NewCampaignItem(
             keyword_text=cand.keyword_text,
+            child_asin=target_child_asin,
             campaign_name=_generate_campaign_name(cand.keyword_text, mt),
             campaign_type="精准广告" if is_exact else "广泛广告",
             match_type=mt,

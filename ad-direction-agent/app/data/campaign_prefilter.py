@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 
 def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
     """返回 (surviving, excluded)。
@@ -23,33 +25,39 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
 
     注意: budget=$1 的活动不在此排除 -- 留给 LLM 按 KB 规则判断淘汰保护条件。
     """
-    # Step 1: 按 campaign_name 分组统计关键词数
+    # Step 1: 按 campaign_name 统计 ① 去重关键词数 ② 各子ASIN关联行数（用于选代表子ASIN）
     name_kw_count: dict[str, set] = {}
+    name_asin_rows: dict[str, Counter] = {}
     for r in raw:
         name = str(r.get("campaign_name") or "")
         kw = str(r.get("keyword_text") or "")
+        ca = str(r.get("child_asin") or "")
         if name and kw:
             name_kw_count.setdefault(name, set()).add(kw)
+        if name and ca:
+            name_asin_rows.setdefault(name, Counter())[ca] += 1
 
     multi_kw_names = {n for n, kws in name_kw_count.items() if len(kws) > 1}
 
     surviving: list[dict] = []
     excluded: list[dict] = []
+    emitted_multi: set[str] = set()   # 多词活动只产 1 条 excluded（防同活动 N 行重复）
 
     for r in raw:
         name = str(r.get("campaign_name") or "")
 
         # 规则 1: 非活跃状态
+        # 注意：当前 _fetch_campaign_context SQL 已用 WHERE campaign_status='ENABLED' 过滤，
+        # 且输出列写死 'ENABLED'，故 raw 不含非 ENABLED 活动 → 本分支为死代码。
+        # 若将来要展示非 ENABLED，需改 SQL（去 WHERE + 取真实 status），届时本分支转活。
         campaign_status = str(r.get("campaign_status") or "").upper()
         keyword_status = str(r.get("keyword_status") or "").upper()
         if campaign_status != "ENABLED" or (keyword_status and keyword_status != "ENABLED"):
             excluded.append({"campaign_name": name, "reason": "inactive"})
             continue
 
-        # 规则 2: 近 7 天无数据 (spend + clicks + impressions 全为零)
-        # 注意：当前上下文查询(_fetch_campaign_context)只取维度、不带 perf 字段，
-        # 故此分支为防御性死代码——"近7天无数据"已由该 SQL 的
-        # `local_report_time >= 7d` WHERE 隐式排除。保留以备将来上下文查询带指标。
+        # 规则 2: 近 7 天无数据 — 死代码（同规则1，SQL 的 local_report_time>=7d 已隐式排除；
+        #         且 report 表对零活动无行，无 campaign 主表可 LEFT JOIN，本期不展示该类）。
         if "spend_7d" in r or "clicks_7d" in r or "impressions_7d" in r:
             spend_7d = float(r.get("spend_7d") or r.get("cost_7d") or 0)
             clicks_7d = int(float(r.get("clicks_7d") or 0))
@@ -58,13 +66,25 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
                 excluded.append({"campaign_name": name, "reason": "no_recent_data"})
                 continue
 
-        # 规则 3: 多关键词活动 (本期暂过滤)
+        # 规则 3: 多关键词活动（本期不进 LLM，前端展示为预过滤卡）
+        #   - 折叠：每活动只产 1 条 excluded（raw 按词/子ASIN 多行，否则会 N 条重复）
+        #   - 子ASIN：取该活动下关联词条数最多的子ASIN（prefilter 无 perf，"花费最高"不可得）
+        #   - keyword_text 硬编码"多关键词活动"
         if name in multi_kw_names:
-            excluded.append({
-                "campaign_name": name,
-                "reason": "multi_keyword_deferred",
-                "keyword_count": len(name_kw_count[name]),
-            })
+            if name not in emitted_multi:
+                emitted_multi.add(name)
+                top_asin = ""
+                if name_asin_rows.get(name):
+                    top_asin = name_asin_rows[name].most_common(1)[0][0]
+                excluded.append({
+                    "campaign_name": name,
+                    "child_asin": top_asin,
+                    "match_type": str(r.get("match_type") or ""),
+                    "keyword_text": "多关键词活动",
+                    "keyword_count": len(name_kw_count[name]),
+                    "reason": "多关键词活动，请到ERP手动修改",
+                    "__prefiltered": True,
+                })
             continue
 
         surviving.append(r)

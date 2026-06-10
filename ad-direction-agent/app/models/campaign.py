@@ -169,6 +169,7 @@ class NewCampaignCandidate(BaseModel):
 class NewCampaignItem(BaseModel):
     """新增活动建议（LLM 判 keyword_class/取舍/文本 + 代码补齐数值字段）。"""
     keyword_text: str
+    child_asin: str = ""                    # 投放目标子 ASIN（代码选历史活动数最多/花费最高的子 ASIN，非父 ASIN）
     action_type: str = "create_campaign"    # KB 16 §5: create_campaign | create_ad_group
     campaign_name: str                      # 代码生成: {匹配类型中文}-{kw}-{YYYY-MM-DD}
     campaign_type: str = ""                 # "精准广告" | "广泛广告"

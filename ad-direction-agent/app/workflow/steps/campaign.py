@@ -23,7 +23,10 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_ELIMINATE,
     classify as _classify_portfolio,
 )
-from app.workflow.steps.campaign_new import analyze_new_campaigns
+from app.workflow.steps.campaign_new import (
+    analyze_new_campaigns,
+    pick_target_child_asin as _pick_target_child_asin,
+)
 from app.models.campaign import (
     CampaignAdjustmentItem,
     CampaignAnalysisResult,
@@ -278,7 +281,8 @@ async def _analyze_campaigns_impl(
                 "child_asin": cu.child_asin,
                 "match_type": cu.match_type,
                 "keyword_text": cu.keyword_text,
-                "reason": "疑似已淘汰（预算≈$1，出价≈$0.2）",
+                "reason": "已入淘汰池（预算≈$1，出价≈$0.2），请到ERP手动修改",
+                "__prefiltered": True,   # 前端按此渲染为灰色不可操作的预过滤卡（无悬停警告）
             })
             continue
         llm_campaigns.append(cu)
@@ -295,7 +299,7 @@ async def _analyze_campaigns_impl(
             parent_seller_sku=campaign_data.parent_seller_sku,
             site_code=campaign_data.site_code,
             total_campaigns=0,
-            skipped_campaigns=skipped_eliminated,
+            skipped_campaigns=skipped_eliminated + (campaign_data.excluded or []),
             warnings=["所有活动均在预过滤阶段被排除（疑似全部已淘汰）"],
             rounds_detail={},
         )
@@ -346,6 +350,8 @@ async def _analyze_campaigns_impl(
     # （并行架构下精准/广泛 adjustments 尚未产出；语义=已存在淘汰活动→词池已变窄）
     pre_eliminated_count = len(skipped_eliminated)
     shop_account = getattr(fetcher, "_last_shop_account", "")
+    # 新增活动投放目标子 ASIN：历史活动数最多/花费最高的子 ASIN（非父 ASIN 占位）
+    target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
 
     async def _no_op_new_campaigns():
         return [], []
@@ -370,6 +376,7 @@ async def _analyze_campaigns_impl(
             strategy_context=strategy_context,
             ctx_dict=ctx_dict,
             temperature=temperature,
+            target_child_asin=target_child_asin,
             days=days,
             sem=new_sem,
         ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
@@ -411,9 +418,13 @@ async def _analyze_campaigns_impl(
             )
             logger.warning("Campaign [%s] 广泛流搜索词全空，否词不可用", parent_asin)
 
-    # 6. 合并两流结果（含预过滤阶段疑似已淘汰的活动，供前端可见）
+    # 6. 合并两流结果（含预过滤活动，供前端可见）
+    #    skipped_eliminated(淘汰池) + campaign_data.excluded(多词等) 均带 __prefiltered，
+    #    exact/broad_skipped 是 LLM 丢失项(不带标记)，前端按标记区分"预过滤"vs"已丢失"
     adjustments = exact_adjustments + broad_adjustments
-    skipped_campaigns = exact_skipped + broad_skipped + skipped_eliminated
+    skipped_campaigns = (
+        exact_skipped + broad_skipped + skipped_eliminated + (campaign_data.excluded or [])
+    )
     if skipped_campaigns:
         logger.warning(
             "Campaign analyze [%s]: %d 个活动未被分析（LLM 批次失败或未返回）",
