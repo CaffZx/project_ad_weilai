@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from app.data.known_listings import KNOWN_LISTINGS
 from app.data.mcp_db_context import McpDbContext, resolve_mcp_context_from_db
 from .text_utils import normalize_site_code
 
@@ -78,16 +77,6 @@ async def resolve_listing_context_async(parent_asin: str) -> ListingContext:
     erp_ctx = _lookup_from_erp_summary(parent_asin)
     if erp_ctx:
         return erp_ctx
-    known = KNOWN_LISTINGS.get(parent_asin)
-    if known:
-        sku, shop_id, site, shop_account = known
-        return ListingContext(
-            parent_asin=parent_asin,
-            parent_seller_sku=sku,
-            shop_id=shop_id,
-            shop_account=shop_account,
-            site_code=site,
-        )
     if not ctx or not ctx.parent_seller_sku:
         raise RuntimeError(f"无法从 Doris 解析 listing 上下文: asin={parent_asin}")
     return ListingContext(

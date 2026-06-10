@@ -41,6 +41,10 @@ class KnowledgeBase:
         # Campaign 策略总览(执行总纲)：维度/广告目的→方向倾向 + 目的触发 + 取舍优先级
         # 仅做定性指挥(不写数值),故不引入 15(数值规则);保持小切片。
         "campaign_overview":    ["02", "04", "09"],
+        # Campaign 新增活动: LLM 只判"选哪些词 + keyword_class",不算数值,故只需:
+        #   16(新增活动规则:触发场景/阻断/输出要求) + 06(关键词类型规则:判 keyword_class 依据)
+        #   + 02(标签维度语境)。明确不含 15/19(数值矩阵,代码层按 KB16§3 定) / 23(组合预算回算,本期不接入)。
+        "new_campaign":         ["16", "06", "02"],
     }
 
     # KB 英文 enum → 项目中文 enum（与 layer_options.toml 对齐）

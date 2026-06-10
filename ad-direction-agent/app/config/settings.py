@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     campaign_portfolio_share_test: int = 20   # 测试/新增
     campaign_portfolio_share_broad: int = 20  # 广泛/自动
 
+    # Campaign 新增活动分析 (KB 16, 独立并行分析线)
+    campaign_new_enabled: bool = True         # 总开关 (关闭退化到无新增建议)
+    campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
+    campaign_new_max_count: int = 20          # 单次分析最大候选词数 (排序后截断 Top-N)
+
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"
     csv_key_column: str = "asin"

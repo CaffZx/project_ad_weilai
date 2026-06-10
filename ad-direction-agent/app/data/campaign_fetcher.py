@@ -37,6 +37,7 @@ class CampaignFetcher:
         self._db_adapter: DbAdapter | None = None
         self._mcp_sem = asyncio.Semaphore(settings.mcp_max_concurrency)
         self._last_shop_id: int = 0  # fetch_campaigns 解析后缓存，供懒加载回落复用
+        self._last_shop_account: str = ""  # 同上，供新增活动线 discover_new_keywords 复用
 
     # ── 主流程 ──
 
@@ -62,6 +63,9 @@ class CampaignFetcher:
             shop_id = db_ctx.shop_id or 0
             parent_seller_sku = db_ctx.parent_seller_sku or ""
             site_code = db_ctx.site_code or "Amazon_US"
+            # 缓存供新增活动线 discover_new_keywords 复用 (shop_account 不在 CampaignData 上)
+            self._last_shop_id = shop_id
+            self._last_shop_account = db_ctx.shop_account or ""
 
         if not db_ctx:
             return CampaignData(
@@ -391,6 +395,57 @@ class CampaignFetcher:
             name, terms = item
             results[name] = terms
         return results
+
+    async def discover_new_keywords(
+        self,
+        parent_asin: str,
+        shop_account: str,
+        parent_seller_sku: str = "",
+        site_code: str = "Amazon_US",
+        days: int = 7,
+        timeout: float | None = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """新增活动候选词发现（KB 16）。并行调 flow_keywords + own_keyword_flow。
+
+        复用 mcp_mapping 已注册的 args 构造器 + mcp_adapter.call_tool_timed_with_args。
+
+        返回 (flow_rows, own_rows)，任一失败/无数据返回空 list（上游记 warning 继续）。
+        flow_rows 字段（实测中文）: 关键词 / 搜索量 / 搜索人数
+        own_rows 字段: 关键词 / 自然排名 等
+        """
+        from app.data.mcp_mapping import McpContext, build_tool_args, make_date_window
+
+        start_date, end_date = make_date_window(days)
+        ctx = McpContext(
+            parent_asin=parent_asin,
+            parent_seller_sku=parent_seller_sku,
+            shop_account=shop_account,
+            site_code=site_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        flow_args = build_tool_args("flow_keywords", ctx)
+        own_args = build_tool_args("own_keyword_flow", ctx)
+        t = timeout if timeout is not None else getattr(settings, "campaign_mcp_tool_timeout", 300.0)
+
+        flow_res, own_res = await asyncio.gather(
+            self._mcp().call_tool_timed_with_args("flow_keywords", flow_args, t),
+            self._mcp().call_tool_timed_with_args("own_keyword_flow", own_args, t),
+            return_exceptions=True,
+        )
+
+        def _rows(res) -> list[dict]:
+            if isinstance(res, BaseException) or not getattr(res, "ok", False):
+                return []
+            return _as_rows(res.value)
+
+        flow_rows = _rows(flow_res)
+        own_rows = _rows(own_res)
+        logger.info(
+            "discover_new_keywords [%s]: flow=%d own=%d",
+            parent_asin, len(flow_rows), len(own_rows),
+        )
+        return flow_rows, own_rows
 
     # ── 组装 ──
 

@@ -376,6 +376,53 @@ def _build_campaign_system_prompt(task_type: str = "exact") -> str:
     return template.replace("{kb_content}", kb_content)
 
 
+# ── Campaign 新增活动 Prompt (KB 16 + 06) ────────────────────────────────────
+
+_NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于知识库 KB 16《新增活动规则》+ KB 06《关键词类型规则》，为候选关键词判断**是否值得新建活动**以及**关键词类别**。
+
+重要：输出中文，JSON key 用英文。
+
+## 业务知识（判断依据）
+{kb_content}
+
+## 任务范围（重要）
+你只做两类判断 + 文本输出：
+1. **action**：该词是否值得新建活动（create / skip）。参考 KB 16 §1 触发场景与 §6 阻断精神，以及【今日总纲】。
+2. **keyword_class**：按 KB 06 判该词类别（generic / long_tail / competitor / brand / custom）。
+3. **文本**：reason / evidence / negative_strategy。
+
+**禁止**输出 bid / budget / campaign_name / match_type / primary_placement —— 这些由代码按 KB 16 §2/§3/§4/§5 确定。
+
+## 输入
+- 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循）
+- 候选词列表：每个含 keyword_text / search_volume / natural_rank / trigger_scene
+
+## 输出 JSON（严格 schema，禁 markdown 围栏）
+{
+  "new_campaigns": [
+    {
+      "keyword_text": "fishnet stockings women plus size",
+      "action": "create",
+      "keyword_class": "long_tail",
+      "negative_strategy": "7天后读搜索词报告，点击>10次且无转化的词进入否词候选",
+      "reason": "(1) 现状：自然位 35 持续上升；(2) 原因：长尾词相关性高且无精准承接；(3) 建议：新建精准活动承接。",
+      "evidence": ["搜索量 156", "自然排名第 35 位"]
+    }
+  ]
+}
+
+## 判断与文案规则
+- 不值得建的词（相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因
+- action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则
+- reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议
+- 禁用规则编号 / 内部术语；evidence 引用具体数值
+"""
+
+
+def _build_new_campaign_prompt() -> str:
+    return _NEW_CAMPAIGN_PROMPT.replace("{kb_content}", kb.build("new_campaign"))
+
+
 # ── Campaign 汇总合成 Prompt ─────────────────────────────────────────────────
 
 _CAMPAIGN_SYNTHESIS_PROMPT = """你是亚马逊广告运营专家。把若干单活动调整建议合成为运营可读的「分组叙事 + 特殊调整尾部清单」。
@@ -1594,6 +1641,89 @@ class LLMReasoner:
                 "error": str(e),
                 "temperature": temperature,
             }
+
+    # ── Campaign 新增活动 (KB 16 + 06) ──────────────────────────────────────
+    async def recommend_new_campaigns(
+        self,
+        asin: str,
+        candidates: list[dict],
+        strategy_context: dict,          # ctx_dict, 含 _strategic_overview_text(posture_brief)
+        temperature: float = 0.3,
+        timeout_override: float | None = None,
+    ) -> dict:
+        """KB 16+06 新增活动批量分析（单批）。LLM 只判 action + keyword_class + 文本，数值代码定。
+
+        与 recommend_campaign_batch 同结构返回:
+          {"parsed": dict, "raw_output": str, "success": bool, "error": str, "temperature": float}
+        """
+        logger.info("Campaign new LLM 入口 [%s] items=%d temp=%.2f",
+                    asin, len(candidates), temperature)
+
+        # 策略上下文段（精简，仅 LLM 判选词/类别所需）
+        ctx_parts = [
+            "## 策略上下文 (ASIN 级，全批共享)",
+            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
+            f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
+            f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
+            f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
+        ]
+        if strategy_context.get("target_acos"):
+            ctx_parts.append(f"  - 运营目标 ACOS: {strategy_context['target_acos']}%")
+        _adirs = strategy_context.get("ad_directions") or []
+        if _adirs:
+            ctx_parts.append(f"  - 广告方向(运营已选): {_adirs}")
+
+        # 今日执行总纲 preamble（与 batch 流一致，注入 posture_brief）
+        overview_text = (strategy_context.get("_strategic_overview_text") or "").strip()
+        preamble = (
+            f"## 今日执行总纲（逐词判断须遵循此宏观框架）\n{overview_text}\n\n---\n\n"
+            if overview_text else ""
+        )
+
+        cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class)"]
+        for i, c in enumerate(candidates):
+            rank = c.get("natural_rank")
+            cand_parts.append(
+                f"\n### 候选 {i + 1}: {c.get('keyword_text', '')}"
+                f"\n  - 搜索量: {c.get('search_volume', 0)}"
+                f"\n  - 自然排名: {rank if rank is not None else 'N/A(无自然位)'}"
+                f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
+            )
+        user_message = preamble + "\n".join(ctx_parts) + "\n" + "\n".join(cand_parts)
+
+        messages = [
+            {"role": "system", "content": _build_new_campaign_prompt()},
+            {"role": "user", "content": user_message},
+        ]
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+                timeout_override=timeout_override,
+            )
+            parsed = self._parse_json(raw)
+            if not isinstance(parsed, dict):
+                return {"parsed": {}, "raw_output": raw, "success": False,
+                        "error": "解析结果非 dict", "temperature": temperature}
+            # 文风清洗 reason/evidence（复用 batch 流相同处理）
+            for it in parsed.get("new_campaigns", []) or []:
+                if isinstance(it, dict):
+                    it["reason"] = humanize_ops_text(self._sanitize_ops_text(it.get("reason", "")))
+                    it["evidence"] = [
+                        humanize_ops_text(self._sanitize_ops_text(e))
+                        for e in (it.get("evidence", []) or [])
+                    ]
+            logger.info("Campaign new LLM 成功 [%s], %d items",
+                        asin, len(parsed.get("new_campaigns", []) or []))
+            return {"parsed": parsed, "raw_output": raw, "success": True,
+                    "error": "", "temperature": temperature}
+        except Exception as e:
+            logger.warning("recommend_new_campaigns 异常 [%s]: %s", asin, e)
+            return {"parsed": {}, "raw_output": "", "success": False,
+                    "error": f"{type(e).__name__}: {e}", "temperature": temperature}
 
     # ── Campaign 策略总览(执行总纲) ──────────────────────────────────────────
     async def recommend_campaign_overview(

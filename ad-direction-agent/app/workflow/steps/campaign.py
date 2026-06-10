@@ -23,6 +23,7 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_ELIMINATE,
     classify as _classify_portfolio,
 )
+from app.workflow.steps.campaign_new import analyze_new_campaigns
 from app.models.campaign import (
     CampaignAdjustmentItem,
     CampaignAnalysisResult,
@@ -316,6 +317,7 @@ async def _analyze_campaigns_impl(
     ctx_dict = strategy_context.model_dump()
     exact_sem = asyncio.Semaphore(cc)   # 每流并发上限 = campaign_llm_concurrency
     broad_sem = asyncio.Semaphore(cc)
+    new_sem = asyncio.Semaphore(cc)     # 新增活动线独立限流（与 exact/broad 对等）
     rounds_detail: dict[str, dict] = {}
     warnings_list: list[str] = []
 
@@ -332,8 +334,22 @@ async def _analyze_campaigns_impl(
             warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
         _t("DONE strategic_overview")
 
-    # 5. 精准流 + 广泛流并行分析（各自独立限流 10，互不阻塞）
-    # return_exceptions=True：一流抛未捕获异常 → 不连累另一流，转为 warning
+    # 5. ★三股并行：精准流 / 广泛流 / 新增活动分析线（各自独立限流，互不阻塞）
+    # return_exceptions=True：任一流抛未捕获异常 → 不连累其余流，转为 warning
+    # 三股共享 ctx_dict（含 _strategic_overview_text = posture_brief），保证今日总纲一致
+    # 新增线输入（并行启动前一次性算好）：
+    existing_kws = {
+        (cu.keyword_text or "").strip().lower()
+        for cu in campaign_data.campaigns if cu.keyword_text
+    }
+    # 用预过滤阶段疑似已淘汰活动数作 FILL_AFTER_ELIMINATION 触发输入
+    # （并行架构下精准/广泛 adjustments 尚未产出；语义=已存在淘汰活动→词池已变窄）
+    pre_eliminated_count = len(skipped_eliminated)
+    shop_account = getattr(fetcher, "_last_shop_account", "")
+
+    async def _no_op_new_campaigns():
+        return [], []
+
     stream_results = await asyncio.gather(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
@@ -343,6 +359,20 @@ async def _analyze_campaigns_impl(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
         ),
+        (analyze_new_campaigns(
+            fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
+            shop_id=campaign_data.shop_id,
+            parent_seller_sku=campaign_data.parent_seller_sku,
+            site_code=campaign_data.site_code,
+            shop_account=shop_account,
+            existing_keywords=existing_kws,
+            pre_eliminated_count=pre_eliminated_count,
+            strategy_context=strategy_context,
+            ctx_dict=ctx_dict,
+            temperature=temperature,
+            days=days,
+            sem=new_sem,
+        ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )
 
@@ -356,9 +386,20 @@ async def _analyze_campaigns_impl(
     (exact_adjustments, exact_rd, exact_summaries, exact_skipped) = _unpack_stream(stream_results[0], "exact")
     (broad_adjustments, broad_rd, broad_summaries, broad_skipped) = _unpack_stream(stream_results[1], "broad")
 
+    # 新增活动线解包（返回 tuple[list[NewCampaignItem], list[str]]）
+    new_campaigns: list = []
+    new_campaigns_warnings: list[str] = []
+    nc_result = stream_results[2]
+    if isinstance(nc_result, BaseException):
+        logger.exception("new_campaigns 流异常 [%s]: %s", parent_asin, nc_result)
+        warnings_list.append(f"新增活动分析异常: {type(nc_result).__name__}: {nc_result}")
+    else:
+        new_campaigns, new_campaigns_warnings = nc_result
+        warnings_list.extend(new_campaigns_warnings)
+
     rounds_detail["exact"] = exact_rd
     rounds_detail["broad"] = broad_rd
-    _t("DONE exact+broad streams")
+    _t(f"DONE exact+broad+new streams (new={len(new_campaigns)})")
 
     # 短期兜底：广泛流完全没拿到搜索词报告时显式 warning。
     # 搜索词无 Doris 回落，MCP 空/失败会静默 → 否词不可用，需让运营可见而非以为"无否词"。
@@ -481,6 +522,8 @@ async def _analyze_campaigns_impl(
         site_code=campaign_data.site_code,
         total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
+        new_campaigns=new_campaigns,
+        new_campaigns_warnings=new_campaigns_warnings,
         skipped_campaigns=skipped_campaigns,
         strategic_overview=strategic_overview,
         synthesis=synthesis,

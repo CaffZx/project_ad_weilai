@@ -117,7 +117,8 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 }
 .campaign-card.eliminate { border-left-color: #DC2626; }
 .campaign-card.adjust    { border-left-color: #F59E0B; }
-.campaign-card.keep      { border-left-color: #16A34A; }
+.campaign-card.keep      { border-left-color: #374151; }
+.campaign-card.create    { border-left-color: #16A34A; }
 
 .campaign-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .campaign-card .meta { font-size: 12px; color: var(--muted-fg); margin-top: 4px; }
@@ -136,7 +137,8 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
 }
 .badge-eliminate { background: #FEE2E2; color: #991B1B; }
 .badge-adjust    { background: #FEF3C7; color: #92400E; }
-.badge-keep      { background: #DCFCE7; color: #166534; }
+.badge-keep      { background: #E5E7EB; color: #374151; }
+.badge-create    { background: #DCFCE7; color: #166534; }
 .badge-skipped   { background: #E5E7EB; color: #6B7280; }
 .badge-high      { background: #DBEAFE; color: #1E40AF; }
 .badge-medium    { background: #E5E7EB; color: #374151; }
@@ -393,7 +395,8 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
         <div class="stat"><div class="num" id="sumTotal">-</div><div class="lab">活动总数</div></div>
         <div class="stat"><div class="num" id="sumElim" style="color:#DC2626;">-</div><div class="lab">淘汰</div></div>
         <div class="stat"><div class="num" id="sumAdj" style="color:#F59E0B;">-</div><div class="lab">调整</div></div>
-        <div class="stat"><div class="num" id="sumKeep" style="color:#16A34A;">-</div><div class="lab">保持</div></div>
+        <div class="stat"><div class="num" id="sumKeep" style="color:#374151;">-</div><div class="lab">保持</div></div>
+        <div class="stat"><div class="num" id="sumNew" style="color:#16A34A;">-</div><div class="lab">新增</div></div>
       </div>
       <div class="text-sm muted" id="sumMeta" style="margin-top:8px;"></div>
       <div class="text-sm" style="color:#DC2626; margin-top:6px; cursor:help;" id="sumWarnings"></div>
@@ -423,6 +426,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
           <option value="eliminate">淘汰</option>
           <option value="adjust">调整</option>
           <option value="keep">保持</option>
+          <option value="create">新增</option>
         </select>
       </div>
       <div class="filter-group">
@@ -758,7 +762,30 @@ function renderResult(r) {
   const skipped = (r.skipped_campaigns || []).map(s => Object.assign({}, s, {
     __skipped: true, action: 'skipped', confidence: 'low', reason: s.reason || '未被分析',
   }));
-  _campaignItems = (r.adjustments || []).concat(skipped);
+  const newItems = (r.new_campaigns || []).map(n => ({
+    campaign_key: n.campaign_name || n.keyword_text,
+    campaign_name: n.campaign_name,
+    campaign_id: '',
+    child_asin: r.parent_asin,
+    keyword_text: n.keyword_text,
+    match_type: n.match_type,
+    keyword_class: n.keyword_class || '',
+    is_core: false,
+    action: 'create_campaign',
+    confidence: n.confidence || 'medium',
+    current_budget: 0, proposed_budget: n.proposed_daily_budget || 3.0,
+    current_bid: 0, proposed_bid: n.proposed_base_bid || 0.30,
+    reason: n.reason || '',
+    evidence: n.evidence || [],
+    triggered_rule: n.trigger_scene || '',
+    placement_adjustments: n.primary_placement && n.primary_placement !== 'N/A'
+      ? [{ placement: n.primary_placement, current_pct: 0, proposed_pct: 100 }] : [],
+    negative_keywords: n.negative_strategy
+      ? [{ keyword_text: '', reason: n.negative_strategy }] : [],
+    ai_portfolio_class: n.ai_portfolio_class || '',
+    review_level: n.review_level || 'MANUAL_REVIEW',
+  }));
+  _campaignItems = (r.adjustments || []).concat(newItems).concat(skipped);
 
   // 恢复审核态（按当前 run_id 隔离）
   _reviewState = _loadReviewState(asin, days, _currentRunId);
@@ -770,6 +797,7 @@ function renderResult(r) {
   $('sumElim').textContent  = s.to_eliminate ?? 0;
   $('sumAdj').textContent   = s.to_adjust ?? 0;
   $('sumKeep').textContent  = s.to_keep ?? 0;
+  $('sumNew').textContent   = (r.new_campaigns || []).length;
 
   const conf = `高 ${s.confidence_high||0} / 中 ${s.confidence_medium||0} / 低 ${s.confidence_low||0}`;
   const budget = s.estimated_budget_impact ?? 0;
@@ -1056,6 +1084,7 @@ function applyFilters() {
       if (fAction === 'eliminate' && a.action !== 'eliminate_to_low_bid_pool') return false;
       if (fAction === 'adjust' && !(a.action || '').startsWith('adjust')) return false;
       if (fAction === 'keep' && a.action !== 'keep') return false;
+      if (fAction === 'create' && a.action !== 'create_campaign') return false;
     }
     if (fAction !== 'all' && isSkipped) return false;
     // 匹配类型维度
@@ -1084,6 +1113,7 @@ function actionLabel(a) {
     adjust_budget: '调预算',
     adjust_placement: '调广告位',
     keep: '保持',
+    create_campaign: '新增',
   }[a] || a || '?');
 }
 
@@ -1119,6 +1149,7 @@ function renderCards(items) {
     }
 
     const klass = adj.action === 'eliminate_to_low_bid_pool' ? 'eliminate'
+                 : adj.action === 'create_campaign' ? 'create'
                  : (adj.action || '').startsWith('adjust') ? 'adjust' : 'keep';
     const confKlass = adj.confidence === 'high' ? 'high'
                     : adj.confidence === 'low' ? 'low' : 'medium';

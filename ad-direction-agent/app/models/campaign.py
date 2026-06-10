@@ -152,6 +152,43 @@ class CampaignBatchResult(BaseModel):
     llm_error: str = ""
 
 
+class NewCampaignCandidate(BaseModel):
+    """新增活动候选词（数据层产出，喂给 LLM 前的中间结构）。
+
+    keyword_class / match_type 由 LLM 基于 KB 06 判定，不在候选阶段填。
+    """
+    keyword_text: str
+    search_volume: int = 0                  # flow_keywords 提供
+    natural_rank: int | None = None         # own_keyword_flow 提供，无则 None
+    # ★KB 16 §3「建议竞价(suggestedBid)」：当前 MCP/Doris 无源，留 None 占位。
+    #   TODO(suggested-bid): 数据源(ERP/亚马逊 API)到位后填入，_calc_initial_bid 自动启用真实分支。
+    suggested_bid: float | None = None
+    trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签，非筛选门禁）
+
+
+class NewCampaignItem(BaseModel):
+    """新增活动建议（LLM 判 keyword_class/取舍/文本 + 代码补齐数值字段）。"""
+    keyword_text: str
+    action_type: str = "create_campaign"    # KB 16 §5: create_campaign | create_ad_group
+    campaign_name: str                      # 代码生成: {匹配类型中文}-{kw}-{YYYY-MM-DD}
+    campaign_type: str = ""                 # "精准广告" | "广泛广告"
+    match_type: str = ""                    # EXACT | BROAD | PHRASE（代码从 keyword_class 推导）
+    keyword_class: str = ""                 # ★LLM 判(KB 06): generic/long_tail/competitor/brand/custom
+    keywords_or_targets: list[str] = Field(default_factory=list)
+    proposed_daily_budget: float = 3.0      # KB 16 §2（代码定）
+    proposed_base_bid: float = 0.30         # KB 16 §3（代码定），真实建议竞价到位后重算
+    primary_placement: str = "头部"          # 仅 EXACT；代码默认"头部"(KB 16 §4 首轮主投位)
+    placement_adjustment: str = "N/A"       # 首轮统一不输出 (KB 16 §5)
+    negative_strategy: str = ""             # 仅 BROAD/PHRASE 必填 (KB 16 §5, LLM 产出)
+    trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签）
+    reason: str = ""                        # LLM 文本
+    evidence: list[str] = Field(default_factory=list)
+    ai_portfolio_class: str = ""            # 归组: 精准测试组 / 自动广泛组
+    confidence: str = "medium"              # 双轮 keyword_class 一致=high, 不一致=low
+    review_level: str = "MANUAL_REVIEW"
+    suggested_bid_source: str = "placeholder"   # "amazon_api" | "placeholder" | "actual_cpc"
+
+
 class CampaignStrategicOverview(BaseModel):
     """策略总览(执行总纲) — 明细前的宏观方向。
 
@@ -175,6 +212,8 @@ class CampaignAnalysisResult(BaseModel):
     run_id: str = ""                                                  # 本次分析唯一 ID (e.g. "20260601T123456Z")，前端 localStorage 隔离用
     total_campaigns: int = 0
     adjustments: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    new_campaigns: list[NewCampaignItem] = Field(default_factory=list)  # KB 16 新增活动建议（独立分析线）
+    new_campaigns_warnings: list[str] = Field(default_factory=list)     # 新增线专属 warning（聚合也进 warnings）
     skipped_campaigns: list[dict] = Field(default_factory=list)       # 整批 LLM 失败或未返回，需人工补救
     strategic_overview: dict | None = None                            # 策略总览(执行总纲)；失败时为 facts-only 或 None
     synthesis: dict | None = None                                     # AI 汇总分析 (groups + special_cases)；失败时为 None
