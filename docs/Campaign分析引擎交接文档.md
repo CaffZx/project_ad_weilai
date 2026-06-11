@@ -1,8 +1,8 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-09
-> **版本**: v1.6
-> **分支**: chenv3.0
+> **最后更新**: 2026-06-11
+> **版本**: v1.7
+> **分支**: chenv3.1
 
 ---
 
@@ -49,15 +49,17 @@ parent_asin
   ├─ MCP basic_info + product_report 并行 → 回落 Doris
   ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN")
   ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
-  ├─ 分流: EXACT → 精准流 / BROAD+PHRASE+AUTO → 广泛流
-  │   ├─ 精准流: 预取 placement → _EXACT_PROMPT → 分批投票
-  │   └─ 广泛流: 预取 search_term → _BROAD_PROMPT → 分批投票
-  ├─ 合并两流结果 + ★组合终分类 (LLM action 补淘汰判定)
+  ├─ ★三股并行 (strategic_overview 后, 共享 ctx_dict/posture_brief, return_exceptions 隔离):
+  │   ├─ 精准流: EXACT, 预取 placement → _EXACT_PROMPT → 分批投票
+  │   ├─ 广泛流: BROAD+PHRASE+AUTO, 预取 search_term → _BROAD_PROMPT → 分批投票
+  │   └─ ★新增活动线: 候选词发现→硬过滤→双轮取交集 (KB16+06, campaign_new.py, 详见 §9)
+  ├─ 合并两流结果 + ★组合终分类 (LLM action 补淘汰判定); new_campaigns 独立挂载
   ├─ ★action 归一化 (_normalize_action: proposed vs current 差值 derive 权威 action)
   ├─ Budget 冲突裁决 + ★终态 action 二次归一
+  ├─ ★预过滤可见化: 淘汰池/多词活动打 __prefiltered, 合并 excluded → 前端灰卡 (§9.3)
   ├─ Sanity check (仅低置信项，≤10/批，并行)
   ├─ ★组合预算汇总 (campaign_budget_summary.py: 3 组约束分配)
-  └─ AI 汇总合成 (按共同原因分组叙事) — 已禁用，待服务器验证后开启
+  └─ AI 汇总合成 (按共同原因分组叙事) — 2026-06-08 已恢复 (§7.1)
 ```
 
 ### 2.2 核心设计决策
@@ -110,6 +112,8 @@ parent_asin
 | `app/llm/kb_loader.py` | ~155 | KB 加载器，`campaign_adjustment` preset (KB 18/19/21/22) |
 | `app/workflow/steps/campaign_portfolio.py` | ~105 | ★组合分类器：4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
 | `app/workflow/steps/campaign_budget_summary.py` | ~90 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
+| `app/workflow/steps/campaign_new.py` | ~340 | ★新增活动分析线 (KB 16)：候选词发现→硬过滤→trigger标注→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9) |
+| `app/data/campaign_prefilter.py` | ~85 | 硬过滤纯函数 (v1.7 加多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示) |
 
 ### 3.2 关键配置项（settings.py）
 
@@ -259,7 +263,7 @@ num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 wor
 | ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `_SYNTHESIS_ENABLED=True`，并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
-| **新增广告活动分析** | P1 | KB 16（新增活动规则）已存在但**未接入任何 preset**，当前 campaign 模块仅分析**已有**活动的调优/淘汰，无法给出"应新建哪些活动"的建议。需：(a) 将 KB 16 加入 preset（如 `campaign_adjustment`）；(b) 在 reasoner.py 新增 `recommend_new_campaigns()` 或扩展现有 prompt；(c) 新增 campaign.py 编排步骤（在已有活动分析后运行，基于策略上下文 + KB 16 规则） |
+| ~~**新增广告活动分析**~~ | ✅ 已完成 | 2026-06-10/11 实现（KB 16+06，三股并行独立分析线）。详见 §9。**剩余子项**：建议竞价(suggestedBid)字段当前无源→bid 占位 $0.30，数据源到位后改 `_calc_initial_bid` 一处；`KEYWORD_PROMOTED_FROM_BROAD` 等 5 个触发场景未实现（需搜索词聚合/KB08/Custom词池）；新增活动预算未接入组合回算(KB23 §5.1)；ERP 写入未接 |
 | DB 落库 | P1 | `t_advert_agent_campaign_analysis` + `_adjustment` 表 |
 | L420 投票 key 同源化 | P1 | `tiebreaker_summaries` 依赖 LLM 回显 campaign_key |
 | **`is_core` 核心词真实数据源** | P1 | 模型字段 `CampaignUnit.is_core: bool` 已定义（model L122），reasoner 已透传至 LLM prompt（reasoner.py L1428-1429）+ synthesis 输出。但**写入端硬编码 `False`**（campaign.py L770：`is_core=False`）。需 (a) 确定数据源（Doris keyword_library 字段 / LLM 从 purpose-agent keyword_class 判定 / 运营手动标注）；(b) 填充 `_campaign_to_prompt_dict` 调用处的真实值 |
@@ -472,5 +476,82 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 
 ---
 
-*最后更新：2026-06-09（v1.6: 执行层落地 ERP 架构共识——前置缓存/执行层定时落库 T+1、后端配置表+渲染表、前端合并主看板+操作台/快照区分、现有资产处理）*
+## 9. 2026-06-10/11 迭代：新增广告活动分析线（KB 16）+ 预过滤可见化
+
+### 9.1 新增活动分析线（KB 16 + 06）— 三股并行独立管道
+
+**目标**：在只分析"已有活动"之外，补上"该 ASIN 应**新建**哪些活动"的建议。
+
+**编排位置**：在 `strategic_overview` 之后，与精准流/广泛流**三股并行**（共享 `asyncio.gather(return_exceptions=True)` + 同一 `ctx_dict`，posture_brief 一致注入）。fail-open：任何阶段失败仅 warning，不连累主分析。
+
+**数据流**（`campaign_new.py:analyze_new_campaigns`）：
+```
+候选词发现 (discover_new_keywords: flow_keywords + own_keyword_flow 并行)
+  → 硬过滤 (KB 16 §6 阻断: 库存<7/退货≥30%/评分<3.8/清货期; + 去重已投词/去噪/搜索量<50)
+  → trigger_scene 标注 (KB 16 §1, 仅展示标签非门禁)
+  → 排序(有自然位优先+搜索量降序) + Top-N 截断 (campaign_new_max_count=20) ← 真正的量控
+  → ★双轮 LLM 取交集 (R1+R2 不同随机种子, 两轮都判"建"才保留, 降幻觉)
+  → 代码补齐: match_type(由keyword_class推导) / bid / budget / campaign_name / placement / 归组
+```
+
+**职责切分**（关键设计）：
+- **LLM 只判**：`action`(create/skip) + `keyword_class`(KB 06 五类) + reason/evidence/negative_strategy。
+- **代码确定性产出**：bid/budget/campaign_name/match_type/primary_placement/归组——不进 LLM。
+
+**KB / 数值规则**：
+| 项 | 规则 | 实现 |
+|---|---|---|
+| preset | `new_campaign = ["16","06","02"]` (LLM 不算数值故无 15/19/23) | `kb_loader.py` |
+| 默认预算 | $3.00 (KB 16 §2) | `DEFAULT_NEW_BUDGET` |
+| 初始 bid | `min(0.5, 建议竞价×0.5)`，下限 $0.20 (KB 16 §3) | `_calc_initial_bid` |
+| **建议竞价字段** | MCP/Doris **当前无源** | **占位 $0.30**；TODO(suggested-bid) 数据源到位改一处 |
+| match_type | keyword_class→映射 (KB 06+16§4): brand/custom→EXACT, generic→BROAD 等 | `_derive_match_type` |
+| primary_placement | 仅 EXACT，代码默认"头部" (KB 16 §4 首轮只声明主投位，不加价) | 不交 LLM |
+| 命名 | `匹配类型-关键词-YYYY-MM-DD`（运营拍板，无 ASIN），如 `精准-fishnet stockings-2026-06-11` | `_generate_campaign_name` |
+| 置信 | keyword_class 两轮一致=high/AUTO_BATCHABLE；不一致=low/MANUAL_REVIEW | 交集组装 |
+
+**触发场景**：本期标注 3 类（RANKING_OPPORTUNITY_NO_EXACT / SEASONAL_ADVANCE_BUILD / FILL_AFTER_ELIMINATION）+ 兜底 KEYWORD_POOL_EXPANSION；其余 5 类（KEYWORD_PROMOTED_FROM_BROAD 需搜索词聚合 / COMPETITOR_INTERCEPT_WINDOW 需 KB08 / CUSTOM_KEYWORD_POOL 需运营词池表等）待数据源接入，有 TODO 标记。
+
+### 9.2 投放目标子 ASIN（`pick_target_child_asin`）
+
+新建活动须挂到具体子 ASIN（非父 ASIN 占位）。判据（运营定）：**历史活动数最多优先，平手按 7 天花费最高**（复合排序 `(活动数, perf_7d.cost)` 双降序）。数据取自 `campaign_data.campaigns`（已 MCP 拉过 perf）。
+
+### 9.3 预过滤可见化（第一期 A+B）
+
+**背景**：原 `skipped_eliminated`（淘汰池）与 `excluded`（多词等）未在前端展示。本期让被预过滤的活动**也在前端可见**（灰色不可操作，只标签+原因），与 LLM"已丢失"项区分。
+
+| 类别 | 数据源 | 本期 | 说明 |
+|---|---|---|---|
+| **A 已入淘汰池** ($1/$0.20) | `skipped_eliminated` (campaign.py) | ✅ | 打 `__prefiltered`，reason="已入淘汰池…请到ERP手动修改" |
+| **B 多词活动** | `excluded` (prefilter) | ✅ | **折叠去重**(每活动1条,防 raw 多行 N 重复)+补维度字段+`keyword_text="多关键词活动"`+词条数最多子ASIN(prefilter 无 perf 故"花费最高"不可得) |
+| **C 非 ENABLED** | — | ❌ 未做 | `_fetch_campaign_context` SQL 已 `WHERE campaign_status='ENABLED'` 且输出列写死 ENABLED → raw 不含；要展示**须改 SQL**(去 WHERE+取真实 status)，prefilter 规则1 才转活 |
+| **D 近7天无数据** | — | ❌ 未做 | report 表对零活动**无行**，且**无 campaign 主表**可 LEFT JOIN；放宽窗口语义也变。需先确认数据口径，prefilter 规则2 当前为死代码 |
+
+> A/B 现有数据齐全、零额外查询；C/D 需数据层改造，运营已确认本期不做。
+
+### 9.4 前端（`demo/campaign_test.html`）
+
+- `new_campaigns` 映射为 adjustment 形状复用卡片渲染器：绿色 `create` 卡 + `sumNew` 统计 + 筛选「新增」+ `actionLabel`/klass/badge 全配齐。
+- **主投位/否词策略专用渲染** `renderNewCampaignExtras`：不套调整型 placement/否词模板（避免假"0%→100%"违反 KB16§5、及字段名对不上的 `?` 占位垃圾）；渲染为「主投广告位: 头部（首轮不加价）」+「否词策略: …」。
+- skipped 分两类：`prefiltered`(灰卡、无悬停) vs `lost`(红色⚠悬停)；概览行显示「预过滤 N | 丢失 M」。
+- 样例 `demo/campaign_sample.json` 已注入展示数据（4 新增 + 23 预过滤 + 1 丢失）。**注意** `loadDebugResult` 优先读 localStorage `campaign_debug_result`，看样例需先 `localStorage.removeItem('campaign_debug_result')`。
+
+### 9.5 涉及文件
+
+| 文件 | 改动 |
+|---|---|
+| `app/workflow/steps/campaign_new.py` | 新建：全流程 + `pick_target_child_asin` |
+| `app/llm/reasoner.py` | `_NEW_CAMPAIGN_PROMPT` + `recommend_new_campaigns()` |
+| `app/data/campaign_fetcher.py` | `discover_new_keywords()` + `_last_shop_account` |
+| `app/llm/kb_loader.py` | preset `new_campaign=["16","06","02"]` |
+| `app/models/campaign.py` | `NewCampaignCandidate`/`NewCampaignItem`(含 child_asin) + `CampaignAnalysisResult.new_campaigns` |
+| `app/config/settings.py` | `campaign_new_enabled`/`_batch_size`/`_max_count` |
+| `app/workflow/steps/campaign.py` | 三股并行 gather + 淘汰池打 `__prefiltered` + 合并 `excluded` |
+| `app/data/campaign_prefilter.py` | 多词去重+补字段+`__prefiltered` |
+| `demo/campaign_test.html` | new_campaigns 映射/绿卡/sumNew/筛选 + 预过滤分流灰卡 + `renderNewCampaignExtras` + 修复 `skipped` 变量遗留 bug |
+
+---
+
+*最后更新：2026-06-11（v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 A淘汰池/B多词 + 前端绿卡/预过滤灰卡——§9）*
+*v1.6: 执行层落地 ERP 架构共识——前置缓存/执行层定时落库 T+1、后端配置表+渲染表、前端合并主看板+操作台/快照区分、现有资产处理*
 *v1.5: 总览/汇总恢复改造 + 前端双 tab/联动/气泡 + 免跑加载 + 展示版（§7）*

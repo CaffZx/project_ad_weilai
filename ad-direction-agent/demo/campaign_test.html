@@ -809,7 +809,9 @@ function renderResult(r) {
   const budget = s.estimated_budget_impact ?? 0;
   const budgetStr = budget >= 0 ? `+$${budget.toFixed(2)}` : `-$${Math.abs(budget).toFixed(2)}`;
   const sanity = r.sanity_check_passed ? '✓' : '✗';
-  const skippedNote = skipped.length ? `  |  丢失: ${skipped.length}` : '';
+  const skippedNote =
+    (prefiltered.length ? `  |  预过滤: ${prefiltered.length}` : '') +
+    (lost.length ? `  |  丢失: ${lost.length}` : '');
   $('sumMeta').textContent =
     `置信: ${conf}  |  预算影响: ${budgetStr}  |  校验: ${sanity}${skippedNote}`;
 
