@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
 > **最后更新**: 2026-06-11
-> **版本**: v1.7
+> **版本**: v1.8
 > **分支**: chenv3.1
 
 ---
@@ -114,6 +114,7 @@ parent_asin
 | `app/workflow/steps/campaign_budget_summary.py` | ~90 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
 | `app/workflow/steps/campaign_new.py` | ~340 | ★新增活动分析线 (KB 16)：候选词发现→硬过滤→trigger标注→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9) |
 | `app/data/campaign_prefilter.py` | ~85 | 硬过滤纯函数 (v1.7 加多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示) |
+| `demo/campaign-panel/` | ~1700 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
 
 ### 3.2 关键配置项（settings.py）
 
@@ -552,6 +553,63 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 
 ---
 
-*最后更新：2026-06-11（v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 A淘汰池/B多词 + 前端绿卡/预过滤灰卡——§9）*
+## 10. 2026-06-11 (续)：广告位加价比例数据接入 + 代码回填 + 前端合并
+
+### 10.1 广告位加价比例字段接入
+
+**背景**：广告位调整建议一直产出一律 `0% → 0% (维持)`。排查发现两个原因叠加：
+1. `ad_campaign_basic_info` MCP 新增了 `头部位置加价比例` / `商品位置加价比例` / `其他位置加价比例` 字段，但代码未解析。
+2. LLM 被要求输出 `current_pct` 数字，但 prompt 无法可靠约束 LLM 从输入复制结构化数值。
+
+**修法**：数据接入 + 代码回填 `current_pct`，LLM 只负责方向判断。
+
+**改动链**（4 文件，~85 行）：
+| # | 文件 | 改动 |
+|---|---|---|
+| ① | `models/campaign.py` | `CampaignUnit` 加 `tos_bid_pct` / `pp_bid_pct` / `ros_bid_pct`（默认 0.0） |
+| ② | `campaign_fetcher.py` | 三条 basic_info 生产路径各补 3 个字段：MCP 路径 `_to_float(row.get("头部位置加价比例"))`，Doris-only 和 fallback 路径填 0.0；`_assemble` 透传 |
+| ③ | `reasoner.py` | `_campaign_to_prompt_dict` 注入 `_placement_pcts: {头部:N, 商品:N, 其他:N}`；prompt 加 `当前加价比例` 行；placement schema 改：LLM **只输出 `action`（维持/小涨/大涨/小降/大降）+ `evidence`**，禁止输出 `current_pct/proposed_pct` |
+| ④ | `campaign.py` | 新增 `_backfill_placement_pcts()` 回填函数——`current_pct` 从 `CampaignUnit` 取真实值，`proposed_pct` = `current + action步长` 受 KB 07 边界裁断（头部≤30/商品≤10/其他≤15，≥0）；`_ACTION_STEP` 步长: 小涨+5pp/大涨+10pp/小降-5pp/大降-10pp；`_PLACEMENT_NAME_MAP` 中英文 placement 名归一；两个 return 路径各调一次 |
+
+**步长（运营未定，本期临时值，替换点 `_ACTION_STEP`）**：
+| action | 步长 |
+|---|---|
+| 小涨 | +5pp |
+| 大涨 | +10pp |
+| 小降 | -5pp |
+| 大降 | -10pp |
+| 维持 | 0 |
+
+**效果**：精准活动 `cur>0` 从 0 升至 43（代码回填），LLM 产出 placement 比率约 41/69（prompt 待加强令覆盖率到 100%）。
+
+### 10.2 关于 `_to_float` vs `_to_pct`
+
+MCP 的加价比例字段返回**百分数口径**（`9.0` = 9%），不和其他 MCP 百分比字段一样走 `_to_pct`（`_to_pct(9.0)` → `900.0` ❌），**必须用 `_to_float`**。
+
+### 10.3 前端合并 (campaign-panel/)
+
+`campaign_test.html` 的渲染逻辑迁移为 **ES module** 独立模块 `demo/campaign-panel/`，通过主看板 `ad-asisitant-agent.html` L2672 的 `<script type="module">` lazy-mount 到第 5 tab。
+
+**文件**（均在 `demo/campaign-panel/`）：
+| 文件 | 说明 |
+|---|---|
+| `panel.js` | 唯一入口 `mountCampaignPanel(el, {asin, days, mode})`，创建骨架→状态→事件→请求→返回 API |
+| `viewmodel.js` | `normalizeViewModel(raw)` 兜底归一（仅 null 填充 + 旧格式兼容），`PORTFOLIO_NAMES` 常量 |
+| `state.js` | `createCampaignState()` 工厂：全部状态 + 突变方法 |
+| `render.js` | 全部渲染函数 + `_backfill_placement_pcts` 对应的前端 `_renderNewCampaignExtras` |
+| `events.js` | `mountEventDelegation(root, state)` — 1 个 click + 1 个 mousedown + change/input/keydown/blur 捕获，按 `[data-action]` 分发 |
+| `panel.css` | 全部 `.camp-` 前缀 CSS，`.camp-root` 包裹 |
+
+**关键设计**：
+- **双轨渲染**：`mode: "interactive"` (操作台，显示复选框/执行按钮) / `"readonly"` (快照只读，隐藏操作件)。前端不感知数据来源。
+- **后端适配层** `app/api/campaign_viewmodel.py`：字段映射 + 枚举翻译 + 来源差异消化（`primary_placement` → `placement_adjustments`+`is_declaration`），前端见统一 ViewModel。
+- **快照接口** `GET /campaign/snapshot?asin=&decision_id=`：stub 实现，后端 mapper 另排期。**当前 tab5 默认 `interactive` 模式**，snapshot 接入后改 `readonly`。
+- **原 `campaign_test.html` 保留**作独立调试页。
+- **CSS 全部 `.camp-` 前缀**，无污染主看板风险（`review-approve/reject` 已加 `.camp-root` 作用域）。
+
+---
+
+*最后更新：2026-06-11（v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10）*
+*v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 A淘汰池/B多词 + 前端绿卡/预过滤灰卡——§9*
 *v1.6: 执行层落地 ERP 架构共识——前置缓存/执行层定时落库 T+1、后端配置表+渲染表、前端合并主看板+操作台/快照区分、现有资产处理*
 *v1.5: 总览/汇总恢复改造 + 前端双 tab/联动/气泡 + 免跑加载 + 展示版（§7）*
