@@ -851,6 +851,8 @@ async def _analyze_one_stream(
                 item.confidence = "medium"
                 adjustments.append(item)
         skipped = _collect_skipped(campaigns, adjustments)
+        if task_type == "exact":
+            _backfill_placement_pcts(adjustments, unit_lookup)
         return adjustments, {
             "round1": _round_stats(r1), "round2": None, "round3": None,
         }, summaries, skipped
@@ -887,6 +889,8 @@ async def _analyze_one_stream(
 
     adjustments = _merge_to_adjustments(votes, r1_results, r2_results)
     skipped = _collect_skipped(campaigns, adjustments)
+    if task_type == "exact":
+        _backfill_placement_pcts(adjustments, unit_lookup)
     _st(f"DONE merge ({len(adjustments)} items, {len(skipped)} skipped)")
     return adjustments, rd, summaries, skipped
 
@@ -1073,6 +1077,51 @@ def _placement_sig(adjustments: list[dict]) -> frozenset:
         if isinstance(p, dict):
             sig.add((str(p.get("placement", "")), str(p.get("action", ""))))
     return frozenset(sig)
+
+
+# KB 07 加价比例边界
+_PLACEMENT_MAX = {"头部": 30, "商品": 10, "其他": 15}
+
+# action → 加价比例步长 (百分点)
+_ACTION_STEP: dict[str, int] = {
+    "大涨": +10,
+    "小涨": +5,
+    "维持": 0,
+    "小降": -5,
+    "大降": -10,
+}
+
+_PLACEMENT_NAME_MAP: dict[str, str] = {
+    "头部": "头部", "Top of Search on-Amazon": "头部", "top_of_search": "头部",
+    "商品": "商品", "Detail Page on-Amazon": "商品", "product_page": "商品",
+    "其他": "其他", "Other on-Amazon": "其他", "rest_of_search": "其他",
+}
+
+
+def _backfill_placement_pcts(
+    adjustments: list,
+    unit_lookup: dict[str, "CampaignUnit"],
+) -> None:
+    """代码回填 placement 的 current_pct + proposed_pct，LLM 只负责 action/evidence。
+
+    current_pct 从 CampaignUnit 取真实值；
+    proposed_pct 按 action 步长 + KB 07 边界算。
+    """
+    for item in adjustments:
+        cu = unit_lookup.get(item.campaign_key)
+        if cu is None:
+            continue
+        pct_by_placement = {"头部": cu.tos_bid_pct, "商品": cu.pp_bid_pct, "其他": cu.ros_bid_pct}
+        for p in item.placement_adjustments or []:
+            pname_raw = str(p.get("placement", "") or "")
+            pname = _PLACEMENT_NAME_MAP.get(pname_raw, pname_raw)
+            current = pct_by_placement.get(pname, 0.0)
+            p["current_pct"] = current
+
+            action = str(p.get("action", "维持") or "维持")
+            step = _ACTION_STEP.get(action, 0)
+            proposed = max(0.0, min(current + step, _PLACEMENT_MAX.get(pname, 100)))
+            p["proposed_pct"] = proposed
 
 
 def _merge_negative_keywords(

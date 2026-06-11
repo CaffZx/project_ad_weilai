@@ -58,6 +58,10 @@ class CampaignUnit(BaseModel):
     perf_7d: CampaignPerf = Field(default_factory=CampaignPerf)   # MCP product_report(7d)
     placements: dict[str, dict] = Field(default_factory=dict)     # MCP placement_report (懒加载)
     placement_data_available: bool = False   # 懒加载前为空
+    # 广告位加价比例：MCP basic_info (头部/商品/其他位置加价比例)
+    tos_bid_pct: float = 0.0                 # 头部位置加价比例 %
+    pp_bid_pct: float = 0.0                  # 商品位置加价比例 %
+    ros_bid_pct: float = 0.0                 # 其他位置加价比例 %
     # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
     #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类
     portfolio: str = ""

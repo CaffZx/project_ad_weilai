@@ -132,6 +132,9 @@ class CampaignFetcher:
                     "campaign_budget": float(camp.get("campaign_budget") or 0),
                     "campaign_status": str(camp.get("campaign_status") or ""),
                     "days_online": -1,  # Doris 无活动上线天数，标未知（勿用 0 触发新活动保护）
+                    "tos_bid_pct": 0.0,
+                    "pp_bid_pct": 0.0,
+                    "ros_bid_pct": 0.0,
                     "source": "doris",
                 }
                 perf = await db._fetch_campaign_perf_from_db(name, shop_id, days)
@@ -224,6 +227,10 @@ class CampaignFetcher:
                         "campaign_status": str(row.get("状态") or ""),
                         # 字段缺失 → -1（未知），勿伪装成 0 天触发"新活动保护"
                         "days_online": _to_days_online(row.get("活动上线天数")),
+                        # 广告位加价比例 (KB 19 §5 决策矩阵依赖)
+                        "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                        "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                        "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
                     })
             return campaign_name, _CallResult(ok=False, error=res.error)
         except Exception as e:  # noqa: BLE001
@@ -269,6 +276,9 @@ class CampaignFetcher:
             "campaign_budget": 0.0,
             "campaign_status": "",
             "days_online": -1,
+            "tos_bid_pct": 0.0,
+            "pp_bid_pct": 0.0,
+            "ros_bid_pct": 0.0,
             "source": "doris",
         }
 
@@ -500,6 +510,9 @@ class CampaignFetcher:
             perf_7d=perf_7d,
             placements={},
             placement_data_available=False,
+            tos_bid_pct=float(basic.get("tos_bid_pct") or 0),
+            pp_bid_pct=float(basic.get("pp_bid_pct") or 0),
+            ros_bid_pct=float(basic.get("ros_bid_pct") or 0),
             source=source,
             flags=[],
         )

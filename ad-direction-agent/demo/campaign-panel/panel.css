@@ -149,8 +149,8 @@
 .camp-badge-low       { background: #FCE7F3; color: #9D174D; }
 
 /* ── review badge ── */
-.review-approve { background: #DCFCE7; color: #166534; }
-.review-reject  { background: #FEE2E2; color: #991B1B; }
+.camp-root .review-approve { background: #DCFCE7; color: #166534; }
+.camp-root .review-reject  { background: #FEE2E2; color: #991B1B; }
 
 /* ── synthesis ── */
 .camp-synthesis-group {

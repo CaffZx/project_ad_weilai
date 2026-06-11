@@ -2671,8 +2671,6 @@ async function loadAnnounceContent(filename) {
 <script type="module">
 import { mountCampaignPanel } from './campaign-panel/panel.js';
 
-let _campaignPanelAPI = null;
-
 const _origSwitchTab = switchTab;
 window._campaignPanelAPI = null;
 window.switchTab = async function(tabId) {
@@ -2685,7 +2683,7 @@ window.switchTab = async function(tabId) {
       window._campaignPanelAPI = await mountCampaignPanel(root, {
         asin,
         days,
-        mode: 'readonly',  // 默认快照（T+1 批次），实时分析由 campaign panel 内部切换
+        mode: 'interactive',  // TODO: snapshot 后端接入后改回 'readonly'
       });
     } catch (e) {
       const msg = document.createElement('div');

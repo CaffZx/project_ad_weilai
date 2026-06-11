@@ -287,7 +287,7 @@ _CAMPAIGN_EXACT_PROMPT = (
       "current_bid": 0.85, "proposed_bid": 0.20,
       "evidence": ["7天花费$18.5", "7天订单0，CVR=0%"],
       "placement_adjustments": [
-        {"placement": "头部", "current_pct": 20, "proposed_pct": 10, "action": "下调", "evidence": "..."}
+        {"placement": "头部", "action": "小涨", "evidence": "ACOS 25% 低于目标 30%，有花费有出单"}
       ],
       "review_level": "MANUAL_REVIEW"
     }
@@ -299,7 +299,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 ### 必填结构字段
 - **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
-- 必须输出 placement_adjustments（三个广告位全部列出，无数据时维持 0%）
+- 必须输出 placement_adjustments（三个广告位全部列出）。每个只填 `placement`（头部/其他/商品）+ `action`（维持/小涨/大涨/小降/大降）+ `evidence`。**禁止输出 current_pct/proposed_pct 数字**——这些由后端按 KB 19 §3 从当前加价比例 + action 自动计算
 
 ### 淘汰活动
 - action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
@@ -1481,6 +1481,12 @@ class LLMReasoner:
             summary["keyword_class"] = keyword_class
         if is_core:
             summary["is_core"] = True
+        # 广告位加价比例 (KB 19 §5 决策矩阵依赖)
+        summary["_placement_pcts"] = {
+            "头部": cu.tos_bid_pct,
+            "商品": cu.pp_bid_pct,
+            "其他": cu.ros_bid_pct,
+        }
 
         return summary
 
@@ -1564,10 +1570,15 @@ class LLMReasoner:
                 camp_parts.append(f"  - ACOS vs 目标: {'+' if s['acos_vs_target'] > 0 else ''}{s['acos_vs_target']}%")
             if "budget_utilization_pct" in s:
                 camp_parts.append(f"  - 预算利用率: {s['budget_utilization_pct']}%")
+            # 广告位加价比例 (KB 19 §5 决策矩阵 — 来自 basic_info，非 placement_report)
+            ppcts = s.get("_placement_pcts", {})
+            if ppcts:
+                camp_parts.append(f"  - 当前加价比例: 头部:{ppcts.get('头部',0)}%, "
+                                 f"商品:{ppcts.get('商品',0)}%, 其他:{ppcts.get('其他',0)}%")
             # 广告位懒加载数据 (KB 22 §2.3 / KB 19 §5)
             if s.get("_placement_data"):
                 pd_data = s["_placement_data"]
-                camp_parts.append(f"  - ★广告位数据 (per-placement):")
+                camp_parts.append(f"  - ★广告位表现 (per-placement):")
                 for pname, pinfo in pd_data.items():
                     if isinstance(pinfo, dict):
                         camp_parts.append(
