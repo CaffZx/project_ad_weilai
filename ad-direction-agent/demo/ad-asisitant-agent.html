@@ -1265,6 +1265,8 @@ async function loadAll() {
   }
   const cpRoot = document.getElementById('campPanelRoot');
   if (cpRoot) cpRoot.innerHTML = '';
+  // 选定父 ASIN 即可查看 campaign 分析（独立于 tab1-4 的前置策略配置）
+  setTabEnabled('tab5', true);
   activeTab = null;
   qsa('.tab-btn').forEach(b => b.classList.remove('tab-active'));
   qsa('.tab-panel').forEach(p => p.classList.remove('active'));
