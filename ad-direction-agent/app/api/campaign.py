@@ -44,6 +44,7 @@ async def _maybe_push_erp(
     temperature: float,
     write_erp: bool,
     state,
+    analysis_mode: str = "REALTIME",
 ) -> dict:
     """分析成功后可选写入 ERP；失败不抛异常。"""
     enabled = write_erp or settings.erp_auto_write
@@ -73,6 +74,14 @@ async def _maybe_push_erp(
             "ERP write_full OK [%s] decision_id=%s cards=%d",
             asin, report.decision_id, report.modern_card,
         )
+        # 批次收尾：置最新 COMPLETED + 清 DRAFT 锁（DRAFT-as-lock 模型）
+        try:
+            from app.persistence.erp_writer.repository import _get_repository
+            await asyncio.to_thread(
+                _get_repository().finalize_batch, report.decision_id, asin, analysis_mode,
+            )
+        except Exception as fe:
+            logger.warning("finalize_batch 失败 [%s] %s: %s (非阻塞)", asin, report.decision_id, fe)
         return out
     except Exception as e:
         logger.exception("ERP write_full 失败 [%s]: %s", asin, e)
@@ -128,45 +137,46 @@ async def campaign_viewmodel(req: dict):
     return vm
 
 
+def _empty_snapshot(asin: str, days: int, msg: str) -> dict:
+    from datetime import datetime, timezone
+    return {
+        "mode": "readonly", "parent_asin": asin, "days": days, "run_id": "",
+        "snapshot_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "summary": {"total": 0, "eliminate": 0, "adjust": 0, "keep": 0, "create": 0,
+                    "prefiltered": 0, "lost": 0, "confidence_high": 0,
+                    "confidence_medium": 0, "confidence_low": 0,
+                    "budget_impact": None, "sanity_check_passed": None},
+        "overview": None, "budget_summary": None, "synthesis": None,
+        "items": [], "warnings": [msg],
+    }
+
+
 @router.get("/campaign/snapshot")
 async def campaign_snapshot(asin: str = "", decision_id: str = "", days: int = 7):
-    """读取最近一次定时分析的快照（mode=readonly）。
+    """读取某决策批次的执行层快照（mode=readonly）。
 
-    不传 decision_id 时默认取 is_latest=1 的最新决策。
-    本期为 stub 实现，返回 mock 数据；后端 mapper 另排期接入业务库。
+    不传 decision_id 时取该 ASIN is_latest=1 的最新已完成批次。
     """
-    from datetime import datetime, timezone
+    from app.persistence.erp_writer.repository import _get_repository
+    from app.api.campaign_viewmodel import from_db_snapshot
 
-    if not asin:
-        return {"mode": "readonly", "parent_asin": "", "days": days, "run_id": "",
-                "snapshot_time": None, "summary": {}, "overview": None,
-                "budget_summary": None, "synthesis": None, "items": [], "warnings": ["asin 必填"]}
+    if not asin and not decision_id:
+        return _empty_snapshot(asin, days, "asin 或 decision_id 必填")
 
-    logger.info("Snapshot stub [%s] decision_id=%s", asin, decision_id or "(latest)")
-
-    return {
-        "mode": "readonly",
-        "parent_asin": asin,
-        "days": 7,
-        "run_id": decision_id or "latest",
-        "snapshot_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "summary": {
-            "total": 0, "eliminate": 0, "adjust": 0, "keep": 0, "create": 0,
-            "prefiltered": 0, "lost": 0,
-            "confidence_high": 0, "confidence_medium": 0, "confidence_low": 0,
-            "budget_impact": None, "sanity_check_passed": None,
-        },
-        "overview": {
-            "facts": {},
-            "assessment_text": "（快照数据未接入，此处为占位）",
-            "direction_text": "",
-            "generated_by": "snapshot",
-        },
-        "budget_summary": None,
-        "synthesis": None,
-        "items": [],
-        "warnings": ["快照接口为 stub，后端 mapper 另排期接入业务库"],
-    }
+    try:
+        repo = _get_repository()
+        if not decision_id:
+            latest = await asyncio.to_thread(repo.get_latest_completed, asin)
+            if not latest:
+                return _empty_snapshot(asin, days, "该 ASIN 暂无已完成批次，请先运行执行层分析")
+            decision_id = latest.get("decision_id")
+        snap = await asyncio.to_thread(repo.read_snapshot, decision_id)
+        if not snap:
+            return _empty_snapshot(asin, days, f"批次 {decision_id} 不存在")
+        return from_db_snapshot(snap, mode="readonly")
+    except Exception as e:
+        logger.exception("Snapshot 读取失败 [%s] decision_id=%s: %s", asin, decision_id, e)
+        return _empty_snapshot(asin, days, f"快照读取失败: {type(e).__name__}: {e}")
 
 
 # ── 审核占位端点（本期 stub）─────────────────────────────────────────────────
@@ -285,24 +295,29 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
 
 @router.post("/campaign/confirm")
 async def campaign_confirm(req: CampaignConfirmRequest):
-    """运营批量审核占位端点 —— 本期仅记录日志，后续生产化会：
-    1. 写 MySQL 表 campaign_confirm_log（含 run_id 幂等键）
-    2. 异步推送到 ERP 系统
-    3. 与 adjustment_history 关联
+    """运营批量审核 → 写 card + pending 的 confirm_status（PENDING→CONFIRMED/REJECTED）。
+
+    run_id 即 decision_id；每个 decision.campaign_key 即 card_id。
+    校验：批次最新已完成且无进行中事件；每活动只处理一次（幂等，重复→skipped）。
     """
-    # TODO 生产化：写表 + 推 ERP
-    approve_n = sum(1 for d in req.decisions if d.decision == "approve")
-    reject_n = sum(1 for d in req.decisions if d.decision == "reject")
+    decision_id = (req.run_id or "").strip()
+    if not decision_id:
+        return {"ok": False, "error": "run_id(decision_id) 必填", "applied": 0, "skipped": 0}
+
+    decisions = [{"campaign_key": d.campaign_key, "decision": d.decision} for d in req.decisions]
+    from app.persistence.erp_writer.repository import _get_repository
+    try:
+        repo = _get_repository()
+        result = await asyncio.to_thread(
+            repo.confirm_decisions, decision_id, decisions, req.operator or None,
+        )
+    except Exception as e:
+        logger.exception("Campaign confirm 失败 [%s] decision_id=%s: %s", req.asin, decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "applied": 0, "skipped": 0}
+
     logger.info(
-        "Campaign confirm [%s run_id=%s] %d decisions (approve=%d, reject=%d) from %s",
-        req.asin, req.run_id or "?", len(req.decisions), approve_n, reject_n,
+        "Campaign confirm [%s decision_id=%s] applied=%s skipped=%s from %s",
+        req.asin, decision_id, result.get("applied"), result.get("skipped"),
         req.operator or "anonymous",
     )
-    return {
-        "received": len(req.decisions),
-        "asin": req.asin,
-        "run_id": req.run_id,
-        "approve": approve_n,
-        "reject": reject_n,
-        "note": "本期仅日志占位，后续会写库+推 ERP",
-    }
+    return result

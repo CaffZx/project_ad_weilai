@@ -75,7 +75,7 @@ function _fullRender(state) {
     _show('camp-list');
     _hide('camp-synthesis');
     _renderPortfolioFilterPills(state);
-    _renderBatchToolbar(state, mode);
+    _renderBatchToolbar(state);
     _renderCards(state);
   }
 
@@ -148,8 +148,8 @@ function _renderTabButtons(state) {
 }
 
 // ── 批量工具栏 ──
-function _renderBatchToolbar(state, mode) {
-  if (mode !== 'interactive') { _hide('camp-batch-toolbar'); return; }
+function _renderBatchToolbar(state) {
+  if (!state.executable) { _hide('camp-batch-toolbar'); return; }
   _show('camp-batch-toolbar');
   const cnt = state._selection.size;
   const total = state._filteredItems.filter(it => it.item_type !== 'prefiltered' && it.item_type !== 'lost').length;
@@ -216,7 +216,7 @@ function _renderCards(state) {
     const reviewBadge = reviewMark
       ? `<span class="review-badge review-${reviewMark}">${reviewMark === 'approve' ? '✓ 已同意' : '✗ 已拒绝'}</span>`
       : '';
-    const interactive = state.mode === 'interactive';
+    const interactive = state.executable !== false;
     const checkboxHtml = interactive
       ? `<div class="card-checkbox"><input type="checkbox" data-key="${_esc(adj.item_id)}" ${state._selection.has(adj.item_id) ? 'checked' : ''} data-action="camp-toggle-select"></div>`
       : '';
@@ -396,7 +396,7 @@ function _renderSynthesis(vm) {
       <div class="group-title">
         ${gi + 1}. ${_esc(g.title || '')}
         <span class="camp-badge camp-badge-${_badgeKlass(g.action)}">${_actionLabel(g.action)} ×${g.count || (g.campaign_keys || []).length}</span>
-        <button class="camp-group-select-btn" data-action="camp-select-group" data-group-index="${gi}" ${vm.mode !== 'interactive' ? 'disabled' : ''}>☑ 全选本组</button>
+        <button class="camp-group-select-btn" data-action="camp-select-group" data-group-index="${gi}" ${!state.executable ? 'disabled' : ''}>☑ 全选本组</button>
       </div>
       <div class="group-narrative">${_esc(g.narrative || '')}</div>
       <div class="group-keys">
@@ -455,7 +455,7 @@ function _renderPortfolioFilterPills(state) {
     const amtLabel = isElim ? '' : (constraints[name] != null ? '约束' : '');
 
     // 约束编辑行（仅在交互模式 + 非淘汰组 + 目标预算存在时显示）
-    const canEdit = state.mode === 'interactive' && !isElim && bs.target_budget != null;
+    const canEdit = state.executable !== false && !isElim && bs.target_budget != null;
     const actLine = !canEdit ? ''
       : (editing === name
         ? `<span class="pp-acts">

@@ -8,6 +8,7 @@ export function createCampaignState() {
     asin: '',
     days: 7,
     mode: null,
+    executable: true,  // 决策批次驱动: false 时隐藏批量栏+禁勾选
     _campaignItems: [],
     _filteredItems: [],
     _currentRunId: '',
@@ -62,7 +63,7 @@ export function createCampaignState() {
 
   // ── 选项 ──
   state.toggleSelection = function (key) {
-    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
+    if (!state.executable) return;  // 决策批次不可执行时禁用操作
     if (state._selection.has(key)) state._selection.delete(key);
     else state._selection.add(key);
     _reRender();
@@ -79,7 +80,7 @@ export function createCampaignState() {
   }
 
   state.selectAllVisible = function () {
-    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
+    if (!state.executable) return;  // 决策批次不可执行时禁用操作
     _visibleNonSkippedKeys().forEach(k => state._selection.add(k));
     _reRender();
   };
@@ -131,7 +132,7 @@ export function createCampaignState() {
 
   // ── 批量确认 / 导出 ──
   state.batchConfirm = async function (decision) {
-    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
+    if (!state.executable) return;  // 决策批次不可执行时禁用操作
     if (state._selection.size === 0) {
       _toast('请先勾选至少一项');
       return;
@@ -183,7 +184,7 @@ export function createCampaignState() {
 
   // ── 汇总联动 ──
   state.selectGroup = function (gi) {
-    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
+    if (!state.executable) return;  // 决策批次不可执行时禁用操作
     const group = state._synthesisGroups[gi];
     if (!group) return;
     group.campaign_keys.forEach(k => state._selection.add(k));

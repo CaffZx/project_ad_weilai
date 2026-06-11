@@ -30,7 +30,7 @@ const API_TIMEOUT = {
  * @param {number} [options.temperature]
  */
 export async function mountCampaignPanel(containerEl, options = {}) {
-  const { asin, days = 7, mode = ViewMode.INTERACTIVE, temperature } = options;
+  const { asin, days = 7, mode = ViewMode.INTERACTIVE, temperature, executable = true, decision_id = '' } = options;
 
   // 1. DOM 骨架
   containerEl.innerHTML = `
@@ -41,14 +41,6 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           <!-- 免责声明 -->
           <div class="camp-disclaimer hidden" id="camp-disclaimer">
             ⚠ AI 建议仅供参考，请结合运营经验判断。执行操作前请二次确认。
-          </div>
-
-          <!-- 模式切换：快照(只读) / 实时分析(操作台) -->
-          <div id="camp-mode-bar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding:6px 12px;background:var(--camp-card-bg);border:1px solid var(--camp-border);border-radius:var(--camp-radius-card);">
-            <span style="font-size:12px;color:var(--camp-muted-fg);">视图：</span>
-            <button id="camp-mode-snapshot" class="camp-filter-btn" style="font-size:12px;">近一次执行层分析</button>
-            <button id="camp-mode-realtime" class="camp-filter-btn" style="font-size:12px;">实时分析</button>
-            <span id="camp-mode-loader" class="hidden" style="font-size:12px;color:var(--camp-muted-fg);margin-left:8px;"><span class="camp-spinner"></span></span>
           </div>
 
           <!-- 告警 -->
@@ -144,7 +136,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
   // 2. 创建状态
   const state = createCampaignState();
-  Object.assign(state, { asin, days, mode });
+  Object.assign(state, { asin, days, mode, executable });
 
   // 3. 注入渲染回调
   state.setRenderer((st) => { _fullRender(st); });
@@ -152,60 +144,18 @@ export async function mountCampaignPanel(containerEl, options = {}) {
   // 4. 挂载事件委托
   const cleanupEvents = mountEventDelegation(root, state);
 
-  // 4b. 模式切换按钮
-  const btnSnapshot = document.getElementById('camp-mode-snapshot');
-  const btnRealtime = document.getElementById('camp-mode-realtime');
-  const modeLoader = document.getElementById('camp-mode-loader');
-
-  function _updateModeButtons(current) {
-    if (btnSnapshot) btnSnapshot.classList.toggle('active', current === ViewMode.READONLY);
-    if (btnRealtime) btnRealtime.classList.toggle('active', current === ViewMode.INTERACTIVE);
-    // readonly 时隐藏批量工具栏和复选框、realtime 显示
-    const bat = document.getElementById('camp-batch-toolbar');
-    if (bat) bat.style.display = (current === ViewMode.INTERACTIVE) ? '' : 'none';
-  }
-
-  if (btnSnapshot) btnSnapshot.onclick = async () => {
-    if (state.mode === ViewMode.READONLY) return;
-    if (modeLoader) modeLoader.classList.remove('hidden');
-    try {
-      const vm = await _fetchSnapshot(asin);
-      state.setData(vm);
-      _updateModeButtons(ViewMode.READONLY);
-    } catch (e) {
-      /* 静默降级 */
-    }
-    if (modeLoader) modeLoader.classList.add('hidden');
-  };
-
-  if (btnRealtime) btnRealtime.onclick = async () => {
-    if (state.mode === ViewMode.INTERACTIVE) return;
-    if (modeLoader) modeLoader.classList.remove('hidden');
-    try {
-      const vm = await _fetchRealtime(asin, days, temperature);
-      state.setData(vm);
-      _updateModeButtons(ViewMode.INTERACTIVE);
-    } catch (e) {
-      /* 静默降级 */
-    }
-    if (modeLoader) modeLoader.classList.add('hidden');
-  };
-
-  _updateModeButtons(mode);
-
-  // 5. 加载数据
+  // 5. 加载数据（mode 由页面级批次选择器驱动，不再内嵌模式条）
   const loader = document.getElementById('camp-loader');
   try {
     if (mode === ViewMode.READONLY) {
       // 快照
-      const vm = await _fetchSnapshot(asin);
+      const vm = await _fetchSnapshot(asin, decision_id);
       state.setData(vm);
     } else {
       // 实时
       if (loader) loader.innerHTML = '<span class="camp-spinner"></span> 正在运行分析（可能需数分钟）...';
       const vm = await _fetchRealtime(asin, days, temperature);
       state.setData(vm);
-      _updateModeButtons(ViewMode.INTERACTIVE);
     }
   } catch (e) {
     if (loader) { loader.textContent = '分析失败：' + (e.message || '未知错误'); loader.style.cssText = 'color:#DC2626;padding:20px;'; }
@@ -232,7 +182,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
       if (loader) { loader.classList.remove('hidden'); loader.innerHTML = '<span class="camp-spinner"></span> 正在运行分析...'; }
       try {
         const vm = mode === ViewMode.READONLY
-          ? await _fetchSnapshot(asin)
+          ? await _fetchSnapshot(asin, decision_id)
           : await _fetchRealtime(asin, days, temperature);
         state.setData(vm);
         state.applyFilters();
@@ -284,7 +234,9 @@ async function _fetchRealtime(asin, days, temperature) {
   return normalizeViewModel(raw);
 }
 
-async function _fetchSnapshot(asin) {
-  const raw = await _callAPI('/campaign/snapshot?' + new URLSearchParams({ asin }), null, API_TIMEOUT.snapshot, 'GET');
+async function _fetchSnapshot(asin, decision_id) {
+  const params = { asin };
+  if (decision_id) params.decision_id = decision_id;
+  const raw = await _callAPI('/campaign/snapshot?' + new URLSearchParams(params), null, API_TIMEOUT.snapshot, 'GET');
   return normalizeViewModel(raw);
 }

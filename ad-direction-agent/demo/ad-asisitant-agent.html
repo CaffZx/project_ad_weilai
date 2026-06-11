@@ -635,6 +635,14 @@ body {
     <!-- 右侧内容区（初始隐藏） -->
     <div id="mainContent" class="hidden" style="display:none;flex-direction:column;gap:0;flex:1">
 
+      <!-- 决策批次栏 -->
+      <div id="batchBar" class="hidden" style="display:flex;gap:10px;align-items:center;padding:8px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;">
+        <span style="font-size:12px;font-weight:600;">历史决策批次</span>
+        <select id="batchSelect" style="width:auto;flex:1;max-width:320px;"></select>
+        <span id="batchBadge" class="badge" style="font-size:10px;"></span>
+        <button id="btnNewEvent" class="btn btn-primary btn-sm" style="margin-left:8px;" onclick="onNewEventClick()">新建分析事件</button>
+      </div>
+
       <!-- 药丸标签栏 -->
       <div class="tab-bar" id="tabBar">
         <button class="tab-btn tab-disabled" data-tab="tab1" onclick="switchTab('tab1')">广告目的与目标关键词推荐</button>
@@ -811,6 +819,111 @@ const tabState = { tab1: false, tab2: false, tab3: false, tab4: false, tab5: fal
 let activeTab = null;
 window._p3data = null;
 const SESSION_START = new Date().toISOString();
+
+// ═══════════════ ERP 跳转参数 ═══════════════
+const _erpParams = (() => {
+  const p = new URLSearchParams(location.search);
+  return {
+    parentAsin: p.get('parentAsin') || '',
+    shopId: p.get('shopId') || '',
+    parentSellerSku: p.get('parentSellerSku') || '',
+    productPosition: p.get('productPosition') || '',
+    productStage: p.get('productStage') || '',
+    seasonType: p.get('seasonType') || '',
+    userId: p.get('userId') || '',
+  };
+})();
+window._erpParams = _erpParams;
+
+// ═══════════════ 决策批次状态 ═══════════════
+let _decisionContext = null;  // GET /decision/context 缓存
+
+async function bootstrapFromContext() {
+  show('btnStart'); // show loading
+  try {
+    const ctx = await callAPI('/decision/context?asin=' + encodeURIComponent(asin), null, API_TIMEOUT.quick, 'GET');
+    _decisionContext = ctx;
+  } catch (e) {
+    console.warn('bootstrap /decision/context 失败,降级实时模式', e);
+    _decisionContext = { has_config: false, in_progress: null, batches: [], degraded: true };
+  }
+  // A/B/C 判定
+  const ctx = _decisionContext;
+  if (!ctx.has_config) {
+    // A: 首访/未配置 → 实时分析
+    renderBatchBar('A');
+    loadAll();
+  } else if (ctx.in_progress) {
+    // C: 有 DRAFT → 实时分析(续), tab5 全锁
+    renderBatchBar('C', ctx);
+    loadAll();
+  } else {
+    // B: 已配置·无 DRAFT → 快照, tab5 可执行
+    renderBatchBar('B', ctx);
+    loadAll();
+  }
+}
+
+function renderBatchBar(mode, ctx) {
+  const bar = document.getElementById('batchBar');
+  if (!bar) return;
+  bar.classList.remove('hidden');
+  const sel = document.getElementById('batchSelect');
+  const badge = document.getElementById('batchBadge');
+  const btn = document.getElementById('btnNewEvent');
+
+  // 批次下拉填充（DRAFT 进行中事件不作为可查看批次）
+  const batches = ((ctx && ctx.batches) || []).filter(b => b.decision_status !== 'DRAFT');
+  sel.innerHTML = batches.map((b) => {
+    const label = (b.analysis_mode === 'SCHEDULED' ? '[定时] ' : '[手动] ') +
+                  (b.completed_at || '').slice(0, 10) +
+                  (b.is_latest ? ' · 最新' : '');
+    return `<option value="${b.decision_id}">${label}${b.executable ? '' : ' (仅查看)'}</option>`;
+  }).join('');
+  if (ctx && ctx.latest_completed_id) sel.value = ctx.latest_completed_id;
+
+  // 状态徽标
+  if (mode === 'A') {
+    badge.textContent = '未配置'; badge.className = 'badge badge-yellow';
+    btn.classList.remove('hidden');
+  } else if (mode === 'C') {
+    badge.textContent = '进行中'; badge.className = 'badge badge-blue';
+    btn.classList.add('hidden');
+  } else {
+    badge.textContent = '最新·可操作'; badge.className = 'badge badge-green';
+    btn.classList.remove('hidden');
+  }
+  // 下拉变化 → 切批次
+  sel.onchange = function() {
+    const id = sel.value;
+    const b = batches.find(x => x.decision_id === id);
+    if (b) switchBatch(b);
+  };
+}
+
+async function switchBatch(batch) {
+  // 以选中批次 decision_id + executable 重挂 campaign 面板（tab5 已挂载时即时生效）
+  const exec = !!batch.executable && !(_decisionContext && _decisionContext.in_progress);
+  if (window._mountCampaignBatch) {
+    await window._mountCampaignBatch({ decision_id: batch.decision_id, executable: exec });
+  }
+}
+
+async function onNewEventClick() {
+  const msg = '确认进入实时分析吗？\n\n期间你将无法通过「执行层」来执行广告调整，直至本次分析完成。';
+  if (!confirm(msg)) return;
+  const res = await callAPI('/decision/new-event', { asin,
+    shopId: _erpParams.shopId,
+    parent_seller_sku: _erpParams.parentSellerSku,
+    analysis_mode: 'REALTIME',
+  });
+  if (res.ok) {
+    alert('已创建分析事件。请在前置工作流完成配置后，运行执行层分析。');
+    location.reload();
+  } else {
+    alert('创建失败: ' + (res.error || '未知错误'));
+  }
+}
 
 // ═══════════════ AI 对话功能 ═══════════════
 let _chatAbortController = null;
@@ -1149,7 +1262,15 @@ async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST
   const t = setTimeout(() => ctrl.abort(), timeout*1000);
   try {
     const opts = { method, headers:{'Content-Type':'application/json'}, signal:ctrl.signal };
-    if (body != null) opts.body = JSON.stringify(body);
+    if (body != null) {
+      // 注入 ERP 上下文(_前缀,后端忽略未知字段)
+      if (typeof body === 'object' && !Array.isArray(body)) {
+        if (_erpParams.shopId) body._shopId = _erpParams.shopId;
+        if (_erpParams.parentSellerSku) body._parentSellerSku = _erpParams.parentSellerSku;
+        if (_erpParams.userId) body._userId = _erpParams.userId;
+      }
+      opts.body = JSON.stringify(body);
+    }
     const r = await fetch(`${API}${path}`, opts);
     if (!r.ok) { const txt = await r.text(); throw new Error(`HTTP ${r.status}: ${txt.slice(0,200)}`); }
     return await r.json();
@@ -2667,34 +2788,65 @@ async function loadAnnounceContent(filename) {
     body.innerHTML = `<div class="announce-empty">加载失败: ${e.message}</div>`;
   }
 }
+
+// ═══════════════ 启动入口 ═══════════════
+// ERP 跳转(带 ?parentAsin=):自动填入 ASIN → bootstrapFromContext
+// 手动:用户输入 ASIN → 点击"加载分析" → loadAll
+document.addEventListener('DOMContentLoaded', () => {
+  if (_erpParams.parentAsin) {
+    $('asinInput').value = _erpParams.parentAsin;
+    asin = _erpParams.parentAsin;
+    // ERP 跳转时自动触发
+    bootstrapFromContext();
+  }
+});
 </script>
 
 <!-- Campaign Panel: lazy-mount on tab5 switch -->
 <script type="module">
 import { mountCampaignPanel } from './campaign-panel/panel.js';
 
-const _origSwitchTab = switchTab;
 window._campaignPanelAPI = null;
+
+const _CAMP_DRAFT_HTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;">执行层尚未完成 —— 本次为进行中的实时分析事件。<br>请在前置工作流(1-4)配置完成后运行执行层分析，或等待当晚定时跑。</div>';
+const _CAMP_LOADING_HTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .5s linear infinite;"></span> 正在加载...</div>';
+
+// 切批次/首挂统一入口：以指定 decision_id + executable 重挂面板
+window._mountCampaignBatch = async function({ decision_id = '', executable = false } = {}) {
+  const root = document.getElementById('campPanelRoot');
+  if (!root || !asin) return;
+  if (window._campaignPanelAPI) {
+    try { window._campaignPanelAPI.unmount(); } catch (_) {}
+    window._campaignPanelAPI = null;
+  }
+  root.innerHTML = _CAMP_LOADING_HTML;
+  try {
+    window._campaignPanelAPI = await mountCampaignPanel(root, {
+      asin, days, mode: 'readonly', decision_id, executable,
+    });
+  } catch (e) {
+    root.innerHTML = '';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'color:var(--danger);padding:20px;';
+    msg.textContent = 'Campaign 初始化失败: ' + e.message;
+    root.appendChild(msg);
+  }
+};
+
+const _origSwitchTab = switchTab;
 window.switchTab = async function(tabId) {
   _origSwitchTab(tabId);
-  if (tabId === 'tab5' && !window._campaignPanelAPI && asin) {
-    const root = document.getElementById('campPanelRoot');
-    if (!root) return;
-    root.innerHTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .5s linear infinite;"></span> 正在加载快照...</div>';
-    try {
-      window._campaignPanelAPI = await mountCampaignPanel(root, {
-        asin,
-        days,
-        mode: 'readonly',  // 默认快照（T+1 批次，读写均可）。快照 stub 期首次打开空白，点"实时分析"触发生成
-      });
-    } catch (e) {
-      const msg = document.createElement('div');
-      msg.style.cssText = 'color:var(--danger);padding:20px;';
-      msg.textContent = 'Campaign 初始化失败: ' + e.message;
-      root.innerHTML = '';
-      root.appendChild(msg);
-    }
-  }
+  if (tabId !== 'tab5' || window._campaignPanelAPI || !asin) return;
+  const root = document.getElementById('campPanelRoot');
+  if (!root) return;
+  const ctx = window._decisionContext || {};
+  // C 态：有进行中事件 → 执行层无结果，空面板提示（不挂 panel）
+  if (ctx.in_progress) { root.innerHTML = _CAMP_DRAFT_HTML; return; }
+  // B 态：默认挂最新已完成批次（可执行）
+  await window._mountCampaignBatch({
+    decision_id: ctx.latest_completed_id || '',
+    executable: !!ctx.has_config && !ctx.in_progress,
+  });
 };
 </script>
 </body>

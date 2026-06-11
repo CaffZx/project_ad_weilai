@@ -87,6 +87,308 @@ class ErpDualWriterRepository:
     def _connect(self):
         return pymysql.connect(**self._conn_kwargs)
 
+    # ── 批次生命周期（决策批次改造方案 §一） ──────────────────────────────
+
+    def list_batches(self, asin: str) -> list[dict]:
+        """返回该 ASIN 所有决策批次，按 create_time 降序。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id AS decision_id, decision_status,
+                              analysis_mode, is_latest, batch_no,
+                              create_time AS completed_at
+                       FROM t_advert_agent_decision
+                       WHERE parent_asin = %s
+                       ORDER BY create_time DESC""",
+                    (asin,),
+                )
+                return cur.fetchall()
+        finally:
+            conn.close()
+
+    def get_latest_completed(self, asin: str) -> dict | None:
+        """返回 is_latest=1 的 COMPLETED 批次。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id AS decision_id, decision_status,
+                              analysis_mode, is_latest, batch_no,
+                              create_time AS completed_at
+                       FROM t_advert_agent_decision
+                       WHERE parent_asin = %s AND is_latest = 1
+                       LIMIT 1""",
+                    (asin,),
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+
+    def get_draft(self, asin: str) -> dict | None:
+        """返回该 ASIN 当前 DRAFT（仅一个）。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id AS decision_id, decision_status,
+                              analysis_mode, is_latest, batch_no
+                       FROM t_advert_agent_decision
+                       WHERE parent_asin = %s AND decision_status = 'DRAFT'
+                       LIMIT 1""",
+                    (asin,),
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+
+    def create_draft(
+        self, asin: str, decision_id: str, batch_no: str, analysis_mode: str,
+    ) -> None:
+        """插入 DRAFT 批次。parent_asin 填 ASIN 原值。"""
+        now = datetime.now(timezone.utc)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_decision
+                       (id, parent_asin, decision_status, is_latest,
+                        analysis_mode, batch_no, create_time, update_time)
+                       VALUES (%s,%s,'DRAFT',0,%s,%s,%s,%s)""",
+                    (decision_id, asin, analysis_mode, batch_no, now, now),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_draft(self, decision_id: str) -> None:
+        """删除 DRAFT 批次（仅 DRAFT 可删，COMPLETED 受保护）。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """DELETE FROM t_advert_agent_decision
+                       WHERE id = %s AND decision_status = 'DRAFT'""",
+                    (decision_id,),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def mark_completed(self, decision_id: str) -> None:
+        """DRAFT → COMPLETED + 翻 is_latest（事务:旧置0→新置1）。
+
+        仅对 decision_status='DRAFT' 的行生效，COMPLETED 翻转为 no-op。
+        """
+        conn = self._connect()
+        try:
+            # 先查出该 DRAFT 的 parent_asin
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT parent_asin FROM t_advert_agent_decision WHERE id=%s AND decision_status='DRAFT'",
+                    (decision_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return  # 不是 DRAFT，不操作
+                asin = row["parent_asin"]
+
+            # 事务:旧 COMPLETED is_latest→0，新 COMPLETED is_latest→1
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE t_advert_agent_decision SET is_latest=0 WHERE parent_asin=%s AND is_latest=1",
+                    (asin,),
+                )
+                cur.execute(
+                    """UPDATE t_advert_agent_decision
+                       SET decision_status='COMPLETED', is_latest=1, update_time=%s
+                       WHERE id=%s""",
+                    (datetime.now(timezone.utc), decision_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ── 执行层快照回读（P2: snapshot → ViewModel 源） ──────────────────────
+
+    def read_snapshot(self, decision_id: str) -> dict | None:
+        """读取某决策批次的执行层快照（decision + summary + cards + 3×pending）。
+
+        返回 raw dict 供 campaign_viewmodel.from_db_snapshot 组装。SELECT * 容错:
+        新列（keyword_class/is_prefiltered/perf_json 等）未迁移时自然缺省。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_decision WHERE id=%s", (decision_id,)
+                )
+                decision = cur.fetchone()
+                if not decision:
+                    return None
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_suggest_summary WHERE decision_id=%s",
+                    (decision_id,),
+                )
+                summary = cur.fetchone()
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_suggest_card "
+                    "WHERE decision_id=%s ORDER BY sort_order, create_time",
+                    (decision_id,),
+                )
+                cards = cur.fetchall() or []
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_campaign_pending WHERE decision_id=%s",
+                    (decision_id,),
+                )
+                campaign_pending = cur.fetchall() or []
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_keyword_pending WHERE decision_id=%s",
+                    (decision_id,),
+                )
+                keyword_pending = cur.fetchall() or []
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_placement_pending WHERE decision_id=%s",
+                    (decision_id,),
+                )
+                placement_pending = cur.fetchall() or []
+            return {
+                "decision": decision,
+                "summary": summary,
+                "cards": cards,
+                "campaign_pending": campaign_pending,
+                "keyword_pending": keyword_pending,
+                "placement_pending": placement_pending,
+            }
+        finally:
+            conn.close()
+
+    def confirm_decisions(
+        self, decision_id: str, decisions: list[dict], operator: str | None = None,
+    ) -> dict:
+        """运营审核写回 card + 子 pending 的 confirm_status（PENDING→CONFIRMED/REJECTED）。
+
+        - 校验可执行：批次 decision_status='COMPLETED' 且 is_latest=1 且该 ASIN 无 DRAFT。
+        - 每活动只处理一次：UPDATE 限 confirm_status='PENDING'，重复处理 rowcount=0 → skipped。
+        decisions: [{campaign_key: <card_id>, decision: 'approve'|'reject'}]
+        """
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT parent_asin, is_latest, decision_status "
+                    "FROM t_advert_agent_decision WHERE id=%s",
+                    (decision_id,),
+                )
+                d = cur.fetchone()
+                if not d:
+                    return {"ok": False, "error": "decision 不存在", "applied": 0, "skipped": 0}
+                if d.get("decision_status") != "COMPLETED" or not d.get("is_latest"):
+                    return {"ok": False, "error": "该批次非最新已完成批次，不可执行",
+                            "applied": 0, "skipped": 0}
+                cur.execute(
+                    "SELECT 1 FROM t_advert_agent_decision "
+                    "WHERE parent_asin=%s AND decision_status='DRAFT' LIMIT 1",
+                    (d["parent_asin"],),
+                )
+                if cur.fetchone():
+                    return {"ok": False, "error": "存在进行中分析事件，执行权已冻结",
+                            "applied": 0, "skipped": 0}
+
+                applied = 0
+                skipped = 0
+                for item in decisions:
+                    card_id = str(item.get("campaign_key") or item.get("card_id") or "").strip()
+                    raw = str(item.get("decision") or "").lower()
+                    if not card_id or raw not in ("approve", "reject"):
+                        continue
+                    status = "CONFIRMED" if raw == "approve" else "REJECTED"
+                    cur.execute(
+                        "UPDATE t_advert_agent_modify_suggest_card "
+                        "SET confirm_status=%s, update_time=%s "
+                        "WHERE id=%s AND decision_id=%s AND confirm_status='PENDING'",
+                        (status, now, card_id, decision_id),
+                    )
+                    if cur.rowcount == 0:
+                        skipped += 1  # 已处理过 / 不存在
+                        continue
+                    applied += 1
+                    for table in (
+                        "t_advert_agent_modify_keyword_pending",
+                        "t_advert_agent_modify_campaign_pending",
+                        "t_advert_agent_modify_placement_pending",
+                    ):
+                        cur.execute(
+                            f"UPDATE {table} SET confirm_status=%s, update_time=%s "
+                            "WHERE suggest_card_id=%s AND confirm_status='PENDING'",
+                            (status, now, card_id),
+                        )
+            conn.commit()
+            return {"ok": True, "applied": applied, "skipped": skipped}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_decision_preset(self, decision_id: str) -> dict | None:
+        """读取某批次冻结的前置 1-4 配置（decision 行的策略/策略/P3/方向列）。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, parent_asin, parent_seller_sku, shop_id, site_code, day_range, "
+                    "product_position, product_stage, season_type, advert_purposes, "
+                    "target_keyword_types, target_acos_suggest, daily_budget_suggest, "
+                    "advert_direction_types, analysis_mode, decision_status, is_latest, "
+                    "batch_no, create_time, update_time "
+                    "FROM t_advert_agent_decision WHERE id=%s",
+                    (decision_id,),
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+
+    def finalize_batch(
+        self, decision_id: str, parent_asin: str, analysis_mode: str = "REALTIME",
+    ) -> None:
+        """write_full 落库后收尾：本批次置最新 COMPLETED + 清该 ASIN 的 DRAFT 锁。
+
+        DRAFT-as-lock 模型：new-event 建 DRAFT 锁(uuid)，执行层 write_full 另建 COMPLETED 行
+        (stable_id)。此处删 DRAFT 锁 + 翻 is_latest 到 COMPLETED 行，二者 decision_id 无需一致。
+        write_full 新行 decision_status 默认 'COMPLETED'、is_latest=0、analysis_mode 默认 'REALTIME'。
+        定时跑无 DRAFT 锁 → DELETE 为 no-op。
+        """
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM t_advert_agent_decision "
+                    "WHERE parent_asin=%s AND decision_status='DRAFT'",
+                    (parent_asin,),
+                )
+                cur.execute(
+                    "UPDATE t_advert_agent_decision SET is_latest=0 "
+                    "WHERE parent_asin=%s AND is_latest=1 AND id<>%s",
+                    (parent_asin, decision_id),
+                )
+                cur.execute(
+                    "UPDATE t_advert_agent_decision "
+                    "SET is_latest=1, decision_status='COMPLETED', analysis_mode=%s, update_time=%s "
+                    "WHERE id=%s",
+                    (analysis_mode, now, decision_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ── 原有方法 ──────────────────────────────────────────────────────────
+
     def _delete_modern_campaign_children(self, cur, decision_id: str) -> None:
         """重跑同一 decision_id 时清除旧 card/pending，避免历史哈希 ID 残留。"""
         for table in (
@@ -985,4 +1287,24 @@ class ErpDualWriterRepository:
             )
             count += 1
         return recommend_id, count
+
+
+# ── 模块级 repository 单例（决策批次端点复用） ──────────────────────────
+
+_repo_instance: ErpDualWriterRepository | None = None
+
+
+def _get_repository() -> ErpDualWriterRepository:
+    """延迟创建 ERP 仓储单例，避免启动时 DB 不通炸模块加载。"""
+    global _repo_instance
+    if _repo_instance is None:
+        from app.config.settings import settings
+        _repo_instance = ErpDualWriterRepository(
+            host=settings.erp_host,
+            port=settings.erp_port,
+            user=settings.erp_user,
+            password=settings.erp_password,
+            database=settings.erp_database,
+        )
+    return _repo_instance
 

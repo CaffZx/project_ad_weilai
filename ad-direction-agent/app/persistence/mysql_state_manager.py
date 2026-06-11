@@ -516,6 +516,16 @@ class MySQLStateManager:
                 pass
         return True
 
+    def clear_p3_recommendation(self, asin: str) -> bool:
+        """清 P3 缓存（新建事件时重做 3）。"""
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute("DELETE FROM p3_recommendation WHERE asin=%s", (asin,))
+            except Exception:
+                pass
+        return True
+
     def save_feedback(self, submission) -> bool:
         asin = submission.parent_asin
         with self._get_lock(asin):

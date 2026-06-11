@@ -294,6 +294,17 @@ class StateManager:
                 except OSError:
                     pass
         return True
+
+    def clear_p3_recommendation(self, asin: str) -> bool:
+        """清 P3 缓存（新建事件时重做 3）。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "p3_recommendation.json"
+            if fp.exists():
+                try:
+                    fp.unlink()
+                except OSError:
+                    pass
+        return True
     # ── 反馈日志 ─────────────────────────────────────────
 
     def _feedback_dir(self, asin: str) -> Path:

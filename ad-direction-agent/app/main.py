@@ -110,6 +110,10 @@ app.include_router(chat_router, prefix=API_PREFIX, tags=["AI对话"])
 from app.api.campaign import router as campaign_router
 app.include_router(campaign_router, prefix=API_PREFIX, tags=["Campaign 活动分析"])
 
+# 决策批次管理
+from app.api.decision import router as decision_router
+app.include_router(decision_router, prefix=API_PREFIX, tags=["决策批次"])
+
 # 版本公告
 from app.api.announcements import router as announce_router
 app.include_router(announce_router, prefix=API_PREFIX, tags=["公告"])
