@@ -62,7 +62,7 @@ export function createCampaignState() {
 
   // ── 选项 ──
   state.toggleSelection = function (key) {
-    if (state.mode !== 'interactive') return;
+    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
     if (state._selection.has(key)) state._selection.delete(key);
     else state._selection.add(key);
     _reRender();
@@ -79,7 +79,7 @@ export function createCampaignState() {
   }
 
   state.selectAllVisible = function () {
-    if (state.mode !== 'interactive') return;
+    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
     _visibleNonSkippedKeys().forEach(k => state._selection.add(k));
     _reRender();
   };
@@ -131,7 +131,7 @@ export function createCampaignState() {
 
   // ── 批量确认 / 导出 ──
   state.batchConfirm = async function (decision) {
-    if (state.mode !== 'interactive') return;
+    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
     if (state._selection.size === 0) {
       _toast('请先勾选至少一项');
       return;
@@ -183,7 +183,7 @@ export function createCampaignState() {
 
   // ── 汇总联动 ──
   state.selectGroup = function (gi) {
-    if (state.mode !== 'interactive') return;
+    // mode 仅控制数据源(snapshot/realtime)，执行层快照也可审核勾选
     const group = state._synthesisGroups[gi];
     if (!group) return;
     group.campaign_keys.forEach(k => state._selection.add(k));

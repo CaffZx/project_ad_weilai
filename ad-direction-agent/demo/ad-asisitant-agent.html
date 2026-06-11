@@ -2683,7 +2683,7 @@ window.switchTab = async function(tabId) {
       window._campaignPanelAPI = await mountCampaignPanel(root, {
         asin,
         days,
-        mode: 'interactive',  // TODO: snapshot 后端接入后改回 'readonly'
+        mode: 'readonly',  // 默认快照（T+1 批次，读写均可）。快照 stub 期首次打开空白，点"实时分析"触发生成
       });
     } catch (e) {
       const msg = document.createElement('div');
