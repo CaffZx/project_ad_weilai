@@ -30,6 +30,7 @@ from app.workflow.steps.campaign import (
     analyze_campaigns,
     build_campaign_strategy_context,
 )
+from app.api.campaign_viewmodel import to_viewmodel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -87,65 +88,132 @@ async def _maybe_push_erp(
 async def campaign_analyze(req: dict):
     """运行 Campaign LLM 分析（分批 + R1+R2 投票 + 可选 R3 + sanity_check）。
 
-    Request body:
-        asin        (str, 必填)
-        days        (int, 默认 7)
-        temperature (float, 可选；默认读 settings.campaign_llm_temperature)
-        refresh     (bool, 可选；True 跳过 Redis 缓存)
-        write_erp   (bool, 可选；True 时本次强制写 ERP，需 ERP_AUTO_WRITE 或此项)
+    保持老格式 CampaignAnalysisResult，供 campaign_test.html 独立调试用。
+    """
+    result, extra = await _do_analyze(req)
 
-    Response: CampaignAnalysisResult.model_dump() + erp_write（若启用）
+    body = result.model_dump()
+    if extra is not None:
+        body["erp_write"] = await _maybe_push_erp(
+            result,
+            asin=extra["asin"],
+            days=extra["days"],
+            temperature=extra["temperature"],
+            write_erp=extra["write_erp"],
+            state=extra["state"],
+        )
+    return body
+
+
+@router.post("/campaign/viewmodel")
+async def campaign_viewmodel(req: dict):
+    """运行 Campaign LLM 分析，返回统一 CampaignViewModel（mode=interactive）。
+
+    供 tab5 实时操作台使用。与 /campaign/analyze 走同一分析链路，
+    仅输出格式不同——pipe 过 to_viewmodel()。
+    """
+    result, extra = await _do_analyze(req)
+
+    vm = to_viewmodel(result, mode="interactive")
+
+    if extra is not None:
+        vm["erp_write"] = await _maybe_push_erp(
+            result,
+            asin=extra["asin"],
+            days=extra["days"],
+            temperature=extra["temperature"],
+            write_erp=extra["write_erp"],
+            state=extra["state"],
+        )
+    return vm
+
+
+@router.get("/campaign/snapshot")
+async def campaign_snapshot(asin: str = "", decision_id: str = "", days: int = 7):
+    """读取最近一次定时分析的快照（mode=readonly）。
+
+    不传 decision_id 时默认取 is_latest=1 的最新决策。
+    本期为 stub 实现，返回 mock 数据；后端 mapper 另排期接入业务库。
+    """
+    from datetime import datetime, timezone
+
+    if not asin:
+        return {"mode": "readonly", "parent_asin": "", "days": days, "run_id": "",
+                "snapshot_time": None, "summary": {}, "overview": None,
+                "budget_summary": None, "synthesis": None, "items": [], "warnings": ["asin 必填"]}
+
+    logger.info("Snapshot stub [%s] decision_id=%s", asin, decision_id or "(latest)")
+
+    return {
+        "mode": "readonly",
+        "parent_asin": asin,
+        "days": 7,
+        "run_id": decision_id or "latest",
+        "snapshot_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "summary": {
+            "total": 0, "eliminate": 0, "adjust": 0, "keep": 0, "create": 0,
+            "prefiltered": 0, "lost": 0,
+            "confidence_high": 0, "confidence_medium": 0, "confidence_low": 0,
+            "budget_impact": None, "sanity_check_passed": None,
+        },
+        "overview": {
+            "facts": {},
+            "assessment_text": "（快照数据未接入，此处为占位）",
+            "direction_text": "",
+            "generated_by": "snapshot",
+        },
+        "budget_summary": None,
+        "synthesis": None,
+        "items": [],
+        "warnings": ["快照接口为 stub，后端 mapper 另排期接入业务库"],
+    }
+
+
+# ── 审核占位端点（本期 stub）─────────────────────────────────────────────────
+
+
+# ── 共享：抽取核心分析逻辑，供 /campaign/analyze 和 /campaign/viewmodel 复用 ──
+
+
+async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
+    """执行 Campaign LLM 分析，返回 (result, extra)。
+
+    extra 包含 erp_write 所需上下文：state / days / temperature。
     """
     asin = str(req.get("asin", "")).strip()
     days = int(req.get("days", 7))
     temp = req.get("temperature", None)
-    refresh = bool(req.get("refresh", False))   # True 时跳过 Redis 缓存，强制重新拉数据
+    refresh = bool(req.get("refresh", False))
     write_erp = bool(req.get("write_erp", False))
 
     if not asin:
-        return CampaignAnalysisResult(
-            parent_asin="", days=days,
-            warnings=["asin 必填"],
-            sanity_check_passed=False,
-            llm_rounds_completed=0,
-        ).model_dump()
+        return (
+            CampaignAnalysisResult(
+                parent_asin="", days=days,
+                warnings=["asin 必填"],
+                sanity_check_passed=False,
+                llm_rounds_completed=0,
+            ),
+            None,
+        )
 
-    # ── 顶层 try/except：任何未捕获异常都转成降级 CampaignAnalysisResult，避免 500 + 堆栈 ──
     try:
-        # 状态 & 长期配置
         state = get_state_manager()
         long_term = state.get_long_term_config(asin) or {}
         wf = state.get_workflow_state(asin) or {}
         keyword_analysis = wf.get("keyword_analysis", {})
-        # 广告方向：运营 tab4「生成评估报告」已选并持久化到 workflow_state.execution
         ad_directions = (wf.get("execution") or {}).get("selected_directions") or []
 
-        # ASIN 数据（120s 超时；超时由外层 except 兜住）
-        # 只拉 META_AD_PRODUCT(供 daily_budget 兜底 spend/days × 1.15)
-        # + listing/gross_profit (必跑,提供 margin/inventory_qty/rating/refund_rate/avg_daily_sales)。
-        # Campaign 模块完全用不到的 6 个 META 一律跳过:
-        #   META_KW_AD / META_AD_PLACEMENT(ASIN级,campaign 有自己的懒加载) /
-        #   META_KW_COMPETITOR_RANK + META_KW_SUB_ASIN_RANK (自然排名 ~62s 慢查询) /
-        #   META_FLOW_KEYWORD (搜索量库 ~87s 慢查询) /
-        #   META_COMPETITOR / META_TREND
-        # MCP 路径下原本并发拉快几百毫秒看不出,doris_fallback 串行就累计 ~150s 触发 120s 超时。
-        #
-        # TODO(A1): 修 run_campaign_analysis 内 ensure_data 解包 bug 后,
-        #   本端点应改走 ctx._ensure_data(meta_filter=...) → asin_data_cache(Redis TTL 4h),
-        #   主应用诊断查过后 Campaign 直接命中缓存,完全不查数仓;
-        #   届时本黑名单 meta_filter 可保留(ctx 内 _ensure_data 也支持透传)。
         aggregator = DataAggregator()
         asin_data = await asyncio.wait_for(
             aggregator.fetch(asin, days=days, meta_filter=["META_AD_PRODUCT"]),
             timeout=120,
         )
 
-        # 策略上下文组装
         strat_ctx = build_campaign_strategy_context(
             asin, asin_data, long_term, keyword_analysis, ad_directions, days=days,
         )
 
-        # target_acos 三级回落：manual override > P3缓存 > 算法
         manual = state.get_target_acos_override(asin)
         if manual is not None:
             strat_ctx.target_acos = int(manual)
@@ -166,7 +234,6 @@ async def campaign_analyze(req: dict):
             asin, days, effective_temp, strat_ctx.target_acos,
         )
 
-        # LLM 分析（纵深防御: 任务级总超时,防 Semaphore 饥饿永久挂死）
         fetcher = CampaignFetcher()
         result = await asyncio.wait_for(
             analyze_campaigns(
@@ -182,36 +249,38 @@ async def campaign_analyze(req: dict):
             ),
             timeout=settings.campaign_total_timeout,
         )
-        body = result.model_dump()
-        body["erp_write"] = await _maybe_push_erp(
-            result,
-            asin=asin,
-            days=days,
-            temperature=effective_temp,
-            write_erp=write_erp,
-            state=state,
-        )
-        return body
+
+        extra = {
+            "state": state,
+            "asin": asin,
+            "days": days,
+            "temperature": effective_temp,
+            "write_erp": write_erp,
+        }
+        return (result, extra)
 
     except asyncio.TimeoutError as e:
         logger.warning("Campaign analyze 超时 [%s]: %s", asin, e)
-        return CampaignAnalysisResult(
-            parent_asin=asin, days=days,
-            warnings=[f"分析总超时（>{settings.campaign_total_timeout}s），请稍后重试或联系管理员"],
-            sanity_check_passed=False,
-            llm_rounds_completed=0,
-        ).model_dump()
+        return (
+            CampaignAnalysisResult(
+                parent_asin=asin, days=days,
+                warnings=[f"分析总超时（>{settings.campaign_total_timeout}s），请稍后重试或联系管理员"],
+                sanity_check_passed=False,
+                llm_rounds_completed=0,
+            ),
+            None,
+        )
     except Exception as e:
         logger.exception("Campaign analyze 异常 [%s]: %s", asin, e)
-        return CampaignAnalysisResult(
-            parent_asin=asin, days=days,
-            warnings=[f"分析失败: {type(e).__name__}: {e}"],
-            sanity_check_passed=False,
-            llm_rounds_completed=0,
-        ).model_dump()
-
-
-# ── 审核占位端点（本期 stub）─────────────────────────────────────────────────
+        return (
+            CampaignAnalysisResult(
+                parent_asin=asin, days=days,
+                warnings=[f"分析失败: {type(e).__name__}: {e}"],
+                sanity_check_passed=False,
+                llm_rounds_completed=0,
+            ),
+            None,
+        )
 
 
 @router.post("/campaign/confirm")

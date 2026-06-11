@@ -1,0 +1,305 @@
+/* ============================================================
+   campaign-panel/panel.css
+   全部规则加 .camp- 前缀，包裹在 .camp-root 内。
+   不污染主看板 tab1-4 的任何样式。
+   ============================================================ */
+
+/* ── CSS 变量 (局部) ── */
+.camp-root {
+  --camp-bg: #F9FAFB;
+  --camp-card-bg: #FFFFFF;
+  --camp-border: #E5E7EB;
+  --camp-foreground: #111827;
+  --camp-muted-fg: #6B7280;
+  --camp-primary: #4F46E5;
+  --camp-primary-hover: #4338CA;
+  --camp-primary-light: #EEF2FF;
+  --camp-radius-card: 8px;
+  --camp-transition-ctl: .15s ease;
+}
+
+.camp-root * { box-sizing: border-box; }
+
+/* ── 布局 ── */
+.camp-app-layout { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+.camp-main-area { flex: 1; overflow-y: auto; padding: 16px; }
+
+/* ── 卡片 ── */
+.camp-card {
+  background: var(--camp-card-bg); border-radius: var(--camp-radius-card);
+  border: 1px solid var(--camp-border); padding: 12px 14px;
+}
+.camp-card-title { font-size: 12px; font-weight: 600; color: var(--camp-muted-fg); margin-bottom: 8px; }
+
+/* ── 表单元素 (限定在 .camp-root 内) ── */
+.camp-root label { display: block; font-size: 11px; color: var(--camp-muted-fg); margin-bottom: 4px; }
+.camp-root input, .camp-root select {
+  width: 100%; padding: 6px 8px; font-size: 13px;
+  border: 1px solid var(--camp-border); border-radius: 6px; background: white;
+}
+.camp-root input:focus, .camp-root select:focus { outline: none; border-color: var(--camp-primary); }
+
+/* ── 按钮 ── */
+.camp-btn {
+  display: inline-block; padding: 7px 14px; font-size: 12px; font-weight: 500;
+  border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+  transition: all var(--camp-transition-ctl); text-align: center;
+}
+.camp-btn-primary { background: var(--camp-primary); color: white; }
+.camp-btn-primary:hover:not(:disabled) { background: var(--camp-primary-hover); }
+.camp-btn-primary:disabled { background: #9CA3AF; cursor: not-allowed; }
+.camp-btn-ghost { background: transparent; color: var(--camp-muted-fg); border-color: var(--camp-border); }
+.camp-btn-ghost:hover { background: #F3F4F6; }
+.camp-btn-block { display: block; width: 100%; }
+
+/* ── 工具类 ── */
+.camp-kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 4px 0; }
+.camp-kv .k { color: var(--camp-muted-fg); }
+.camp-kv .v { font-weight: 500; }
+.camp-kv .v.empty { color: #9CA3AF; font-style: italic; font-weight: 400; }
+.camp-root .muted { color: var(--camp-muted-fg); }
+.camp-root .text-xs { font-size: 11px; }
+.camp-root .text-sm { font-size: 12px; }
+.camp-root .hidden { display: none !important; }
+
+/* ── spinner ── */
+.camp-spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid var(--camp-border); border-top-color: var(--camp-primary);
+  border-radius: 50%; animation: camp-spin 0.8s linear infinite;
+}
+@keyframes camp-spin { to { transform: rotate(360deg); } }
+
+/* ── 免责声明 ── */
+.camp-disclaimer {
+  font-size: 11px; color: #78350F; padding: 8px 12px;
+  background: #FEF3C7; border-left: 3px solid #F59E0B; margin-bottom: 12px;
+  border-radius: 0 4px 4px 0;
+}
+
+/* ── 概览统计 ── */
+.camp-summary-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  margin-bottom: 8px;
+}
+.camp-summary-grid .stat { text-align: center; }
+.camp-summary-grid .num  { font-size: 22px; font-weight: 700; }
+.camp-summary-grid .lab  { font-size: 11px; color: var(--camp-muted-fg); margin-top: 2px; }
+
+/* ── 筛选栏 ── */
+#camp-filters { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 8px; }
+#camp-filters .filter-group { display: flex; align-items: center; gap: 4px; }
+#camp-filters .filter-label { font-size: 11px; color: var(--camp-muted-fg); }
+#camp-filters select { width: auto; padding: 4px 8px; font-size: 12px; }
+#camp-search {
+  flex: 1; max-width: 280px; padding: 4px 8px; font-size: 12px;
+  border: 1px solid var(--camp-border); border-radius: 6px;
+}
+.camp-filter-btn {
+  font-size: 12px; padding: 4px 12px; border-radius: 6px;
+  border: 1px solid var(--camp-border); background: white; cursor: pointer;
+}
+.camp-filter-btn:hover { background: #F3F4F6; }
+.camp-filter-btn.active { background: var(--camp-primary); color: white; border-color: var(--camp-primary); }
+
+/* ── 活动卡片 ── */
+.camp-adjustment-card {
+  display: flex; gap: 12px;
+  border-left: 4px solid var(--camp-border);
+  padding: 12px 14px; margin-bottom: 8px;
+  background: var(--camp-card-bg); border-radius: var(--camp-radius-card);
+  border-top: 1px solid var(--camp-border); border-right: 1px solid var(--camp-border); border-bottom: 1px solid var(--camp-border);
+  position: relative;
+}
+.camp-adjustment-card.eliminate { border-left-color: #DC2626; }
+.camp-adjustment-card.adjust    { border-left-color: #F59E0B; }
+.camp-adjustment-card.keep      { border-left-color: #374151; }
+.camp-adjustment-card.create    { border-left-color: #16A34A; }
+.camp-adjustment-card.skipped   { border-left-color: #9CA3AF; opacity: 0.85; background: #F9FAFB; }
+
+.camp-adjustment-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.camp-adjustment-card .meta { font-size: 12px; color: var(--camp-muted-fg); margin-top: 4px; }
+.camp-adjustment-card .values {
+  display: grid; grid-template-columns: 1fr; gap: 2px;
+  margin-top: 6px; font-size: 13px;
+}
+.camp-adjustment-card .reason {
+  font-size: 12px; line-height: 1.55; color: var(--camp-foreground);
+  margin-top: 8px; white-space: pre-wrap;
+}
+.camp-adjustment-card .detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--camp-border); }
+.camp-adjustment-card .detail.hidden { display: none; }
+.camp-adjustment-card .card-checkbox { flex: 0 0 auto; padding-top: 2px; }
+.camp-adjustment-card .review-badge {
+  position: absolute; top: 8px; right: 12px;
+  font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600;
+}
+
+/* ── badge ── */
+.camp-badge {
+  font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600;
+}
+.camp-badge-eliminate { background: #FEE2E2; color: #991B1B; }
+.camp-badge-adjust    { background: #FEF3C7; color: #92400E; }
+.camp-badge-keep      { background: #E5E7EB; color: #374151; }
+.camp-badge-create    { background: #DCFCE7; color: #166534; }
+.camp-badge-skipped   { background: #E5E7EB; color: #6B7280; }
+.camp-badge-high      { background: #DBEAFE; color: #1E40AF; }
+.camp-badge-medium    { background: #E5E7EB; color: #374151; }
+.camp-badge-low       { background: #FCE7F3; color: #9D174D; }
+
+/* ── review badge ── */
+.review-approve { background: #DCFCE7; color: #166534; }
+.review-reject  { background: #FEE2E2; color: #991B1B; }
+
+/* ── synthesis ── */
+.camp-synthesis-group {
+  border-left: 3px solid var(--camp-primary);
+  padding: 8px 12px; margin-bottom: 10px; background: #F9FAFB;
+  border-radius: 0 6px 6px 0;
+}
+.camp-synthesis-group .group-title {
+  font-size: 13px; font-weight: 600; color: var(--camp-foreground); margin-bottom: 4px;
+}
+.camp-synthesis-group .group-narrative {
+  font-size: 12px; color: var(--camp-foreground); line-height: 1.6; margin-bottom: 4px;
+}
+.camp-synthesis-group .group-keys {
+  font-size: 11px; color: var(--camp-muted-fg);
+}
+.camp-synthesis-group .group-keys details summary { cursor: pointer; user-select: none; }
+.camp-synthesis-group .group-keys ul { margin: 4px 0 0 0; padding-left: 18px; }
+.camp-synthesis-special {
+  border-left: 3px solid #F59E0B; padding: 8px 12px; margin-top: 8px;
+  background: #FFFBEB; border-radius: 0 6px 6px 0;
+}
+
+/* ── batch toolbar ── */
+.camp-batch-toolbar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 8px 12px; margin-bottom: 8px;
+  background: var(--camp-card-bg); border: 1px solid var(--camp-border); border-radius: var(--camp-radius-card);
+}
+.camp-batch-toolbar .sep { flex: 1; }
+.camp-batch-toolbar button {
+  font-size: 12px; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--camp-border); background: white; cursor: pointer;
+}
+.camp-batch-toolbar button:hover { background: #F3F4F6; }
+.camp-batch-toolbar button.primary {
+  background: var(--camp-primary); color: white; border-color: var(--camp-primary);
+}
+.camp-batch-toolbar button.danger {
+  background: #DC2626; color: white; border-color: #DC2626;
+}
+
+/* ── 组合筛选气泡 ── */
+.camp-portfolio-pills-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--camp-border);
+  width: 100%;
+}
+.camp-portfolio-pill {
+  display: inline-flex; flex-direction: column; align-items: flex-start;
+  justify-content: center;
+  flex: 1 1 0; min-width: 150px;
+  padding: 8px 14px; border-radius: 10px;
+  border: 1.5px solid #BAE6FD; background: #E0F2FE; color: #111827; cursor: pointer;
+  font-size: 12px; line-height: 1.4; transition: all 0.12s ease;
+  user-select: none;
+}
+.camp-portfolio-pill:hover { background: #BAE6FD; }
+.camp-portfolio-pill.active {
+  background: #BAE6FD; color: #111827; border-color: #0EA5E9;
+}
+.camp-portfolio-pill .pp-name { font-weight: 600; }
+.camp-portfolio-pill .pp-amount { font-size: 11px; opacity: 0.85; margin-top: 1px; }
+.camp-portfolio-pill .pp-budget { font-size: 11px; opacity: 0.85; margin-top: 1px; }
+.camp-portfolio-pill.active .pp-amount,
+.camp-portfolio-pill.active .pp-budget { opacity: 1; }
+.camp-portfolio-pill .pp-acts { display: flex; gap: 4px; margin-top: 3px; }
+.camp-portfolio-pill .pp-act {
+  font-size: 10px; padding: 1px 7px; border-radius: 4px;
+  border: 1px solid #0EA5E9; color: #0369A1;
+  background: white; cursor: pointer; line-height: 1.5;
+}
+.camp-portfolio-pill .pp-act:hover { background: #E0F2FE; }
+.camp-portfolio-pill .pp-edit-input {
+  width: 58px; font-size: 10px; padding: 1px 5px;
+  border: 1px solid #0EA5E9; border-radius: 4px;
+  background: white; color: var(--camp-foreground);
+}
+.camp-portfolio-fallback-hint {
+  font-size: 11px; color: #B45309; background: #FEF3C7;
+  padding: 4px 10px; border-radius: 6px; margin-left: 6px;
+}
+
+/* ── 预算汇总 ── */
+.camp-budget-summary-totals {
+  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+}
+.camp-budget-summary-totals .stat {
+  font-size: 12px; color: var(--camp-muted-fg);
+}
+.camp-budget-summary-totals .stat strong {
+  color: var(--camp-foreground); font-size: 16px; font-weight: 700; margin: 0 4px;
+}
+
+/* ── Tab 切换 ── */
+.camp-tab-bar {
+  display: flex; gap: 0; margin-bottom: 12px;
+  border-bottom: 2px solid var(--camp-border);
+}
+.camp-ctab-btn {
+  padding: 7px 18px; font-size: 13px; font-weight: 500;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--camp-muted-fg); border-bottom: 2px solid transparent;
+  margin-bottom: -2px; transition: all 0.12s ease;
+}
+.camp-ctab-btn:hover { color: var(--camp-foreground); }
+.camp-ctab-btn.active { color: var(--camp-primary); border-bottom-color: var(--camp-primary); }
+
+/* ── 汇总→明细 联动 ── */
+.camp-group-select-btn {
+  margin-left: 8px; font-size: 11px; padding: 2px 10px;
+  border: 1px solid var(--camp-primary); color: var(--camp-primary);
+  background: transparent; border-radius: 5px; cursor: pointer;
+  transition: all .12s ease;
+}
+.camp-group-select-btn:hover { background: var(--camp-primary); color: #fff; }
+.camp-special-jump {
+  color: var(--camp-primary); cursor: pointer; text-decoration: underline;
+  word-break: break-all;
+}
+.camp-special-jump:hover { opacity: .75; }
+
+/* ── 跳转高亮动画 ── */
+@keyframes camp-flashHighlight {
+  0%, 50%, 100% { background: var(--camp-card-bg); box-shadow: none; }
+  25%, 75%      { background: #FEF9C3; box-shadow: 0 0 0 2px rgba(245,158,11,.22); }
+}
+.camp-adjustment-card.flash {
+  animation: camp-flashHighlight 1.2s ease-in-out;
+  position: relative; z-index: 1;
+}
+
+/* ── toast ── */
+.camp-toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #111827; color: #fff; padding: 8px 16px; border-radius: 8px;
+  font-size: 13px; opacity: 0; pointer-events: none; transition: opacity .2s;
+  z-index: 9999;
+}
+.camp-toast.show { opacity: .95; }
+
+/* ── 加载器 ── */
+#camp-loader {
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; color: var(--camp-muted-fg); font-size: 13px;
+}
+
+/* ── 空态 ── */
+#camp-list:empty::after {
+  content: '无匹配活动'; display: block; text-align: center;
+  padding: 40px 20px; color: var(--camp-muted-fg); font-size: 13px;
+}

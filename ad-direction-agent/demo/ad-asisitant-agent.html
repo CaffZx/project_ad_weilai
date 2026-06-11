@@ -11,6 +11,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./campaign-panel/panel.css">
 <style>
 /* ═══════════════ 设计 Token ═══════════════ */
 :root {
@@ -640,6 +641,7 @@ body {
         <button class="tab-btn tab-disabled" data-tab="tab2" onclick="switchTab('tab2')">数据监控</button>
         <button class="tab-btn tab-disabled" data-tab="tab3" onclick="switchTab('tab3')">目标ACOS和预算推荐</button>
         <button class="tab-btn tab-disabled" data-tab="tab4" onclick="switchTab('tab4')">广告方向推荐</button>
+        <button class="tab-btn tab-disabled" data-tab="tab5" onclick="switchTab('tab5')">广告活动分析</button>
       </div>
 
       <!-- Tab1 面板 — 策略推荐 -->
@@ -726,6 +728,11 @@ body {
         </div>
       </div>
 
+      <!-- Tab5 面板 — 广告活动分析 -->
+      <div class="tab-panel" id="panel-tab5">
+        <div id="campPanelRoot" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0;"></div>
+      </div>
+
     </div>
   </main>
 
@@ -800,7 +807,7 @@ let sec1Confirmed = false;
 let sec2Confirmed = false;
 let diagnosisLoaded = false;
 let _trendData = [];
-const tabState = { tab1: false, tab2: false, tab3: false, tab4: false };
+const tabState = { tab1: false, tab2: false, tab3: false, tab4: false, tab5: false };
 let activeTab = null;
 window._p3data = null;
 const SESSION_START = new Date().toISOString();
@@ -1250,7 +1257,14 @@ async function loadAll() {
 
   // 重置状态
   sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
-  ['tab1','tab2','tab3','tab4'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
+  ['tab1','tab2','tab3','tab4','tab5'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
+  // 换 ASIN 时卸载旧的 campaign panel
+  if (window._campaignPanelAPI) {
+    try { window._campaignPanelAPI.unmount(); } catch (_) {}
+    window._campaignPanelAPI = null;
+  }
+  const cpRoot = document.getElementById('campPanelRoot');
+  if (cpRoot) cpRoot.innerHTML = '';
   activeTab = null;
   qsa('.tab-btn').forEach(b => b.classList.remove('tab-active'));
   qsa('.tab-panel').forEach(p => p.classList.remove('active'));
@@ -1390,6 +1404,7 @@ async function confirmStrategy() {
       return;
     }
     setTabEnabled('tab1', true);
+    setTabEnabled('tab5', true);  // 选定父 ASIN 即可查看 campaign 分析（快照只读/实时独立，不依赖 tab1-4 完成）
     if (tact.returnVisit) {
       // loadTactics 内已拉取右侧数据并 showMainContent
     } else {
@@ -2650,6 +2665,37 @@ async function loadAnnounceContent(filename) {
     body.innerHTML = `<div class="announce-empty">加载失败: ${e.message}</div>`;
   }
 }
+</script>
+
+<!-- Campaign Panel: lazy-mount on tab5 switch -->
+<script type="module">
+import { mountCampaignPanel } from './campaign-panel/panel.js';
+
+let _campaignPanelAPI = null;
+
+const _origSwitchTab = switchTab;
+window._campaignPanelAPI = null;
+window.switchTab = async function(tabId) {
+  _origSwitchTab(tabId);
+  if (tabId === 'tab5' && !window._campaignPanelAPI && asin) {
+    const root = document.getElementById('campPanelRoot');
+    if (!root) return;
+    root.innerHTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .5s linear infinite;"></span> 正在加载快照...</div>';
+    try {
+      window._campaignPanelAPI = await mountCampaignPanel(root, {
+        asin,
+        days,
+        mode: 'readonly',  // 默认快照（T+1 批次），实时分析由 campaign panel 内部切换
+      });
+    } catch (e) {
+      const msg = document.createElement('div');
+      msg.style.cssText = 'color:var(--danger);padding:20px;';
+      msg.textContent = 'Campaign 初始化失败: ' + e.message;
+      root.innerHTML = '';
+      root.appendChild(msg);
+    }
+  }
+};
 </script>
 </body>
 </html>
