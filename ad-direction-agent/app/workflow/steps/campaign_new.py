@@ -94,7 +94,7 @@ def _calc_initial_bid(cand: NewCampaignCandidate) -> tuple[float, str]:
     if cand.suggested_bid is not None and cand.suggested_bid > 0:
         bid = max(BID_HARD_LOWER, min(BID_HARD_UPPER, round(cand.suggested_bid * 0.5, 2)))
         return bid, "amazon_api"
-    # TODO(suggested-bid): 建议竞价字段(ERP/亚马逊 API)到位后上面分支命中；当前占位 $0.30
+    # MCP 未命中时降级占位（关键词不在亚马逊建议竞价覆盖范围内）
     return BID_PLACEHOLDER, "placeholder"
 
 
@@ -257,6 +257,26 @@ async def analyze_new_campaigns(
     candidates.sort(key=lambda c: (c.natural_rank is None, -c.search_volume))
     max_n = getattr(settings, "campaign_new_max_count", 20)
     candidates = candidates[:max_n]
+
+    # 2b. ★建议竞价（KB 16 §3）：批量查 MCP，填入 cand.suggested_bid
+    #     _calc_initial_bid 已有 if cand.suggested_bid is not None 分支，只填值即可
+    if settings.campaign_new_enabled and shop_account:
+        try:
+            kw_texts = [c.keyword_text for c in candidates]
+            bids = await fetcher.fetch_suggested_bids(
+                kw_texts, shop_account, parent_asin, parent_seller_sku,
+            )
+            for c in candidates:
+                sb = bids.get(c.keyword_text)
+                if sb is not None:
+                    c.suggested_bid = sb
+            logger.info(
+                "Campaign new [%s]: MCP 建议竞价命中 %d/%d",
+                parent_asin, len([c for c in candidates if c.suggested_bid is not None]), len(candidates),
+            )
+        except Exception as e:
+            logger.warning("Campaign new [%s]: 建议竞价查询失败 (非阻塞): %s", parent_asin, e)
+
     logger.info("Campaign new [%s]: %d 个候选词进入双轮 LLM 选词", parent_asin, len(candidates))
 
     # 3. 双轮 LLM 选词取交集（KB 06 判 keyword_class + create/skip）

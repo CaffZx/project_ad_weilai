@@ -457,6 +457,54 @@ class CampaignFetcher:
         )
         return flow_rows, own_rows
 
+    async def fetch_suggested_bids(
+        self,
+        keywords: list[str],
+        shop_account: str,
+        parent_asin: str,
+        parent_seller_sku: str,
+        timeout: float | None = None,
+    ) -> dict[str, float]:
+        """批量查询亚马逊关键词建议竞价（KB 16 §3 数据源）。
+
+        调 whp_amazon_advert_keyword_suggest_bid，一次传全部关键词。
+        返回 {keyword_text: suggested_bid} mapping，未命中不留 key。
+        """
+        import json as _json
+        if not keywords:
+            return {}
+        kw_list = _json.dumps([{"keyword": kw} for kw in keywords])
+        args = {
+            "shopAccount": shop_account,
+            "parentAsin": parent_asin,
+            "parentSellerSku": parent_seller_sku,
+            "keywordVoList": kw_list,
+        }
+        t = timeout if timeout is not None else getattr(settings, "campaign_mcp_tool_timeout", 300.0)
+        try:
+            res = await self._mcp().call_tool_timed_with_args(
+                "whp_amazon_advert_keyword_suggest_bid", args, t,
+            )
+            if res.ok and isinstance(res.value, dict):
+                data = res.value.get("data") or {}
+                bid_list = data.get("suggestBidList") or []
+                out: dict[str, float] = {}
+                for row in bid_list:
+                    if not isinstance(row, dict):
+                        continue
+                    kw = str(row.get("keyword") or "").strip()
+                    bid = row.get("suggestBid")
+                    if kw and bid is not None:
+                        try:
+                            out[kw] = float(bid)
+                        except (TypeError, ValueError):
+                            pass
+                logger.info("fetch_suggested_bids [%s]: %d/%d hit", parent_asin, len(out), len(keywords))
+                return out
+        except Exception as e:
+            logger.warning("fetch_suggested_bids 失败 [%s]: %s (非阻塞)", parent_asin, e)
+        return {}
+
     # ── 组装 ──
 
     def _assemble(

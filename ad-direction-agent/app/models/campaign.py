@@ -164,8 +164,8 @@ class NewCampaignCandidate(BaseModel):
     keyword_text: str
     search_volume: int = 0                  # flow_keywords 提供
     natural_rank: int | None = None         # own_keyword_flow 提供，无则 None
-    # ★KB 16 §3「建议竞价(suggestedBid)」：当前 MCP/Doris 无源，留 None 占位。
-    #   TODO(suggested-bid): 数据源(ERP/亚马逊 API)到位后填入，_calc_initial_bid 自动启用真实分支。
+    # ★KB 16 §3「建议竞价(suggestedBid)」：MCP whp_amazon_advert_keyword_suggest_bid 批量查询填入。
+    #   命中→_calc_initial_bid 按公式 min(0.5, bid×0.5) 计算；未命中→降级占位 $0.30。
     suggested_bid: float | None = None
     trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签，非筛选门禁）
 
