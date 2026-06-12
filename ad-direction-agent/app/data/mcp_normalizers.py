@@ -70,12 +70,12 @@ def normalize_listing_basic_info(payload: Any) -> dict:
     row = rows[0]
     return {
         "seller_sku": row.get("parent_seller_sku") or row.get("seller_sku"),
-        "product_price": _float(row.get("price") or row.get("product_price")),
-        "star_level": _float(row.get("rating") or row.get("star_level")),
-        "comment_num": _int(row.get("review_count") or row.get("comment_num")),
-        "brand": row.get("brand"),
-        "category_name": row.get("category_name"),
-        "refund_rate": _float(row.get("refund_rate")),
+        "product_price": _float(_pick(row, "price", "product_price", "售价")),
+        "star_level": _float(_pick(row, "star_level", "rating", "星级")),
+        "comment_num": _int(_pick(row, "comment_num", "review_count", "评论数")),
+        "brand": _pick(row, "brand", "品牌"),
+        "category_name": _pick(row, "category_name", "品类", "类目"),
+        "refund_rate": _float(_pick(row, "refund_rate", "16周退款率")),
     }
 
 
