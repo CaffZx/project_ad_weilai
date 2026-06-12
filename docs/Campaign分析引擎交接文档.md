@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
 > **最后更新**: 2026-06-12
-> **版本**: v1.9
+> **版本**: v2.0
 > **分支**: chenv3.1
 
 ---
@@ -658,8 +658,41 @@ tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来�
 
 ---
 
-*最后更新：2026-06-12（v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11）*
+## 12. 2026-06-12 (续)：建议竞价 MCP 接入 + 前端闭环 + 稳定性修复
+
+### 12.1 建议竞价 MCP 接入（KB 16 §3 数据源）
+
+`whp_amazon_advert_keyword_suggest_bid` 工具已上线。候选词截断后（≤20）一次批量查询，命中词填入 `cand.suggested_bid` → `_calc_initial_bid` 自动按 `min(0.5, bid×0.5)` 计算真实出价。未命中词降级 `$0.30` 占位（关键词不在亚马逊建议竞价数据库覆盖范围内）。实测命中率 ~70%（14/20）。
+
+### 12.2 前端闭环接线（`0119404` 提交）
+
+`new-event` 创建的 `run_id` → C 态 tab5 "运行执行层分析"按钮 → `mountCampaignPanel({write_erp:true, run_id})` → analysis 完成 → `finalize_batch` 翻 `is_latest` + 清 session → `onComplete` 刷新 context → 自动切 B 态快照。
+
+### 12.3 前置配置只读快照渲染（P3）
+
+`renderReadonlyDecisionPreset(decisionId)` 调 `/decision/{id}/preset`，渲染战略/策略/P3/广告方向为只读 badge 标签，隐藏保存/AI 推荐按钮。
+
+### 12.4 稳定性修复
+
+| 修复 | 说明 |
+|---|---|
+| session TTL 12h | `get_analysis_session` 超期自动清，防运营执行权永久冻结（MySQL + JSON 双后端） |
+| userId 接线 | `batchConfirm` 的 `operator` 从硬编码 `'tab5'` 改为 `window._erpParams.userId` |
+| state session 方法 | `set_workflow_state`（非 `save_`）、`clear_p3_recommendation` 双后端补全 |
+| SQL 迁移 | `is_latest` 回填用 `ROW_NUMBER() OVER (PARTITION BY parent_asin)` 窗口函数 |
+
+### 12.5 待完成
+
+- P3 前置只读渲染完成闭环（B 态初始加载时自动调 `renderReadonlyDecisionPreset`，当前仅切换批次时触发）
+- P4 定时调度器（`decision_config.enabled` 列已备，APScheduler 扫表）
+- `analysis_overview` 写入端补（列在但 `write_full` 不填）
+- `ensure_schema` 健壮化（`--` 注释 chunk 被整段跳过）
+
+---
+
+*最后更新：2026-06-12（v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12）*
+*v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11*
 *v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10*
-*v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 §9*
+*v1.7: 新增广告活动分析线 §9*
 *v1.6: 执行层落地 ERP 架构共识 §8*
-*v1.5: 总览/汇总恢复改造 + 前端双 tab/联动/气泡 §7*
+*v1.5: 总览/汇总恢复改造 + 前端双 tab §7*
