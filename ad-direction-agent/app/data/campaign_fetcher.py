@@ -152,11 +152,20 @@ class CampaignFetcher:
                     parent_asin, parent_seller_sku, shop_account, site_code, days))
                 if has_exact else None
             )
-            # 并行拉 basic_info（return_exceptions=True：单活动异常不拖垮全部）
-            basic_list = await asyncio.gather(
-                *[self._fetch_basic_one(name, shop_account) for name in names],
-                return_exceptions=True,
-            )
+            # basic_info + product_report 每活动【配对并行】：两者互不依赖，2N 调用共用
+            # MCP 内部 Semaphore(80) 限流不会超限；省掉"basic 全完成才启 perf"的串行屏障。
+            # 内层 gather return_exceptions=True → 每元素恒为 [basic_raw, perf_raw]，外层不抛。
+            pair_list = await asyncio.gather(*[
+                asyncio.gather(
+                    self._fetch_basic_one(name, shop_account),
+                    self._fetch_perf_one(name, shop_account, start_date, end_date),
+                    return_exceptions=True,
+                )
+                for name in names
+            ])
+            basic_list = [p[0] for p in pair_list]
+            perf_list = [p[1] for p in pair_list]
+
             for name, res in self._zip_results(names, basic_list):
                 if res.ok and isinstance(res.value, dict):
                     basic_results[name] = {**res.value, "source": "mcp"}
@@ -165,12 +174,6 @@ class CampaignFetcher:
                     basic_results[name] = self._doris_fallback_basic_info(name)
                     mcp_fail += 1
 
-            # 并行拉 product_report；失败回落 Doris（shop_id 已在循环外解析）
-            perf_list = await asyncio.gather(
-                *[self._fetch_perf_one(name, shop_account, start_date, end_date)
-                  for name in names],
-                return_exceptions=True,
-            )
             for name, res in self._zip_results(names, perf_list):
                 if res.ok and isinstance(res.value, dict):
                     perf_results[name] = {**res.value, "source": "mcp"}
@@ -182,7 +185,7 @@ class CampaignFetcher:
 
             if rank_task is not None:
                 try:
-                    rank_map = await asyncio.wait_for(rank_task, timeout=45)
+                    rank_map = await rank_task  # 超时已在 _fetch_keyword_ranks 内（从 task 启动算）
                 except Exception as e:  # noqa: BLE001
                     logger.warning("自然排名等待失败 [%s]: %s (非阻塞)", parent_asin, e)
                     rank_map = {}
@@ -551,14 +554,19 @@ class CampaignFetcher:
         child_args = build_tool_args("keyword_child_asins", ctx)
         own_args = build_tool_args("own_keyword_flow", ctx)
         t = getattr(settings, "campaign_mcp_tool_timeout", 300.0)
+        # 墙钟超时在此处（从本协程启动算），与 await 时机无关；超时/异常 → fail-open 返回 {}
+        rank_timeout = getattr(settings, "campaign_rank_timeout", 45.0)
         try:
-            child_res, own_res = await asyncio.gather(
-                self._mcp().call_tool_timed_with_args("keyword_child_asins", child_args, t),
-                self._mcp().call_tool_timed_with_args("own_keyword_flow", own_args, t),
-                return_exceptions=True,
+            child_res, own_res = await asyncio.wait_for(
+                asyncio.gather(
+                    self._mcp().call_tool_timed_with_args("keyword_child_asins", child_args, t),
+                    self._mcp().call_tool_timed_with_args("own_keyword_flow", own_args, t),
+                    return_exceptions=True,
+                ),
+                timeout=rank_timeout,
             )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("自然排名拉取异常 [%s]: %s (非阻塞)", parent_asin, e)
+        except Exception as e:  # noqa: BLE001  (含 asyncio.TimeoutError)
+            logger.warning("自然排名拉取异常/超时 [%s]: %s (非阻塞)", parent_asin, e)
             return {}
 
         rank_map: dict[str, dict] = {}

@@ -46,7 +46,13 @@ class LegacyRestMcpInvoker:
 
 
     def __init__(self):
-        self._client = httpx.AsyncClient(timeout=settings.mcp_timeout)
+        self._client = httpx.AsyncClient(
+            timeout=settings.mcp_timeout,
+            limits=httpx.Limits(
+                max_connections=settings.mcp_max_connections,
+                max_keepalive_connections=40,
+            ),
+        )
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         if not settings.mcp_gateway_url:

@@ -329,18 +329,29 @@ async def _analyze_campaigns_impl(
     rounds_detail: dict[str, dict] = {}
     warnings_list: list[str] = []
 
-    # 4.5 策略总览(执行总纲)：先于明细产出；posture_brief 注入各批作定性框架。
-    #     在主链上 → fail-open：失败仅 facts-only + warning，明细照常无 preamble 跑。
+    # 4.5 策略总览(执行总纲)：改为 gate task，与三流的 prefetch【重叠】跑（prefetch 不读 ctx_dict）。
+    #     各流在 LLM 轮(_run_round)前 await gate → posture_brief 已注入，保证今日总纲一致。
+    #     fail-open：gate 异常仅 warning，不阻塞三流。结果在三流 gather 后从 _ov_holder 取。
     strategic_overview: dict | None = None
+    _ov_holder: dict = {}
+    overview_gate: asyncio.Task | None = None
     if settings.campaign_overview_enabled:
-        facts = _build_overview_facts(campaign_data, llm_campaigns, strategy_context)
-        overview_obj = await _run_overview(reasoner, parent_asin, facts, ctx_dict, temperature)
-        strategic_overview = overview_obj.model_dump()
-        if overview_obj.posture_brief:
-            ctx_dict["_strategic_overview_text"] = overview_obj.posture_brief
-        if overview_obj.generated_by == "fallback":
-            warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
-        _t("DONE strategic_overview")
+        _ov_facts = _build_overview_facts(campaign_data, llm_campaigns, strategy_context)
+
+        async def _run_overview_gate():
+            try:
+                obj = await _run_overview(reasoner, parent_asin, _ov_facts, ctx_dict, temperature)
+                _ov_holder["overview"] = obj.model_dump()
+                if obj.posture_brief:
+                    ctx_dict["_strategic_overview_text"] = obj.posture_brief  # 原地注入，三流共享引用
+                if obj.generated_by == "fallback":
+                    warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
+                _t("DONE strategic_overview")
+            except Exception:
+                logger.exception("策略总览 gate 异常 [%s]（fail-open，不阻塞三流）", parent_asin)
+                warnings_list.append("策略总览生成异常，仅展示现状数字（不影响明细）")
+
+        overview_gate = asyncio.create_task(_run_overview_gate())
 
     # 5. ★三股并行：精准流 / 广泛流 / 新增活动分析线（各自独立限流，互不阻塞）
     # return_exceptions=True：任一流抛未捕获异常 → 不连累其余流，转为 warning
@@ -364,10 +375,12 @@ async def _analyze_campaigns_impl(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
+            overview_gate=overview_gate,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
+            overview_gate=overview_gate,
         ),
         (analyze_new_campaigns(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
@@ -383,9 +396,18 @@ async def _analyze_campaigns_impl(
             target_child_asin=target_child_asin,
             days=days,
             sem=new_sem,
+            overview_gate=overview_gate,
         ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )
+
+    # 策略总览 gate 兜底等待（空流不会在内部 await）→ 取结果（fail-open，已在 gate 内吞异常）
+    if overview_gate is not None:
+        try:
+            await overview_gate
+        except Exception:
+            pass
+        strategic_overview = _ov_holder.get("overview")
 
     def _unpack_stream(r, label):
         if isinstance(r, BaseException):
@@ -478,31 +500,34 @@ async def _analyze_campaigns_impl(
     budget_warnings = _resolve_budget_conflicts(adjustments)
     warnings_list.extend(budget_warnings)
 
-    # 8. Sanity check（仅校验低置信项，分批并行避免 LLM 输出超 max_tokens）
-    # sanity_ok 默认 False：未运行/有批次失败都按"未通过"展示，仅全批次成功才置 True
-    sanity_ok = False
-    if _SANITY_CHECK_ENABLED:
+    # 8 + 8b：Sanity check 与 AI 汇总合成【并行】。
+    # 两者都只读已定稿的 adjustments，产出独立（warnings vs 分组叙事），无数据依赖 →
+    # gather 省墙钟（约 20-55s）。各自吞异常 + 返回自身 warnings，避免并发改 warnings_list。
+    async def _run_sanity() -> tuple[list[str], bool]:
+        # sanity_ok 默认 False：未运行/有批次失败都按"未通过"展示，仅全批次成功才 True
+        if not _SANITY_CHECK_ENABLED:
+            logger.info("Campaign sanity check 已禁用 [%s]", parent_asin)
+            return [], False
         try:
-            sc_warnings, sanity_ok = await _sanity_check_batched(
+            sc_warnings, ok = await _sanity_check_batched(
                 reasoner, parent_asin, adjustments,
                 exact_summaries + broad_summaries,
                 ctx_dict, temperature,
             )
-            warnings_list.extend(sc_warnings)
             _t("DONE sanity_check")
+            return sc_warnings, ok
         except Exception as e:
             logger.warning("Campaign sanity check 失败 [%s]: %s", parent_asin, e)
-            warnings_list.append(f"sanity_check 执行失败: {e}")
-            sanity_ok = False
-    else:
-        logger.info("Campaign sanity check 已禁用 [%s]", parent_asin)
+            return [f"sanity_check 执行失败: {e}"], False
 
-    # 8b. AI 汇总合成 (按共同原因分组的运营叙事)
-    # timeout_override=55：httpx socket 层自断，不依赖 asyncio 取消
-    synthesis: dict | None = None
-    if _SYNTHESIS_ENABLED and adjustments:
+    async def _run_synth() -> tuple[dict | None, list[str]]:
+        # timeout_override=55：httpx socket 层自断，不依赖 asyncio 取消
+        if not (_SYNTHESIS_ENABLED and adjustments):
+            if adjustments:
+                logger.info("Campaign synthesis 已禁用 [%s]", parent_asin)
+            return None, []
         try:
-            synthesis = await reasoner.recommend_campaign_synthesis(
+            syn = await reasoner.recommend_campaign_synthesis(
                 asin=parent_asin,
                 adjustments=adjustments,
                 strategy_context=ctx_dict,
@@ -510,14 +535,31 @@ async def _analyze_campaigns_impl(
                 timeout_override=55,
             )
             _t("DONE synthesis")
-            if synthesis and synthesis.get("error"):
-                warnings_list.append(f"AI 汇总合成失败: {synthesis['error']}")
+            if syn and syn.get("error"):
+                return syn, [f"AI 汇总合成失败: {syn['error']}"]
+            return syn, []
         except Exception as e:
             logger.warning("Campaign synthesis 异常 [%s]: %s", parent_asin, e)
-            warnings_list.append(f"AI 汇总合成异常: {e}")
-            synthesis = None
-    elif adjustments:
-        logger.info("Campaign synthesis 已禁用 [%s]", parent_asin)
+            return None, [f"AI 汇总合成异常: {e}"]
+
+    sanity_res, synth_res = await asyncio.gather(
+        _run_sanity(), _run_synth(), return_exceptions=True,
+    )
+
+    if isinstance(sanity_res, BaseException):
+        logger.warning("Campaign sanity gather 异常 [%s]: %s", parent_asin, sanity_res)
+        sanity_ok = False
+    else:
+        sc_warnings, sanity_ok = sanity_res
+        warnings_list.extend(sc_warnings)
+
+    synthesis: dict | None = None
+    if isinstance(synth_res, BaseException):
+        logger.warning("Campaign synthesis gather 异常 [%s]: %s", parent_asin, synth_res)
+        warnings_list.append(f"AI 汇总合成 gather 异常: {synth_res}")
+    else:
+        synthesis, synth_warns = synth_res
+        warnings_list.extend(synth_warns)
 
     # 9. 汇总统计
     summary_stats = {
@@ -828,8 +870,9 @@ async def _analyze_one_stream(
     sem: asyncio.Semaphore,
     temperature: float,
     ctx_dict: dict,
+    overview_gate: "asyncio.Task | None" = None,
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
-    """单流全流程: summaries → unit_lookup → 预取 → 分批 → R1+R2 → 投票 → (R3) → 合并。
+    """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1+R2 → 投票 → (R3) → 合并。
 
     返回 (adjustments, rounds_detail, enriched_summaries, skipped_campaigns)。
     skipped = 整批 LLM 失败或未返回 item 的活动（运营需人工补救）。
@@ -861,6 +904,10 @@ async def _analyze_one_stream(
             fetcher, parent_asin, days, summaries, unit_lookup,
         )
     _st(f"DONE prefetch ({len(campaigns)} campaigns)")
+
+    # LLM 轮前等策略总览 gate：保证 ctx_dict 已含 posture_brief（与上面的 prefetch 重叠跑，不串行）
+    if overview_gate is not None:
+        await overview_gate
 
     # 3. 分批 + R1+R2（少于 2 批时跳过投票，单轮直出）
     if len(campaigns) < batch_size * 2:

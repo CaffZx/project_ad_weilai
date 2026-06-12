@@ -56,7 +56,8 @@ class Settings(BaseSettings):
     mcp_gateway_header_name: str = "Authorization"
     mcp_timeout: float = 1200.0
     mcp_retries: int = 1
-    mcp_max_concurrency: int = 80
+    mcp_max_concurrency: int = 115
+    mcp_max_connections: int = 120  # MCP httpx 连接池上限，须 ≥ mcp_max_concurrency（留余量防池排队成新瓶颈）
     # ad_keyword_report 匹配类型：逗号分隔 EXACT,BROAD,PHRASE；留空/all 则不传 match_type（全类型）
     mcp_keyword_match_types: str = ""
     mcp_default_shop_account: str = ""
@@ -118,6 +119,7 @@ class Settings(BaseSettings):
     campaign_discovery_timeout: float = 90.0
     campaign_mcp_tool_timeout: float = 300.0
     campaign_db_fallback_timeout: float = 60.0
+    campaign_rank_timeout: float = 45.0          # 自然排名旁路拉取墙钟上限（从 task 启动算）
     campaign_prefilter_enabled: bool = True
     # Campaign LLM 分析
     # 每流(精准/广泛各一)并发上限。单 ASIN 上限 = exact + broad = 2×该值。

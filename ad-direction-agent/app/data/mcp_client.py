@@ -109,7 +109,13 @@ class StreamableHttpMcpInvoker:
         if not settings.mcp_gateway_url:
             raise RuntimeError("MCP 网关未配置: mcp_gateway_url")
         self._endpoint = settings.mcp_gateway_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=settings.mcp_timeout)
+        self._client = httpx.AsyncClient(
+            timeout=settings.mcp_timeout,
+            limits=httpx.Limits(
+                max_connections=settings.mcp_max_connections,
+                max_keepalive_connections=40,
+            ),
+        )
         self._session_id: str | None = None
         self._init_lock = asyncio.Lock()
 

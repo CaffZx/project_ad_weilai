@@ -172,6 +172,7 @@ async def analyze_new_campaigns(
     target_child_asin: str = "",
     days: int = 7,
     sem: asyncio.Semaphore | None = None,
+    overview_gate: "asyncio.Task | None" = None,
 ) -> tuple[list[NewCampaignItem], list[str]]:
     """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings)。
 
@@ -283,19 +284,33 @@ async def analyze_new_campaigns(
     batch_size = getattr(settings, "campaign_new_batch_size", 10)
     cand_dump = [c.model_dump() for c in candidates]
 
+    # 信号量提到循环外：原 `sem or asyncio.Semaphore(1)` 每次迭代新建 = 限流形同虚设
+    # （改 gather 后必须共享同一把，否则真的不限流）。sem 实际由调用方传入(new_sem)。
+    round_sem = sem or asyncio.Semaphore(1)
+
     async def _run_round(seed: int) -> dict[str, dict]:
         import random as _rnd
         ordered = cand_dump[:]
         _rnd.Random(seed).shuffle(ordered)
         batches = [ordered[i:i + batch_size] for i in range(0, len(ordered), batch_size)]
-        out: dict[str, dict] = {}
-        for batch in batches:
-            async with (sem or asyncio.Semaphore(1)):
-                res = await reasoner.recommend_new_campaigns(
+
+        async def _call_one(batch):
+            async with round_sem:
+                return await reasoner.recommend_new_campaigns(
                     asin=parent_asin, candidates=batch,
                     strategy_context=ctx_dict,           # 含 posture_brief
                     temperature=temperature, timeout_override=55,
                 )
+
+        # 轮内批次并行（对齐主流 _run_round 的 gather 模式）
+        results = await asyncio.gather(
+            *[_call_one(b) for b in batches], return_exceptions=True,
+        )
+        out: dict[str, dict] = {}
+        for res in results:
+            if isinstance(res, BaseException):
+                warnings.append(f"new_campaigns 批次异常: {type(res).__name__}: {res}")
+                continue
             if res.get("success") and isinstance(res.get("parsed"), dict):
                 for it in res["parsed"].get("new_campaigns", []) or []:
                     if not isinstance(it, dict):
@@ -308,6 +323,10 @@ async def analyze_new_campaigns(
             else:
                 warnings.append(f"new_campaigns 批次失败: {res.get('error', 'unknown')}")
         return out
+
+    # LLM 轮前等策略总览 gate：保证 ctx_dict 含 posture_brief（候选词发现/建议竞价已跑完，不串行）
+    if overview_gate is not None:
+        await overview_gate
 
     try:
         r1, r2 = await asyncio.gather(_run_round(1), _run_round(2))
