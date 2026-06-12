@@ -1151,16 +1151,21 @@ def _placement_sig(adjustments: list[dict]) -> frozenset:
 
 
 # KB 07 加价比例边界
-_PLACEMENT_MAX = {"头部": 30, "商品": 10, "其他": 15}
+# KB 07「最大加幅」= 单次广告位调整的【加幅绝对值上限】(百分点)，叠加在当前加价比例上；
+# 不是加价比例的"值上限"。头部(TOS)≤30 / 其他(RoS)≤15 / 商品(PP)≤10；加价比例本身无硬上限。
+_PLACEMENT_DELTA_CAP = {"头部": 30, "商品": 10, "其他": 15}
 
-# action → 加价比例步长 (百分点)
-_ACTION_STEP: dict[str, int] = {
-    "大涨": +10,
-    "小涨": +5,
-    "维持": 0,
-    "小降": -5,
-    "大降": -10,
-}
+# action → 加幅(百分点)。小涨/小降 固定 ±10；大涨/大降 = ±当前广告位最大加幅(_PLACEMENT_DELTA_CAP)。
+def _placement_step(action: str, cap: float) -> float:
+    if action == "小涨":
+        return min(10.0, cap)
+    if action == "大涨":
+        return cap
+    if action == "小降":
+        return -min(10.0, cap)
+    if action == "大降":
+        return -cap
+    return 0.0  # 维持 / 未知
 
 _PLACEMENT_NAME_MAP: dict[str, str] = {
     "头部": "头部", "Top of Search on-Amazon": "头部", "top_of_search": "头部",
@@ -1190,8 +1195,12 @@ def _backfill_placement_pcts(
             p["current_pct"] = current
 
             action = str(p.get("action", "维持") or "维持")
-            step = _ACTION_STEP.get(action, 0)
-            proposed = max(0.0, min(current + step, _PLACEMENT_MAX.get(pname, 100)))
+            # KB 07 加幅: 小涨/小降=±10；大涨/大降=±最大加幅(头部30/其他15/商品10)。
+            # 叠加在当前加价比例上，加价比例本身无值上限（仅 ≥0）。
+            # 例: 头部 183% 大涨(+30)→213%；小涨(+10)→193%。
+            cap = _PLACEMENT_DELTA_CAP.get(pname, 100)
+            step = _placement_step(action, cap)
+            proposed = max(0.0, current + step)
             p["proposed_pct"] = proposed
 
 
