@@ -542,8 +542,11 @@ body {
     <div class="card">
       <div class="card-title" style="margin-bottom:8px">分析 ASIN</div>
       <div class="flex gap-2" style="align-items:center">
-        <input id="asinInput" type="text" placeholder="输入 ASIN" autocomplete="off"
-               class="input flex-1" style="min-width:0">
+        <!-- 正常态：只读展示父 ASIN（来自 ERP URL） -->
+        <span id="asinDisplay" class="hidden" style="font-weight:600;font-size:15px;flex:1;min-width:0;word-break:break-all"></span>
+        <!-- 调试态：仅当无 URL parentAsin 或 ?debug=1 时显示，可手动输入 -->
+        <input id="asinInput" type="text" placeholder="输入 ASIN（调试）" autocomplete="off"
+               class="input flex-1 hidden" style="min-width:0">
         <select id="daysSelect" onchange="onDaysChange(this.value)"
                 style="border:1.5px solid var(--border);border-radius:var(--radius-ctl);
                        padding:8px 10px;font-size:13px;background:var(--card-bg);
@@ -552,7 +555,7 @@ body {
           <option value="14">14天</option>
           <option value="30">30天</option>
         </select>
-        <button onclick="loadAll()" id="btnStart" class="btn btn-primary">
+        <button onclick="loadAll()" id="btnStart" class="btn btn-primary hidden">
           加载分析
         </button>
       </div>
@@ -629,7 +632,7 @@ body {
   <main class="main-area" id="mainArea">
     <!-- 初始空状态（ASIN 加载前） -->
     <div id="mainEmpty" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted-fg);font-size:13px">
-      输入 ASIN 并点击「加载分析」开始
+      正在从 ERP 上下文加载分析…
     </div>
 
     <!-- 右侧内容区（初始隐藏） -->
@@ -788,7 +791,7 @@ body {
   <div class="chat-messages" id="chatMessages">
     <div class="chat-welcome" id="chatWelcome">
       <div class="icon">👋</div>
-      <div class="text">你好！我是 AI 广告优化助手。请先输入 ASIN 并加载分析，然后我可以帮你解答广告投放相关问题。<br><br>💡 例如：<br>• 分析当前 ACOS 是否合理<br>• 建议如何优化广告投放策略<br>• 解释数据趋势变化原因<br>• 给出关键词投放建议</div>
+      <div class="text">你好！我是 AI 广告优化助手。页面加载分析后，我可以帮你解答广告投放相关问题。<br><br>💡 例如：<br>• 分析当前 ACOS 是否合理<br>• 建议如何优化广告投放策略<br>• 解释数据趋势变化原因<br>• 给出关键词投放建议</div>
     </div>
   </div>
   <div class="chat-input-area">
@@ -826,6 +829,7 @@ const _erpParams = (() => {
   return {
     parentAsin: p.get('parentAsin') || '',
     shopId: p.get('shopId') || '',
+    shopAccount: p.get('shopAccount') || '',
     parentSellerSku: p.get('parentSellerSku') || '',
     productPosition: p.get('productPosition') || '',
     productStage: p.get('productStage') || '',
@@ -855,7 +859,6 @@ async function refreshDecisionContext() {
 }
 
 async function bootstrapFromContext() {
-  show('btnStart'); // show loading
   await refreshDecisionContext();
   // A/B/C 判定
   const ctx = _decisionContext;
@@ -1131,7 +1134,7 @@ async function sendChatMessage() {
 
   // 检查 ASIN 是否已加载
   if (!asin) {
-    addChatMessage('assistant error', '⚠️ 请先在左侧输入 ASIN 并点击「加载分析」，然后才能进行对话。');
+    addChatMessage('assistant error', '⚠️ 请等待页面加载分析完成后再进行对话。');
     return;
   }
 
@@ -1395,6 +1398,7 @@ async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST
       // 注入 ERP 上下文(_前缀,后端忽略未知字段)
       if (typeof body === 'object' && !Array.isArray(body)) {
         if (_erpParams.shopId) body._shopId = _erpParams.shopId;
+        if (_erpParams.shopAccount) body._shopAccount = _erpParams.shopAccount;
         if (_erpParams.parentSellerSku) body._parentSellerSku = _erpParams.parentSellerSku;
         if (_erpParams.userId) body._userId = _erpParams.userId;
       }
@@ -1460,7 +1464,7 @@ function showMainContent() {
   mc.classList.remove('hidden');
 }
 
-const MAIN_EMPTY_DEFAULT = '输入 ASIN 并点击「加载分析」开始';
+const MAIN_EMPTY_DEFAULT = '正在从 ERP 上下文加载分析…';
 const MAIN_EMPTY_NEED_STRATEGY = '请在左侧完成「战略层」三项选择并点击「保存」，再查看右侧分析';
 const PANEL_LOADING_HTML = '<div class="loading-text" style="padding:24px;text-align:center"><span class="spinner"></span> 加载中...</div>';
 
@@ -1633,7 +1637,41 @@ async function loadStrategy() {
   setHTML('strategyContent', html);
   show('btnStrategy');
   hide('sec1Loader');
+  if (!prefilled) _applyUrlStrategyPrefill();  // 首访(无既存配置)时用 ERP URL 标签预填
   return { ok: true, data };
+}
+
+// ERP URL 码 → 战略层下拉值(=中文 label，与 layer_options.toml id 一致)
+const _ERP_POSITION_ZH = {
+  P0_PRODUCT: '战略级产品 (P0)', P1_PRODUCT: '重点产品 (P1)',
+  P2_PRODUCT: '常规产品 (P2)', P3_PRODUCT: '长尾产品 (P3)',
+  TOP: '战略级产品 (P0)', WAIST: '常规产品 (P2)', LONG_TAIL: '长尾产品 (P3)',
+};
+const _ERP_STAGE_ZH = {
+  TESTING: '测试期', PROMOTING: '推进期', PUSHING: '推进期',
+  HARVEST_PROFIT: '收割利润期', HARVESTING: '收割利润期',
+  MAINTAINING: '维持期', LIQUIDATING: '清货期',
+};
+const _ERP_SEASON_ZH = {
+  OFF_SEASON: '淡季', PEAK_SEASON_PREPARE: '旺季准备',
+  BIG_PEAK_SEASON: '大旺季', LATE_PEAK_SEASON: '旺季末期',
+};
+
+// 首访时，用 ERP URL 传入的 productPosition/productStage/seasonType 预选战略层下拉。
+// 仅当该维度尚未选中、且库里存在对应选项时才填；标签对不上则静默跳过(防呆)。
+function _applyUrlStrategyPrefill() {
+  const want = {
+    product_level: _ERP_POSITION_ZH[_erpParams.productPosition],
+    product_stage: _ERP_STAGE_ZH[_erpParams.productStage],
+    season_stage: _ERP_SEASON_ZH[_erpParams.seasonType],
+  };
+  Object.entries(want).forEach(([dim, label]) => {
+    if (!label) return;
+    const txt = qs(`.dd-btn[data-dim="${dim}"] .dd-text`);
+    if (!txt || txt.textContent !== '请选择') return;
+    const opt = qs(`.dd-option[data-dim="${dim}"][data-value="${label}"]`);
+    if (opt) selectDropdown(opt);
+  });
 }
 
 let _lastTacticsAiRec = { ad_purposes: [], target_keyword_strategy: [] };
@@ -2935,14 +2973,21 @@ async function loadAnnounceContent(filename) {
 }
 
 // ═══════════════ 启动入口 ═══════════════
-// ERP 跳转(带 ?parentAsin=):自动填入 ASIN → bootstrapFromContext
-// 手动:用户输入 ASIN → 点击"加载分析" → loadAll
+// 正常态：ERP 跳转(带 ?parentAsin=) → 只读展示 ASIN → bootstrapFromContext 自启动
+// 调试态：无 parentAsin 或 ?debug=1 → 显示手动输入框 + 加载按钮
 document.addEventListener('DOMContentLoaded', () => {
+  const debugMode = new URLSearchParams(location.search).get('debug') === '1';
   if (_erpParams.parentAsin) {
-    $('asinInput').value = _erpParams.parentAsin;
     asin = _erpParams.parentAsin;
-    // ERP 跳转时自动触发
+    $('asinInput').value = asin;
+    $('asinDisplay').textContent = asin;
+    show('asinDisplay');
+    if (debugMode) { show('asinInput'); show('btnStart'); }  // 调试：保留手动入口
     bootstrapFromContext();
+  } else {
+    // 无 URL 父 ASIN → 调试手动入口
+    show('asinInput'); show('btnStart');
+    setMainEmptyMessage('请从 ERP 跳转进入（URL 需带 parentAsin）；调试可手动输入 ASIN 后点「加载分析」');
   }
 });
 </script>

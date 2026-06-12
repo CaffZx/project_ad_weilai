@@ -85,8 +85,37 @@ def _lookup_sync(asin: str, shop_account: str | None) -> dict | None:
         conn.close()
 
 
-async def resolve_mcp_context_from_db(asin: str) -> McpDbContext | None:
-    """从 Doris 解析 MCP 入参；DB 不可达时返回 None 并打日志。"""
+def _coerce_int(v) -> int | None:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+async def resolve_mcp_context_from_db(
+    asin: str, override: dict | None = None
+) -> McpDbContext | None:
+    """解析 MCP 入参。
+
+    override（来自 ERP URL：shop_account/parent_seller_sku/site_code/shop_id）若带
+    shop_account（MCP 工具必填的账号字符串）则直接构造，**不查库**——保证用的是运营
+    当前在看的店铺，且省一次 dwd_shop JOIN。无 override（如定时跑批无 URL 参数）则保留
+    原 Doris 解析路径。
+    """
+    if override and str(override.get("shop_account") or "").strip():
+        ctx = McpDbContext(
+            parent_asin=asin,
+            parent_seller_sku=str(override.get("parent_seller_sku") or "").strip(),
+            shop_account=str(override["shop_account"]).strip(),
+            shop_id=_coerce_int(override.get("shop_id")),
+            site_code=str(override.get("site_code") or settings.mcp_default_site_code or "Amazon_US"),
+        )
+        logger.info(
+            "MCP 上下文(URL注入) [%s] sku=%s shop=%s site=%s",
+            asin, ctx.parent_seller_sku, ctx.shop_account, ctx.site_code,
+        )
+        return ctx
+
     if not settings.mcp_resolve_sku_via_db:
         return _context_from_env_only(asin)
 

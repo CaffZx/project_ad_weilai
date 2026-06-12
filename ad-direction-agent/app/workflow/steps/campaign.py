@@ -154,11 +154,13 @@ async def analyze_campaigns(
     campaign_data: CampaignData | None = None,
     keyword_analysis: dict | None = None,
     run_id: str | None = None,
+    erp_override: dict | None = None,
 ) -> CampaignAnalysisResult:
     """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
 
     实验脚本直接调用此函数，无需 WorkflowContext。
     campaign_data 可预取后复用；keyword_analysis 用于逐词 keyword_class 富化。
+    erp_override：ERP URL 注入的 shop_account/sku/site_code/shop_id，透传给数据拉取以跳过 dwd_shop 反查。
     """
 
     bs = batch_size or settings.campaign_batch_size
@@ -185,7 +187,7 @@ async def analyze_campaigns(
             asin_data=asin_data, strategy_context=strategy_context,
             days=days, bs=bs, cc=cc, temperature=temperature, refresh=refresh,
             campaign_data=campaign_data, keyword_analysis=keyword_analysis,
-            run_id=run_id, _t=_t,
+            run_id=run_id, _t=_t, erp_override=erp_override,
         )
         return result
     finally:
@@ -208,6 +210,7 @@ async def _analyze_campaigns_impl(
     keyword_analysis: dict | None,
     run_id: str,
     _t,
+    erp_override: dict | None = None,
 ) -> CampaignAnalysisResult:
 
     # 1. 获取活动数据 — 优先 Redis 缓存（refresh=True 时跳过），miss 时拉 MCP/Doris
@@ -219,7 +222,7 @@ async def _analyze_campaigns_impl(
         else:
             try:
                 campaign_data = await asyncio.wait_for(
-                    fetcher.fetch_campaigns(parent_asin, days=days),
+                    fetcher.fetch_campaigns(parent_asin, days=days, override=erp_override),
                     timeout=300,
                 )
                 await _save_cached_campaigns(parent_asin, days, campaign_data)
@@ -1342,13 +1345,17 @@ async def _prefetch_placement(
     if not placement_names:
         return enriched
 
-    from app.data.mcp_db_context import resolve_mcp_context_from_db
-    try:
-        ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
-        shop_account = ctx.shop_account if ctx else ""
-        shop_id = ctx.shop_id if ctx else 0
-    except Exception:
-        shop_account = ""; shop_id = 0
+    # 优先用主 fetch 已解析并缓存的店铺(含 URL override)，避免二次 dwd_shop 反查
+    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    shop_id = getattr(fetcher, "_last_shop_id", 0) or 0
+    if not shop_account:
+        from app.data.mcp_db_context import resolve_mcp_context_from_db
+        try:
+            ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
+            shop_account = ctx.shop_account if ctx else ""
+            shop_id = ctx.shop_id if ctx else 0
+        except Exception:
+            shop_account = ""; shop_id = 0
 
     sd, ed = _make_date_window(days)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
@@ -1388,12 +1395,15 @@ async def _prefetch_search_terms(
     if not search_term_names:
         return enriched
 
-    from app.data.mcp_db_context import resolve_mcp_context_from_db
-    try:
-        ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
-        shop_account = ctx.shop_account if ctx else ""
-    except Exception:
-        shop_account = ""
+    # 优先用主 fetch 已解析并缓存的店铺(含 URL override)，避免二次 dwd_shop 反查
+    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    if not shop_account:
+        from app.data.mcp_db_context import resolve_mcp_context_from_db
+        try:
+            ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
+            shop_account = ctx.shop_account if ctx else ""
+        except Exception:
+            shop_account = ""
 
     sd, ed = _make_date_window(days)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度

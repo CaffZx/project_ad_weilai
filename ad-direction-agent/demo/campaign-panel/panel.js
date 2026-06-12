@@ -239,6 +239,19 @@ async function _callAPI(path, body, timeout = 60, method = 'POST') {
   }
 }
 
+// ERP URL 上下文（panel 有独立 _callAPI，不经主页 callAPI 注入，故在此自取）
+function _erpCtx() {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const o = {};
+    if (p.get('shopId')) o._shopId = p.get('shopId');
+    if (p.get('shopAccount')) o._shopAccount = p.get('shopAccount');
+    if (p.get('parentSellerSku')) o._parentSellerSku = p.get('parentSellerSku');
+    if (p.get('userId')) o._userId = p.get('userId');
+    return o;
+  } catch (_) { return {}; }
+}
+
 async function _fetchRealtime(asin, days, temperature, extra = {}) {
   const raw = await _callAPI('/campaign/viewmodel', {
     asin, days,
@@ -246,6 +259,7 @@ async function _fetchRealtime(asin, days, temperature, extra = {}) {
     run_id: extra.run_id || undefined,
     write_erp: !!extra.write_erp,
     analysis_mode: extra.analysis_mode || 'REALTIME',
+    ..._erpCtx(),
   }, API_TIMEOUT.campaign);
   return normalizeViewModel(raw);
 }

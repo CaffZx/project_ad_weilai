@@ -201,6 +201,16 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
     requested_run_id = str(req.get("run_id") or "").strip()
     analysis_mode = str(req.get("analysis_mode") or "REALTIME").upper()
 
+    # ERP URL 注入的上下文（前端以 _ 前缀传入）。带 shop_account 才视为有效，
+    # 用于跳过 dwd_shop 反查（定时跑批无此参数则走 DB 解析）。
+    _shop_account = str(req.get("_shopAccount") or "").strip()
+    erp_override = {
+        "shop_account": _shop_account,
+        "parent_seller_sku": str(req.get("_parentSellerSku") or "").strip(),
+        "site_code": str(req.get("_siteCode") or "").strip(),
+        "shop_id": req.get("_shopId"),
+    } if _shop_account else None
+
     if not asin:
         return (
             CampaignAnalysisResult(
@@ -265,6 +275,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                 refresh=refresh,
                 keyword_analysis=keyword_analysis,
                 run_id=effective_run_id,
+                erp_override=erp_override,
             ),
             timeout=settings.campaign_total_timeout,
         )

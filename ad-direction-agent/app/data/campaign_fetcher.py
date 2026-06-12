@@ -47,15 +47,18 @@ class CampaignFetcher:
         days: int = 7,
         *,
         prefer_db: bool = False,
+        override: dict | None = None,
     ) -> CampaignData:
         """完整 pipeline 入口。
 
         prefer_db=True 时跳过 MCP，全走 Doris（用于刷新/调试）。
+        override（ERP URL 注入 shop_account/parent_seller_sku/site_code/shop_id）传入则
+        跳过 dwd_shop 反查，直接用 URL 上下文。
         """
         errors: list[str] = []
 
-        # ① 解析上下文 → child_asins + shop_account
-        db_ctx = await resolve_mcp_context_from_db(parent_asin)
+        # ① 解析上下文 → child_asins + shop_account（URL override 优先，否则 Doris 反查）
+        db_ctx = await resolve_mcp_context_from_db(parent_asin, override=override)
         shop_id = 0
         parent_seller_sku = ""
         site_code = "Amazon_US"
