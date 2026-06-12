@@ -316,7 +316,18 @@ class StateManager:
                 return None
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) and data.get("run_id") else None
+                if not isinstance(data, dict) or not data.get("run_id"):
+                    return None
+                st = data.get("started_at")
+                if st:
+                    try:
+                        started = datetime.fromisoformat(str(st))
+                        if (datetime.now(timezone.utc) - started).total_seconds() > 12 * 3600:
+                            self.clear_analysis_session(asin)
+                            return None
+                    except (ValueError, TypeError):
+                        pass
+                return data
             except (json.JSONDecodeError, OSError):
                 return None
 

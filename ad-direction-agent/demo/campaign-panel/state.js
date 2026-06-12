@@ -149,7 +149,7 @@ export function createCampaignState() {
           days: state.days,
           run_id: state._currentRunId,
           decisions,
-          operator: 'tab5',
+          operator: ((window._erpParams || {}).userId) || 'tab5',
         }),
       });
       let body = null;
