@@ -80,3 +80,9 @@ CREATE TABLE IF NOT EXISTS feedback (
     submitted_at DATETIME(6) NOT NULL,
     INDEX idx_feedback_asin (asin)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS analysis_session (
+    asin VARCHAR(20) PRIMARY KEY,
+    run_id VARCHAR(64) NOT NULL,
+    started_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;

@@ -89,14 +89,17 @@ class ErpDualWriterRepository:
 
     # ── 批次生命周期（决策批次改造方案 §一） ──────────────────────────────
 
+    # 注：批次 = 一行 t_advert_agent_decision，id=decision_id 写库时生成（不预建 DRAFT 行）。
+    #     "进行中"态用 run_id 落 state 库（StateManager.*_analysis_session），不污染 ERP 库。
+    #     decision 表无 decision_status 列；所有 decision 行即"已完成批次"。
+
     def list_batches(self, asin: str) -> list[dict]:
-        """返回该 ASIN 所有决策批次，按 create_time 降序。"""
+        """返回该 ASIN 所有已完成决策批次，按 create_time 降序。"""
         conn = self._connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id AS decision_id, decision_status,
-                              analysis_mode, is_latest, batch_no,
+                    """SELECT id AS decision_id, analysis_mode, is_latest, batch_no,
                               create_time AS completed_at
                        FROM t_advert_agent_decision
                        WHERE parent_asin = %s
@@ -108,104 +111,19 @@ class ErpDualWriterRepository:
             conn.close()
 
     def get_latest_completed(self, asin: str) -> dict | None:
-        """返回 is_latest=1 的 COMPLETED 批次。"""
+        """返回 is_latest=1 的最新批次（is_latest 由 finalize_batch 维护）。"""
         conn = self._connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id AS decision_id, decision_status,
-                              analysis_mode, is_latest, batch_no,
+                    """SELECT id AS decision_id, analysis_mode, is_latest, batch_no,
                               create_time AS completed_at
                        FROM t_advert_agent_decision
                        WHERE parent_asin = %s AND is_latest = 1
-                       LIMIT 1""",
+                       ORDER BY create_time DESC LIMIT 1""",
                     (asin,),
                 )
                 return cur.fetchone()
-        finally:
-            conn.close()
-
-    def get_draft(self, asin: str) -> dict | None:
-        """返回该 ASIN 当前 DRAFT（仅一个）。"""
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT id AS decision_id, decision_status,
-                              analysis_mode, is_latest, batch_no
-                       FROM t_advert_agent_decision
-                       WHERE parent_asin = %s AND decision_status = 'DRAFT'
-                       LIMIT 1""",
-                    (asin,),
-                )
-                return cur.fetchone()
-        finally:
-            conn.close()
-
-    def create_draft(
-        self, asin: str, decision_id: str, batch_no: str, analysis_mode: str,
-    ) -> None:
-        """插入 DRAFT 批次。parent_asin 填 ASIN 原值。"""
-        now = datetime.now(timezone.utc)
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO t_advert_agent_decision
-                       (id, parent_asin, decision_status, is_latest,
-                        analysis_mode, batch_no, create_time, update_time)
-                       VALUES (%s,%s,'DRAFT',0,%s,%s,%s,%s)""",
-                    (decision_id, asin, analysis_mode, batch_no, now, now),
-                )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def delete_draft(self, decision_id: str) -> None:
-        """删除 DRAFT 批次（仅 DRAFT 可删，COMPLETED 受保护）。"""
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """DELETE FROM t_advert_agent_decision
-                       WHERE id = %s AND decision_status = 'DRAFT'""",
-                    (decision_id,),
-                )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def mark_completed(self, decision_id: str) -> None:
-        """DRAFT → COMPLETED + 翻 is_latest（事务:旧置0→新置1）。
-
-        仅对 decision_status='DRAFT' 的行生效，COMPLETED 翻转为 no-op。
-        """
-        conn = self._connect()
-        try:
-            # 先查出该 DRAFT 的 parent_asin
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT parent_asin FROM t_advert_agent_decision WHERE id=%s AND decision_status='DRAFT'",
-                    (decision_id,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return  # 不是 DRAFT，不操作
-                asin = row["parent_asin"]
-
-            # 事务:旧 COMPLETED is_latest→0，新 COMPLETED is_latest→1
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE t_advert_agent_decision SET is_latest=0 WHERE parent_asin=%s AND is_latest=1",
-                    (asin,),
-                )
-                cur.execute(
-                    """UPDATE t_advert_agent_decision
-                       SET decision_status='COMPLETED', is_latest=1, update_time=%s
-                       WHERE id=%s""",
-                    (datetime.now(timezone.utc), decision_id),
-                )
-            conn.commit()
         finally:
             conn.close()
 
@@ -265,10 +183,11 @@ class ErpDualWriterRepository:
 
     def confirm_decisions(
         self, decision_id: str, decisions: list[dict], operator: str | None = None,
+        *, in_progress: bool = False,
     ) -> dict:
         """运营审核写回 card + 子 pending 的 confirm_status（PENDING→CONFIRMED/REJECTED）。
 
-        - 校验可执行：批次 decision_status='COMPLETED' 且 is_latest=1 且该 ASIN 无 DRAFT。
+        - 校验可执行：批次 is_latest=1 且该 ASIN 无进行中事件（in_progress 由 API 层查 state 库传入）。
         - 每活动只处理一次：UPDATE 限 confirm_status='PENDING'，重复处理 rowcount=0 → skipped。
         decisions: [{campaign_key: <card_id>, decision: 'approve'|'reject'}]
         """
@@ -277,22 +196,16 @@ class ErpDualWriterRepository:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT parent_asin, is_latest, decision_status "
-                    "FROM t_advert_agent_decision WHERE id=%s",
+                    "SELECT parent_asin, is_latest FROM t_advert_agent_decision WHERE id=%s",
                     (decision_id,),
                 )
                 d = cur.fetchone()
                 if not d:
                     return {"ok": False, "error": "decision 不存在", "applied": 0, "skipped": 0}
-                if d.get("decision_status") != "COMPLETED" or not d.get("is_latest"):
-                    return {"ok": False, "error": "该批次非最新已完成批次，不可执行",
+                if not d.get("is_latest"):
+                    return {"ok": False, "error": "该批次非最新批次，不可执行",
                             "applied": 0, "skipped": 0}
-                cur.execute(
-                    "SELECT 1 FROM t_advert_agent_decision "
-                    "WHERE parent_asin=%s AND decision_status='DRAFT' LIMIT 1",
-                    (d["parent_asin"],),
-                )
-                if cur.fetchone():
+                if in_progress:
                     return {"ok": False, "error": "存在进行中分析事件，执行权已冻结",
                             "applied": 0, "skipped": 0}
 
@@ -306,9 +219,9 @@ class ErpDualWriterRepository:
                     status = "CONFIRMED" if raw == "approve" else "REJECTED"
                     cur.execute(
                         "UPDATE t_advert_agent_modify_suggest_card "
-                        "SET confirm_status=%s, update_time=%s "
+                        "SET confirm_status=%s, confirm_user_id=%s, confirm_time=%s, update_time=%s "
                         "WHERE id=%s AND decision_id=%s AND confirm_status='PENDING'",
-                        (status, now, card_id, decision_id),
+                        (status, operator, now, now, card_id, decision_id),
                     )
                     if cur.rowcount == 0:
                         skipped += 1  # 已处理过 / 不存在
@@ -320,9 +233,10 @@ class ErpDualWriterRepository:
                         "t_advert_agent_modify_placement_pending",
                     ):
                         cur.execute(
-                            f"UPDATE {table} SET confirm_status=%s, update_time=%s "
+                            f"UPDATE {table} SET confirm_status=%s, confirm_user_id=%s, "
+                            "confirm_time=%s, update_time=%s "
                             "WHERE suggest_card_id=%s AND confirm_status='PENDING'",
-                            (status, now, card_id),
+                            (status, operator, now, now, card_id),
                         )
             conn.commit()
             return {"ok": True, "applied": applied, "skipped": skipped}
@@ -341,7 +255,7 @@ class ErpDualWriterRepository:
                     "SELECT id, parent_asin, parent_seller_sku, shop_id, site_code, day_range, "
                     "product_position, product_stage, season_type, advert_purposes, "
                     "target_keyword_types, target_acos_suggest, daily_budget_suggest, "
-                    "advert_direction_types, analysis_mode, decision_status, is_latest, "
+                    "advert_direction_types, analysis_mode, is_latest, "
                     "batch_no, create_time, update_time "
                     "FROM t_advert_agent_decision WHERE id=%s",
                     (decision_id,),
@@ -355,20 +269,15 @@ class ErpDualWriterRepository:
     ) -> None:
         """write_full 落库后收尾：本批次置最新 COMPLETED + 清该 ASIN 的 DRAFT 锁。
 
-        DRAFT-as-lock 模型：new-event 建 DRAFT 锁(uuid)，执行层 write_full 另建 COMPLETED 行
-        (stable_id)。此处删 DRAFT 锁 + 翻 is_latest 到 COMPLETED 行，二者 decision_id 无需一致。
-        write_full 新行 decision_status 默认 'COMPLETED'、is_latest=0、analysis_mode 默认 'REALTIME'。
-        定时跑无 DRAFT 锁 → DELETE 为 no-op。
+        write_full 落库后,新决策行 id=decision_id 已存在(is_latest 默认 1)。此处把该 ASIN
+        其它行 is_latest 置 0、本行置 1 + 写 analysis_mode,保证每 ASIN 唯一最新。
+        进行中(run_id)标记的清除由 API 层在 state 库做,本方法不碰 state。
+        decision 表无 decision_status 列——所有 decision 行即"已完成批次"。
         """
         conn = self._connect()
         now = datetime.now()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM t_advert_agent_decision "
-                    "WHERE parent_asin=%s AND decision_status='DRAFT'",
-                    (parent_asin,),
-                )
                 cur.execute(
                     "UPDATE t_advert_agent_decision SET is_latest=0 "
                     "WHERE parent_asin=%s AND is_latest=1 AND id<>%s",
@@ -376,8 +285,7 @@ class ErpDualWriterRepository:
                 )
                 cur.execute(
                     "UPDATE t_advert_agent_decision "
-                    "SET is_latest=1, decision_status='COMPLETED', analysis_mode=%s, update_time=%s "
-                    "WHERE id=%s",
+                    "SET is_latest=1, analysis_mode=%s, update_time=%s WHERE id=%s",
                     (analysis_mode, now, decision_id),
                 )
             conn.commit()

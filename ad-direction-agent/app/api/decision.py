@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
@@ -51,17 +50,16 @@ async def decision_context(asin: str = "", shopId: str = ""):
         long_term = state.get_long_term_config(asin) or {}
         has_config = bool(long_term.get("product_level") or long_term.get("product_stage"))
 
-        # 2. ERP DB 批次列表 + 草稿（容错: DB 不通不崩）
-        repo = None
+        # 2. 进行中事件标记（state 库，run_id 句柄；不污染 ERP 库）
+        sess = state.get_analysis_session(asin)
+        in_progress = sess.get("run_id") if sess else None
+
+        # 3. ERP DB 已完成批次列表（容错: DB 不通不崩）
         batches = []
-        in_progress = None
         latest_updated = None
         try:
             repo = _repo()
             batches = repo.list_batches(asin) if repo else []
-            in_progress = repo.get_draft(asin) if repo else None
-            if in_progress:
-                in_progress = in_progress.get("decision_id") if isinstance(in_progress, dict) else in_progress
             if batches:
                 latest = next((b for b in batches if b.get("is_latest")), None)
                 if latest:
@@ -70,14 +68,14 @@ async def decision_context(asin: str = "", shopId: str = ""):
             logger.warning("ERP DB 连不上，批次查询降级: %s", e)
             return {
                 "has_config": has_config,
-                "in_progress": None,
+                "in_progress": in_progress,
                 "latest_completed_id": None,
                 "latest_completed_updated_at": None,
                 "batches": [],
                 "degraded": True,
             }
 
-        # 3. 计算 executable
+        # 4. 计算 executable = 最新批次 且 无进行中事件
         for b in batches:
             b["executable"] = bool(b.get("is_latest")) and not in_progress
 
@@ -106,57 +104,45 @@ async def decision_context(asin: str = "", shopId: str = ""):
 
 @router.post("/decision/new-event")
 async def new_decision_event(req: dict):
-    """新建分析事件 → INSERT DRAFT(REALTIME)。
+    """新建分析事件 → 在 state 库标记进行中（run_id 作批次句柄）。
 
+    不在 ERP 库预建 decision 行——decision_id 由执行层 write_full 落库时生成。
     清空 3-4（target_acos_override + p3 缓存 + execution），保留 1-2 继承。
-    返回: { decision_id, analysis_mode: "REALTIME" }
+    返回: { run_id, analysis_mode }
     """
     asin = str(req.get("asin", "")).strip()
     if not asin:
         return {"ok": False, "error": "asin 必填"}
 
-    # 幂等:已有 DRAFT 则复用，不重复建
-    try:
-        repo = _repo()
-        if repo:
-            existing = repo.get_draft(asin)
-            if existing:
-                did = existing.get("decision_id") if isinstance(existing, dict) else existing
-                logger.info("复用现存 DRAFT [%s] decision_id=%s", asin, did)
-                return {"ok": True, "decision_id": did, "analysis_mode": existing.get("analysis_mode", "REALTIME"),
-                        "reused": True}
-    except Exception:
-        pass
-
-    decision_id = uuid.uuid4().hex[:32]  # 32-char hex, 与 write_full 的 UUID 口径一致
-    batch_no = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M-%S")
+    state = get_state_manager()
     analysis_mode = str(req.get("analysis_mode", "REALTIME")).upper() or "REALTIME"
 
-    try:
-        repo = _repo()
-        if repo:
-            repo.create_draft(asin, decision_id, batch_no, analysis_mode)
-    except Exception as e:
-        logger.exception("create_draft 失败 [%s]: %s", asin, e)
-        return {"ok": False, "error": f"create_draft 失败: {e}"}
+    # 幂等:已有进行中事件则复用
+    existing = state.get_analysis_session(asin)
+    if existing and existing.get("run_id"):
+        logger.info("复用现存进行中事件 [%s] run_id=%s", asin, existing["run_id"])
+        return {"ok": True, "run_id": existing["run_id"],
+                "analysis_mode": analysis_mode, "reused": True}
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if not state.set_analysis_session(asin, run_id):
+        return {"ok": False, "error": "标记进行中事件失败"}
 
     # 清 3-4，保留 1-2 继承
     try:
-        state = get_state_manager()
-        state.clear_target_acos_override(asin)       # 清 ACOS 手动覆盖
+        state.clear_target_acos_override(asin)
         if hasattr(state, "clear_p3_recommendation"):
-            state.clear_p3_recommendation(asin)        # 清 P3 缓存
+            state.clear_p3_recommendation(asin)
         wf = state.get_workflow_state(asin) or {}
         execution = dict(wf.get("execution") or {})
         execution["selected_directions"] = None
         wf["execution"] = execution
-        state.set_workflow_state(asin, wf)             # ← 正确方法名
+        state.set_workflow_state(asin, wf)
     except Exception as e:
         logger.warning("清 3-4 失败 [%s]: %s (非阻塞)", asin, e)
 
-    logger.info("新建事件 [%s] decision_id=%s mode=%s", asin, decision_id, analysis_mode)
-    return {"ok": True, "decision_id": decision_id, "analysis_mode": analysis_mode,
-            "batch_no": batch_no}
+    logger.info("新建事件 [%s] run_id=%s mode=%s", asin, run_id, analysis_mode)
+    return {"ok": True, "run_id": run_id, "analysis_mode": analysis_mode}
 
 
 # ── POST /decision/cancel-event ──────────────────────────────────────────
@@ -164,24 +150,16 @@ async def new_decision_event(req: dict):
 
 @router.post("/decision/cancel-event")
 async def cancel_decision_event(req: dict):
-    """放弃实时分析事件 → 删除 DRAFT，旧批次执行权自动恢复。
-
-    仅允许删除 DRAFT 状态，不允许删除 COMPLETED/ARCHIVED。
-    """
+    """放弃进行中分析事件 → 清 state 库标记，旧批次执行权自动恢复。"""
     asin = str(req.get("asin", "")).strip()
-    decision_id = str(req.get("decision_id", "")).strip()
-    if not asin or not decision_id:
-        return {"ok": False, "error": "asin 和 decision_id 必填"}
-
+    if not asin:
+        return {"ok": False, "error": "asin 必填"}
     try:
-        repo = _repo()
-        if repo:
-            repo.delete_draft(decision_id)
+        get_state_manager().clear_analysis_session(asin)
     except Exception as e:
-        logger.exception("delete_draft 失败 [%s] %s: %s", asin, decision_id, e)
-        return {"ok": False, "error": f"delete_draft 失败: {e}"}
-
-    logger.info("取消事件 [%s] decision_id=%s", asin, decision_id)
+        logger.exception("清进行中事件失败 [%s]: %s", asin, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    logger.info("取消事件 [%s]", asin)
     return {"ok": True}
 
 
@@ -191,6 +169,8 @@ async def cancel_decision_event(req: dict):
 _POSITION_ZH = {
     "P0_PRODUCT": "战略级产品 (P0)", "P1_PRODUCT": "重点产品 (P1)",
     "P2_PRODUCT": "常规产品 (P2)", "P3_PRODUCT": "长尾产品 (P3)",
+    # 旧 3 级英文码兼容（decision.product_position 历史值 TOP/WAIST/LONG_TAIL）
+    "TOP": "战略级产品 (P0)", "WAIST": "常规产品 (P2)", "LONG_TAIL": "长尾产品 (P3)",
 }
 _STAGE_ZH = {
     "TESTING": "测试期", "PROMOTING": "推进期", "HARVEST_PROFIT": "收割利润期",
@@ -228,7 +208,6 @@ def _translate_preset(row: dict) -> dict:
         "decision_id": row.get("id"),
         "parent_asin": row.get("parent_asin"),
         "analysis_mode": row.get("analysis_mode"),
-        "decision_status": row.get("decision_status"),
         "is_latest": bool(row.get("is_latest")),
         "days": _DAYRANGE.get(row.get("day_range"), 7),
         "strategy": {

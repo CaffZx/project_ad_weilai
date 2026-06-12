@@ -305,6 +305,45 @@ class StateManager:
                 except OSError:
                     pass
         return True
+
+    # ── 进行中分析事件（DRAFT 进行中标记，run_id 作批次句柄）─────────
+
+    def get_analysis_session(self, asin: str) -> dict | None:
+        """返回该 ASIN 进行中的实时分析事件 {run_id, started_at}，无则 None。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return None
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) and data.get("run_id") else None
+            except (json.JSONDecodeError, OSError):
+                return None
+
+    def set_analysis_session(self, asin: str, run_id: str) -> bool:
+        with self._get_lock(asin):
+            self._ensure_asin_dir(asin)
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            try:
+                fp.write_text(json.dumps(
+                    {"run_id": run_id, "started_at": datetime.now(timezone.utc).isoformat()},
+                    ensure_ascii=False,
+                ), encoding="utf-8")
+                return True
+            except OSError as e:
+                logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
+                return False
+
+    def clear_analysis_session(self, asin: str) -> bool:
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if fp.exists():
+                try:
+                    fp.unlink()
+                except OSError:
+                    pass
+        return True
+
     # ── 反馈日志 ─────────────────────────────────────────
 
     def _feedback_dir(self, asin: str) -> Path:

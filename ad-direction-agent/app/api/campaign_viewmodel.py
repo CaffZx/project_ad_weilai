@@ -403,6 +403,12 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
         if pc:
             budget_summary = {"portfolio_constraints": pc}
 
+    overview = None
+    ov_text = srow.get("analysis_overview") if srow else None
+    if ov_text:
+        overview = {"facts": {}, "assessment_text": ov_text,
+                    "direction_text": "", "generated_by": "snapshot"}
+
     warnings = []
     if srow and srow.get("alert_msg"):
         warnings = [w for w in str(srow["alert_msg"]).split("; ") if w]
@@ -417,11 +423,10 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
         "run_id": decision.get("id") or "",
         "snapshot_time": snap_time.isoformat() if hasattr(snap_time, "isoformat") else snap_time,
         "summary": summary,
-        "overview": None,
+        "overview": overview,
         "budget_summary": budget_summary,
         "synthesis": None,
         "items": items,
         "warnings": warnings,
-        "decision_status": decision.get("decision_status"),
         "is_latest": bool(decision.get("is_latest")),
     }

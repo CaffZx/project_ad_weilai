@@ -526,6 +526,46 @@ class MySQLStateManager:
                 pass
         return True
 
+    # ── 进行中分析事件（run_id 作批次句柄）─────────────────
+
+    def get_analysis_session(self, asin: str) -> dict | None:
+        try:
+            self.ensure_schema()
+            row = self._execute(
+                "SELECT run_id, started_at FROM analysis_session WHERE asin=%s", (asin,), "one"
+            )
+            if not row or not row.get("run_id"):
+                return None
+            st = row.get("started_at")
+            return {"run_id": row["run_id"],
+                    "started_at": st.isoformat() if hasattr(st, "isoformat") else st}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("读取分析事件标记失败 [%s]: %s", asin, e)
+            return None
+
+    def set_analysis_session(self, asin: str, run_id: str) -> bool:
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute(
+                    "INSERT INTO analysis_session (asin, run_id, started_at) VALUES (%s,%s,%s) "
+                    "ON DUPLICATE KEY UPDATE run_id=VALUES(run_id), started_at=VALUES(started_at)",
+                    (asin, run_id, self._now()),
+                )
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
+                return False
+
+    def clear_analysis_session(self, asin: str) -> bool:
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute("DELETE FROM analysis_session WHERE asin=%s", (asin,))
+            except Exception:
+                pass
+        return True
+
     def save_feedback(self, submission) -> bool:
         asin = submission.parent_asin
         with self._get_lock(asin):

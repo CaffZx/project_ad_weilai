@@ -74,14 +74,15 @@ async def _maybe_push_erp(
             "ERP write_full OK [%s] decision_id=%s cards=%d",
             asin, report.decision_id, report.modern_card,
         )
-        # 批次收尾：置最新 COMPLETED + 清 DRAFT 锁（DRAFT-as-lock 模型）
+        # 批次收尾：本批次置最新（is_latest 我方维护）+ 清进行中事件标记（state 库）
         try:
             from app.persistence.erp_writer.repository import _get_repository
             await asyncio.to_thread(
                 _get_repository().finalize_batch, report.decision_id, asin, analysis_mode,
             )
+            await asyncio.to_thread(state.clear_analysis_session, asin)
         except Exception as fe:
-            logger.warning("finalize_batch 失败 [%s] %s: %s (非阻塞)", asin, report.decision_id, fe)
+            logger.warning("finalize_batch/清进行中 失败 [%s] %s: %s (非阻塞)", asin, report.decision_id, fe)
         return out
     except Exception as e:
         logger.exception("ERP write_full 失败 [%s]: %s", asin, e)
@@ -297,8 +298,8 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
 async def campaign_confirm(req: CampaignConfirmRequest):
     """运营批量审核 → 写 card + pending 的 confirm_status（PENDING→CONFIRMED/REJECTED）。
 
-    run_id 即 decision_id；每个 decision.campaign_key 即 card_id。
-    校验：批次最新已完成且无进行中事件；每活动只处理一次（幂等，重复→skipped）。
+    req.run_id 为快照的 decision_id（write_full 落库时生成）；decision.campaign_key 即 card_id。
+    校验：批次 is_latest=1 且该 ASIN 无进行中事件（state 库）；每活动只处理一次（幂等，重复→skipped）。
     """
     decision_id = (req.run_id or "").strip()
     if not decision_id:
@@ -307,9 +308,12 @@ async def campaign_confirm(req: CampaignConfirmRequest):
     decisions = [{"campaign_key": d.campaign_key, "decision": d.decision} for d in req.decisions]
     from app.persistence.erp_writer.repository import _get_repository
     try:
+        sess = get_state_manager().get_analysis_session(req.asin) if req.asin else None
+        in_progress = bool(sess and sess.get("run_id"))
         repo = _get_repository()
         result = await asyncio.to_thread(
             repo.confirm_decisions, decision_id, decisions, req.operator or None,
+            in_progress=in_progress,
         )
     except Exception as e:
         logger.exception("Campaign confirm 失败 [%s] decision_id=%s: %s", req.asin, decision_id, e)
