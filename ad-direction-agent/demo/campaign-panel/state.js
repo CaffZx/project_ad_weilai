@@ -137,17 +137,10 @@ export function createCampaignState() {
       _toast('请先勾选至少一项');
       return;
     }
-    state._selection.forEach(key => { state._reviewState[key] = decision; });
-    _saveReviewState();
-    _reRender();
-    _toast(`已标记 ${state._selection.size} 项为「${decision === 'approve' ? '同意' : '不同意'}」`);
 
-    // 提交后端 /campaign/confirm
+    const selectedKeys = Array.from(state._selection);
     try {
-      const decisions = [];
-      state._selection.forEach(key => {
-        decisions.push({ campaign_key: key, decision: decision });
-      });
+      const decisions = selectedKeys.map(key => ({ campaign_key: key, decision }));
       const resp = await fetch((window.location.origin || '') + '/api/v1/agent/ad-direction/campaign/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -159,12 +152,23 @@ export function createCampaignState() {
           operator: 'tab5',
         }),
       });
+      let body = null;
+      try { body = await resp.json(); } catch (_) {}
       if (!resp.ok) {
-        const txt = await resp.text();
-        console.warn('[campaign-panel] /campaign/confirm 失败:', txt.slice(0, 200));
+        throw new Error((body && body.error) || `HTTP ${resp.status}`);
       }
+      if (!body || body.ok === false) {
+        throw new Error((body && body.error) || '审核写回失败');
+      }
+      selectedKeys.forEach(key => { state._reviewState[key] = decision; });
+      _saveReviewState();
+      _reRender();
+      const applied = body.applied ?? selectedKeys.length;
+      const skipped = body.skipped ?? 0;
+      _toast(`已写回 ${applied} 项${skipped ? `，跳过 ${skipped} 项` : ''}`);
     } catch (e) {
-      console.warn('[campaign-panel] /campaign/confirm 网络错误:', e.message);
+      console.warn('[campaign-panel] /campaign/confirm 失败:', e.message);
+      _toast(`审核写回失败：${e.message || '未知错误'}`);
     }
   };
 

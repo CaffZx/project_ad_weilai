@@ -914,9 +914,126 @@ function renderBatchBar(mode, ctx) {
 async function switchBatch(batch) {
   // 以选中批次 decision_id + executable 重挂 campaign 面板（tab5 已挂载时即时生效）
   const exec = !!batch.executable && !(_decisionContext && _decisionContext.in_progress);
+  if (batch.decision_id && !(_decisionContext && _decisionContext.in_progress)) {
+    await renderReadonlyDecisionPreset(batch.decision_id, { switchDefault: false });
+  }
   if (window._mountCampaignBatch) {
     await window._mountCampaignBatch({ decision_id: batch.decision_id, executable: exec });
   }
+}
+
+function selectedDecisionId() {
+  const sel = $('batchSelect');
+  return (sel && sel.value) || (_decisionContext && _decisionContext.latest_completed_id) || '';
+}
+
+function shouldUseSnapshotMode() {
+  const ctx = _decisionContext || {};
+  return !!(ctx.has_config && !ctx.in_progress && selectedDecisionId());
+}
+
+function _badgeHtml(value, cls = 'badge-gray') {
+  if (value == null || value === '') return '<span style="color:var(--muted-fg)">—</span>';
+  return `<span class="badge ${cls}" style="margin:2px">${escapeHtml(String(value))}</span>`;
+}
+
+function _badgeListHtml(values, cls = 'badge-blue') {
+  const arr = Array.isArray(values) ? values : (values ? [values] : []);
+  return arr.length ? arr.map(v => _badgeHtml(v, cls)).join('') : '<span style="color:var(--muted-fg)">—</span>';
+}
+
+function _snapshotRow(label, valueHtml) {
+  return `<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--surface);font-size:12px">
+    <span style="color:var(--muted-fg);font-weight:600">${label}</span>
+    <span style="text-align:right;line-height:1.7">${valueHtml}</span>
+  </div>`;
+}
+
+function setSnapshotReadonlyControls(readonly) {
+  ['btnStrategy','btnTactics','btnRefreshRec','btnRefreshDiag','btnRefreshP3','btnGenerate'].forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    if (readonly) el.classList.add('hidden');
+    else el.classList.remove('hidden');
+  });
+}
+
+async function renderReadonlyDecisionPreset(decisionId, { switchDefault = true } = {}) {
+  if (!decisionId) return false;
+  const data = await callAPI(`/decision/${encodeURIComponent(decisionId)}/preset`, null, API_TIMEOUT.quick, 'GET');
+  if (!data || !data.ok) {
+    err('errGlobal', (data && data.error) || '批次快照读取失败');
+    return false;
+  }
+  renderReadonlyPreset(data, { switchDefault });
+  return true;
+}
+
+function renderReadonlyPreset(data, { switchDefault = true } = {}) {
+  hide('errGlobal');
+  setSnapshotReadonlyControls(true);
+
+  show('sec1Done'); $('sec1Done').textContent = '快照';
+  show('sec2Done'); $('sec2Done').textContent = '快照';
+  sec1Confirmed = true; sec2Confirmed = true;
+  hide('sec1Loader'); hide('sec2Loader');
+
+  const s = data.strategy || {};
+  const t = data.tactics || {};
+  const p3 = data.p3 || {};
+  const dirs = data.directions || [];
+
+  setHTML('strategyContent',
+    _snapshotRow('产品定位', _badgeHtml(s.product_level)) +
+    _snapshotRow('产品阶段', _badgeHtml(s.product_stage)) +
+    _snapshotRow('季节阶段', _badgeHtml(s.season_stage)) +
+    '<div style="font-size:11px;color:var(--muted-fg);margin-top:8px">读取自所选历史批次，当前为只读快照。</div>'
+  );
+  setHTML('strategyContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
+  show('strategyContext');
+
+  setHTML('tacticsContent',
+    _snapshotRow('广告目的', _badgeListHtml(t.ad_purposes, 'badge-green')) +
+    _snapshotRow('目标关键词策略', _badgeListHtml(t.target_keyword_strategy, 'badge-blue')) +
+    '<div style="font-size:11px;color:var(--muted-fg);margin-top:8px">如需修改配置，请新建分析事件。</div>'
+  );
+
+  show('cardP3Override');
+  $('p3AcosLeftInput').value = p3.target_acos != null ? p3.target_acos : '';
+  $('p3BudgetLeftInput').value = p3.daily_budget != null ? Math.round(p3.daily_budget) : '';
+  $('p3AcosLeftInput').disabled = true;
+  $('p3BudgetLeftInput').disabled = true;
+
+  setHTML('targetScoreCards', `<div class="card" style="grid-column:1/-1;margin:0">
+    <div class="card-title">批次快照</div>
+    ${_snapshotRow('广告目的', _badgeListHtml(t.ad_purposes, 'badge-green'))}
+    ${_snapshotRow('关键词策略', _badgeListHtml(t.target_keyword_strategy, 'badge-blue'))}
+  </div>`);
+  setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">历史批次快照不重新拉取关键词监控明细</td></tr>');
+  $('tacticsKwCount').textContent = '0';
+
+  setHTML('p3AcosColumn', `<div class="card" style="margin:0">${_snapshotRow('目标 ACOS', p3.target_acos != null ? `<b>${escapeHtml(String(p3.target_acos))}%</b>` : '—')}</div>`);
+  setHTML('p3BudgetColumn', `<div class="card" style="margin:0">${_snapshotRow('每日预算', p3.daily_budget != null ? `<b>$${escapeHtml(String(Math.round(p3.daily_budget)))}</b>` : '—')}</div>`);
+  hide('p3Reasoning'); hide('p3Warnings'); hide('p3CacheBadge');
+
+  setHTML('execDirections', dirs.length
+    ? dirs.map(d => `<div class="dir-card selected" style="cursor:default"><div class="dir-card-head"><span class="dir-card-title">${escapeHtml(String(d))}</span><span class="badge badge-green">快照</span></div></div>`).join('')
+    : '<div style="padding:16px;color:var(--muted-fg);font-size:12px">该批次未记录广告方向</div>');
+  hide('aiReasoningExec');
+  hide('reportArea');
+
+  setHTML('diagMetrics', '<div style="padding:24px;text-align:center;color:var(--muted-fg);font-size:12px">历史批次快照不重新拉取实时数据监控</div>');
+  setHTML('alertSignals', '');
+  setHTML('diagContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
+  clearTrendChart();
+
+  setTabEnabled('tab1', true);
+  setTabEnabled('tab2', true);
+  setTabEnabled('tab3', true);
+  setTabEnabled('tab4', true);
+  setTabEnabled('tab5', true);
+  showMainContent();
+  if (switchDefault) switchTab('tab5');
 }
 
 async function onNewEventClick() {
@@ -1406,6 +1523,11 @@ async function loadAll(skipContextRefresh = false) {
   if (cpRoot) cpRoot.innerHTML = '';
   // 选定父 ASIN 即可查看 campaign 分析（独立于 tab1-4 的前置策略配置）
   setTabEnabled('tab5', true);
+  setSnapshotReadonlyControls(false);
+  $('p3AcosLeftInput').disabled = false;
+  $('p3BudgetLeftInput').disabled = false;
+  $('sec1Done').textContent = '已保存';
+  $('sec2Done').textContent = '已保存';
   activeTab = null;
   qsa('.tab-btn').forEach(b => b.classList.remove('tab-active'));
   qsa('.tab-panel').forEach(p => p.classList.remove('active'));
@@ -1434,6 +1556,11 @@ async function loadAll(skipContextRefresh = false) {
   setMainEmptyMessage('正在加载配置与数据…');
 
   try {
+    if (shouldUseSnapshotMode()) {
+      const ok = await renderReadonlyDecisionPreset(selectedDecisionId(), { switchDefault: true });
+      if (!ok) resetMainEmptyDefault();
+      return;
+    }
     const strat = await loadStrategy();
     if (!strat.ok) {
       resetMainEmptyDefault();
