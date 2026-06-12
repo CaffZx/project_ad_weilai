@@ -258,6 +258,10 @@ function _renderCards(state) {
             | ${_esc(adj.match_type || '?')}
             | 关键词: ${_esc(adj.keyword_text || '?')}
             ${adj.keyword_class ? '| ' + _esc(adj.keyword_class) : ''}
+            ${adj.match_type === 'EXACT' && adj.natural_rank != null
+              ? '| 自然排名: 第' + adj.natural_rank + '位' + _rankArrow(adj.rank_change) : ''}
+            ${adj.match_type === 'EXACT' && adj.natural_rank == null && adj.near_natural_rank != null
+              ? '| <span style="color:#D97706;">⚠ 已掉榜(上次第' + adj.near_natural_rank + '位)</span>' : ''}
             ${adj.is_core ? '| <span style="color:#DC2626;">⚠ 核心词</span>' : ''}
             ${adj.triggered_rule ? '| 触发规则: <code>' + _esc(adj.triggered_rule) + '</code>' : ''}
             ${adj.review_level ? '| 审核: ' + _esc(adj.review_level) : ''}
@@ -291,6 +295,15 @@ function toggleDetail(btn) {
     detail.style.display = 'none';
     btn.textContent = '展开详情';
   }
+}
+
+// ── 自然排名箭头（周变化）──
+function _rankArrow(chg) {
+  if (chg == null) return '';
+  if (chg === 0) return ' <span style="color:#6B7280;">(持平)</span>';
+  return chg > 0
+    ? ' <span style="color:#059669;">(↑' + chg + ')</span>'
+    : ' <span style="color:#DC2626;">(↓' + Math.abs(chg) + ')</span>';
 }
 
 // ── evidence ──

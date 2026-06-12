@@ -62,6 +62,10 @@ class CampaignUnit(BaseModel):
     tos_bid_pct: float = 0.0                 # 头部位置加价比例 %
     pp_bid_pct: float = 0.0                  # 商品位置加价比例 %
     ros_bid_pct: float = 0.0                 # 其他位置加价比例 %
+    # 自然排名（周排名）：仅 EXACT 填充；主源 MCP keyword_child_asins(有近次)，own_keyword_flow 补缺
+    natural_rank: int | None = None          # 当前自然排名
+    near_natural_rank: int | None = None     # 近次爬取排名（仅 child_asins 有）
+    rank_change: int | None = None           # near - cur，正数=排名上升；own 补缺词为 None
     # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
     #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类
     portfolio: str = ""
@@ -124,6 +128,10 @@ class CampaignAdjustmentItem(BaseModel):
     match_type: str = ""
     keyword_class: str = ""
     is_core: bool = False
+    # 自然排名（仅 EXACT；代码回填，LLM 不输出）
+    natural_rank: int | None = None
+    near_natural_rank: int | None = None
+    rank_change: int | None = None
     action: str = ""                             # eliminate_to_low_bid_pool | adjust_bid | adjust_budget | adjust_placement | keep
     direction: dict[str, str] = Field(default_factory=dict)
     triggered_rule: str = ""

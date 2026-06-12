@@ -442,6 +442,18 @@ async def _analyze_campaigns_impl(
     #     之后再走 _is_in_elimination_pool 会误判一批"刚被强制淘汰"的活动。
     # 用 unit_lookup 把 Doris 上下文独有字段补到 adjustment 上 (LLM 不产出这些)
     unit_by_key = {cu.campaign_key: cu for cu in llm_campaigns}
+
+    def _rank_evidence_line(cu) -> str:
+        """自然排名证据行（代码事实，非 LLM 产出）。"""
+        if cu.natural_rank is not None:
+            if cu.rank_change is not None and cu.rank_change != 0:
+                sym = "↑" if cu.rank_change > 0 else "↓"
+                return f"自然排名第{cu.natural_rank}位（较上次{sym}{abs(cu.rank_change)}）"
+            return f"自然排名第{cu.natural_rank}位"
+        if cu.near_natural_rank is not None:
+            return f"已掉榜（上次自然排名第{cu.near_natural_rank}位）"
+        return ""
+
     for item in adjustments:
         cu = unit_by_key.get(item.campaign_key)
         if cu is None:
@@ -449,6 +461,14 @@ async def _analyze_campaigns_impl(
         item.campaign_id = cu.campaign_id
         item.keyword_id = cu.keyword_id
         item.seller_sku = cu.seller_sku
+        # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
+        item.natural_rank = cu.natural_rank
+        item.near_natural_rank = cu.near_natural_rank
+        item.rank_change = cu.rank_change
+        if cu.match_type == "EXACT":
+            _ln = _rank_evidence_line(cu)
+            if _ln and _ln not in item.evidence:
+                item.evidence.append(_ln)
         if settings.campaign_portfolio_enabled:
             item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action)
             cu.portfolio = item.ai_portfolio_class
@@ -1735,13 +1755,22 @@ async def _sanity_check(
                 break
 
         p = camp_facts.get("perf_7d", {})
+        # 注入运营文本(reason) + 实际执行数值(current→proposed) + 广告位动作，
+        # 供 LLM 比对"文本陈述 vs 实际数值决策"是否一致（不只校 action 合理性）
+        plc_txt = "; ".join(
+            f"{x.get('placement', '')}:{x.get('action', '')}"
+            for x in (adj.placement_adjustments or [])
+        ) or "无"
         facts_parts.append(
             f"  - {adj.campaign_name}: action={adj.action}, "
             f"triggered_rule={adj.triggered_rule}, "
             f"7d花费=${p.get('cost', 0)}, 7d订单={p.get('orders', 0)}, "
             f"7d CVR={p.get('cvr', 'N/A')}%, "
             f"match_type={adj.match_type}, keyword_class={adj.keyword_class}, "
-            f"is_core={adj.is_core}"
+            f"is_core={adj.is_core}\n"
+            f"    实际执行数值: Bid {adj.current_bid}→{adj.proposed_bid}, "
+            f"Budget {adj.current_budget}→{adj.proposed_budget}, 广告位: {plc_txt}\n"
+            f"    运营文本(reason): {adj.reason}"
         )
 
     strategy_text = "\n".join(

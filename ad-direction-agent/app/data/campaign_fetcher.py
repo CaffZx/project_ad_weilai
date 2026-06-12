@@ -125,6 +125,7 @@ class CampaignFetcher:
 
         basic_results: dict[str, dict] = {}
         perf_results: dict[str, dict] = {}
+        rank_map: dict[str, dict] = {}
         mcp_ok = 0
         mcp_fail = 0
 
@@ -144,6 +145,13 @@ class CampaignFetcher:
                 perf_results[name] = {**(perf or {}), "source": "doris"}
             fetch_source = "doris"
         else:
+            # 旁路并行拉自然排名（周排名，仅 EXACT 需要；与 basic/perf 两波 gather 重叠，零额外串行）
+            has_exact = any(str(c.get("match_type") or "") == "EXACT" for c in surviving)
+            rank_task = (
+                asyncio.create_task(self._fetch_keyword_ranks(
+                    parent_asin, parent_seller_sku, shop_account, site_code, days))
+                if has_exact else None
+            )
             # 并行拉 basic_info（return_exceptions=True：单活动异常不拖垮全部）
             basic_list = await asyncio.gather(
                 *[self._fetch_basic_one(name, shop_account) for name in names],
@@ -172,6 +180,13 @@ class CampaignFetcher:
                     perf_results[name] = {**(fb or {}), "source": "doris"}
                     mcp_fail += 1
 
+            if rank_task is not None:
+                try:
+                    rank_map = await asyncio.wait_for(rank_task, timeout=45)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("自然排名等待失败 [%s]: %s (非阻塞)", parent_asin, e)
+                    rank_map = {}
+
             fetch_source = "mcp" if mcp_fail == 0 else ("mixed" if mcp_ok > 0 else "doris")
             logger.info(
                 "Campaign MCP [%s]: %d ok, %d failed, source=%s",
@@ -184,7 +199,7 @@ class CampaignFetcher:
             name = str(camp.get("campaign_name") or "")
             basic = basic_results.get(name, {})
             perf = perf_results.get(name, {})
-            unit = self._assemble(camp, basic, perf)
+            unit = self._assemble(camp, basic, perf, rank_map)
             campaigns.append(unit)
 
         if errors:
@@ -508,6 +523,68 @@ class CampaignFetcher:
             logger.warning("fetch_suggested_bids 失败 [%s]: %s (非阻塞)", parent_asin, e)
         return {}
 
+    async def _fetch_keyword_ranks(
+        self,
+        parent_asin: str,
+        parent_seller_sku: str,
+        shop_account: str,
+        site_code: str = "Amazon_US",
+        days: int = 7,
+    ) -> dict[str, dict]:
+        """旁路拉自然排名（周排名），全 MCP 不碰 Doris。
+
+        主源 keyword_child_asins（含近次→周变化），own_keyword_flow 补缺（仅当前排名）。
+        返回 {keyword_lower: {natural_rank, near_natural_rank, rank_change}}；失败 fail-open 返回 {}。
+        """
+        from app.data.mcp_mapping import McpContext, build_tool_args, make_date_window
+        from app.data.mcp_normalizers import normalize_keyword_rankings
+
+        start_date, end_date = make_date_window(days)
+        ctx = McpContext(
+            parent_asin=parent_asin,
+            parent_seller_sku=parent_seller_sku,
+            shop_account=shop_account,
+            site_code=site_code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        child_args = build_tool_args("keyword_child_asins", ctx)
+        own_args = build_tool_args("own_keyword_flow", ctx)
+        t = getattr(settings, "campaign_mcp_tool_timeout", 300.0)
+        try:
+            child_res, own_res = await asyncio.gather(
+                self._mcp().call_tool_timed_with_args("keyword_child_asins", child_args, t),
+                self._mcp().call_tool_timed_with_args("own_keyword_flow", own_args, t),
+                return_exceptions=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("自然排名拉取异常 [%s]: %s (非阻塞)", parent_asin, e)
+            return {}
+
+        rank_map: dict[str, dict] = {}
+        # 主源：keyword_child_asins（含近次排名 → 周变化）
+        if not isinstance(child_res, BaseException) and getattr(child_res, "ok", False):
+            for r in normalize_keyword_rankings(None, child_res.value):
+                kw = str(r.get("keyword") or "").strip().lower()
+                cur = r.get("craw_nature_rank")
+                near = r.get("near_craw_nature_rank")
+                if not kw or (cur is None and near is None):
+                    continue
+                change = (near - cur) if (cur is not None and near is not None) else None
+                rank_map[kw] = {"natural_rank": cur, "near_natural_rank": near, "rank_change": change}
+        # 补缺：own_keyword_flow（仅当前排名，无周变化）
+        if not isinstance(own_res, BaseException) and getattr(own_res, "ok", False):
+            for row in _as_rows(own_res.value):
+                kw = str(row.get("关键词") or row.get("keyword") or "").strip().lower()
+                if not kw or kw in rank_map:
+                    continue
+                cur = _to_float(row.get("自然排名") or row.get("natural_rank"))
+                if cur is None or cur <= 0:
+                    continue
+                rank_map[kw] = {"natural_rank": int(cur), "near_natural_rank": None, "rank_change": None}
+        logger.info("自然排名 [%s]: %d 词命中 (child+own)", parent_asin, len(rank_map))
+        return rank_map
+
     # ── 组装 ──
 
     def _assemble(
@@ -515,11 +592,16 @@ class CampaignFetcher:
         ctx: dict,
         basic: dict,
         perf: dict,
+        rank_map: dict | None = None,
     ) -> CampaignUnit:
         """合并 Doris 上下文 + MCP 数据 → CampaignUnit。"""
         child_asin = str(ctx.get("child_asin") or "")
         match_type = str(ctx.get("match_type") or "")
         keyword_text = str(ctx.get("keyword_text") or "")
+        # 自然排名仅精准 join（按 keyword 小写归一）
+        rk: dict = {}
+        if match_type == "EXACT" and rank_map and keyword_text:
+            rk = rank_map.get(keyword_text.strip().lower()) or {}
 
         perf_7d = CampaignPerf(
             clicks=int(_to_float(perf.get("clicks")) or 0),
@@ -564,6 +646,9 @@ class CampaignFetcher:
             tos_bid_pct=float(basic.get("tos_bid_pct") or 0),
             pp_bid_pct=float(basic.get("pp_bid_pct") or 0),
             ros_bid_pct=float(basic.get("ros_bid_pct") or 0),
+            natural_rank=rk.get("natural_rank"),
+            near_natural_rank=rk.get("near_natural_rank"),
+            rank_change=rk.get("rank_change"),
             source=source,
             flags=[],
         )

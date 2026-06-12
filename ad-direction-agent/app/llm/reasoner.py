@@ -251,7 +251,13 @@ _CAMPAIGN_SHARED_INTRO = """你是一个资深的亚马逊广告运营专家。�
 用户消息中的「策略上下文」包含该 ASIN 的产品阶段、广告目的、目标 ACOS、利润率、评分、退货率、库存天数、自然单占比等信息。这些是活动分析的"背景"，不需要在每个活动中重复输出。
 
 ## 活动列表
-用户消息中的「活动列表」包含每个活动的：活动名、子ASIN、关键词、匹配类型、当前 Bid、当前 Budget、上线天数(注：-1 表示未知，勿当作新活动)、7日性能指标。"""
+用户消息中的「活动列表」包含每个活动的：活动名、子ASIN、关键词、匹配类型、当前 Bid、当前 Budget、上线天数(注：-1 表示未知，勿当作新活动)、7日性能指标。
+
+## 文本与数值自洽（强制，输出前自检）
+reason 里的动作描述（含(3)调整建议）必须与你同时输出的 proposed 数值**严格同向同值**：
+- 方向词「提升/调高/加大」⟺ proposed > current；「降低/下调/收紧」⟺ proposed < current；「维持」⟺ proposed = current。bid 与 budget 各自独立判断。
+- reason 中提到的目标数值（如「提升至 $0.20」）必须等于对应的 proposed_bid / proposed_budget，不得是另一个数。
+- 严禁出现「文本说提升、proposed 却更低」「文本说降到 $0.30、proposed_bid 却是 $0.20」这类自相矛盾。输出前逐条核对 reason 与 proposed_bid / proposed_budget 是否一致。"""
 
 _CAMPAIGN_EXACT_PROMPT = (
     _CAMPAIGN_SHARED_INTRO
@@ -268,6 +274,8 @@ _CAMPAIGN_EXACT_PROMPT = (
 5. **应用幅度系数**: 最终幅度 = KB 19 基础幅度 × KB 17 §5.2 阶段系数 × KB 17 §5.3 淡旺季系数。
 6. **细化执行**: KB 22 §2（精准调整规则）、KB 19 §5/§9（广告位决策/好坏判断）、KB 21（淘汰规则）。
 通用基准: KB 18 §1-4/§6、KB 19 §1-4/§6/§10、KB 22 §0/§1。
+
+> **自然排名信号**（活动列表含「自然排名」行时才有，仅精准）：排名上升且 ACOS 在容忍度内 → 倾向保护/推进该词（KB 22 §2.2 Ranking 保护、KB 19 §5 广告位）；排名下滑或「已掉榜」→ 命中 RANK_* 问题类型，谨慎降 bid/淘汰（如指向淘汰先走 KB 17 §7 淘汰前诊断）；无「自然排名」行 → 按现有指标逻辑，勿臆测排名。
 
 ## 输出格式
 {
@@ -1487,6 +1495,13 @@ class LLMReasoner:
             "商品": cu.pp_bid_pct,
             "其他": cu.ros_bid_pct,
         }
+        # 自然排名（周排名）：仅精准注入；广泛流排名概念模糊，不给
+        if cu.match_type == "EXACT" and (cu.natural_rank is not None or cu.near_natural_rank is not None):
+            summary["_natural_rank"] = {
+                "cur": cu.natural_rank,
+                "near": cu.near_natural_rank,
+                "change": cu.rank_change,
+            }
 
         return summary
 
@@ -1575,6 +1590,18 @@ class LLMReasoner:
             if ppcts:
                 camp_parts.append(f"  - 当前加价比例: 头部:{ppcts.get('头部',0)}%, "
                                  f"商品:{ppcts.get('商品',0)}%, 其他:{ppcts.get('其他',0)}%")
+            # 自然排名（周排名，仅精准；三态：有排名/已掉榜/无数据不渲染）
+            nr = s.get("_natural_rank")
+            if nr:
+                cur, near, chg = nr.get("cur"), nr.get("near"), nr.get("change")
+                if cur is not None:
+                    arrow = ""
+                    if chg is not None:
+                        sym = "↑" if chg > 0 else ("↓" if chg < 0 else "持平")
+                        arrow = f"（较上次 {sym}{abs(chg) if chg else ''}）"
+                    camp_parts.append(f"  - 自然排名: 第{cur}位{arrow}")
+                elif near is not None:
+                    camp_parts.append(f"  - 自然排名: ⚠️已掉榜（上次第{near}位）")
             # 广告位懒加载数据 (KB 22 §2.3 / KB 19 §5)
             if s.get("_placement_data"):
                 pd_data = s["_placement_data"]

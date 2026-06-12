@@ -67,6 +67,9 @@ def _item_from_adjustment(adj) -> dict:
         "triggered_rule": adj.triggered_rule or "",
         "review_level": adj.review_level or "",
         "is_core": getattr(adj, "is_core", False),
+        "natural_rank": getattr(adj, "natural_rank", None),
+        "near_natural_rank": getattr(adj, "near_natural_rank", None),
+        "rank_change": getattr(adj, "rank_change", None),
         "action_klass": _action_klass(adj.action or ""),
         "conf_klass": _conf_klass(adj.confidence or ""),
     }
