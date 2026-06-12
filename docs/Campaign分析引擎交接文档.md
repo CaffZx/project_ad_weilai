@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-11
-> **版本**: v1.8
+> **最后更新**: 2026-06-12
+> **版本**: v1.9
 > **分支**: chenv3.1
 
 ---
@@ -609,7 +609,57 @@ MCP 的加价比例字段返回**百分数口径**（`9.0` = 9%），不和其�
 
 ---
 
-*最后更新：2026-06-11（v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10）*
-*v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 A淘汰池/B多词 + 前端绿卡/预过滤灰卡——§9*
-*v1.6: 执行层落地 ERP 架构共识——前置缓存/执行层定时落库 T+1、后端配置表+渲染表、前端合并主看板+操作台/快照区分、现有资产处理*
-*v1.5: 总览/汇总恢复改造 + 前端双 tab/联动/气泡 + 免跑加载 + 展示版（§7）*
+## 11. 2026-06-12：决策批次驱动 + 快照回读 + confirm 写回
+
+### 11.1 决策批次状态机（P1-P2，详见 `docs/决策批次改造方案.md`）
+
+**模型**：`run_id` = 批次句柄（分析启动时即存在），`decision_id` = 写库时生成（ERP 表主键）。进行中状态落 state 库 `analysis_session`（asin → run_id），不污染 ERP decision 表。
+
+**A/B/C 三态**：
+| 场景 | 左侧 1-4 | tab5 |
+|---|---|---|
+| A 首访/未配置 | 可编辑 | 锁定 |
+| B 已配置·无进行中 | 只读快照 | 可交互·可执行（选中 `is_latest` 批次） |
+| C 有进行中 | 可编辑 | 全锁（旧失效·新未完成） |
+
+**执行权**：`executable = is_latest AND NOT state.get_in_progress()`
+
+**关键 API**：
+- `GET /decision/context` — 批次列表 + 三态判定
+- `POST /decision/new-event` — 新建分析（写 state session，清 3-4）
+- `POST /decision/cancel-event` — 取消分析（清 state session）
+- `GET /decision/{id}/preset` — 前置 1-4 配置快照（ERP 码→中文 label）
+
+### 11.2 快照回读 mapper（`campaign_viewmodel.from_db_snapshot`）
+
+21 表 → ViewModel 反向映射：
+- card + 3×pending 子表 → 统一 `items`
+- `suggest_category` + group_type 兜底 → `action` 推导
+- summary 8 列 → `portfolio_constraints` 重组
+- `_f()` 处理 Decimal→float JSON 安全
+- overview 读 `analysis_overview` 列
+- 快照是实时子集（`prefiltered`/`lost`/`perf_7d` 可能缺），前端按字段有无降级
+
+### 11.3 `/campaign/confirm` 写回
+
+校验批次可执行 + 每活动幂等（`confirm_status='PENDING'` 限），写 card + 3×pending `confirm_status`。
+
+### 11.4 `finalize_batch` 闭环
+
+`_maybe_push_erp` 成功后 → `finalize_batch(report.decision_id, asin, analysis_mode)` → 旧批次 `is_latest=0`、新批次 `is_latest=1` + 清 state session。
+
+### 11.5 ERP 库改造摘要
+
+已落地列：`is_latest`/`analysis_mode`、card `keyword_class`/`review_level`/`is_core`/`perf_json`/`is_prefiltered`、summary `create_count`/`analysis_overview`/portfolio 8 列、`decision_config` P4 字段、synthesis collation 统一。
+
+### 11.6 前端合并（`campaign-panel/`）
+
+tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来的 `mode` 门禁。in-panel 模式条已移除，改由页面级批次选择器驱动。
+
+---
+
+*最后更新：2026-06-12（v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11）*
+*v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10*
+*v1.7: 新增广告活动分析线 KB16+06 三股并行 + 投放子ASIN选择 + 预过滤可见化第一期 §9*
+*v1.6: 执行层落地 ERP 架构共识 §8*
+*v1.5: 总览/汇总恢复改造 + 前端双 tab/联动/气泡 §7*
