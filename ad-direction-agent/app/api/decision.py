@@ -1,8 +1,8 @@
 """决策批次管理 API — context / new-event / cancel-event。
 
 批次 = 一行 t_advert_agent_decision，冻结一份前置 1-4 快照 + 一份执行层结果。
-状态机: DRAFT(进行中) → COMPLETED(已完成) / ARCHIVED(失效)。
-执行权 = is_latest AND NOT exists(该 ASIN 的 DRAFT)。
+进行中事件落 state 库 analysis_session；ERP decision 行只表示已完成快照。
+执行权 = is_latest AND NOT exists(该 ASIN 的 analysis_session)。
 """
 
 from __future__ import annotations

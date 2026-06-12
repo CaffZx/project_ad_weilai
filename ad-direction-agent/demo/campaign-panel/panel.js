@@ -30,7 +30,18 @@ const API_TIMEOUT = {
  * @param {number} [options.temperature]
  */
 export async function mountCampaignPanel(containerEl, options = {}) {
-  const { asin, days = 7, mode = ViewMode.INTERACTIVE, temperature, executable = true, decision_id = '' } = options;
+  const {
+    asin,
+    days = 7,
+    mode = ViewMode.INTERACTIVE,
+    temperature,
+    executable = true,
+    decision_id = '',
+    run_id = '',
+    write_erp = false,
+    analysis_mode = 'REALTIME',
+    onComplete = null,
+  } = options;
 
   // 1. DOM 骨架
   containerEl.innerHTML = `
@@ -154,8 +165,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
     } else {
       // 实时
       if (loader) loader.innerHTML = '<span class="camp-spinner"></span> 正在运行分析（可能需数分钟）...';
-      const vm = await _fetchRealtime(asin, days, temperature);
+      const vm = await _fetchRealtime(asin, days, temperature, { run_id, write_erp, analysis_mode });
       state.setData(vm);
+      if (typeof onComplete === 'function') onComplete(vm);
     }
   } catch (e) {
     if (loader) { loader.textContent = '分析失败：' + (e.message || '未知错误'); loader.style.cssText = 'color:#DC2626;padding:20px;'; }
@@ -183,9 +195,10 @@ export async function mountCampaignPanel(containerEl, options = {}) {
       try {
         const vm = mode === ViewMode.READONLY
           ? await _fetchSnapshot(asin, decision_id)
-          : await _fetchRealtime(asin, days, temperature);
+          : await _fetchRealtime(asin, days, temperature, { run_id, write_erp, analysis_mode });
         state.setData(vm);
         state.applyFilters();
+        if (mode !== ViewMode.READONLY && typeof onComplete === 'function') onComplete(vm);
       } catch (e) {
         /* 静默降级 */
       }
@@ -226,10 +239,13 @@ async function _callAPI(path, body, timeout = 60, method = 'POST') {
   }
 }
 
-async function _fetchRealtime(asin, days, temperature) {
+async function _fetchRealtime(asin, days, temperature, extra = {}) {
   const raw = await _callAPI('/campaign/viewmodel', {
     asin, days,
     temperature: temperature != null ? temperature : undefined,
+    run_id: extra.run_id || undefined,
+    write_erp: !!extra.write_erp,
+    analysis_mode: extra.analysis_mode || 'REALTIME',
   }, API_TIMEOUT.campaign);
   return normalizeViewModel(raw);
 }

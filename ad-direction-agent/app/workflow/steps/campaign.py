@@ -153,6 +153,7 @@ async def analyze_campaigns(
     refresh: bool = False,
     campaign_data: CampaignData | None = None,
     keyword_analysis: dict | None = None,
+    run_id: str | None = None,
 ) -> CampaignAnalysisResult:
     """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
 
@@ -162,7 +163,7 @@ async def analyze_campaigns(
 
     bs = batch_size or settings.campaign_batch_size
     cc = concurrency or settings.campaign_llm_concurrency
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = (run_id or "").strip() or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     t_start = time.monotonic()
     _t = lambda label: logger.info("Campaign timing [%s] +%.1fs: %s", parent_asin, time.monotonic() - t_start, label)
 

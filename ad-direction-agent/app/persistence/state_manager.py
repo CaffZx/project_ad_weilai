@@ -306,7 +306,7 @@ class StateManager:
                     pass
         return True
 
-    # ── 进行中分析事件（DRAFT 进行中标记，run_id 作批次句柄）─────────
+    # ── 进行中分析事件（run_id 作批次句柄）─────────
 
     def get_analysis_session(self, asin: str) -> dict | None:
         """返回该 ASIN 进行中的实时分析事件 {run_id, started_at}，无则 None。"""

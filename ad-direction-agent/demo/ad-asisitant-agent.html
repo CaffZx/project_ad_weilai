@@ -838,29 +838,39 @@ window._erpParams = _erpParams;
 // ═══════════════ 决策批次状态 ═══════════════
 let _decisionContext = null;  // GET /decision/context 缓存
 
-async function bootstrapFromContext() {
-  show('btnStart'); // show loading
+function setDecisionContext(ctx) {
+  _decisionContext = ctx;
+  window._decisionContext = ctx;
+}
+
+async function refreshDecisionContext() {
   try {
     const ctx = await callAPI('/decision/context?asin=' + encodeURIComponent(asin), null, API_TIMEOUT.quick, 'GET');
-    _decisionContext = ctx;
+    setDecisionContext(ctx);
   } catch (e) {
     console.warn('bootstrap /decision/context 失败,降级实时模式', e);
-    _decisionContext = { has_config: false, in_progress: null, batches: [], degraded: true };
+    setDecisionContext({ has_config: false, in_progress: null, batches: [], degraded: true });
   }
+  return _decisionContext;
+}
+
+async function bootstrapFromContext() {
+  show('btnStart'); // show loading
+  await refreshDecisionContext();
   // A/B/C 判定
   const ctx = _decisionContext;
   if (!ctx.has_config) {
     // A: 首访/未配置 → 实时分析
     renderBatchBar('A');
-    loadAll();
+    loadAll(true);
   } else if (ctx.in_progress) {
-    // C: 有 DRAFT → 实时分析(续), tab5 全锁
+    // C: 有进行中事件 → 前置可编辑，tab5 可运行执行层分析
     renderBatchBar('C', ctx);
-    loadAll();
+    loadAll(true);
   } else {
-    // B: 已配置·无 DRAFT → 快照, tab5 可执行
+    // B: 已配置·无进行中事件 → 快照, tab5 可执行
     renderBatchBar('B', ctx);
-    loadAll();
+    loadAll(true);
   }
 }
 
@@ -872,8 +882,8 @@ function renderBatchBar(mode, ctx) {
   const badge = document.getElementById('batchBadge');
   const btn = document.getElementById('btnNewEvent');
 
-  // 批次下拉填充（DRAFT 进行中事件不作为可查看批次）
-  const batches = ((ctx && ctx.batches) || []).filter(b => b.decision_status !== 'DRAFT');
+  // 批次下拉填充（进行中事件在 state 库，不进入已完成批次列表）
+  const batches = ((ctx && ctx.batches) || []);
   sel.innerHTML = batches.map((b) => {
     const label = (b.analysis_mode === 'SCHEDULED' ? '[定时] ' : '[手动] ') +
                   (b.completed_at || '').slice(0, 10) +
@@ -918,8 +928,10 @@ async function onNewEventClick() {
     analysis_mode: 'REALTIME',
   });
   if (res.ok) {
-    alert('已创建分析事件。请在前置工作流完成配置后，运行执行层分析。');
-    location.reload();
+    setDecisionContext({ ...(_decisionContext || {}), in_progress: res.run_id });
+    renderBatchBar('C', _decisionContext);
+    alert('已创建分析事件。请在前置工作流完成配置后，到第 5 个标签运行执行层分析。');
+    await loadAll(true);
   } else {
     alert('创建失败: ' + (res.error || '未知错误'));
   }
@@ -1368,10 +1380,16 @@ async function loadMainInsightPanels() {
 }
 
 // ═══════════════ 主加载 ═══════════════
-async function loadAll() {
+async function loadAll(skipContextRefresh = false) {
   asin = $('asinInput').value.trim();
   if (!asin) { err('errGlobal', '请输入 ASIN'); return; }
   hide('errGlobal');
+  if (!skipContextRefresh) {
+    const ctx = await refreshDecisionContext();
+    if (!ctx.has_config) renderBatchBar('A', ctx);
+    else if (ctx.in_progress) renderBatchBar('C', ctx);
+    else renderBatchBar('B', ctx);
+  }
   const startBtn = $('btnStart');
   startBtn.disabled = true;
   startBtn.textContent = '⏳ 加载中...';
@@ -2808,7 +2826,12 @@ import { mountCampaignPanel } from './campaign-panel/panel.js';
 
 window._campaignPanelAPI = null;
 
-const _CAMP_DRAFT_HTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;">执行层尚未完成 —— 本次为进行中的实时分析事件。<br>请在前置工作流(1-4)配置完成后运行执行层分析，或等待当晚定时跑。</div>';
+const _CAMP_IN_PROGRESS_HTML = `
+  <div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;">
+    <div style="font-weight:600;color:var(--fg);margin-bottom:6px;">执行层尚未完成</div>
+    <div>本次为进行中的实时分析事件。请在前置工作流(1-4)配置完成后运行执行层分析。</div>
+    <button id="campRunRealtimeBtn" class="btn btn-primary" style="margin-top:14px;">运行执行层分析</button>
+  </div>`;
 const _CAMP_LOADING_HTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);"><span class="spinner" style="display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .5s linear infinite;"></span> 正在加载...</div>';
 
 // 切批次/首挂统一入口：以指定 decision_id + executable 重挂面板
@@ -2833,6 +2856,49 @@ window._mountCampaignBatch = async function({ decision_id = '', executable = fal
   }
 };
 
+window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
+  const root = document.getElementById('campPanelRoot');
+  if (!root || !asin) return;
+  if (window._campaignPanelAPI) {
+    try { window._campaignPanelAPI.unmount(); } catch (_) {}
+    window._campaignPanelAPI = null;
+  }
+  root.innerHTML = _CAMP_LOADING_HTML;
+  try {
+    window._campaignPanelAPI = await mountCampaignPanel(root, {
+      asin,
+      days,
+      mode: 'interactive',
+      executable: false,
+      run_id,
+      write_erp: true,
+      analysis_mode: 'REALTIME',
+      onComplete: async (vm) => {
+        const write = vm && vm.erp_write;
+        if (write && write.ok && write.decision_id) {
+          await refreshDecisionContext();
+          renderBatchBar('B', _decisionContext);
+          await window._mountCampaignBatch({
+            decision_id: write.decision_id,
+            executable: true,
+          });
+        } else if (write && write.attempted) {
+          const msg = document.createElement('div');
+          msg.style.cssText = 'margin:10px 0;padding:8px 12px;border:1px solid var(--danger);color:var(--danger);border-radius:6px;font-size:12px;';
+          msg.textContent = '分析已完成，但写入 ERP 失败：' + (write.error || write.skipped || '未知原因');
+          root.prepend(msg);
+        }
+      },
+    });
+  } catch (e) {
+    root.innerHTML = '';
+    const msg = document.createElement('div');
+    msg.style.cssText = 'color:var(--danger);padding:20px;';
+    msg.textContent = 'Campaign 实时分析失败: ' + e.message;
+    root.appendChild(msg);
+  }
+};
+
 const _origSwitchTab = switchTab;
 window.switchTab = async function(tabId) {
   _origSwitchTab(tabId);
@@ -2841,7 +2907,12 @@ window.switchTab = async function(tabId) {
   if (!root) return;
   const ctx = window._decisionContext || {};
   // C 态：有进行中事件 → 执行层无结果，空面板提示（不挂 panel）
-  if (ctx.in_progress) { root.innerHTML = _CAMP_DRAFT_HTML; return; }
+  if (ctx.in_progress) {
+    root.innerHTML = _CAMP_IN_PROGRESS_HTML;
+    const btn = root.querySelector('#campRunRealtimeBtn');
+    if (btn) btn.addEventListener('click', () => window._mountCampaignRealtime({ run_id: ctx.in_progress }));
+    return;
+  }
   // B 态：默认挂最新已完成批次（可执行）
   await window._mountCampaignBatch({
     decision_id: ctx.latest_completed_id || '',

@@ -267,9 +267,9 @@ class ErpDualWriterRepository:
     def finalize_batch(
         self, decision_id: str, parent_asin: str, analysis_mode: str = "REALTIME",
     ) -> None:
-        """write_full 落库后收尾：本批次置最新 COMPLETED + 清该 ASIN 的 DRAFT 锁。
+        """write_full 落库后收尾：本批次置最新。
 
-        write_full 落库后,新决策行 id=decision_id 已存在(is_latest 默认 1)。此处把该 ASIN
+        write_full 落库后,新决策行 id=decision_id 已存在。此处把该 ASIN
         其它行 is_latest 置 0、本行置 1 + 写 analysis_mode,保证每 ASIN 唯一最新。
         进行中(run_id)标记的清除由 API 层在 state 库做,本方法不碰 state。
         decision 表无 decision_status 列——所有 decision 行即"已完成批次"。

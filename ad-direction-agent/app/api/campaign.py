@@ -111,6 +111,7 @@ async def campaign_analyze(req: dict):
             temperature=extra["temperature"],
             write_erp=extra["write_erp"],
             state=extra["state"],
+            analysis_mode=extra["analysis_mode"],
         )
     return body
 
@@ -134,6 +135,7 @@ async def campaign_viewmodel(req: dict):
             temperature=extra["temperature"],
             write_erp=extra["write_erp"],
             state=extra["state"],
+            analysis_mode=extra["analysis_mode"],
         )
     return vm
 
@@ -196,6 +198,8 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
     temp = req.get("temperature", None)
     refresh = bool(req.get("refresh", False))
     write_erp = bool(req.get("write_erp", False))
+    requested_run_id = str(req.get("run_id") or "").strip()
+    analysis_mode = str(req.get("analysis_mode") or "REALTIME").upper()
 
     if not asin:
         return (
@@ -210,6 +214,9 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
 
     try:
         state = get_state_manager()
+        sess = state.get_analysis_session(asin)
+        session_run_id = str((sess or {}).get("run_id") or "").strip()
+        effective_run_id = requested_run_id or session_run_id or None
         long_term = state.get_long_term_config(asin) or {}
         wf = state.get_workflow_state(asin) or {}
         keyword_analysis = wf.get("keyword_analysis", {})
@@ -257,6 +264,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                 temperature=effective_temp,
                 refresh=refresh,
                 keyword_analysis=keyword_analysis,
+                run_id=effective_run_id,
             ),
             timeout=settings.campaign_total_timeout,
         )
@@ -267,6 +275,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             "days": days,
             "temperature": effective_temp,
             "write_erp": write_erp,
+            "analysis_mode": analysis_mode,
         }
         return (result, extra)
 
