@@ -690,7 +690,35 @@ tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来�
 
 ---
 
-*最后更新：2026-06-12（v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12）*
+## 13. 2026-06-12 (续)：自然排名（周排名）接入精准活动分析
+
+### 13.1 缺口
+两条互不相通的排名路径：ASIN 级（wizard tab2，有 natural_rank/near/change）vs campaign 级（tab5，**无**）。且 `campaign.py:_do_analyze` 的 `aggregator.fetch(..., meta_filter=["META_AD_PRODUCT"])` 把排名 META 砍了 → campaign 路径**连排名数据都没拉**。KB 07/19§5/22§2.2 的 Ranking 规则依赖排名，LLM 只能靠 perf 反推——真实信息缺口。
+
+### 13.2 修复（全 MCP 不碰 Doris，纯精准）
+旁路拉取 → 挂活动 → 进 prompt：
+| 文件 | 改动 |
+|---|---|
+| `data/campaign_fetcher.py` | `_fetch_keyword_ranks`：主源 `keyword_child_asins`（含近次→周变化），`own_keyword_flow` 补缺（仅当前排名）；返回 `{kw_lower:{natural_rank,near_natural_rank,rank_change}}`。`fetch_campaigns` 旁路 task 与 basic/perf 两波 gather **重叠**；`_assemble` 仅 EXACT 按 keyword join |
+| `models/campaign.py` | `CampaignUnit` + `CampaignAdjustmentItem` 各 +`natural_rank`/`near_natural_rank`/`rank_change` |
+| `llm/reasoner.py` | `_campaign_to_prompt_dict` 注入 `_natural_rank`（仅 EXACT）；活动列表三态渲染行（有排名/已掉榜/无数据不渲染）；EXACT prompt 加 RANK 决策指令 |
+| `workflow/steps/campaign.py` | 回填 adjustment 3 字段 + 追加排名证据行（走 `card.evidence` 落库，**快照轨零改可见**） |
+| `api/campaign_viewmodel.py` | `_item_from_adjustment` 透传 3 字段（实时轨） |
+| `demo/campaign-panel/render.js` | 精准卡 meta 行显示排名 + `_rankArrow` 周变化箭头（↑绿/↓红/持平灰） |
+
+### 13.3 关键性质
+- **周语义** = `near_natural_rank`(上次爬取) vs 当前的 delta，与 tab2 同口径（非严格自然周环比）；
+- **纯精准**：`has_exact` 门控——纯广泛 ASIN 根本不拉排名，广泛流 prompt/前端零改；
+- **零串行延迟**：旁路 task 与 basic/perf 重叠；**超时 `campaign_rank_timeout=45s` 在 `_fetch_keyword_ranks` 内部**（从协程启动算，与 await 时机无关），超时/异常 fail-open 返回 `{}`，不连累主分析；
+- **子 ASIN 精度**：child_asins 返回该词最优子 ASIN 排名（ASIN 级口径），与活动绑定 child_asin 可能不同——v1 接受（tab2 同款折衷）。
+
+### 13.4 待真实环境确认
+`keyword_child_asins` 传空 `keyword` 是否返回**全部词**排名（沿用 ASIN 级同款 builder，理论一致；本机 Doris/MCP 不可达未 live 验证）。若返回空/单词 → 改逐词查或换 `keyword_competitors`。解析/合并逻辑已**造假 MCP 响应单测通过**（child 优先 + own 补缺 + 周变化 + 掉榜 + rank≤0 脏值过滤）。
+
+---
+
+*最后更新：2026-06-12（v2.1: 自然排名（周排名）接入精准活动分析 §13）*
+*v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12*
 *v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11*
 *v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10*
 *v1.7: 新增广告活动分析线 §9*
