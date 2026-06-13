@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     ]
 
     # 长期状态：json | mysql
-    state_backend: str = "json"
+    state_backend: str = "mysql"
     state_db_host: str = "127.0.0.1"
     state_db_port: int = 3306
     state_db_user: str = "ad_agent"

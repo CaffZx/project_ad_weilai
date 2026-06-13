@@ -397,22 +397,53 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
     }
 
     budget_summary = None
+    pc = {}
     if srow:
-        pc = {}
         if srow.get("main_push_budget") is not None:
             pc["精准主力组"] = _f(srow.get("main_push_budget"))
         if srow.get("broad_auto_budget") is not None:
             pc["自动广泛组"] = _f(srow.get("broad_auto_budget"))
         if srow.get("test_new_budget") is not None:
             pc["精准测试组"] = _f(srow.get("test_new_budget"))
+    # 总预算约束 = 前置每日预算推荐（decision.daily_budget_suggest），不在 summary 冗余存
+    target_budget = _f(decision.get("daily_budget_suggest"))
+    if pc or target_budget is not None:
+        budget_summary = {}
         if pc:
-            budget_summary = {"portfolio_constraints": pc}
+            budget_summary["portfolio_constraints"] = pc
+        if target_budget is not None:
+            budget_summary["target_budget"] = target_budget
 
     overview = None
     ov_text = srow.get("analysis_overview") if srow else None
     if ov_text:
         overview = {"facts": {}, "assessment_text": ov_text,
                     "direction_text": "", "generated_by": "snapshot"}
+
+    # ── synthesis 组装（reason_group + member + special 三表）──
+    #   member.suggest_card_id = card.id = 前端 item_id → campaign_keys 直接用 card_id，
+    #   保证前端"全选本组/跳转成员"按 data-key(item_id) 命中。
+    _CAT_TO_ACTION = {"ELIMINATE": "eliminate_to_low_bid_pool", "KEEP": "keep", "ADJUST": "adjust_bid"}
+    _mem_by_group: dict = {}
+    for m in snapshot.get("reason_members") or []:
+        _mem_by_group.setdefault(m.get("group_id"), []).append(m)
+    syn_groups = []
+    for g in snapshot.get("reason_groups") or []:
+        mems = _mem_by_group.get(g.get("id"), [])
+        keys = [m.get("suggest_card_id") for m in mems if m.get("suggest_card_id")]
+        syn_groups.append({
+            "title": g.get("group_title") or "",
+            "narrative": g.get("description") or "",
+            "action": _CAT_TO_ACTION.get((g.get("suggest_category") or "").upper(), "adjust_bid"),
+            "count": g.get("member_count") or len(keys),
+            "campaign_keys": keys,
+        })
+    syn_specials = [{
+        "campaign_key": s.get("display_text") or "",
+        "why_special": s.get("recommendation") or "",
+        "metrics": s.get("metrics_text") or "",
+    } for s in snapshot.get("specials") or []]
+    synthesis = {"groups": syn_groups, "special_cases": syn_specials} if (syn_groups or syn_specials) else None
 
     warnings = []
     if srow and srow.get("alert_msg"):
@@ -430,7 +461,7 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
         "summary": summary,
         "overview": overview,
         "budget_summary": budget_summary,
-        "synthesis": None,
+        "synthesis": synthesis,
         "items": items,
         "warnings": warnings,
         "is_latest": bool(decision.get("is_latest")),

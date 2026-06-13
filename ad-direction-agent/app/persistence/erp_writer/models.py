@@ -98,6 +98,14 @@ class SuggestCardCanonical:
     proposed_budget: Decimal | None
     current_bid: Decimal | None
     proposed_bid: Decimal | None
+    # 新列（card 表已有列，写入端补齐）
+    campaign_key: str = ""               # synthesis member 关联用（活动名×子ASIN）
+    keyword_class: str | None = None
+    review_level: str | None = None
+    is_core: bool = False
+    perf_json: str | None = None         # 逐活动 7 天指标 JSON
+    is_prefiltered: bool = False
+    prefilter_reason: str | None = None
     placements: list[PlacementCanonical] = field(default_factory=list)
     keyword_pending: list[KeywordPendingCanonical] = field(default_factory=list)
     campaign_pending: list[CampaignPendingCanonical] = field(default_factory=list)
@@ -135,4 +143,8 @@ class CanonicalRun:
     site_code: str | None = None
     budget_groups: dict[str, Any] = field(default_factory=dict)
     decision_meta: dict[str, Any] = field(default_factory=dict)
+    # 总览（落 summary.analysis_overview）+ 汇总（落 synthesis 三表）
+    overview_text: str | None = None
+    synthesis: dict[str, Any] = field(default_factory=dict)
+    create_count: int = 0                # 新增活动数（落 summary.create_count）
 

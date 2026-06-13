@@ -484,6 +484,7 @@ async def _analyze_campaigns_impl(
         item.keyword_id = cu.keyword_id
         item.seller_sku = cu.seller_sku
         # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
+        item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
         item.natural_rank = cu.natural_rank
         item.near_natural_rank = cu.near_natural_rank
         item.rank_change = cu.rank_change

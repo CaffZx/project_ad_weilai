@@ -170,6 +170,25 @@ class ErpDualWriterRepository:
                     (decision_id,),
                 )
                 placement_pending = cur.fetchall() or []
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_suggest_reason_group "
+                    "WHERE decision_id=%s ORDER BY sort_order",
+                    (decision_id,),
+                )
+                reason_groups = cur.fetchall() or []
+                cur.execute(
+                    "SELECT m.* FROM t_advert_agent_modify_suggest_reason_group_member m "
+                    "JOIN t_advert_agent_modify_suggest_reason_group g ON m.group_id=g.id "
+                    "WHERE g.decision_id=%s ORDER BY m.sort_order",
+                    (decision_id,),
+                )
+                reason_members = cur.fetchall() or []
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_modify_suggest_special "
+                    "WHERE decision_id=%s ORDER BY sort_order",
+                    (decision_id,),
+                )
+                specials = cur.fetchall() or []
             return {
                 "decision": decision,
                 "summary": summary,
@@ -177,6 +196,9 @@ class ErpDualWriterRepository:
                 "campaign_pending": campaign_pending,
                 "keyword_pending": keyword_pending,
                 "placement_pending": placement_pending,
+                "reason_groups": reason_groups,
+                "reason_members": reason_members,
+                "specials": specials,
             }
         finally:
             conn.close()
@@ -327,6 +349,7 @@ class ErpDualWriterRepository:
                     report.modern_campaign_pending,
                     report.modern_placement_pending,
                 ) = self._upsert_modern_cards_and_pending(cur, run, now)
+                self._upsert_synthesis(cur, run, now)
             conn.commit()
             return report
         except Exception:
@@ -362,6 +385,7 @@ class ErpDualWriterRepository:
                     report.modern_campaign_pending,
                     report.modern_placement_pending,
                 ) = self._upsert_modern_cards_and_pending(cur, run, now)
+                self._upsert_synthesis(cur, run, now)
                 if wizard_payload:
                     report.purpose_score = self._upsert_purpose_scores(
                         cur, run, wizard_payload, now
@@ -416,12 +440,14 @@ class ErpDualWriterRepository:
             budget_impact, validation_passed, alert_count, alert_msg,
             main_push_count, main_push_budget, broad_auto_count, broad_auto_budget,
             test_new_count, test_new_budget, eliminate_bubble_count, eliminate_bubble_budget,
+            analysis_overview, create_count,
             create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,
             %s,%s
         )
         ON DUPLICATE KEY UPDATE
@@ -449,6 +475,8 @@ class ErpDualWriterRepository:
             test_new_budget=VALUES(test_new_budget),
             eliminate_bubble_count=VALUES(eliminate_bubble_count),
             eliminate_bubble_budget=VALUES(eliminate_bubble_budget),
+            analysis_overview=VALUES(analysis_overview),
+            create_count=VALUES(create_count),
             update_time=VALUES(update_time)
         """
         cur.execute(
@@ -480,6 +508,8 @@ class ErpDualWriterRepository:
                 bg.get("test_new_budget"),
                 bg.get("eliminate_bubble_count"),
                 bg.get("eliminate_bubble_budget"),
+                run.overview_text,
+                run.create_count,
                 now,
                 now,
             ),
@@ -496,10 +526,12 @@ class ErpDualWriterRepository:
             id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no,
             suggest_category, confidence_level, campaign_group_type, campaign_id, campaign_name,
             asin, keyword, keyword_match_type, trigger_rule, description, evidence,
+            keyword_class, review_level, is_core, perf_json, is_prefiltered, prefilter_reason,
             confirm_status, execute_status, sort_order, create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,
             'PENDING','PENDING',%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
@@ -515,6 +547,12 @@ class ErpDualWriterRepository:
             trigger_rule=VALUES(trigger_rule),
             description=VALUES(description),
             evidence=VALUES(evidence),
+            keyword_class=VALUES(keyword_class),
+            review_level=VALUES(review_level),
+            is_core=VALUES(is_core),
+            perf_json=VALUES(perf_json),
+            is_prefiltered=VALUES(is_prefiltered),
+            prefilter_reason=VALUES(prefilter_reason),
             sort_order=VALUES(sort_order),
             update_time=VALUES(update_time)
         """
@@ -599,6 +637,12 @@ class ErpDualWriterRepository:
                     card.trigger_rule,
                     card.description,
                     card.evidence,
+                    card.keyword_class,
+                    card.review_level,
+                    1 if card.is_core else 0,
+                    card.perf_json,
+                    1 if card.is_prefiltered else 0,
+                    card.prefilter_reason,
                     card.sort_order,
                     now,
                     now,
@@ -608,7 +652,7 @@ class ErpDualWriterRepository:
 
             for idx, kw in enumerate(card.keyword_pending, start=1):
                 kw_row_id = warehouse_pending_id(
-                    "mkp", run.decision_id, card.campaign_id, kw.keyword_id, kw.match_type, idx,
+                    "mkp", run.decision_id, card.card_id, kw.keyword_id, kw.match_type, idx,
                 )
                 cur.execute(
                     keyword_sql,
@@ -638,7 +682,7 @@ class ErpDualWriterRepository:
 
             for idx, c in enumerate(card.campaign_pending, start=1):
                 cp_row_id = warehouse_pending_id(
-                    "mcp", run.decision_id, card.campaign_id, "budget", idx,
+                    "mcp", run.decision_id, card.card_id, "budget", idx,
                 )
                 cur.execute(
                     campaign_sql,
@@ -665,7 +709,7 @@ class ErpDualWriterRepository:
 
             for idx, plc in enumerate(card.placements, start=1):
                 plc_row_id = warehouse_pending_id(
-                    "mpl", run.decision_id, card.campaign_id, plc.placement_type, idx,
+                    "mpl", run.decision_id, card.card_id, plc.placement_type, idx,
                 )
                 cur.execute(
                     placement_sql,
@@ -692,6 +736,94 @@ class ErpDualWriterRepository:
                 placement_count += 1
 
         return card_count, keyword_count, campaign_count, placement_count
+
+    def _upsert_synthesis(self, cur, run: CanonicalRun, now: datetime) -> tuple[int, int, int]:
+        """写 synthesis 三表（reason_group / member / special）。重跑先清旧。
+
+        member.suggest_card_id 关联 card.id：用 card.campaign_key → card.id 映射，
+        把 group.campaign_keys（活动名×子ASIN）翻译成 card_id。
+        """
+        syn = run.synthesis or {}
+        groups = syn.get("groups") or []
+        specials = syn.get("special_cases") or []
+
+        # 清旧（member 无 decision_id，按 group 关联删）
+        cur.execute(
+            "DELETE m FROM t_advert_agent_modify_suggest_reason_group_member m "
+            "JOIN t_advert_agent_modify_suggest_reason_group g ON m.group_id=g.id "
+            "WHERE g.decision_id=%s",
+            (run.decision_id,),
+        )
+        cur.execute(
+            "DELETE FROM t_advert_agent_modify_suggest_reason_group WHERE decision_id=%s",
+            (run.decision_id,),
+        )
+        cur.execute(
+            "DELETE FROM t_advert_agent_modify_suggest_special WHERE decision_id=%s",
+            (run.decision_id,),
+        )
+
+        key_to_card = {c.campaign_key: c.card_id for c in run.cards if c.campaign_key}
+        _cat = {"eliminate_to_low_bid_pool": "ELIMINATE", "keep": "KEEP"}
+
+        def _s(v: Any, n: int) -> str | None:
+            if v is None:
+                return None
+            return str(v)[:n]
+
+        g_count = m_count = s_count = 0
+        for gi, g in enumerate(groups):
+            if not isinstance(g, dict):
+                continue
+            group_id = stable_id("rg", run.decision_id, gi)
+            action = str(g.get("action") or "")
+            category = _cat.get(action, "ADJUST")
+            keys = g.get("campaign_keys") or []
+            cur.execute(
+                "INSERT INTO t_advert_agent_modify_suggest_reason_group "
+                "(id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no, "
+                "group_title, suggest_category, member_count, description, sort_order, create_time, update_time) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE group_title=VALUES(group_title), "
+                "suggest_category=VALUES(suggest_category), member_count=VALUES(member_count), "
+                "description=VALUES(description), sort_order=VALUES(sort_order), update_time=VALUES(update_time)",
+                (group_id, run.decision_id, run.shop_id, run.parent_asin, run.parent_seller_sku,
+                 run.site_code, run.batch_no, _s(g.get("title"), 500) or "", category,
+                 len(keys), g.get("narrative"), gi, now, now),
+            )
+            g_count += 1
+            for ki, ckey in enumerate(keys):
+                card_id = key_to_card.get(ckey)
+                if not card_id:
+                    continue
+                mid = stable_id("rgm", group_id, card_id)
+                cur.execute(
+                    "INSERT INTO t_advert_agent_modify_suggest_reason_group_member "
+                    "(id, group_id, suggest_card_id, campaign_name, sort_order, create_time, update_time) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                    "ON DUPLICATE KEY UPDATE campaign_name=VALUES(campaign_name), "
+                    "sort_order=VALUES(sort_order), update_time=VALUES(update_time)",
+                    (mid, group_id, card_id, _s(ckey, 500), ki, now, now),
+                )
+                m_count += 1
+        for si, sc in enumerate(specials):
+            if not isinstance(sc, dict):
+                continue
+            sid = stable_id("rsp", run.decision_id, si)
+            cur.execute(
+                "INSERT INTO t_advert_agent_modify_suggest_special "
+                "(id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no, "
+                "display_text, metrics_text, recommendation, sort_order, create_time, update_time) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON DUPLICATE KEY UPDATE display_text=VALUES(display_text), "
+                "metrics_text=VALUES(metrics_text), recommendation=VALUES(recommendation), "
+                "sort_order=VALUES(sort_order), update_time=VALUES(update_time)",
+                (sid, run.decision_id, run.shop_id, run.parent_asin, run.parent_seller_sku,
+                 run.site_code, run.batch_no, _s(sc.get("campaign_key"), 500) or "",
+                 _s(sc.get("metrics"), 500), sc.get("why_special"), si, now, now),
+            )
+            s_count += 1
+        return g_count, m_count, s_count
 
     def _upsert_legacy_recommend(self, cur, run: CanonicalRun, now: datetime) -> None:
         recommend_id = stable_id("rec", run.decision_id)

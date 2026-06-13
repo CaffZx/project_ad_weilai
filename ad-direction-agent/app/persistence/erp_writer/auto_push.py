@@ -66,6 +66,12 @@ def analysis_to_kb_payload(
         "sanity_check_passed": data.get("sanity_check_passed", True),
         "llm_rounds_completed": data.get("llm_rounds_completed") or 0,
         "rounds_detail": data.get("rounds_detail") or {},
+        # 下游 canonicalize / write_full 落库用（总览 + 汇总 + 新增 + 预过滤）；
+        # 不带这些字段时快照轨就丢总览/汇总/新增卡/预过滤卡。
+        "strategic_overview": data.get("strategic_overview"),
+        "synthesis": data.get("synthesis"),
+        "new_campaigns": data.get("new_campaigns") or [],
+        "skipped_campaigns": data.get("skipped_campaigns") or [],
     }
     if data.get("budget_summary") is not None:
         payload["budget_summary"] = data["budget_summary"]

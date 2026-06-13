@@ -3063,6 +3063,10 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
     try { window._campaignPanelAPI.unmount(); } catch (_) {}
     window._campaignPanelAPI = null;
   }
+  // 实时分析进行中标志：await mountCampaignPanel 期间 _campaignPanelAPI 为 null，
+  // 单靠它会让 switchTab 误判"未挂载"→ 覆盖正在跑的面板、重现"运行执行层分析"入口，
+  // 再点又撞后端幂等锁。用独立标志保护整个 await 区间。
+  window._campaignRealtimeRunning = true;
   root.innerHTML = _CAMP_LOADING_HTML;
   try {
     window._campaignPanelAPI = await mountCampaignPanel(root, {
@@ -3100,13 +3104,15 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
     msg.style.cssText = 'color:var(--danger);padding:20px;';
     msg.textContent = 'Campaign 实时分析失败: ' + e.message;
     root.appendChild(msg);
+  } finally {
+    window._campaignRealtimeRunning = false;
   }
 };
 
 const _origSwitchTab = switchTab;
 window.switchTab = async function(tabId) {
   _origSwitchTab(tabId);
-  if (tabId !== 'tab5' || window._campaignPanelAPI || !asin) return;
+  if (tabId !== 'tab5' || window._campaignPanelAPI || window._campaignRealtimeRunning || !asin) return;
   const root = document.getElementById('campPanelRoot');
   if (!root) return;
   const ctx = window._decisionContext || {};

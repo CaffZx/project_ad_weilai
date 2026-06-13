@@ -152,6 +152,22 @@ def _utc_from_iso(value: str | None) -> datetime:
     return dt
 
 
+def _batch_no(experiment_id: str, run_number: int) -> str:
+    """对外批次号：run_id(UTC, 形如 20260613T051742Z) → 本地 YYYYMMDD-HHMM-序号。
+
+    从 run_id 派生（非 now()）→ 同一 run_id 重试（决策批次进行中事件失败重跑）时
+    batch_no 稳定不漂移；与历史 7 天数据 YYYYMMDD-HHMM-序号 格式一致。
+    run_id 非该格式（旧/外部）→ 兜底本地当前时间。
+    """
+    try:
+        dt = datetime.strptime(experiment_id, "%Y%m%dT%H%M%SZ").replace(
+            tzinfo=timezone.utc
+        ).astimezone()
+        return f"{dt.strftime('%Y%m%d-%H%M')}-{run_number:02d}"
+    except (ValueError, TypeError):
+        return f"{datetime.now().strftime('%Y%m%d-%H%M')}-{run_number:02d}"
+
+
 def _confidence_level(score: int | float | None) -> str:
     if score is None:
         return "low"
@@ -308,7 +324,9 @@ def canonicalize_payload(
     experiment_id = payload.get("experiment_id") or "exp"
     run_number = to_int(payload.get("run_number")) or 1
     decision_id = stable_id("dec", parent_asin, experiment_id, run_number)
-    batch_no = f"{experiment_id}-{run_number:02d}"
+    # batch_no 对外展示：从 run_id 派生本地 YYYYMMDD-HHMM-序号（复刻旧版，重试稳定）；
+    # 不参与任何唯一键，纯标记。decision_id 仍用 experiment_id(run_id) 保可追溯。
+    batch_no = _batch_no(experiment_id, run_number)
     timestamp = _utc_from_iso(payload.get("timestamp"))
     summary = payload.get("summary") or {}
 
@@ -430,11 +448,102 @@ def canonicalize_payload(
                 proposed_budget=to_decimal(primary_adj.get("proposed_budget")),
                 current_bid=to_decimal(primary_adj.get("current_bid")),
                 proposed_bid=to_decimal(primary_adj.get("proposed_bid")),
+                campaign_key=primary_adj.get("campaign_key") or "",
+                keyword_class=primary_adj.get("keyword_class") or None,
+                review_level=primary_adj.get("review_level") or None,
+                is_core=bool(primary_adj.get("is_core")),
                 placements=list(placements_by_type.values()),
                 keyword_pending=keyword_pending,
                 campaign_pending=campaign_pending,
             )
         )
+
+    # ── 新增活动 → CREATE 卡（campaign_id 空；pending old=NULL 表"从无到有"）──
+    create_count = 0
+    for nc in payload.get("new_campaigns") or []:
+        if not isinstance(nc, dict):
+            continue
+        name = nc.get("campaign_name") or nc.get("keyword_text") or ""
+        if not name:
+            continue
+        seed = f"new:{name}"
+        kw_text = _clip(nc.get("keyword_text"), 512)
+        mt = _normalize_match_type(nc.get("match_type"))
+        bid = to_decimal(nc.get("proposed_base_bid"))
+        budget = to_decimal(nc.get("proposed_daily_budget"))
+        nc_kw: list[KeywordPendingCanonical] = []
+        if bid is not None:
+            nc_kw.append(KeywordPendingCanonical(
+                keyword_id=stable_id("nkw", decision_id, seed),  # 新活动无真 keyword_id，合成确定性 id
+                keyword_text=kw_text, match_type=mt,
+                old_state=None, new_state="ENABLED", old_bid=None, new_bid=bid))
+        nc_camp: list[CampaignPendingCanonical] = []
+        if budget is not None:
+            nc_camp.append(CampaignPendingCanonical(
+                old_state=None, new_state="ENABLED", old_budget=None, new_budget=budget))
+        nc_plc: list[PlacementCanonical] = []
+        primary = _normalize_placement(nc.get("primary_placement"))
+        if primary:
+            nc_plc.append(PlacementCanonical(
+                placement_type=primary, old_percent=None, new_percent=None,
+                adjust_action="首轮主投", remark=_clip(nc.get("negative_strategy"), 512) or None))
+        cards.append(SuggestCardCanonical(
+            card_id=stable_id("car", decision_id, seed),
+            decision_id=decision_id, campaign_id=None,
+            campaign_name=_clip(name, 512) or name, asin=_clip(nc.get("child_asin"), 64),
+            keyword=kw_text, keyword_match_type=mt,
+            trigger_rule=_clip(nc.get("trigger_scene"), 128),
+            suggest_category="CREATE",
+            confidence_level=str(nc.get("confidence") or "medium"),
+            campaign_group_type=map_campaign_group_type((nc.get("ai_portfolio_class") or "").strip()),
+            description=nc.get("reason"),
+            evidence="\n".join(str(x) for x in (nc.get("evidence") or []) if x),
+            sort_order=900,
+            current_budget=None, proposed_budget=budget, current_bid=None, proposed_bid=bid,
+            campaign_key=name, keyword_class=nc.get("keyword_class") or None,
+            review_level=nc.get("review_level") or None, is_core=False,
+            placements=nc_plc, keyword_pending=nc_kw, campaign_pending=nc_camp))
+        create_count += 1
+
+    # ── 预过滤活动 → prefiltered 卡（灰卡，不可执行，无 pending；lost 不落库）──
+    for sk in payload.get("skipped_campaigns") or []:
+        if not isinstance(sk, dict) or not sk.get("__prefiltered"):
+            continue
+        ckey = sk.get("campaign_key") or sk.get("campaign_name") or ""
+        if not ckey:
+            continue
+        reason = sk.get("reason") or ""
+        kcount = sk.get("keyword_count")
+        if kcount and "词" not in reason:
+            reason = f"{reason}（{kcount}词）" if reason else f"多关键词活动（{kcount}词）"
+        cards.append(SuggestCardCanonical(
+            card_id=stable_id("car", decision_id, f"pref:{ckey}"),
+            decision_id=decision_id, campaign_id=None,
+            campaign_name=_clip(sk.get("campaign_name") or ckey, 512) or ckey,
+            asin=_clip(sk.get("child_asin"), 64),
+            keyword=_clip(sk.get("keyword_text"), 512),
+            keyword_match_type=_normalize_match_type(sk.get("match_type")),
+            trigger_rule=None, suggest_category=None, confidence_level="low",
+            campaign_group_type=map_campaign_group_type((sk.get("portfolio") or "").strip()),
+            description=None, evidence="", sort_order=950,
+            current_budget=None, proposed_budget=None, current_bid=None, proposed_bid=None,
+            campaign_key=ckey, is_prefiltered=True, prefilter_reason=_clip(reason, 255)))
+
+    # ── 总览文本（落 summary.analysis_overview）──
+    _ov = payload.get("strategic_overview") or {}
+    overview_text = None
+    if isinstance(_ov, dict):
+        _parts = []
+        if _ov.get("assessment_text"):
+            _parts.append("【判断】" + str(_ov["assessment_text"]))
+        if _ov.get("direction_text"):
+            _parts.append("【方向】" + str(_ov["direction_text"]))
+        overview_text = "\n\n".join(_parts) or None
+
+    # ── 汇总（落 synthesis 三表）──
+    synthesis = payload.get("synthesis")
+    if not isinstance(synthesis, dict):
+        synthesis = {}
 
     strategy = payload.get("strategy_context") or {}
     # v2 metrics model: one SUMMARY row always; DAILY rows only when source provides day-level metrics.
@@ -511,5 +620,8 @@ def canonicalize_payload(
         site_code=site_code,
         budget_groups=budget_groups,
         decision_meta=payload.get("decision_meta") or {},
+        overview_text=overview_text,
+        synthesis=synthesis,
+        create_count=create_count,
     )
 
