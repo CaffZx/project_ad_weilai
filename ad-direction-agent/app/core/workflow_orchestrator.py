@@ -101,7 +101,12 @@ class WorkflowOrchestrator:
         meta_filter: list[str] | None = None,
         days: int = 7,
     ) -> ASINData:
-        """获取 ASIN 数据（Redis 短期缓存 / 强制刷新 / 按需 meta）"""
+        """获取 ASIN 数据（Redis 短期缓存 / 强制刷新 / 按需 meta）。
+
+        缓存按 (asin, days, meta_filter 集合) 分 key：各层场景裁剪的 META 列表不同 →
+        各存各的部分快照，互不污染。meta_filter 分支同样走 读缓存→miss→fetch→写缓存，
+        不再每次直拉（这是"同一 ASIN 当天重复点仍慢"的根因）。
+        """
         key = (asin, days)
 
         if refresh:
@@ -109,7 +114,10 @@ class WorkflowOrchestrator:
                 if key in self._data_tasks:
                     self._data_tasks[key].cancel()
                     del self._data_tasks[key]
-            if not meta_filter:
+            # 删本 filter 的缓存；带 filter 刷新时连全量 key 一起失效，
+            # 否则下次"全量超集命中"会拿旧全量盖过本次刷新。
+            await asin_data_cache.delete(asin, days, meta_filter=meta_filter)
+            if meta_filter:
                 await asin_data_cache.delete(asin, days)
             logger.info("诊断刷新: 缓存已清除, 重新查询 %s", asin)
             if meta_filter:
@@ -119,13 +127,26 @@ class WorkflowOrchestrator:
                     days=days,
                     prefer_db=bool(settings.mcp_refresh_via_db),
                 )
+                await asin_data_cache.set(asin, data, days=days, meta_filter=meta_filter)
             else:
                 data = await self.aggregator.fetch(asin, days=days, prefer_db=True)
                 await asin_data_cache.set(asin, data, days=days)
             return data
 
         if meta_filter:
-            return await self.aggregator.fetch(asin, meta_filter=meta_filter, days=days)
+            # 1) 本 filter 部分缓存命中
+            cached = await asin_data_cache.get(asin, days, meta_filter=meta_filter)
+            if cached:
+                return cached
+            # 2) 全量缓存是任意 filter 的超集（strategy/options 后台 preload 写入）→ 直接复用。
+            #    仅接受完整全量；partial 全量可能恰好缺本层维度，不冒险复用。
+            full = await asin_data_cache.get(asin, days)
+            if full and getattr(full, "data_freshness", None) != "partial":
+                return full
+            # 3) miss → 拉本 filter 子集并缓存
+            data = await self.aggregator.fetch(asin, meta_filter=meta_filter, days=days)
+            await asin_data_cache.set(asin, data, days=days, meta_filter=meta_filter)
+            return data
 
         cached = await asin_data_cache.get(asin, days)
         if cached:
