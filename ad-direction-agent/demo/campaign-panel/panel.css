@@ -53,7 +53,7 @@
 .camp-btn-block { display: block; width: 100%; }
 
 /* ── 工具类 ── */
-.camp-kv { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 4px 0; }
+.camp-kv { display: flex; justify-content: flex-start; align-items: baseline; gap: 8px; font-size: 12px; padding: 4px 0; }
 .camp-kv .k { color: var(--camp-muted-fg); }
 .camp-kv .v { font-weight: 500; }
 .camp-kv .v.empty { color: #9CA3AF; font-style: italic; font-weight: 400; }

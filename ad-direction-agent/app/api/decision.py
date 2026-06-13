@@ -228,17 +228,93 @@ def _translate_preset(row: dict) -> dict:
     }
 
 
+# ── 富快照反译（Tab1 评分卡 / Tab3 ACOS·预算推理），与实时渲染器同形 ──────────
+# purpose_score.advert_purpose(ERP 码) → renderTargetScores 期望的 target；
+# renderTargetScores 内部 targetMap[s.target]||s.target，给中文也能正确回退显示。
+_PURPOSE_TARGET = {"TRAFFIC": "Traffic", "CONVERSION": "Conversion",
+                   "RANKING": "Ranking", "PROFIT": "Profit"}
+# recommend_tag(direction_detail/ai_suggest) → renderP3 的 confidence 着色（纯视觉）
+_TAG_CONF = {"RECOMMENDED": "high", "OPTIONAL": "medium", "NOT_RECOMMENDED": "low"}
+
+
+def _join_reason(basis, suggest, future) -> str:
+    """split_reason_sections 的逆操作：三段带标记拼回，供前端 formatAiSections 展示。"""
+    parts = []
+    if basis:
+        parts.append("【决策依据】" + str(basis))
+    if suggest:
+        parts.append("【建议】" + str(suggest))
+    if future:
+        parts.append("【后续关注】" + str(future))
+    return "\n".join(parts)
+
+
+def _translate_tactics_scores(rows: list) -> list:
+    """purpose_score 行 → renderTargetScores(scores) 入参（Tab1 评分卡）。"""
+    out = []
+    for r in rows or []:
+        code = (r.get("advert_purpose") or "").upper()
+        out.append({
+            "target": _PURPOSE_TARGET.get(code, _PURPOSE_ZH.get(code, code)),
+            "level": r.get("recommend_level") or "",
+            "score": r.get("score"),
+            "reason": _join_reason(r.get("decision_basis"), r.get("suggest"),
+                                   r.get("future_attention")),
+        })
+    return out
+
+
+def _translate_p3_recommend(ai: dict | None) -> dict | None:
+    """ai_suggest 行 → renderP3(data) 入参（Tab3）。manual_override=False 走净分支，
+    不设 llm_status/data_completeness → isLlmBlocked=False、不弹 dataStatus banner。
+    budget 的 current/direction/magnitude 是实时分析态、快照未存 → 降级（前端显示 —）。"""
+    if not ai:
+        return None
+    acos = ai.get("suggest_acos")
+    budget = ai.get("suggest_budget")
+    risk = ai.get("risk_warning")
+    return {
+        "target_acos": {
+            "recommended_target": float(acos) if acos is not None else None,
+            "confidence": _TAG_CONF.get((ai.get("suggest_acos_tag") or "").upper(), "medium"),
+            "reasoning": _join_reason(ai.get("suggest_acos_decision_basis"),
+                                      ai.get("suggest_acos_suggest"),
+                                      ai.get("suggest_acos_future_attention")),
+            "manual_override": False,
+        },
+        "budget_bid": {
+            "suggested": float(budget) if budget is not None else None,
+            "current": None, "direction": "", "magnitude_pct": "",
+            "reason": _join_reason(ai.get("suggest_budget_decision_basis"),
+                                   ai.get("suggest_budget_suggest"),
+                                   ai.get("suggest_budget_future_attention")),
+            "bid_adjustments": [],
+            "manual_override": False,
+        },
+        "overall_reasoning": ai.get("comprehensive_judgment") or "",
+        "risk_warnings": [risk] if risk else [],
+        "from_cache": False,
+    }
+
+
 @router.get("/decision/{decision_id}/preset")
 async def decision_preset(decision_id: str):
-    """读取某批次冻结的前置 1-4 配置快照（只读展示用，ERP 码→中文 label）。"""
+    """读取某批次冻结的前置 1-4 快照（只读展示用）。
+
+    config 标签（strategy/tactics/p3/directions）+ 富段（tactics_scores=Tab1 评分卡、
+    p3_recommend=Tab3 ACOS/预算推理，与实时渲染器同形）。富段缺失时为空/None，前端降级。
+    """
     if not decision_id:
         return {"ok": False, "error": "decision_id 必填"}
     try:
         repo = _repo()
-        row = await asyncio.to_thread(repo.get_decision_preset, decision_id) if repo else None
-        if not row:
+        snap = await asyncio.to_thread(repo.read_decision_preset_rich, decision_id) if repo else None
+        if not snap or not snap.get("decision"):
             return {"ok": False, "error": "批次不存在"}
-        return {"ok": True, **_translate_preset(row)}
+        out = {"ok": True, **_translate_preset(snap["decision"])}
+        out["tactics_scores"] = _translate_tactics_scores(snap.get("purpose_scores") or [])
+        out["p3_recommend"] = _translate_p3_recommend(snap.get("ai_suggest"))
+        return out
     except Exception as e:
         logger.exception("decision/preset 异常 [%s]: %s", decision_id, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}

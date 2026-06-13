@@ -286,6 +286,54 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
+    def read_decision_preset_rich(self, decision_id: str) -> dict | None:
+        """前置 1-4 富快照：decision 主行 + purpose_score(Tab1) + ai_suggest(Tab3)。
+
+        数据由 write_full 的 _upsert_purpose_scores / _upsert_ai_suggest 落库（零额外写）。
+        子表读各自 try 包裹：表/段缺失（未跑前置 AI、ERP 未迁移）时该段降级为空，
+        不连累 decision 主行返回。Tab2(data_metrics)/Tab4(direction_detail) 待后续接入。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM t_advert_agent_decision WHERE id=%s", (decision_id,)
+                )
+                decision = cur.fetchone()
+                if not decision:
+                    return None
+
+                purpose_scores: list = []
+                try:
+                    cur.execute(
+                        "SELECT advert_purpose, score, recommend_level, decision_basis, "
+                        "suggest, future_attention FROM t_advert_agent_purpose_score "
+                        "WHERE decision_id=%s ORDER BY create_time",
+                        (decision_id,),
+                    )
+                    purpose_scores = cur.fetchall() or []
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("read purpose_score 降级 [%s]: %s", decision_id, e)
+
+                ai_suggest = None
+                try:
+                    cur.execute(
+                        "SELECT suggest_acos, suggest_acos_tag, suggest_acos_decision_basis, "
+                        "suggest_acos_suggest, suggest_acos_future_attention, suggest_budget, "
+                        "suggest_budget_tag, suggest_budget_decision_basis, suggest_budget_suggest, "
+                        "suggest_budget_future_attention, comprehensive_judgment, execution_pace, "
+                        "risk_warning, tip_msg FROM t_advert_agent_ai_suggest "
+                        "WHERE decision_id=%s LIMIT 1",
+                        (decision_id,),
+                    )
+                    ai_suggest = cur.fetchone()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("read ai_suggest 降级 [%s]: %s", decision_id, e)
+
+            return {"decision": decision, "purpose_scores": purpose_scores, "ai_suggest": ai_suggest}
+        finally:
+            conn.close()
+
     def finalize_batch(
         self, decision_id: str, parent_asin: str, analysis_mode: str = "REALTIME",
     ) -> None:

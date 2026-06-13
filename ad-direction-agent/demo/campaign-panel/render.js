@@ -20,12 +20,16 @@ function _fmtMoney(v) {
   return Number(v).toFixed(2);
 }
 function _fmtChange(cur, prop) {
-  if (cur == null || prop == null) return _fmtMoney(prop);
+  if (cur == null && prop == null) return '—';
+  if (cur == null) return `$${_fmtMoney(prop)}`;   // 无原值（如新增活动）→ 单值
+  if (prop == null) return `$${_fmtMoney(cur)}`;
   const d = prop - cur;
-  if (Math.abs(d) < 0.005) return _fmtMoney(prop);
+  if (Math.abs(d) < 0.005) return `$${_fmtMoney(cur)}`;   // 无变化 → 单值，不画箭头
   const sign = d >= 0 ? '+' : '';
-  const color = d >= 0 ? '#DC2626' : '#16A34A';
-  return `$${_fmtMoney(prop)} <span style="color:${color};font-size:11px;">(${sign}$${d.toFixed(2)})</span>`;
+  const color = d >= 0 ? '#16A34A' : '#DC2626';   // 涨=绿/降=红（对齐 campaign_test.html / 范例图）
+  // 调整前 → 调整后 (变化)
+  return `$${_fmtMoney(cur)} <span style="color:var(--camp-muted-fg);">→</span> $${_fmtMoney(prop)}`
+       + ` <span style="color:${color};font-size:11px;">(${sign}$${d.toFixed(2)})</span>`;
 }
 
 function _actionLabel(a) {

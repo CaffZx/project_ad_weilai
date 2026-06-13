@@ -239,6 +239,8 @@ body {
 .dir-card.dir-suit-recommended { border-left: 3px solid #10B981; }
 .dir-card.dir-suit-available { border-left: 3px solid #3B82F6; }
 .dir-card.dir-suit-not_recommended { border-left: 3px solid #9CA3AF; }
+.dir-card.flat { background:#F5F3FF; border-color:#DDD6FE; cursor:default; }
+.dir-card.flat:hover { border-color:#DDD6FE; }
 .dir-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .dir-card-title { font-weight: 600; font-size: 13px; color: var(--foreground); }
 .dir-color { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -538,8 +540,14 @@ body {
   <!-- ═══════════════ 左侧 配置区 (400px) ═══════════════ -->
   <aside class="sidebar" id="sidebar">
 
-    <!-- ASIN 段 -->
-    <div class="card">
+    <!-- 基础信息（ERP 跳转：URL 参数渲染；调试态隐藏） -->
+    <div class="card hidden" id="cardBaseInfo">
+      <div class="card-title" style="margin-bottom:8px">基础信息</div>
+      <div id="baseInfoContent"></div>
+    </div>
+
+    <!-- ASIN 段（输入 ASIN + 加载分析；仅调试态可见，ERP 模式隐藏） -->
+    <div class="card" id="cardAsinInput">
       <div class="card-title" style="margin-bottom:8px">分析 ASIN</div>
       <div class="flex gap-2" style="align-items:center">
         <!-- 正常态：只读展示父 ASIN（来自 ERP URL） -->
@@ -547,14 +555,6 @@ body {
         <!-- 调试态：仅当无 URL parentAsin 或 ?debug=1 时显示，可手动输入 -->
         <input id="asinInput" type="text" placeholder="输入 ASIN（调试）" autocomplete="off"
                class="input flex-1 hidden" style="min-width:0">
-        <select id="daysSelect" onchange="onDaysChange(this.value)"
-                style="border:1.5px solid var(--border);border-radius:var(--radius-ctl);
-                       padding:8px 10px;font-size:13px;background:var(--card-bg);
-                       color:var(--foreground);cursor:pointer;width:90px;flex-shrink:0">
-          <option value="7">7天</option>
-          <option value="14">14天</option>
-          <option value="30">30天</option>
-        </select>
         <button onclick="loadAll()" id="btnStart" class="btn btn-primary hidden">
           加载分析
         </button>
@@ -570,6 +570,16 @@ body {
       </div>
       <div id="strategyContent">
         <p class="card-desc">加载 ASIN 后显示选项</p>
+      </div>
+      <!-- 分析天数（战略层末行；实时可选，快照态由 renderReadonlyPreset 隐藏，改战略层只读行显示） -->
+      <div id="daysControl" style="margin-top:10px">
+        <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">分析天数</label>
+        <select id="daysSelect" onchange="onDaysChange(this.value)"
+                style="border:1.5px solid var(--border);border-radius:var(--radius-ctl);padding:8px 10px;font-size:13px;background:var(--card-bg);color:var(--foreground);cursor:pointer;width:100%">
+          <option value="7">7天</option>
+          <option value="14">14天</option>
+          <option value="30">30天</option>
+        </select>
       </div>
       <div id="sec1Loader" class="hidden loading-text" style="margin-top:6px"><span class="spinner"></span>加载中...</div>
       <button onclick="confirmStrategy()" id="btnStrategy" class="btn btn-primary btn-sm hidden" style="margin-top:8px">保存</button>
@@ -594,11 +604,10 @@ body {
       <span id="tacticsRecLoader" class="hidden loading-text" style="margin-top:4px"><span class="spinner"></span>AI 重新推荐中...</span>
       <span id="tacticsRecErr" class="hidden" style="color:var(--danger);font-size:12px;margin-top:4px;display:block"></span>
       <p id="errSec2" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
-    </div>
 
-    <!-- P3 手动覆盖（初始隐藏） -->
-    <div class="card hidden" id="cardP3Override">
-      <div class="card-title" style="margin-bottom:10px">目标 ACOS 与预算推荐</div>
+      <!-- 目标 ACOS / 预算 / 广告方向：并入策略层同一气泡（子区，带分隔线） -->
+      <div class="hidden" id="cardP3Override" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+        <div class="card-title" style="margin-bottom:10px">目标 ACOS 与预算推荐</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <!-- 目标 ACOS -->
         <div>
@@ -623,7 +632,29 @@ body {
           </div>
           <div id="p3BudgetLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
         </div>
+        <!-- 广告方向（config 项；快照轨只读 badges，实时态下拉操作台） -->
+        <div id="leftDirectionsBlock" class="hidden">
+          <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">广告方向</label>
+          <!-- 快照只读 -->
+          <div id="leftDirections" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+          <!-- 实时操作台：多选下拉 + 保存 -->
+          <div id="leftDirectionsEdit" class="hidden">
+            <div class="tactics-dropdown" style="min-width:0">
+              <div style="position:relative">
+                <button type="button" class="md-btn" data-dim="directions" onclick="toggleMultiDropdown(this)">
+                  <span class="md-tags" id="mtags_directions"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
+                </button>
+                <div class="md-panel hidden" id="leftDirectionsOptions"></div>
+              </div>
+            </div>
+            <div class="flex items-center gap-2" style="margin-top:6px">
+              <button onclick="saveDirectionsLeft()" id="btnSaveDirections" class="btn btn-primary btn-sm">保存</button>
+              <span id="leftDirectionsStatus" class="hidden" style="font-size:10px;margin-left:4px"></span>
+            </div>
+          </div>
+        </div>
       </div>
+    </div>
     </div>
 
   </aside>
@@ -726,17 +757,6 @@ body {
           <div id="dataStatusTab4" class="hidden" style="font-size:12px;border-radius:var(--radius-ctl);padding:8px 12px;margin-bottom:8px;background:#FEF3C7;border:1px solid #FCD34D;color:#92400E"></div>
           <div id="execDirections" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px"></div>
           <div id="aiReasoningExec" class="hidden ai-panel" style="margin-top:8px"></div>
-          <div style="margin-top:10px;display:flex;gap:8px">
-            <button onclick="generateReport()" id="btnGenerate" class="btn btn-primary">生成评估报告</button>
-          </div>
-          <p id="errSec4" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
-        </div>
-        <!-- 下半段：AI 报告（初始隐藏） -->
-        <div id="reportArea" class="hidden" style="display:flex;flex-direction:column;gap:10px">
-          <div class="card" style="background:var(--primary-bg)">
-            <div class="card-title">后续动作推荐（AI）</div>
-            <div id="reportAnalysis" style="font-size:12px"></div>
-          </div>
         </div>
       </div>
 
@@ -835,10 +855,24 @@ const _erpParams = (() => {
     productPosition: p.get('productPosition') || '',
     productStage: p.get('productStage') || '',
     seasonType: p.get('seasonType') || '',
+    siteCode: p.get('siteCode') || '',
     userId: p.get('userId') || '',
   };
 })();
 window._erpParams = _erpParams;
+
+// 基础信息卡（ERP 跳转 URL 参数 → 只读展示；不含决策批次/日期）
+const _SITE_ZH = { Amazon_US:'美国', Amazon_UK:'英国', Amazon_DE:'德国', US:'美国', UK:'英国', DE:'德国' };
+function renderBaseInfo() {
+  const p = _erpParams;
+  const site = _SITE_ZH[p.siteCode] || p.siteCode || '—';
+  setHTML('baseInfoContent',
+    _snapshotRow('父 ASIN', escapeHtml(p.parentAsin) || '—') +
+    _snapshotRow('父 SellerSku', escapeHtml(p.parentSellerSku) || '—') +
+    _snapshotRow('店铺', escapeHtml(p.shopAccount) || '—') +
+    _snapshotRow('站点', escapeHtml(site) || '—')
+  );
+}
 
 // ═══════════════ 决策批次状态 ═══════════════
 let _decisionContext = null;  // GET /decision/context 缓存
@@ -1001,11 +1035,13 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   const dirs = data.directions || [];
 
   setHTML('strategyContent',
+    _snapshotRow('分析天数', (data.days ? data.days + '天' : '—')) +
     _snapshotRow('产品定位', _badgeHtml(s.product_level)) +
     _snapshotRow('产品阶段', _badgeHtml(s.product_stage)) +
     _snapshotRow('季节阶段', _badgeHtml(s.season_stage)) +
     '<div style="font-size:11px;color:var(--muted-fg);margin-top:8px">读取自所选历史批次，当前为只读快照。</div>'
   );
+  hide('daysControl');   // 快照态：天数冻结，隐藏选择器（已在战略层只读行显示「分析天数 X天」）
   setHTML('strategyContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
   show('strategyContext');
 
@@ -1021,11 +1057,16 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   $('p3AcosLeftInput').disabled = true;
   $('p3BudgetLeftInput').disabled = true;
 
-  setHTML('targetScoreCards', `<div class="card" style="grid-column:1/-1;margin:0">
-    <div class="card-title">批次快照</div>
-    ${_snapshotRow('广告目的', _badgeListHtml(t.ad_purposes, 'badge-green'))}
-    ${_snapshotRow('关键词策略', _badgeListHtml(t.target_keyword_strategy, 'badge-blue'))}
-  </div>`);
+  // Tab1 评分卡：优先复用实时渲染器（零改造），无富数据时降级为 config badge 快照
+  if (Array.isArray(data.tactics_scores) && data.tactics_scores.length) {
+    renderTargetScores(data.tactics_scores);
+  } else {
+    setHTML('targetScoreCards', `<div class="card" style="grid-column:1/-1;margin:0">
+      <div class="card-title">批次快照</div>
+      ${_snapshotRow('广告目的', _badgeListHtml(t.ad_purposes, 'badge-green'))}
+      ${_snapshotRow('关键词策略', _badgeListHtml(t.target_keyword_strategy, 'badge-blue'))}
+    </div>`);
+  }
   setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">历史批次快照不重新拉取关键词监控明细</td></tr>');
   $('tacticsKwCount').textContent = '0';
 
@@ -1036,6 +1077,12 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   setHTML('execDirections', dirs.length
     ? dirs.map(d => `<div class="dir-card selected" style="cursor:default"><div class="dir-card-head"><span class="dir-card-title">${escapeHtml(String(d))}</span><span class="badge badge-green">快照</span></div></div>`).join('')
     : '<div style="padding:16px;color:var(--muted-fg);font-size:12px">该批次未记录广告方向</div>');
+  // 左栏广告方向（config 项，与战略/策略/ACOS·预算同列，快照只读）
+  const _ldEl = $('leftDirections');
+  if (_ldEl) _ldEl.innerHTML = dirs.length
+    ? dirs.map(d => _badgeHtml(d, 'badge-blue')).join('')
+    : '<span style="color:var(--muted-fg)">—</span>';
+  show('leftDirectionsBlock'); show('leftDirections'); hide('leftDirectionsEdit');
   hide('aiReasoningExec');
   hide('reportArea');
 
@@ -1664,6 +1711,7 @@ async function loadStrategy() {
   html += '</div>';
   setHTML('strategyContent', html);
   show('btnStrategy');
+  show('daysControl');   // 实时态：战略层末行天数选择器可选
   hide('sec1Loader');
   if (!prefilled) _applyUrlStrategyPrefill();  // 首访(无既存配置)时用 ERP URL 标签预填
   return { ok: true, data };
@@ -2596,34 +2644,57 @@ async function loadExecution() {
   // 缓存 AI 推荐方向供反馈使用
   _lastExecAiDirs = data.recommended_directions || [];
 
-  const colors = { push_natural:'#3B82F6', expand_keywords:'#8B5CF6', optimize_acos:'#F97316', balance_maintain:'#14B8A6' };
   let html = '';
+  let optsHtml = '';
   data.directions.forEach(d => {
-    const c = colors[d.id]||'#6B7280';
-    const rc = d.recommended ? 'recommended' : '';
     const defaultSel = d.recommended && d.suitability_score >= 40;
     const title = d.label || cnDir(d.id);
     const scoreBadge = d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray';
-    const aiBadge = d.suitability !== 'recommended' && d.recommended && d.suitability_score >= 40
-      ? '<span class="badge badge-amber" style="font-size:10px">AI建议</span>' : '';
-    const suitCls = d.suitability ? `dir-suit-${d.suitability}` : '';
-    html += `<div class="dir-card ${rc} ${suitCls}" id="dirc_${d.id}" onclick="togDir('${d.id}')" data-selected="${defaultSel?'true':'false'}">
+    // Tab4 卡片：纯展示（统一淡紫、无选中光效；保留评分+理由）
+    html += `<div class="dir-card flat" id="dirc_${d.id}">
         <div class="dir-card-head">
-          <span class="dir-color" style="background:${c}"></span>
           <span class="dir-card-title">${title}</span>
           <span class="badge dir-score ${scoreBadge}">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</span>
-          ${aiBadge}
         </div>
         <div class="dir-reason-wrap">${formatDirReason(d.reason)}</div>
     </div>`;
+    // 左栏下拉选项（多选，默认勾选 AI 推荐项；value=英文 id 供保存，data-label=中文供展示）
+    optsHtml += `<label class="md-option"><input type="checkbox" value="${d.id}" data-label="${title}" data-dim="directions" ${defaultSel?'checked':''} onchange="updateMultiTags('directions')">
+      <div class="md-opt-text"><div class="md-opt-label">${title}${d.recommended?' <span class="md-check-rec">AI推荐</span>':''}</div>
+      <div class="md-opt-desc">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</div></div></label>`;
   });
   setHTML('execDirections', html);
+
+  // 左栏广告方向操作台（实时态）：灌下拉选项 + 显示下拉、隐藏只读 badges
+  const _optsEl = $('leftDirectionsOptions');
+  if (_optsEl) { _optsEl.innerHTML = optsHtml; updateMultiTags('directions'); }
+  show('leftDirectionsBlock'); hide('leftDirections'); show('leftDirectionsEdit');
 
   if (data.recommendation_summary) {
     show('aiReasoningExec');
     setHTML('aiReasoningExec', formatAiSections(sanitizeOpsDisplayText(data.recommendation_summary)));
     $('aiReasoningExec').className = 'ai-reasoning';
   } else hide('aiReasoningExec');
+}
+
+// 左栏广告方向操作台保存（搬原「生成评估报告」的保存职责；报告生成已废弃）
+async function saveDirectionsLeft() {
+  const selected = Array.from(qsa('input[data-dim="directions"]:checked')).map(cb => cb.value);
+  const st = $('leftDirectionsStatus');
+  if (selected.length === 0) {
+    if (st) { st.textContent = '请至少选择一个方向'; st.style.color = 'var(--danger)'; show('leftDirectionsStatus'); }
+    return;
+  }
+  const btn = $('btnSaveDirections');
+  btn.disabled = true; btn.textContent = '保存中...';
+  try {
+    await callAPI('/execution/select', { asin, selected_directions: selected, sub_options: {} });
+    fbCaptureExecution(_lastExecAiDirs, selected);
+    if (st) { st.textContent = '✓ 已保存'; st.style.color = 'var(--success)'; show('leftDirectionsStatus'); }
+  } catch (e) {
+    if (st) { st.textContent = '保存失败: ' + e.message; st.style.color = 'var(--danger)'; show('leftDirectionsStatus'); }
+  }
+  btn.disabled = false; btn.textContent = '保存';
 }
 
 function togDir(id) {
@@ -2764,7 +2835,7 @@ function updateMultiTags(dim) {
     container.innerHTML = '<span class="md-placeholder">请选择</span>';
   } else {
     container.innerHTML = Array.from(checked).map(cb =>
-      `<span class="md-tag">${cb.value}<span class="md-tag-remove" onclick="event.stopPropagation();uncheckTag('${dim}','${cb.value}')">&times;</span></span>`
+      `<span class="md-tag">${cb.dataset.label || cb.value}<span class="md-tag-remove" onclick="event.stopPropagation();uncheckTag('${dim}','${cb.value}')">&times;</span></span>`
     ).join('');
   }
 }
@@ -3010,7 +3081,9 @@ document.addEventListener('DOMContentLoaded', () => {
     $('asinInput').value = asin;
     $('asinDisplay').textContent = asin;
     show('asinDisplay');
-    if (debugMode) { show('asinInput'); show('btnStart'); }  // 调试：保留手动入口
+    // ERP 模式：隐藏「输入ASIN/加载分析」卡，改渲染「基础信息」卡（URL 参数）
+    hide('cardAsinInput'); show('cardBaseInfo'); renderBaseInfo();
+    if (debugMode) { hide('cardBaseInfo'); show('cardAsinInput'); show('asinInput'); show('btnStart'); }  // 调试：保留手动入口
     bootstrapFromContext();
   } else {
     // 无 URL 父 ASIN → 调试手动入口
