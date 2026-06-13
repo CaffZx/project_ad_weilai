@@ -211,7 +211,6 @@ function _renderCards(state) {
     const klass = adj.action_klass || _badgeKlass(adj.action);
     const confKlass = adj.conf_klass || adj.confidence || 'medium';
     const fullReason = adj.reason || '';
-    const shortReason = fullReason.length > 250 ? fullReason.slice(0, 250) + '…' : fullReason;
     const reviewMark = state._reviewState[adj.item_id];
     const reviewBadge = reviewMark
       ? `<span class="review-badge review-${reviewMark}">${reviewMark === 'approve' ? '✓ 已同意' : '✗ 已拒绝'}</span>`
@@ -267,9 +266,8 @@ function _renderCards(state) {
             ${adj.review_level ? '| 审核: ' + _esc(adj.review_level) : ''}
           </div>
           <div class="values">${vals}</div>
-          <div class="reason">${_esc(shortReason)}</div>
+          <div class="reason" style="white-space:pre-wrap;">${_esc(fullReason)}</div>
           <div class="detail hidden" style="display:none;">
-            <div style="font-size:12px;line-height:1.7;white-space:pre-wrap;">${_esc(fullReason)}</div>
             ${_renderEvidence(adj)}
             ${extras}
           </div>

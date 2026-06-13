@@ -122,7 +122,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           <div id="camp-portfolio-pills-row" class="camp-portfolio-pills-row hidden"></div>
 
           <!-- 批量工具栏 -->
-          <div id="camp-batch-toolbar" class="camp-batch-toolbar hidden" style="display:none;">
+          <div id="camp-batch-toolbar" class="camp-batch-toolbar hidden">
             <button data-action="camp-select-all">全选可见</button>
             <button data-action="camp-clear-selection">清空选择</button>
             <span class="sep"></span>

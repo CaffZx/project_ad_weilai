@@ -363,7 +363,10 @@ def canonicalize_payload(
         primary_idx, primary_adj = _pick_primary_adjustment(group)
         match_type = _normalize_match_type(primary_adj.get("match_type"))
         keyword_text = _clip(primary_adj.get("keyword_text"), 512)
-        confidence = to_int(primary_adj.get("confidence"))
+        # confidence 是字符串 high/medium/low（非数字分数）；直接归一，勿走 to_int
+        confidence = str(primary_adj.get("confidence") or "medium").strip().lower()
+        if confidence not in ("high", "medium", "low"):
+            confidence = "medium"
         evidence_list = primary_adj.get("evidence") or []
         evidence_text = "\n".join(str(x) for x in evidence_list if x)
         description = primary_adj.get("reason")
@@ -439,7 +442,7 @@ def canonicalize_payload(
                 keyword_match_type=match_type,
                 trigger_rule=_clip(primary_adj.get("triggered_rule"), 128),
                 suggest_category=_category_from_action(primary_adj.get("action")),
-                confidence_level=_confidence_level(confidence),
+                confidence_level=confidence,
                 campaign_group_type=campaign_group_type,
                 description=description,
                 evidence=evidence_text,

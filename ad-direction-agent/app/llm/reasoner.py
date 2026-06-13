@@ -1861,7 +1861,7 @@ class LLMReasoner:
             asin, len(adjustments), timeout_override or 55,
         )
 
-        # 精简单条信息，控制输入 token
+        # 精简单条信息，控制输入 token（synthesis 只需语义聚类，不需要数值和元数据）
         compact: list[dict] = []
         for adj in adjustments:
             d = adj.model_dump() if hasattr(adj, "model_dump") else dict(adj)
@@ -1871,14 +1871,7 @@ class LLMReasoner:
                 "action": d.get("action", ""),
                 "triggered_rule": d.get("triggered_rule", ""),
                 "match_type": d.get("match_type", ""),
-                "keyword_class": d.get("keyword_class", ""),
-                "is_core": d.get("is_core", False),
-                "current_bid": d.get("current_bid"),
-                "proposed_bid": d.get("proposed_bid"),
-                "current_budget": d.get("current_budget"),
-                "proposed_budget": d.get("proposed_budget"),
                 "reason": d.get("reason") or "",  # 完整理由：分组命脉，不截断
-                "confidence": d.get("confidence", "medium"),
             })
 
         ctx_lines = [
@@ -1908,8 +1901,8 @@ class LLMReasoner:
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                max_tokens=8192,
-                timeout_override=max(timeout_override or 0, 180),   # 强档慢，至少 180s
+                max_tokens=16384,                                    # pro思考也吃 token 预算
+                timeout_override=max(timeout_override or 0, 240),   # 强档慢，至少 240s
                 model=settings.llm_model_strong,                    # 汇总=重要节点→强档
                 thinking=True,
                 reasoning_effort=settings.llm_strong_reasoning_effort,
