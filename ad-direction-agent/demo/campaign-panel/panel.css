@@ -79,7 +79,7 @@
 
 /* ── 概览统计 ── */
 .camp-summary-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px;
   margin-bottom: 8px;
 }
 .camp-summary-grid .stat { text-align: center; }

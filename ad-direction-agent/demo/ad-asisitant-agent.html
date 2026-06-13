@@ -891,7 +891,7 @@ function renderBatchBar(mode, ctx) {
   const batches = ((ctx && ctx.batches) || []);
   sel.innerHTML = batches.map((b) => {
     const label = (b.analysis_mode === 'SCHEDULED' ? '[定时] ' : '[手动] ') +
-                  (b.completed_at || '').slice(0, 10) +
+                  (b.batch_no || (b.completed_at || '').slice(0, 10)) +
                   (b.is_latest ? ' · 最新' : '');
     return `<option value="${b.decision_id}">${label}${b.executable ? '' : ' (仅查看)'}</option>`;
   }).join('');
@@ -3085,7 +3085,9 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
           // 以真实 ctx 派生三态/执行权：finalize_batch 或清 session 失败时
           // ctx.in_progress 仍为真 → 不误显 B/可执行（否则 confirm 会被后端拒）。
           applyBatchBarFromCtx(ctx);
-          const exec = !!ctx.has_config && !ctx.in_progress;
+          // 执行权 = 最新批次 且 无进行中事件（与前置配置 has_config 无关，按决策批次定稿）。
+          // 刚 finalize 的 write.decision_id 即最新批次。
+          const exec = !ctx.in_progress;
           await window._mountCampaignBatch({
             decision_id: write.decision_id || ctx.latest_completed_id || '',
             executable: exec,
@@ -3124,9 +3126,10 @@ window.switchTab = async function(tabId) {
     return;
   }
   // B 态：默认挂最新已完成批次（可执行）
+  // 执行权 = 有最新批次 且 无进行中事件（与前置配置 has_config 无关，按决策批次定稿）
   await window._mountCampaignBatch({
     decision_id: ctx.latest_completed_id || '',
-    executable: !!ctx.has_config && !ctx.in_progress,
+    executable: !!ctx.latest_completed_id && !ctx.in_progress,
   });
 };
 </script>

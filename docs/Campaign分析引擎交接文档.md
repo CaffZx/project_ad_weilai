@@ -717,7 +717,44 @@ tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来�
 
 ---
 
-*最后更新：2026-06-12（v2.1: 自然排名（周排名）接入精准活动分析 §13）*
+## 14. 2026-06-13：执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复
+
+> 当日 6 commit + 4 未提交。**完整细节见 [docs/2026-06-13-交接文档.md](2026-06-13-交接文档.md)**。
+
+### 14.1 ERP 执行层全链路落库接线（`53fa5b3` + 未提交 mappers）
+表结构经核对 **0 加列**（`ERP数据库改造方案.md` DDL 已落地，含 synthesis 三表/card 新列/summary 新列/collation 已转 general_ci）。
+- `auto_push`：payload 带 overview/synthesis/new_campaigns/skipped。
+- `models`：`SuggestCardCanonical` +campaign_key/keyword_class/review_level/is_core/perf_json/is_prefiltered/prefilter_reason；`CanonicalRun` +overview_text/synthesis/create_count。
+- `mappers`：cards 扩展（adjustments + **CREATE 卡 + 预过滤 prefiltered 卡**，新增/预过滤卡 `campaign_id=NULL` 避免撞 `uk(decision_id,campaign_id)`）；提取 overview/synthesis。
+- `repository`：summary 写 `analysis_overview`/`create_count`；card 写 6 新列；新增 `_upsert_synthesis`（reason_group/member/special，member.suggest_card_id=card_id）；read_snapshot 读 synthesis 三表；pending 行主键种子改 `card_id`。
+- `from_db_snapshot`：读 synthesis 三表；`target_budget` 取 `decision.daily_budget_suggest`（不在 summary 冗余存）。
+- 真库验证：analysis_overview / review_level / is_prefiltered(39 灰卡) / create_count ✅。
+
+### 14.2 batch_no + confidence_level 修复（未提交 mappers）
+- **batch_no**：从 run_id 派生本地 `YYYYMMDD-HHMM-序号`（复刻旧格式、与历史 7 天一致、同 run_id 重试稳定），与 decision_id 解耦；不参与唯一键。
+- **confidence_level**：原 `to_int("high")=None → _confidence_level → "low"` 把所有卡写成 low；改为直接用字符串 high/medium/low。**历史脏数据无法 SQL 回填，需重跑覆盖**。
+
+### 14.3 pipeline 并行提速（`5d232dd`）
+basic/perf 每活动配对并行；overview 改 gate task 与三流 prefetch 重叠；新增活动批次 `for`→`gather`（并修 `sem or Semaphore(1)` 失效限流）；sanity/synthesis 合成并行。
+
+### 14.4 缓存按 filter 分 key（`ecc207e`）
+`_ensure_data` 的 meta_filter 分支原**不读写缓存** → 同 ASIN 当天每次「加载分析」重拉。改：redis key 加 `:f<hash>` filter 维度 + 三级查找（本 filter→全量超集→fetch），refresh 删本 filter+全量。运维：Redis 未起只剩 30s LRU。
+
+### 14.5 决策批次面板修复（`889a0db`）
+B1 汇总 tab ReferenceError(state→vm) / B2 ViewModel 字段透传 / B3 localStorage GC 误删 / B5 跳转门禁 / B6 onComplete 三态 / B7 预算合计全集 / 缺口1 C 态放弃分析 / 实时切 tab 重复触发（`_campaignRealtimeRunning`）。
+
+### 14.6 前端展示 + synthesis 截断（未提交 render/panel/reasoner）
+- reason 完整显示（pre-wrap，不截断、不进展开详情）。
+- 批量栏去 inline `display:none`（`_show()` 清不掉 inline → 整条栏含「全选可见」永不显示）。
+- synthesis 截断（Unterminated string）：精简输入字段 + `max_tokens` 8192→16384 + timeout 240。
+
+### 14.7 待办（详见 6.13 文档）
+P1：方向 A 收敛（实时轨落库→读快照+删 to_viewmodel，落库失败报错不兜底）；ERP 脚本迁移（scripts/erp_db→根 scripts/erp，去硬编码可插拔）；历史 confidence 脏数据重跑；is_core 数据源。P2：定时调度器（decision_config 已备）；special 跳转；synthesis 兜底。
+
+---
+
+*最后更新：2026-06-13（v2.2: 执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复 §14）*
+*v2.1: 自然排名（周排名）接入精准活动分析 §13*
 *v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12*
 *v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11*
 *v1.8: placement 加价比例数据接入+代码回填+前端合并模块 §10*
