@@ -47,15 +47,24 @@ export function createCampaignState() {
     } catch (_) {}
   }
 
+  // run_id 形如 "20260612T031045Z"（UTC），解析为毫秒时间戳；非该格式返回 null。
+  function _runIdToMs(runId) {
+    const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(runId || '');
+    return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+  }
+
   function _gcOldReviewKeys() {
     try {
       const now = Date.now();
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const k = localStorage.key(i);
         if (k && k.startsWith('camp_review_')) {
+          // key = camp_review_{asin}_{days}_{run_id}；末段是 run_id（UTC 时间串）。
+          // 原先 parseInt("20260612T031045Z")=20260612，与 Date.now()(~1.7e12) 比较恒为旧
+          // → 每次都把刚写入的当前审核态一并删掉。改为正确解析；解析失败则跳过删除（保守）。
           const parts = k.split('_');
-          const ts = parseInt(parts[parts.length - 1]);
-          if (!isNaN(ts) && (now - ts > 7 * 86400 * 1000)) localStorage.removeItem(k);
+          const ms = _runIdToMs(parts[parts.length - 1]);
+          if (ms != null && (now - ms > 7 * 86400 * 1000)) localStorage.removeItem(k);
         }
       }
     } catch (_) {}
@@ -221,8 +230,8 @@ export function createCampaignState() {
 
   state.jumpToDetail = function (key) {
     state._activeTab = 'detail';
-    // 自动加入勾选
-    if (state.mode === 'interactive') state._selection.add(key);
+    // 自动加入勾选（门禁与全模块统一用 executable：B 态 readonly+executable 也应自动勾选）
+    if (state.executable) state._selection.add(key);
     _reRender();
     // scroll + flash
     requestAnimationFrame(() => {

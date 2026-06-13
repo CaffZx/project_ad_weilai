@@ -39,6 +39,10 @@ function _def(v, fallback) {
 
 function _itemDefaults(item) {
   return {
+    // 先铺原始 item，保留后端透传但未列入下方白名单的字段
+    // （natural_rank/near_natural_rank/rank_change、confirm_status/execute_status、
+    //  keyword_count 等）；下方归一化字段再覆盖，确保默认值不丢。
+    ...item,
     item_type: _def(item.item_type, 'existing'),
     item_id: _def(item.item_id, _def(item.campaign_key, item.campaign_name || '')),
     campaign_key: _def(item.campaign_key, ''),

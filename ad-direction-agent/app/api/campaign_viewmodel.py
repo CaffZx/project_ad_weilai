@@ -143,6 +143,8 @@ def _item_from_skipped(s) -> dict:
         "keyword_text": s.get("keyword_text", "") or "",
         "match_type": s.get("match_type", "") or "",
         "keyword_class": s.get("keyword_class", "") or "",
+        # 多词预过滤卡词数（数据源 campaign_prefilter.py 已产出，前端灰卡展示用）
+        "keyword_count": s.get("keyword_count"),
         "action": "prefiltered" if is_prefiltered else "skipped",
         "reason": s.get("reason", "") or "",
         "evidence": [],

@@ -644,6 +644,7 @@ body {
         <select id="batchSelect" style="width:auto;flex:1;max-width:320px;"></select>
         <span id="batchBadge" class="badge" style="font-size:10px;"></span>
         <button id="btnNewEvent" class="btn btn-primary btn-sm" style="margin-left:8px;" onclick="onNewEventClick()">新建分析事件</button>
+        <button id="btnCancelEvent" class="btn btn-sm hidden" style="margin-left:8px;" onclick="onCancelEventClick()">放弃本次分析</button>
       </div>
 
       <!-- 药丸标签栏 -->
@@ -884,6 +885,7 @@ function renderBatchBar(mode, ctx) {
   const sel = document.getElementById('batchSelect');
   const badge = document.getElementById('batchBadge');
   const btn = document.getElementById('btnNewEvent');
+  const btnCancel = document.getElementById('btnCancelEvent');
 
   // 批次下拉填充（进行中事件在 state 库，不进入已完成批次列表）
   const batches = ((ctx && ctx.batches) || []);
@@ -899,12 +901,15 @@ function renderBatchBar(mode, ctx) {
   if (mode === 'A') {
     badge.textContent = '未配置'; badge.className = 'badge badge-yellow';
     btn.classList.remove('hidden');
+    if (btnCancel) btnCancel.classList.add('hidden');
   } else if (mode === 'C') {
     badge.textContent = '进行中'; badge.className = 'badge badge-blue';
     btn.classList.add('hidden');
+    if (btnCancel) btnCancel.classList.remove('hidden');   // C 态:可放弃进行中事件
   } else {
     badge.textContent = '最新·可操作'; badge.className = 'badge badge-green';
     btn.classList.remove('hidden');
+    if (btnCancel) btnCancel.classList.add('hidden');
   }
   // 下拉变化 → 切批次
   sel.onchange = function() {
@@ -912,6 +917,15 @@ function renderBatchBar(mode, ctx) {
     const b = batches.find(x => x.decision_id === id);
     if (b) switchBatch(b);
   };
+}
+
+// 统一三态分派：未配置→A / 有进行中事件→C / 已配置无进行中→B。
+// 抽出供 loadAll、onComplete 等复用，避免各处硬编码 mode。
+function applyBatchBarFromCtx(ctx) {
+  const c = ctx || {};
+  if (!c.has_config) renderBatchBar('A', c);
+  else if (c.in_progress) renderBatchBar('C', c);
+  else renderBatchBar('B', c);
 }
 
 async function switchBatch(batch) {
@@ -1054,6 +1068,22 @@ async function onNewEventClick() {
     await loadAll(true);
   } else {
     alert('创建失败: ' + (res.error || '未知错误'));
+  }
+}
+
+async function onCancelEventClick() {
+  if (!confirm('确认放弃本次进行中的分析吗？\n\n放弃后将恢复到最近一次已完成批次的可执行状态。')) return;
+  let res;
+  try {
+    res = await callAPI('/decision/cancel-event', { asin });
+  } catch (e) {
+    alert('放弃失败: ' + (e.message || '未知错误'));
+    return;
+  }
+  if (res && res.ok) {
+    await bootstrapFromContext();   // 重跑三态判定（含 refreshDecisionContext + 渲染）
+  } else {
+    alert('放弃失败: ' + ((res && res.error) || '未知错误'));
   }
 }
 
@@ -1507,9 +1537,7 @@ async function loadAll(skipContextRefresh = false) {
   hide('errGlobal');
   if (!skipContextRefresh) {
     const ctx = await refreshDecisionContext();
-    if (!ctx.has_config) renderBatchBar('A', ctx);
-    else if (ctx.in_progress) renderBatchBar('C', ctx);
-    else renderBatchBar('B', ctx);
+    applyBatchBarFromCtx(ctx);
   }
   const startBtn = $('btnStart');
   startBtn.disabled = true;
@@ -3049,10 +3077,14 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
         const write = vm && vm.erp_write;
         if (write && write.ok && write.decision_id) {
           await refreshDecisionContext();
-          renderBatchBar('B', _decisionContext);
+          const ctx = _decisionContext || {};
+          // 以真实 ctx 派生三态/执行权：finalize_batch 或清 session 失败时
+          // ctx.in_progress 仍为真 → 不误显 B/可执行（否则 confirm 会被后端拒）。
+          applyBatchBarFromCtx(ctx);
+          const exec = !!ctx.has_config && !ctx.in_progress;
           await window._mountCampaignBatch({
-            decision_id: write.decision_id,
-            executable: true,
+            decision_id: write.decision_id || ctx.latest_completed_id || '',
+            executable: exec,
           });
         } else if (write && write.attempted) {
           const msg = document.createElement('div');

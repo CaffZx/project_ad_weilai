@@ -409,7 +409,7 @@ function _renderSynthesis(vm) {
       <div class="group-title">
         ${gi + 1}. ${_esc(g.title || '')}
         <span class="camp-badge camp-badge-${_badgeKlass(g.action)}">${_actionLabel(g.action)} ×${g.count || (g.campaign_keys || []).length}</span>
-        <button class="camp-group-select-btn" data-action="camp-select-group" data-group-index="${gi}" ${!state.executable ? 'disabled' : ''}>☑ 全选本组</button>
+        <button class="camp-group-select-btn" data-action="camp-select-group" data-group-index="${gi}" ${!vm.executable ? 'disabled' : ''}>☑ 全选本组</button>
       </div>
       <div class="group-narrative">${_esc(g.narrative || '')}</div>
       <div class="group-keys">
@@ -505,7 +505,9 @@ function _renderBudgetSummary(state) {
   if (!bs) { _hide('camp-budget-summary'); return; }
 
   let selTotal = 0;
-  state._filteredItems.forEach(it => {
+  // 遍历全集 _campaignItems（非 _filteredItems）：勾选后再切筛选时，
+  // 被藏住的已勾选项仍须计入"已勾选合计"，与"执行后预计总预算"语义一致。
+  state._campaignItems.forEach(it => {
     if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
     if (it.proposed_budget != null && state._selection.has(it.item_id)) {
       selTotal += it.proposed_budget;
