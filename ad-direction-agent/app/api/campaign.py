@@ -25,12 +25,13 @@ from app.persistence.erp_writer.auto_push import (
     should_push_to_erp,
     wizard_payload_from_state,
 )
+from app.persistence.erp_writer.repository import _get_repository
 from app.persistence.state_factory import get_state_manager
 from app.workflow.steps.campaign import (
     analyze_campaigns,
     build_campaign_strategy_context,
 )
-from app.api.campaign_viewmodel import to_viewmodel
+from app.api.campaign_viewmodel import from_db_snapshot
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -118,26 +119,81 @@ async def campaign_analyze(req: dict):
 
 @router.post("/campaign/viewmodel")
 async def campaign_viewmodel(req: dict):
-    """运行 Campaign LLM 分析，返回统一 CampaignViewModel（mode=interactive）。
+    """实时操作台：分析 → 强制落库 → 回读快照渲染（方向 A 收敛）。
 
-    供 tab5 实时操作台使用。与 /campaign/analyze 走同一分析链路，
-    仅输出格式不同——pipe 过 to_viewmodel()。
+    单一 mapper `from_db_snapshot` 为唯一真相源（与 /campaign/snapshot 同源），
+    消两 mapper 漂移债。红线：执行层无落库记录禁止展示可执行——落库/回读失败
+    一律明确报错（_failure_vm），不内存兜底。
     """
     result, extra = await _do_analyze(req)
+    if extra is None:                       # 分析本身失败（超时/异常/缺 asin）
+        return _failure_vm(result)
 
-    vm = to_viewmodel(result, mode="interactive")
+    # 实时轨强制落库（本路径落库是硬约束，不看请求的 write_erp 位）。
+    erp = await _maybe_push_erp(
+        result,
+        asin=extra["asin"],
+        days=extra["days"],
+        temperature=extra["temperature"],
+        write_erp=True,
+        state=extra["state"],
+        analysis_mode=extra["analysis_mode"],
+    )
+    decision_id = erp.get("decision_id")
+    if not erp.get("ok") or not decision_id:
+        reason = erp.get("error") or erp.get("skipped") or "未知原因"
+        vm = _failure_vm(result, extra_warnings=[f"执行层落库失败，无法操作：{reason}"])
+        vm["erp_write"] = erp
+        return vm
 
-    if extra is not None:
-        vm["erp_write"] = await _maybe_push_erp(
+    # 落库成功 → 回读快照，单一 mapper 渲染（mode=interactive 供操作台勾选）。
+    try:
+        snap = await asyncio.to_thread(_get_repository().read_snapshot, decision_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("read_snapshot 回读失败 [%s] %s", decision_id, e)
+        snap = None
+    if not snap:
+        vm = _failure_vm(
             result,
-            asin=extra["asin"],
-            days=extra["days"],
-            temperature=extra["temperature"],
-            write_erp=extra["write_erp"],
-            state=extra["state"],
-            analysis_mode=extra["analysis_mode"],
+            extra_warnings=[f"落库成功但快照回读失败（decision_id={decision_id}）"],
         )
+        vm["erp_write"] = erp
+        return vm
+
+    vm = from_db_snapshot(snap, mode="interactive")
+    vm["erp_write"] = erp
     return vm
+
+
+def _failure_vm(
+    result: CampaignAnalysisResult,
+    *,
+    mode: str = "interactive",
+    extra_warnings: list[str] | None = None,
+) -> dict:
+    """方向 A：分析失败 / 落库失败 → 空 vm（无 items、不可执行），不内存兜底。
+
+    与 to_viewmodel/from_db_snapshot 同形，但 items=[]、is_latest=False，
+    前端据此明确报错且不展示可执行 UI。
+    """
+    warnings = list(result.warnings or [])
+    if extra_warnings:
+        warnings += extra_warnings
+    return {
+        "mode": mode,
+        "parent_asin": result.parent_asin or "",
+        "days": result.days or 7,
+        "run_id": result.run_id or "",
+        "snapshot_time": None,
+        "summary": {
+            "total": 0, "eliminate": 0, "adjust": 0, "keep": 0, "create": 0,
+            "prefiltered": 0, "lost": 0, "confidence_high": 0,
+            "confidence_medium": 0, "confidence_low": 0,
+            "budget_impact": None, "sanity_check_passed": result.sanity_check_passed,
+        },
+        "overview": None, "budget_summary": None, "synthesis": None,
+        "items": [], "warnings": warnings, "is_latest": False,
+    }
 
 
 def _empty_snapshot(asin: str, days: int, msg: str) -> dict:
@@ -160,9 +216,6 @@ async def campaign_snapshot(asin: str = "", decision_id: str = "", days: int = 7
 
     不传 decision_id 时取该 ASIN is_latest=1 的最新已完成批次。
     """
-    from app.persistence.erp_writer.repository import _get_repository
-    from app.api.campaign_viewmodel import from_db_snapshot
-
     if not asin and not decision_id:
         return _empty_snapshot(asin, days, "asin 或 decision_id 必填")
 

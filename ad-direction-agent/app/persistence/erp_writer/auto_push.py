@@ -155,8 +155,10 @@ def should_push_to_erp(result: CampaignAnalysisResult | dict[str, Any]) -> tuple
     else:
         data = dict(result)
 
-    if not data.get("sanity_check_passed", True):
-        return False, "sanity_check_passed=false"
+    # 注意：sanity_check_passed 不作落库门槛。它衡量的是「sanity 旁路 LLM
+    # 步骤是否成功跑完」（禁用/无低置信项也可能为 True，LLM 抖动则为 False），
+    # 并非主分析结果（adjustments/cards）的质量。sanity 结论照常落 summary
+    # .validation_passed 字段，由前端按该字段警示，但不阻断主结果落库。
     adjustments = data.get("adjustments") or []
     if not adjustments:
         return False, "no adjustments"

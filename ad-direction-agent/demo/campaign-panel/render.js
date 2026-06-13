@@ -56,6 +56,9 @@ function _fullRender(state) {
   // 告警
   _renderWarnings(vm);
 
+  // sanity 校验未通过警示（sanity 失败照常落库，仅警示不阻断执行）
+  _renderSanityNotice(vm);
+
   // 概览
   _renderOverview(vm);
 
@@ -102,6 +105,22 @@ function _renderOverview(vm) {
     _$('camp-overview-body').innerHTML = '<div class="text-xs muted">AI 执行总纲未生成（数据不足或超时），请参考下方明细。</div>';
   }
   _show('camp-overview');
+}
+
+// ── sanity 校验未通过警示 ──
+// validation_passed=0（sanity 旁路 LLM 失败/发现矛盾）→ 数据照常可见可执行，
+// 仅复用 .camp-disclaimer（琥珀色）提示人工复核。sanity_check_passed===false 才显示，
+// null/undefined（无低置信项跳过校验，或快照无该列）不显示。
+function _renderSanityNotice(vm) {
+  const el = _$('camp-disclaimer');
+  if (!el) return;
+  const passed = vm.summary && vm.summary.sanity_check_passed;
+  if (passed === false) {
+    el.textContent = '⚠ 一致性校验未通过（可能为 sanity 步骤 LLM 抖动，或发现决策矛盾）。数据仍可查看与执行，请人工复核后再确认。';
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
 }
 
 // ── 告警 ──

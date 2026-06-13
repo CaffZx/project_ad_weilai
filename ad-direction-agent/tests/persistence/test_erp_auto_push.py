@@ -78,6 +78,8 @@ def test_wizard_payload_partial_when_empty():
 
 
 def test_should_push_to_erp_gates():
+    # sanity 失败不再阻断落库（sanity 只衡量旁路步骤成败，非结果质量）。
+    # 有 adjustments + campaign_id 即可落库；sanity 结论另落 validation_passed。
     ok, _ = should_push_to_erp(
         CampaignAnalysisResult(
             parent_asin="X",
@@ -85,7 +87,7 @@ def test_should_push_to_erp_gates():
             adjustments=[CampaignAdjustmentItem(campaign_name="c", campaign_id="1")],
         )
     )
-    assert ok is False
+    assert ok is True
 
     ok, reason = should_push_to_erp(
         CampaignAnalysisResult(

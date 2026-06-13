@@ -364,7 +364,18 @@ async def _analyze_campaigns_impl(
     # 用预过滤阶段疑似已淘汰活动数作 FILL_AFTER_ELIMINATION 触发输入
     # （并行架构下精准/广泛 adjustments 尚未产出；语义=已存在淘汰活动→词池已变窄）
     pre_eliminated_count = len(skipped_eliminated)
-    shop_account = getattr(fetcher, "_last_shop_account", "")
+    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    if not shop_account:
+        # 与 placement/search_term 懒加载（本文件 ~1428/~1477 行）一致的回落：
+        # _last_shop_account 为空时从 DB 解析。candidate 发现的 flow_keywords/
+        # own_keyword_flow 把 shop_account 列为必填，缺则 build_tool_args 丢弃该参数
+        # → MCP 查不到 → new_campaigns 恒空。此处补齐，杜绝"店铺未缓存即无新增活动"。
+        from app.data.mcp_db_context import resolve_mcp_context_from_db
+        try:
+            _shop_ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
+            shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
+        except Exception:
+            shop_account = ""
     # 新增活动投放目标子 ASIN：历史活动数最多/花费最高的子 ASIN（非父 ASIN 占位）
     target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
 
@@ -483,6 +494,12 @@ async def _analyze_campaigns_impl(
         item.campaign_id = cu.campaign_id
         item.keyword_id = cu.keyword_id
         item.seller_sku = cu.seller_sku
+        # current_* 以代码可信源（CampaignUnit）为准：current_budget 来自 MCP
+        # ad_campaign_basic_info、current_bid 来自 Doris 上下文，均为后台真值。
+        # LLM 在 JSON 回填的 current_* 可能抄错，不予采信（proposed_* 仍用 LLM 产出）。
+        # 修正后，_resolve_budget_conflicts 末尾的终态 _normalize_action 会据真值重派生 action。
+        item.current_budget = cu.current_budget
+        item.current_bid = cu.current_bid
         # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
         item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
         item.natural_rank = cu.natural_rank
