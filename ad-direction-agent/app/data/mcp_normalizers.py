@@ -176,10 +176,10 @@ def normalize_keyword_rankings(competitors_payload: Any, child_asins_payload: An
         for row in payload:
             rows.append(
                 {
-                    "keyword": row.get("keyword"),
-                    "craw_nature_rank": _int(row.get("natural_rank") or row.get("craw_nature_rank")),
-                    "near_craw_nature_rank": _int(row.get("near_natural_rank") or row.get("near_craw_nature_rank")),
-                    "craw_sp_rank": _int(row.get("sp_rank") or row.get("craw_sp_rank")),
+                    "keyword": _pick(row, "keyword", "关键词", "搜索词"),
+                    "craw_nature_rank": _int(_pick(row, "natural_rank", "craw_nature_rank", "自然排名", "自然排位排名", "自然位排位")),
+                    "near_craw_nature_rank": _int(_pick(row, "near_natural_rank", "near_craw_nature_rank", "近次排名", "上次排名", "上次自然排名")),
+                    "craw_sp_rank": _int(_pick(row, "sp_rank", "craw_sp_rank", "sp排名", "SP排名")),
                 }
             )
     return rows
