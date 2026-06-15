@@ -164,6 +164,15 @@ class Settings(BaseSettings):
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
     campaign_new_max_count: int = 20          # 单次分析最大候选词数 (排序后截断 Top-N)
 
+    # 淘汰活动复评（重启）— KB 21 §7，确定性规则引擎，无 LLM
+    campaign_restart_enabled: bool = True             # 总开关
+    campaign_restart_review_days: int = 14            # 入池 ≥N 天才复评 (KB §7)
+    campaign_restart_budget: float = 3.0              # 恢复后日预算 (KB §7 情况一/二)
+    campaign_restart_bid_floor: float = 0.20          # 情况一 Bid 维持值 / 情况二下限
+    campaign_restart_bid_cap: float = 0.5             # 情况二 min(0.5, 均CPC) 上限 (KB §7)
+    campaign_restart_high_spend_7d: float = 15.0      # 情况二「淘汰前花费较高」阈值 (借 §1，运营已确认，可调)
+    campaign_restart_orders_window_max_days: int = 30 # 在池订单窗口上限 = min(入池天数, 此值)
+
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"
     csv_key_column: str = "asin"

@@ -23,6 +23,8 @@ def _action_klass(action: str) -> str:
     """action 字段 → CSS klass."""
     if action == "eliminate_to_low_bid_pool":
         return "eliminate"
+    if action.startswith("reactivate"):
+        return "reactivate"
     if action.startswith("adjust"):
         return "adjust"
     if action == "keep":
@@ -162,6 +164,11 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             action = "prefiltered"
         else:
             item_type = "existing"
+
+        # 复评卡识别（KB21§7）：trigger_rule=REACTIVATE_* → action/klass 走 reactivate（前端深蓝「复评」）
+        _trig = card.get("trigger_rule") or ""
+        if not is_pref and _trig.upper().startswith("REACTIVATE"):
+            action = _trig.lower()
 
         grp_code = card.get("campaign_group_type") or ""
         items.append({

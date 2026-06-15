@@ -63,6 +63,19 @@ def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
     return (b is not None and b <= LOW_BID_MAX) or (bg is not None and bg <= LOW_BUDGET_MAX)
 
 
+def is_strictly_in_low_bid_pool(bid: float | None, budget: float | None) -> bool:
+    """严格在池：bid ≤ LOW_BID_MAX 且 budget ≤ LOW_BUDGET_MAX（双双到底 = 已完全淘汰执行）。
+
+    与 _is_in_elimination_pool（OR，归组/强制淘汰用）区分：本谓词用 AND，
+    供预过滤剔除（campaign.py）与淘汰复评（campaign_restart.py）判"确实已入池执行"，
+    单一真相源，避免阈值/逻辑漂移（KB 21 §6）。
+    """
+    return (
+        bid is not None and bid <= LOW_BID_MAX
+        and budget is not None and budget <= LOW_BUDGET_MAX
+    )
+
+
 def _is_exact_testing(unit: CampaignUnit, effective_budget: float | None = None) -> bool:
     """精准测试组判定:活动预算 < $5 (KB23 §3.1)。
 

@@ -455,6 +455,9 @@ def canonicalize_payload(
                 keyword_class=primary_adj.get("keyword_class") or None,
                 review_level=primary_adj.get("review_level") or None,
                 is_core=bool(primary_adj.get("is_core")),
+                # 逐活动 7d 指标快照 → 既有 perf_json 列（淘汰卡借此存淘汰前花费，KB21§7 情况二复评读取）
+                perf_json=(json.dumps(primary_adj["perf_7d"], ensure_ascii=False)
+                           if primary_adj.get("perf_7d") else None),
                 placements=list(placements_by_type.values()),
                 keyword_pending=keyword_pending,
                 campaign_pending=campaign_pending,

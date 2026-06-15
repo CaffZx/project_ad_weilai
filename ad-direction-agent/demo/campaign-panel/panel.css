@@ -115,6 +115,7 @@
 .camp-adjustment-card.adjust    { border-left-color: #F59E0B; }
 .camp-adjustment-card.keep      { border-left-color: #374151; }
 .camp-adjustment-card.create    { border-left-color: #16A34A; }
+.camp-adjustment-card.reactivate { border-left-color: #1E3A8A; }   /* 复评 — 深蓝/navy */
 .camp-adjustment-card.skipped   { border-left-color: #9CA3AF; opacity: 0.85; background: #F9FAFB; }
 
 .camp-adjustment-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -143,6 +144,7 @@
 .camp-badge-adjust    { background: #FEF3C7; color: #92400E; }
 .camp-badge-keep      { background: #E5E7EB; color: #374151; }
 .camp-badge-create    { background: #DCFCE7; color: #166534; }
+.camp-badge-reactivate { background: #1E3A8A; color: #fff; }   /* 复评 — 深蓝 */
 .camp-badge-skipped   { background: #E5E7EB; color: #6B7280; }
 .camp-badge-high      { background: #DBEAFE; color: #1E40AF; }
 .camp-badge-medium    { background: #E5E7EB; color: #374151; }

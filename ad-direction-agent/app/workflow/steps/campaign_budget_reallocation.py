@@ -28,6 +28,7 @@ from app.models.campaign import (
     CampaignAdjustmentItem,
     CampaignStrategyContext,
     CampaignUnit,
+    NewCampaignItem,
 )
 from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_BROAD,
@@ -75,14 +76,32 @@ def _group_of(item: CampaignAdjustmentItem) -> str:
     return PORTFOLIO_BROAD
 
 
+def _group_of_new(nc: NewCampaignItem) -> str:
+    """新增活动归组（永不淘汰）：优先 ai_portfolio_class（campaign_new 已设测试/广泛），
+    缺失时按 match_type 兜底——新 EXACT 一律进精准测试组（KB23 §3.4：<$5、未验证，不套 $5 分界）。"""
+    g = (nc.ai_portfolio_class or "").strip()
+    if g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD):
+        return g
+    mt = (nc.match_type or "").upper()
+    if mt in ("BROAD", "PHRASE", "AUTO"):
+        return PORTFOLIO_BROAD
+    return PORTFOLIO_TEST  # 新 EXACT（及未知）→ 测试组（兜底分支，ai_portfolio_class 通常已设）
+
+
 def aggregate(
     adjustments: list[CampaignAdjustmentItem],
     all_units: list[CampaignUnit],
     ctx: CampaignStrategyContext,
     *,
     search_volume_map: dict[str, int] | None = None,
+    new_campaigns: list[NewCampaignItem] | None = None,
 ) -> dict:
-    """预聚合 LLM 输入包（约束维度）。current_group_budget 兜底 = 父目标×占比。"""
+    """预聚合 LLM 输入包（约束维度）。current_group_budget 兜底 = 父目标×占比。
+
+    新增活动（KB23 §5.1）：current=0 的纯净增需求，加进所属组 group_requested_delta
+    软信号 + 单列 new_requested_delta，供 LLM 按 §3.1B 权衡（不扩 pool、不撑大父预算，
+    在固定池内挤占别组=存量消耗）。
+    """
     sv_map = search_volume_map or {}
     unit_by_key = {cu.campaign_key: cu for cu in all_units}
     parent_target = _f(ctx.daily_budget) if ctx.daily_budget is not None else None
@@ -103,6 +122,7 @@ def aggregate(
             "base_constraint": (round(parent_target * shares[g] / share_sum, 2)
                                 if parent_target else None),
             "group_requested_delta": 0.0,   # 组内活动想加/减多少（需求信号，非绝对预算）
+            "new_requested_delta": 0.0,     # 其中来自本轮新建活动的需求（current=0 净增，KB23 §5.1）
             "campaigns": [],
         }
         for g in _ACTIVE_GROUPS
@@ -134,8 +154,32 @@ def aggregate(
             "search_volume": sv_map.get((item.keyword_text or "").strip().lower()),
         })
 
+    # 新增活动（KB23 §5.1）：current=0 → 整笔 proposed 是净增需求，进所属组软信号。
+    # 字段缺口：NewCampaignItem 无 natural_rank/acos（在 Candidate 上，未透传）→ None；
+    # search_volume 从 sv_map 按词回查（KB §3.1A 缺字段时 LLM 应小预算观察，不据此大幅倾斜）。
+    for nc in (new_campaigns or []):
+        grp = _group_of_new(nc)
+        if grp not in _ACTIVE_GROUPS:
+            continue
+        proposed = _f(nc.proposed_daily_budget)
+        gd = groups[grp]
+        gd["group_requested_delta"] += proposed
+        gd["new_requested_delta"] += proposed
+        gd["campaigns"].append({
+            "campaign_key": nc.campaign_name or nc.keyword_text,
+            "keyword_text": nc.keyword_text,
+            "current_budget": 0.0,
+            "proposed_budget": round(proposed, 2),
+            "natural_rank": None,
+            "rank_change": None,
+            "acos": None,
+            "search_volume": sv_map.get((nc.keyword_text or "").strip().lower()),
+            "is_new": True,
+        })
+
     for g in _ACTIVE_GROUPS:
         groups[g]["group_requested_delta"] = round(groups[g]["group_requested_delta"], 2)
+        groups[g]["new_requested_delta"] = round(groups[g]["new_requested_delta"], 2)
 
     pool = round((parent_target or 0.0) + parent_allowed, 2)
     purposes = ctx.ad_purposes or []

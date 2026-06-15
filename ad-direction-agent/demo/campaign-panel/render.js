@@ -39,6 +39,8 @@ function _actionLabel(a) {
     adjust_bid: '调出价',
     adjust_budget: '调预算',
     adjust_placement: '调广告位',
+    reactivate_budget_only: '复评',
+    reactivate_with_calibrated_bid: '复评',
     keep: '保持',
     create_campaign: '新增',
     prefiltered: '预过滤',
@@ -48,6 +50,7 @@ function _actionLabel(a) {
 
 function _badgeKlass(action) {
   if (action === 'eliminate_to_low_bid_pool') return 'eliminate';
+  if ((action || '').startsWith('reactivate')) return 'reactivate';
   if (action === 'create_campaign') return 'create';
   if ((action || '').startsWith('adjust')) return 'adjust';
   return 'keep';

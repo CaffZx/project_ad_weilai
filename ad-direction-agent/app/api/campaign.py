@@ -325,6 +325,15 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             asin, days, effective_temp, strat_ctx.target_acos,
         )
 
+        # 淘汰复评（KB21§7）入池日期/淘汰前花费：只读 ERP 历史，fail-open（库不通 → {} → 不复评）
+        try:
+            entry_dates = await asyncio.to_thread(
+                _get_repository().get_elimination_entry_dates, asin,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("get_elimination_entry_dates 失败 [%s]: %s (复评跳过)", asin, e)
+            entry_dates = {}
+
         fetcher = CampaignFetcher()
         result = await asyncio.wait_for(
             analyze_campaigns(
@@ -339,6 +348,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                 keyword_analysis=keyword_analysis,
                 run_id=effective_run_id,
                 erp_override=erp_override,
+                elimination_entry_dates=entry_dates,
             ),
             timeout=settings.campaign_total_timeout,
         )

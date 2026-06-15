@@ -504,7 +504,7 @@ _CAMPAIGN_OVERVIEW_PROMPT = """你是资深亚马逊广告策略分析师。基�
 - **禁止**出现"已淘汰N个/已提价/预计下调$X"这类分析结果——那是后续汇总的事。
 - 宏观视角，不逐个活动点评。
 - 广告方向统一用中文：推进自然位 / 新增扩词 / 优化ACOS / 平衡维持。
-- 数据缺失（N/A）的维度：明确不基于它判断、不臆测，不当作"正常"。
+- 数据缺失（N/A）的维度：明确不基于它判断、不臆测，既不当作"正常/安全"、也不当作"风险/不足"；不得因数据缺失就反向施加阻断（如缺库存数据≠库存不足，不得据此禁止对自身指标健康的活动加预算/调价等动作）。只有规则中有明确阈值且数值确认越线（如库存确认<7天）才触发对应阻断。
 
 ## 输出格式（纯 JSON，不含 markdown 代码块标记）
 {
@@ -530,7 +530,8 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
 
 ## 输入说明（数值已由代码算好，禁止重算）
 - `parent`：`budget_pool`（本轮 3 活跃组**可分配总额** = 父目标 + 允许净增）、`parent_target_daily_budget`、`base_shares_pct`（兜底基础占比，通常 60/20/20）、`low_bid_retention_release`、`priority_context`（产品定位/淡旺季/是否含 ranking 推词）。
-- `groups[]`：每组 `base_constraint`（= 父目标×基础占比，**分配起点**）、`base_share_pct`、`group_requested_delta`（组内活动想加/减多少，**需求信号**，不是要你累加的绝对预算）、组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断）。
+- `groups[]`：每组 `base_constraint`（= 父目标×基础占比，**分配起点**）、`base_share_pct`、`group_requested_delta`（组内活动想加/减多少，**需求信号**，不是要你累加的绝对预算）、`new_requested_delta`（其中来自本轮**新建活动**的需求，current=0 全是净增）、组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断；`is_new` 标记新建活动，其 natural_rank/acos 暂无数据）。
+  - **新建活动权衡（KB §3.1B）**：`new_requested_delta` 大不代表必须把该组（通常是精准测试组）整体加到 $5——**不得为新活动稀释推词预算**；新活动缺自然位/ACOS 字段时按小预算观察，不据此大幅向测试组倾斜。
 - `low_bid_group`：低价捡漏组，**固定 $1、不参与分配**，仅展示释放金额。
 
 ## 你的任务（把 budget_pool 分给 3 组）

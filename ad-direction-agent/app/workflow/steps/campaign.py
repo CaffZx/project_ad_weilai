@@ -24,7 +24,9 @@ from app.workflow.steps.campaign_portfolio import (
     LOW_BUDGET_MAX,
     PORTFOLIO_ELIMINATE,
     classify as _classify_portfolio,
+    is_strictly_in_low_bid_pool,
 )
+from app.workflow.steps.campaign_restart import analyze_eliminated_restart
 from app.workflow.steps.campaign_new import (
     analyze_new_campaigns,
     pick_target_child_asin as _pick_target_child_asin,
@@ -138,6 +140,93 @@ async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> No
         pass
 
 
+# ── 淘汰复评 I/O 编排（KB 21 §7；纯判定在 campaign_restart.analyze_eliminated_restart） ──
+
+
+async def _run_restart_review(
+    pool_units: list[CampaignUnit],
+    entry_dates: dict,
+    fetcher: CampaignFetcher,
+    campaign_data: CampaignData | None,
+    parent_asin: str,
+) -> tuple[list[CampaignAdjustmentItem], set[str]]:
+    """门控抓取后调纯函数。仅 ≥review_days 候选拉在池窗口订单；有情况二候选才拉精准30d均CPC。"""
+    from datetime import date
+    from app.data.mcp_mapping import make_date_window
+    from app.workflow.steps.campaign_restart import restart_orders_window_days
+
+    today = date.today()
+    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    review_days = settings.campaign_restart_review_days
+
+    def _days(rec: dict) -> int:
+        ed = rec.get("entry_date")
+        ed = ed.date() if hasattr(ed, "date") else ed
+        return (today - ed).days if ed else -1
+
+    candidates = []
+    for cu in pool_units:
+        cid = (cu.campaign_id or "").strip()
+        rec = entry_dates.get(cid) if cid else None
+        if rec and _days(rec) >= review_days:
+            candidates.append((cu, _days(rec), rec))
+    if not candidates:
+        return [], set()
+
+    # 在池窗口订单（并行；窗口 = min(入池天数, 上限)，评审 #1）
+    orders_inpool: dict[str, int] = {}
+    tasks = [
+        fetcher._fetch_perf_one(cu.campaign_name, shop_account, *make_date_window(restart_orders_window_days(d)))
+        for cu, d, _ in candidates
+    ]
+    for (cu, _, _), r in zip(candidates, await asyncio.gather(*tasks, return_exceptions=True)):
+        if isinstance(r, tuple) and len(r) == 2 and getattr(r[1], "ok", False) and isinstance(r[1].value, dict):
+            orders_inpool[(cu.campaign_id or "").strip()] = int(r[1].value.get("orders") or 0)
+
+    # 情况二门控：有 0 单且淘汰前花费>$15 的候选，才拉精准 30d 均CPC
+    high_spend = settings.campaign_restart_high_spend_7d
+    need_cpc = any(
+        orders_inpool.get((cu.campaign_id or "").strip(), 0) == 0
+        and rec.get("eliminate_spend_7d") is not None
+        and float(rec["eliminate_spend_7d"]) > high_spend
+        for cu, _, rec in candidates
+    )
+    exact_cpc_30d = await _fetch_exact_cpc_30d(fetcher, campaign_data, shop_account) if need_cpc else None
+
+    return analyze_eliminated_restart(
+        [c[0] for c in candidates], entry_dates, orders_inpool, exact_cpc_30d, today=today,
+    )
+
+
+async def _fetch_exact_cpc_30d(
+    fetcher: CampaignFetcher, campaign_data: CampaignData | None, shop_account: str,
+) -> float | None:
+    """父ASIN活跃精准广告近30天均CPC（KB §7 情况二定价）：有出单词优先，否则全部精准词。"""
+    from app.data.mcp_mapping import make_date_window
+
+    exacts = [
+        cu for cu in (campaign_data.campaigns if campaign_data else [])
+        if (cu.match_type or "").upper() == "EXACT"
+        and not is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget)
+    ]
+    if not exacts:
+        return None
+    sd, ed = make_date_window(30)
+    tasks = [fetcher._fetch_perf_one(cu.campaign_name, shop_account, sd, ed) for cu in exacts]
+    cpc_ordered: list[float] = []
+    cpc_all: list[float] = []
+    for r in await asyncio.gather(*tasks, return_exceptions=True):
+        if not (isinstance(r, tuple) and len(r) == 2 and getattr(r[1], "ok", False) and isinstance(r[1].value, dict)):
+            continue
+        cpc = r[1].value.get("cpc")
+        if cpc is not None and float(cpc) > 0:
+            cpc_all.append(float(cpc))
+            if int(r[1].value.get("orders") or 0) > 0:
+                cpc_ordered.append(float(cpc))
+    pool = cpc_ordered or cpc_all
+    return round(sum(pool) / len(pool), 2) if pool else None
+
+
 # ── 公开入口 ────────────────────────────────────────────────────────────────
 
 
@@ -157,6 +246,7 @@ async def analyze_campaigns(
     keyword_analysis: dict | None = None,
     run_id: str | None = None,
     erp_override: dict | None = None,
+    elimination_entry_dates: dict | None = None,
 ) -> CampaignAnalysisResult:
     """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
 
@@ -277,10 +367,10 @@ async def _analyze_campaigns_impl(
     #     → 本期暂时过滤不做重复分析（仅满足其一的活动放行 LLM，由低价捡漏强制淘汰兜底）
     llm_campaigns: list[CampaignUnit] = []
     skipped_eliminated: list[dict] = []
+    pool_units: list[CampaignUnit] = []   # 严格在池活动（复评候选源，保留 cu 供 KB21§7 复评）
     for cu in campaign_data.campaigns:
-        if (cu.current_budget is not None and cu.current_bid is not None
-                and cu.current_bid <= LOW_BID_MAX
-                and cu.current_budget <= LOW_BUDGET_MAX):
+        if is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
+            pool_units.append(cu)
             skipped_eliminated.append({
                 "campaign_key": cu.campaign_key,
                 "campaign_name": cu.campaign_name,
@@ -504,6 +594,8 @@ async def _analyze_campaigns_impl(
         # 修正后，_resolve_budget_conflicts 末尾的终态 _normalize_action 会据真值重派生 action。
         item.current_budget = cu.current_budget
         item.current_bid = cu.current_bid
+        # 7d 指标快照回填 → card.perf_json（淘汰卡借此存淘汰前花费，KB21§7 情况二复评读取）
+        item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
         # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
         item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
         item.natural_rank = cu.natural_rank
@@ -532,6 +624,25 @@ async def _analyze_campaigns_impl(
             eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
             item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action, effective_budget=eff)
             cu.portfolio = item.ai_portfolio_class
+
+    # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
+    #   位置关键：必须在 _resolve_budget_conflicts(§7) 之后——否则"低价捡漏强制淘汰兜底"会因
+    #   复评项 current=$1/$0.20 把它打回 eliminate。复评项已带完整字段，无需 backfill/终态分类。
+    if settings.campaign_restart_enabled and pool_units and elimination_entry_dates:
+        try:
+            reactivate_items, reactivated_keys = await _run_restart_review(
+                pool_units, elimination_entry_dates, fetcher, campaign_data, parent_asin,
+            )
+            if reactivate_items:
+                adjustments.extend(reactivate_items)
+                skipped_campaigns = [
+                    s for s in skipped_campaigns
+                    if s.get("campaign_key") not in reactivated_keys
+                ]
+                _t(f"DONE restart_review ({len(reactivate_items)} 复评卡)")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Campaign 复评异常 [%s]: %s (fail-open)", parent_asin, e)
+            warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
 
     # 8 + 8b：Sanity check 与 AI 汇总合成【并行】。
     # 两者都只读已定稿的 adjustments，产出独立（warnings vs 分组叙事），无数据依赖 →
@@ -599,7 +710,8 @@ async def _analyze_campaigns_impl(
         if not (settings.campaign_budget_agent_enabled and adjustments):
             return _fallback(source="rule")          # agent 关 / 无调整 → 规则引擎（正常路径，无 warning）
         try:
-            agg = bra.aggregate(adjustments, llm_campaigns, strategy_context, search_volume_map=flow_sv_map)
+            agg = bra.aggregate(adjustments, llm_campaigns, strategy_context,
+                                search_volume_map=flow_sv_map, new_campaigns=new_campaigns)
             agent_out = await reasoner.recommend_budget_reallocation(
                 parent_asin, agg, temperature=temperature,
             )

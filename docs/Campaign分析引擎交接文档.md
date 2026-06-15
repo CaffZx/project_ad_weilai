@@ -753,7 +753,50 @@ P1：方向 A 收敛（实时轨落库→读快照+删 to_viewmodel，落库失�
 
 ---
 
-*最后更新：2026-06-13（v2.2: 执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复 §14）*
+## 15. 2026-06-14/15：双轨读回 + tab5 多处口径修复 + Part 6 真实执行接入
+
+> 跨多 commit / 多窗口并行：`99ce0b6`(方向A收敛+KB23回算) → `c436415` → `63ba75d`(action粗类化+placement判据+campaign_new shop_account回退+flow_sv) → `1a79370`(post-merge rounding/card_id/TZ) → `8c6efd0`(Part 6 合并)。
+
+### 15.1 前置双轨读回（Tab3/Tab4 快照富化）
+- **Tab3**：`decision.py:_translate_p3_recommend` → `/decision/{id}/preset` 出 `p3_recommend`；前端 `renderReadonlyPreset` 复用 `renderP3` 还原 ACOS/预算推理全文（ai_suggest 真库有值，前端接线即出）。
+- **Tab4**：`repository.read_decision_preset_rich` 加读 `direction_recommend_detail`；`decision.py:_translate_p4_directions` → `directions_rich`；前端抽 `renderDirCard(d)`（实时 `loadExecution` 与快照共用），渲评分+理由全文卡。**前提**：写入侧须先把完整 directions 落 `wf["directions"]`（`run_get_execution_options` 持久化）——历史批次无则降级方向名 badge。
+
+### 15.2 tab5 执行层口径修复（均在 `from_db_snapshot` / 分析侧，单源生效）
+- **action 粗类化**：`_snapshot_action` 退化为纯查 `suggest_category`（ELIMINATE/CREATE/KEEP/低价 group → 对应；ADJUST/空 → 粗类 `adjust`=「调整」），**不再按 pending 行有无猜 adjust_bid**（曾把全维持活动误标「调出价」）。前端 `_actionLabel` 补 `adjust:'调整'`。
+- **placement 判据**：`_normalize_action` 的 `placement_changed` 从「列表非空」改为「任一广告位 proposed_pct≠current_pct」——全维持的 EXACT 活动正确 derive 成 `keep`。
+- **预算约束 backend 化**：`from_db_snapshot` 的 `target_budget`（顶部预算约束）= **3 活跃组约束加总 + 低价捡漏固定 $1**（KB21§6），不再取 `decision.daily_budget_suggest`（那是回算前父级预算，与组加总不同口径，会对不上）。低价 $1 前端硬编码（KB 常量）。
+
+### 15.3 低价捡漏组判定重做（阈值 0.21/1.01）
+统一常量 `LOW_BID_MAX=0.21` / `LOW_BUDGET_MAX=1.01`（`campaign_portfolio.py`，campaign.py 复用）：
+- **预过滤（AND）**：`bid≤0.21 且 budget≤1.01`（两者都到底=已入池）→ 灰卡剔除不分析。
+- **分类（OR）**：`_is_in_elimination_pool` = `bid≤0.21 或 budget≤1.01` → 低价捡漏组。
+- **LLM 硬规则**：EXACT/BROAD prompt 加「bid≤0.21 或 budget≤1.01 → 必须 eliminate」。
+- **强制兜底（不靠 LLM）**：`_resolve_budget_conflicts` 循环顶部命中 OR 即翻 `action=eliminate`，**紧接现有淘汰硬校验无条件把 proposed 修正到 $1/$0.20**（治 LLM 不听话把 proposed 调高）。
+
+### 15.4 Part 6：广告调整 MCP 真实执行接入（`8c6efd0`，详见 [docs/2026-06-15-交接文档.md]）
+confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表 + 回写 pending `execute_status` → 前端「调整记录」表。新增 `advert_mcp_client`/`advert_exec_mapper`(唯一映射点)/`advert_execution`；repo 6 执行方法 + `_audit_int` + `use_tls`；3 端点 `/campaign/execute|execute/status|execution-records`。**默认安全**：`advert_mcp_enabled=false` + `advert_exec_dry_run=true`。真库 dry-run 全链路通；真实写 Amazon「新建活动」链路通仅被 IP 白名单 403 拦；「改已有活动」卡在数仓 campaign_id 调整 MCP 不识别（外部契约待 MCP 团队）。
+
+### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，已按代码现状核实）
+| 项 | 状态 |
+|---|---|
+| 方向 A 收敛（实时轨落库→读快照+删 to_viewmodel） | ✅ 已完成（`99ce0b6`） |
+| `/campaign/confirm` 落地（confirm_decisions 非 stub） | ✅ 已完成 |
+| A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成（`ecc207e`） |
+| `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成（`53fa5b3`） |
+| 建议竞价（suggestedBid）MCP 接入 | ✅ 已完成（§12.1） |
+| **`is_core` 真实数据源** | ❌ **仍硬编码 `False`**（campaign.py:956），P1 未动 |
+| **P4 定时调度器**（decision_config 已备，APScheduler 扫表） | ❌ 未做（全项目无 APScheduler） |
+| **新增活动预算接入组合回算**（KB23 §5.1） | ❌ 未做（`campaign_budget_reallocation` 不含 new_campaigns） |
+| 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | ❌ 未做（需搜索词聚合/KB08/词池表，仅展示标签） |
+| **组合按 proposed（执行后预算）分类** | ✅ **已实现（A 派：显示+回算统一按 proposed）**。`campaign_portfolio.classify` 加 `effective_budget`：预分类(campaign.py:322)按 `current` 喂 LLM 现状上下文，**终分类(campaign.py:533)传 `eff=proposed`** 做主力↔测试升降组（KB23 §3.1B/§3.5/§3.7）；淘汰判定仍读 current。回算 `bra._group_of` 读同一 `ai_portfolio_class`（即 proposed 分组）+ 兜底也按 proposed。 |
+| Part 6 真实写 Amazon（改已有活动 / 新建活动） | ⏳ 链路通，被 IP 白名单 + 数仓 campaign_id 外部契约阻塞 |
+
+> **新增活动 LLM 触发条件（澄清）**：LLM **无触发门禁**。`trigger_scene` 仅展示标签；门是「硬过滤(KB16§6)→排序→Top-N(≤20)→双轮 LLM 取交集」，LLM 只对每候选词判 create/skip。
+
+---
+
+*最后更新：2026-06-15（v2.3: 双轨读回 Tab3/4 + tab5 action粗类化/placement判据/预算约束backend化 + 低价捡漏0.21·1.01重做 + Part 6 真实执行 §15）*
+*v2.2: 执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复 §14*
 *v2.1: 自然排名（周排名）接入精准活动分析 §13*
 *v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12*
 *v1.9: 决策批次状态机+快照回读+confirm写回+DRAFT→state库 §11*

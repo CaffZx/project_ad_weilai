@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import logging
 from typing import Any
 
@@ -124,6 +125,47 @@ class ErpDualWriterRepository:
                     (asin,),
                 )
                 return cur.fetchall()
+        finally:
+            conn.close()
+
+    def get_elimination_entry_dates(self, parent_asin: str) -> dict[str, dict]:
+        """重建每活动「进入低价捡漏组日期 + 淘汰前7d花费」（KB 21 §7 复评用，零加列，仅读既有列）。
+
+        返回 {campaign_id: {"entry_date": datetime, "eliminate_spend_7d": float|None}}。
+        入池日期 = 该 campaign 最近一次 CONFIRMED 的 ELIMINATE 卡所对应 campaign_pending 的
+        COALESCE(execute_time, confirm_time)（活动真正变 $1/$0.20 的时刻；执行未回写则退确认时刻）。
+        淘汰前花费 = 该淘汰卡 perf_json.cost（淘汰那次的 7d 花费）；历史卡无 perf_json → None。
+        复淘汰按 entry_date DESC 取最近一次。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT c.campaign_id AS campaign_id,
+                              c.perf_json AS perf_json,
+                              COALESCE(cp.execute_time, cp.confirm_time) AS entry_date
+                       FROM t_advert_agent_modify_suggest_card c
+                       JOIN t_advert_agent_modify_campaign_pending cp
+                            ON cp.suggest_card_id = c.id
+                       WHERE c.parent_asin = %s
+                         AND c.suggest_category = 'ELIMINATE'
+                         AND cp.confirm_status = 'CONFIRMED'
+                         AND c.campaign_id IS NOT NULL AND c.campaign_id <> ''
+                         AND COALESCE(cp.execute_time, cp.confirm_time) IS NOT NULL
+                       ORDER BY c.campaign_id,
+                                COALESCE(cp.execute_time, cp.confirm_time) DESC""",
+                    (parent_asin,),
+                )
+                out: dict[str, dict] = {}
+                for r in cur.fetchall():
+                    cid = str(r.get("campaign_id") or "").strip()
+                    if not cid or cid in out:
+                        continue  # 每 campaign 取首条 = 最近一次入池
+                    out[cid] = {
+                        "entry_date": r.get("entry_date"),
+                        "eliminate_spend_7d": _perf_json_cost(r.get("perf_json")),
+                    }
+                return out
         finally:
             conn.close()
 
@@ -1654,6 +1696,18 @@ class ErpDualWriterRepository:
 # ── 模块级 repository 单例（决策批次端点复用） ──────────────────────────
 
 _repo_instance: ErpDualWriterRepository | None = None
+
+
+def _perf_json_cost(perf_json) -> float | None:
+    """解 card.perf_json 取 cost（淘汰前7d花费）；空/非法 → None。"""
+    if not perf_json:
+        return None
+    try:
+        d = perf_json if isinstance(perf_json, dict) else json.loads(perf_json)
+        v = d.get("cost")
+        return float(v) if v is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def _get_repository() -> ErpDualWriterRepository:

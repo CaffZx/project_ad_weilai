@@ -151,6 +151,9 @@ class CampaignAdjustmentItem(BaseModel):
     ai_portfolio_class: str = ""
     # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
     portfolio_or_group: str = ""
+    # 逐活动 7 天指标快照(代码回填自 CampaignUnit.perf_7d)→ 落 card.perf_json;
+    # 淘汰卡借此存淘汰前花费,供 KB21§7 情况二复评读取(perf_json 列既有,零加列)
+    perf_7d: dict = Field(default_factory=dict)
 
 
 class CampaignBatchResult(BaseModel):

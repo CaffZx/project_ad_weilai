@@ -92,6 +92,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
                 <option value="">全部</option>
                 <option value="eliminate">淘汰</option>
                 <option value="adjust">调整</option>
+                <option value="reactivate">复评</option>
                 <option value="keep">保持</option>
                 <option value="create">新增</option>
                 <option value="skipped">预过滤/丢失</option>
