@@ -297,12 +297,70 @@ def _translate_p3_recommend(ai: dict | None) -> dict | None:
     }
 
 
+# ── Tab4 方向卡反译（direction_recommend_detail → renderDirCard 入参，同形零映射）──
+
+
+def _content_lines_to_reason(v) -> str:
+    """content_json（JSON 字符串数组）→ 用「；」拼回 reason，供前端 formatDirReason 按「；」拆。"""
+    if not v:
+        return ""
+    items = v
+    if isinstance(v, str):
+        try:
+            items = json.loads(v)
+        except json.JSONDecodeError:
+            items = [v]
+    if not isinstance(items, list):
+        items = [str(items)]
+    return "；".join(str(x).strip() for x in items if str(x).strip())
+
+
+def _translate_p4_directions(rows: list) -> list:
+    """direction_recommend_detail 行 → renderDirCard(d) 入参（Tab4 方向卡）。
+
+    direction_type(ERP码) → id(小写)+label(中文)；recommend_tag(库存小写) → suitability 直用；
+    suggest_score → suitability_score；content_json(数组) → reason(；拼)；recommended 由 suitability 派生。
+    """
+    out = []
+    for r in rows or []:
+        code = (r.get("direction_type") or "").strip()
+        suit = (r.get("recommend_tag") or "available").strip().lower()
+        out.append({
+            "id": code.lower(),
+            "label": _DIRECTION_ZH.get(code, code),
+            "suitability": suit,
+            "suitability_score": r.get("suggest_score"),
+            "reason": _content_lines_to_reason(r.get("content_json")),
+            "recommended": suit == "recommended",
+        })
+    return out
+
+
+def _translate_p4_summary(main_row: dict | None) -> str:
+    """direction_recommend.conclusion_json → recommendation_summary 文本（总述，可空）。"""
+    if not main_row or not main_row.get("conclusion_json"):
+        return ""
+    raw = main_row["conclusion_json"]
+    try:
+        obj = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(obj, dict):
+        oa = obj.get("overall_analysis")
+        if isinstance(oa, list):
+            return "\n".join(str(x).strip() for x in oa if str(x).strip())
+        if isinstance(oa, str):
+            return oa
+    return ""
+
+
 @router.get("/decision/{decision_id}/preset")
 async def decision_preset(decision_id: str):
     """读取某批次冻结的前置 1-4 快照（只读展示用）。
 
     config 标签（strategy/tactics/p3/directions）+ 富段（tactics_scores=Tab1 评分卡、
-    p3_recommend=Tab3 ACOS/预算推理，与实时渲染器同形）。富段缺失时为空/None，前端降级。
+    p3_recommend=Tab3 ACOS/预算推理、directions_rich=Tab4 方向卡，与实时渲染器同形）。
+    富段缺失时为空/None，前端降级。
     """
     if not decision_id:
         return {"ok": False, "error": "decision_id 必填"}
@@ -314,6 +372,8 @@ async def decision_preset(decision_id: str):
         out = {"ok": True, **_translate_preset(snap["decision"])}
         out["tactics_scores"] = _translate_tactics_scores(snap.get("purpose_scores") or [])
         out["p3_recommend"] = _translate_p3_recommend(snap.get("ai_suggest"))
+        out["directions_rich"] = _translate_p4_directions(snap.get("direction_detail") or [])
+        out["directions_summary"] = _translate_p4_summary(snap.get("direction_main"))
         return out
     except Exception as e:
         logger.exception("decision/preset 异常 [%s]: %s", decision_id, e)

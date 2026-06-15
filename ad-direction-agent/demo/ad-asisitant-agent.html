@@ -1086,20 +1086,34 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">历史批次快照不重新拉取关键词监控明细</td></tr>');
   $('tacticsKwCount').textContent = '0';
 
-  setHTML('p3AcosColumn', `<div class="card" style="margin:0">${_snapshotRow('目标 ACOS', p3.target_acos != null ? `<b>${escapeHtml(String(p3.target_acos))}%</b>` : '—')}</div>`);
-  setHTML('p3BudgetColumn', `<div class="card" style="margin:0">${_snapshotRow('每日预算', p3.daily_budget != null ? `<b>$${escapeHtml(String(Math.round(p3.daily_budget)))}</b>` : '—')}</div>`);
-  hide('p3Reasoning'); hide('p3Warnings'); hide('p3CacheBadge');
+  // Tab3：有富快照 p3_recommend → 复用实时 renderP3，还原 ACOS/预算推理全文 + 综合判断 + 风险；
+  // 无则降级为 config 快照行。renderP3 在 manual_override=false 分支不读 DOM 输入，快照安全。
+  if (data.p3_recommend) {
+    renderP3(data.p3_recommend);
+    hide('p3CacheBadge');
+  } else {
+    setHTML('p3AcosColumn', `<div class="card" style="margin:0">${_snapshotRow('目标 ACOS', p3.target_acos != null ? `<b>${escapeHtml(String(p3.target_acos))}%</b>` : '—')}</div>`);
+    setHTML('p3BudgetColumn', `<div class="card" style="margin:0">${_snapshotRow('每日预算', p3.daily_budget != null ? `<b>$${escapeHtml(String(Math.round(p3.daily_budget)))}</b>` : '—')}</div>`);
+    hide('p3Reasoning'); hide('p3Warnings'); hide('p3CacheBadge');
+  }
 
-  setHTML('execDirections', dirs.length
-    ? dirs.map(d => `<div class="dir-card selected" style="cursor:default"><div class="dir-card-head"><span class="dir-card-title">${escapeHtml(String(d))}</span><span class="badge badge-green">快照</span></div></div>`).join('')
-    : '<div style="padding:16px;color:var(--muted-fg);font-size:12px">该批次未记录广告方向</div>');
+  // Tab4：富快照 directions_rich → 复用 renderDirCard（评分+理由全文 + 总述）；无则降级方向名 badge 卡。
+  if (Array.isArray(data.directions_rich) && data.directions_rich.length) {
+    setHTML('execDirections', data.directions_rich.map(renderDirCard).join(''));
+    if (data.directions_summary) { show('aiReasoningExec'); setHTML('aiReasoningExec', formatAiSections(sanitizeOpsDisplayText(data.directions_summary))); }
+    else hide('aiReasoningExec');
+  } else {
+    setHTML('execDirections', dirs.length
+      ? dirs.map(d => `<div class="dir-card selected" style="cursor:default"><div class="dir-card-head"><span class="dir-card-title">${escapeHtml(String(d))}</span><span class="badge badge-green">快照</span></div></div>`).join('')
+      : '<div style="padding:16px;color:var(--muted-fg);font-size:12px">该批次未记录广告方向</div>');
+    hide('aiReasoningExec');
+  }
   // 左栏广告方向（config 项，与战略/策略/ACOS·预算同列，快照只读）
   const _ldEl = $('leftDirections');
   if (_ldEl) _ldEl.innerHTML = dirs.length
     ? dirs.map(d => _badgeHtml(d, 'badge-blue')).join('')
     : '<span style="color:var(--muted-fg)">—</span>';
   show('leftDirectionsBlock'); show('leftDirections'); hide('leftDirectionsEdit');
-  hide('aiReasoningExec');
   hide('reportArea');
 
   setHTML('diagMetrics', '<div style="padding:24px;text-align:center;color:var(--muted-fg);font-size:12px">历史批次快照不重新拉取实时数据监控</div>');
@@ -2354,11 +2368,14 @@ function renderP3(data) {
     </div>
     <button onclick="clearP3Budget()" class="btn btn-danger-ghost" style="margin-top:8px">✕ 取消覆盖</button>`;
   } else {
-    budgetHtml += `<div style="font-size:28px;font-weight:700;margin-bottom:4px">&dollar;${bb.suggested != null ? bb.suggested.toFixed(0) : '—'}</div>
-    <div style="font-size:11px;color:var(--muted-fg);line-height:1.5">
-      当前 <b>&dollar;${bb.current != null ? bb.current.toFixed(0) : '—'}</b>
-      &rarr; <b class="${bb.direction==='increase'?'p3-conf-high':bb.direction==='decrease'?'p3-conf-low':''}">${bb.direction==='increase'?'+':bb.direction==='decrease'?'-':''}${bb.magnitude_pct}%</b>
-    </div>`;
+    budgetHtml += `<div style="font-size:28px;font-weight:700;margin-bottom:4px">&dollar;${bb.suggested != null ? bb.suggested.toFixed(0) : '—'}</div>`;
+    // 当前→变化 delta 仅实时态有（current 非空）；快照态 current=null 整行省略，避免「当前 $— → %」丑串。
+    if (bb.current != null) {
+      budgetHtml += `<div style="font-size:11px;color:var(--muted-fg);line-height:1.5">
+        当前 <b>&dollar;${bb.current.toFixed(0)}</b>
+        &rarr; <b class="${bb.direction==='increase'?'p3-conf-high':bb.direction==='decrease'?'p3-conf-low':''}">${bb.direction==='increase'?'+':bb.direction==='decrease'?'-':''}${bb.magnitude_pct}%</b>
+      </div>`;
+    }
   }
   if (bb.reason) {
     budgetHtml += `<div style="font-size:11px;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}">${(bb.reason||'').replace(/\n/g,'<br>')}</div>`;
@@ -2674,6 +2691,21 @@ function formatDirReason(reason) {
   ).join('') + '</ul>';
 }
 
+// Tab4 方向卡（纯展示，淡紫无光效，含评分+理由）。实时态(loadExecution)与快照态
+// (renderReadonlyPreset) 共用，避免模板复制漂移。入参 d = {id,label,suitability,suitability_score,reason}。
+function renderDirCard(d) {
+  const title = d.label || cnDir(d.id);
+  const scoreBadge = d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray';
+  const score = (d.suitability_score != null) ? Math.round(d.suitability_score) : '—';
+  return `<div class="dir-card flat" id="dirc_${d.id}">
+        <div class="dir-card-head">
+          <span class="dir-card-title">${title}</span>
+          <span class="badge dir-score ${scoreBadge}">${score}分 · ${cnSuit(d.suitability)}</span>
+        </div>
+        <div class="dir-reason-wrap">${formatDirReason(d.reason)}</div>
+    </div>`;
+}
+
 // ═══════════════ 执行方向 → Tab4 ═══════════════
 async function loadExecution() {
   if (!$('execDirections').innerHTML.includes('spinner')) {
@@ -2695,15 +2727,7 @@ async function loadExecution() {
   data.directions.forEach(d => {
     const defaultSel = d.recommended && d.suitability_score >= 40;
     const title = d.label || cnDir(d.id);
-    const scoreBadge = d.suitability==='recommended'?'badge-green':d.suitability==='available'?'badge-blue':'badge-gray';
-    // Tab4 卡片：纯展示（统一淡紫、无选中光效；保留评分+理由）
-    html += `<div class="dir-card flat" id="dirc_${d.id}">
-        <div class="dir-card-head">
-          <span class="dir-card-title">${title}</span>
-          <span class="badge dir-score ${scoreBadge}">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</span>
-        </div>
-        <div class="dir-reason-wrap">${formatDirReason(d.reason)}</div>
-    </div>`;
+    html += renderDirCard(d);
     // 左栏下拉选项（多选，默认勾选 AI 推荐项；value=英文 id 供保存，data-label=中文供展示）
     optsHtml += `<label class="md-option"><input type="checkbox" value="${d.id}" data-label="${title}" data-dim="directions" ${defaultSel?'checked':''} onchange="updateMultiTags('directions')">
       <div class="md-opt-text"><div class="md-opt-label">${title}${d.recommended?' <span class="md-check-rec">AI推荐</span>':''}</div>

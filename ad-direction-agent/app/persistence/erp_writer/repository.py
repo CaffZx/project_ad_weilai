@@ -330,7 +330,32 @@ class ErpDualWriterRepository:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("read ai_suggest 降级 [%s]: %s", decision_id, e)
 
-            return {"decision": decision, "purpose_scores": purpose_scores, "ai_suggest": ai_suggest}
+                direction_detail: list = []
+                try:
+                    cur.execute(
+                        "SELECT direction_type, recommend_tag, suggest_score, content_json, "
+                        "sort_order FROM t_advert_agent_direction_recommend_detail "
+                        "WHERE decision_id=%s ORDER BY sort_order",
+                        (decision_id,),
+                    )
+                    direction_detail = cur.fetchall() or []
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("read direction_detail 降级 [%s]: %s", decision_id, e)
+
+                direction_main = None
+                try:
+                    cur.execute(
+                        "SELECT conclusion_json FROM t_advert_agent_direction_recommend "
+                        "WHERE decision_id=%s LIMIT 1",
+                        (decision_id,),
+                    )
+                    direction_main = cur.fetchone()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("read direction_recommend 降级 [%s]: %s", decision_id, e)
+
+            return {"decision": decision, "purpose_scores": purpose_scores,
+                    "ai_suggest": ai_suggest, "direction_detail": direction_detail,
+                    "direction_main": direction_main}
         finally:
             conn.close()
 

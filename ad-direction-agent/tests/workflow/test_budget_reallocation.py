@@ -1,6 +1,7 @@
 """预算回算（KB23）纯逻辑单测 — aggregate / validate / to_budget_summary。
 
-无 DB / 无 LLM。数据对齐 KB23 §11 示例。
+无 DB / 无 LLM。约束维度：current_group_budget 兜底 = 父目标×60/20/20，
+回算在 budget_pool(=父目标+允许净增) 上分配，proposed 守恒到 pool。
 """
 
 import pytest
@@ -33,16 +34,16 @@ def _adj(key, kw, cur, prop, group, action="adjust_budget", match="EXACT"):
     )
 
 
-def _ctx():
+def _ctx(target=140.0):
     return CampaignStrategyContext(
         parent_asin="B0TEST", product_level="重点产品 (P1)", season_stage="旺季准备",
         ad_purposes=["排名型"], ad_directions=["推进自然位"],
-        daily_budget=100.0, daily_budget_source="override",
+        daily_budget=target, daily_budget_source="override",
     )
 
 
-def _kb_example_adjustments():
-    # KB23 §11：主力 +20 / 测试 +3 / 广泛 +7；一条转入低价捡漏释放 20（21→1）
+def _adjustments():
+    # 主力需求 +20 / 测试 +3 / 广泛 +7；一条转入低价捡漏释放 20（21→1）
     return [
         _adj("camp_main", "Main KW", 50, 70, PORTFOLIO_MAIN),
         _adj("camp_test", "Test KW", 10, 13, PORTFOLIO_TEST),
@@ -60,94 +61,84 @@ def parent_allowed_10():
     settings.campaign_parent_allowed_net_increase = old
 
 
-def test_aggregate_kb_example(parent_allowed_10):
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
+def test_aggregate_base_constraint_anchors_on_parent_target():
+    # 默认 parent_allowed=0 → pool = 父目标 140；base_constraint = 140×60/20/20
+    agg = aggregate(_adjustments(), [], _ctx(140.0))
     p = agg["parent"]
-    assert p["requested_increase_budget"] == 30.0
-    assert p["low_bid_retention_release"] == 20.0
-    assert p["released_budget"] == 20.0
-    assert p["net_required_increase"] == 10.0
-    assert p["available_reallocation_budget"] == 30.0     # released 20 + parent_allowed 10
+    assert p["budget_pool"] == 140.0
+    assert p["constraint_basis"] == "fallback_share_60_20_20"
     by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_MAIN]["base_constraint"] == 84.0     # 140×0.6
+    assert by[PORTFOLIO_TEST]["base_constraint"] == 28.0     # 140×0.2
+    assert by[PORTFOLIO_BROAD]["base_constraint"] == 28.0
+    # delta 只作需求信号（不累加成绝对预算）
     assert by[PORTFOLIO_MAIN]["group_requested_delta"] == 20.0
     assert by[PORTFOLIO_TEST]["group_requested_delta"] == 3.0
     assert by[PORTFOLIO_BROAD]["group_requested_delta"] == 7.0
     assert agg["low_bid_group"]["moved_in_count"] == 1
+    assert p["low_bid_retention_release"] == 20.0
     assert p["priority_context"]["has_ranking_push"] is True
 
 
-def test_aggregate_default_parent_allowed_zero():
-    # 默认 settings.campaign_parent_allowed_net_increase = 0 → available = released = 20
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    assert agg["parent"]["available_reallocation_budget"] == 20.0
+def test_aggregate_pool_grows_with_parent_allowed(parent_allowed_10):
+    agg = aggregate(_adjustments(), [], _ctx(140.0))
+    assert agg["parent"]["budget_pool"] == 150.0          # 140 + 10 允许净增
 
 
 def test_search_volume_and_acos_join():
     units = [CampaignUnit(
         campaign_name="camp_main", campaign_key="camp_main", child_asin="B0C1",
-        keyword_text="Main KW", match_type="EXACT",
-        perf_7d=CampaignPerf(acos=22.0),
+        keyword_text="Main KW", match_type="EXACT", perf_7d=CampaignPerf(acos=22.0),
     )]
-    agg = aggregate(_kb_example_adjustments(), units, _ctx(),
-                    search_volume_map={"main kw": 1000})
-    main = next(g for g in agg["groups"] if g["group"] == PORTFOLIO_MAIN)
-    camp = main["campaigns"][0]
-    assert camp["search_volume"] == 1000        # join by keyword_text.lower()
-    assert camp["acos"] == 22.0                 # 透传 perf_7d.acos
-    # 空 map / 无 unit → 缺省不报错（best-effort 降级）
-    agg2 = aggregate(_kb_example_adjustments(), [], _ctx(), search_volume_map={})
+    agg = aggregate(_adjustments(), units, _ctx(), search_volume_map={"main kw": 1000})
+    camp = next(g for g in agg["groups"] if g["group"] == PORTFOLIO_MAIN)["campaigns"][0]
+    assert camp["search_volume"] == 1000     # join by keyword_text.lower()
+    assert camp["acos"] == 22.0              # 透传 perf_7d.acos
+    agg2 = aggregate(_adjustments(), [], _ctx(), search_volume_map={})
     assert next(g for g in agg2["groups"] if g["group"] == PORTFOLIO_MAIN)["campaigns"][0]["search_volume"] is None
 
 
-def _valid_agent_out():
+def _agent_out(main=90.0, test=25.0, broad=25.0):
+    # 守恒到 pool=140（默认），向主力倾斜
     return {
-        "allocation_method": "full",
-        "parent": {"proposed_total_group_budget": 111.0, "net_required_increase": 10.0, "explanation": "ok"},
+        "allocation_method": "weighted_main",
+        "parent": {"proposed_total_group_budget": main + test + broad, "explanation": "向主力倾斜"},
         "budget_groups": [
-            {"group": PORTFOLIO_MAIN, "current_group_budget": 50, "requested_delta": 20, "actual_delta": 20, "proposed_group_budget": 70, "reason": "x"},
-            {"group": PORTFOLIO_TEST, "current_group_budget": 10, "requested_delta": 3, "actual_delta": 3, "proposed_group_budget": 13, "reason": "x"},
-            {"group": PORTFOLIO_BROAD, "current_group_budget": 20, "requested_delta": 7, "actual_delta": 7, "proposed_group_budget": 27, "reason": "x"},
+            {"group": PORTFOLIO_MAIN, "base_constraint": 84, "proposed_group_budget": main, "reason": "x"},
+            {"group": PORTFOLIO_TEST, "base_constraint": 28, "proposed_group_budget": test, "reason": "x"},
+            {"group": PORTFOLIO_BROAD, "base_constraint": 28, "proposed_group_budget": broad, "reason": "x"},
         ],
     }
 
 
-def test_validate_pass(parent_allowed_10):
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    ok, why = validate(_valid_agent_out(), agg)
+def test_validate_pass_when_sum_within_pool():
+    agg = aggregate(_adjustments(), [], _ctx(140.0))       # pool=140
+    ok, why = validate(_agent_out(90, 25, 25), agg)        # sum=140
     assert ok, why
 
 
-def test_validate_rejects_over_requested(parent_allowed_10):
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    bad = _valid_agent_out()
-    bad["budget_groups"][0]["actual_delta"] = 25      # > requested 20
-    ok, _ = validate(bad, agg)
-    assert ok is False
+def test_validate_rejects_over_pool():
+    agg = aggregate(_adjustments(), [], _ctx(140.0))       # pool=140
+    ok, _ = validate(_agent_out(220, 11, 19), agg)         # sum=250 ≫ 140
+    assert ok is False                                     # 守恒/父目标硬顶
 
 
-def test_validate_rejects_low_bid_in_groups(parent_allowed_10):
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    bad = _valid_agent_out()
+def test_validate_rejects_low_bid_in_groups():
+    agg = aggregate(_adjustments(), [], _ctx(140.0))
+    bad = _agent_out(80, 25, 25)
     bad["budget_groups"].append(
-        {"group": PORTFOLIO_ELIMINATE, "actual_delta": 5, "proposed_group_budget": 6})
+        {"group": PORTFOLIO_ELIMINATE, "proposed_group_budget": 10})
     ok, _ = validate(bad, agg)
-    assert ok is False                                # GROUP-004
+    assert ok is False                                     # GROUP-004
 
 
-def test_validate_rejects_over_available():
-    # 默认 parent_allowed=0 → available=20；构造 Σactual=30 超额
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    ok, _ = validate(_valid_agent_out(), agg)          # Σactual=30 > available 20
-    assert ok is False
-
-
-def test_to_budget_summary_agent():
-    agg = aggregate(_kb_example_adjustments(), [], _ctx())
-    bs = to_budget_summary(_valid_agent_out(), agg, source="agent")
+def test_to_budget_summary_constraints_sum_within_target():
+    agg = aggregate(_adjustments(), [], _ctx(140.0))
+    bs = to_budget_summary(_agent_out(90, 25, 25), agg, source="agent")
     assert bs["source"] == "agent"
-    assert bs["target_budget"] == 100.0
-    assert bs["portfolio_constraints"][PORTFOLIO_MAIN] == 70.0
-    assert bs["portfolio_constraints"][PORTFOLIO_TEST] == 13.0
-    assert bs["portfolio_constraints"][PORTFOLIO_BROAD] == 27.0
-    assert bs["portfolio_budget_summary"]["allocation_method"] == "full"
-    assert "budget_groups" in bs
+    assert bs["target_budget"] == 140.0
+    pc = bs["portfolio_constraints"]
+    assert pc[PORTFOLIO_MAIN] == 90.0 and pc[PORTFOLIO_TEST] == 25.0 and pc[PORTFOLIO_BROAD] == 25.0
+    # 关键回归：3 组约束之和不再超父目标
+    assert round(sum(pc.values()), 2) <= 140.0 + 0.5
+    assert bs["portfolio_budget_summary"]["budget_pool"] == 140.0
