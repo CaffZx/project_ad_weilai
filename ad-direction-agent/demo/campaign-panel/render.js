@@ -495,7 +495,7 @@ function _renderPortfolioFilterPills(state) {
     const isElim = name === LOW_BID;
     const ov = state._portfolioOverride[name];
 
-    // 约束行：低价捡漏组硬编码 $1（KB 21 §6 每活动 $1，组合约束固定 $1）；其余 override > 推荐
+    // 约束行：低价捡漏组硬编码 $1（KB 21 §6 固定 $1，常量直接写）；其余 override > 后端推荐约束
     let amt, amtLabel;
     if (isElim) { amt = '$1'; amtLabel = '约束'; }
     else if (ov != null) { amt = money0(ov); amtLabel = '约束(覆盖)'; }

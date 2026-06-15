@@ -354,6 +354,50 @@ def _translate_p4_summary(main_row: dict | None) -> str:
     return ""
 
 
+# ── Tab1 核心关键词监控反译（core_keyword_tracking → renderKeywordTable 入参）──
+# keyword_type(ERP码) → 前端 Broad/Long-tail 等键（与 renderKeywordTable 的 stCnMap 键对齐）。
+_KWTYPE_KEY = {"GENERIC": "Broad", "LONG_TAIL": "Long-tail", "COMPETITOR": "Competitor",
+               "BRAND": "Brand", "CUSTOM": "Custom"}
+
+
+def _rank_to_int(v):
+    """nature_rank(库 varchar) → 正整数排名；非正/不可解析 → None（前端显示未入榜）。"""
+    try:
+        n = int(float(str(v).strip()))
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _change_to_int(v):
+    """nature_rank_change(库 varchar) → 带符号整数（含负/0）；不可解析 → None。"""
+    try:
+        return int(float(str(v).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _translate_core_keywords(rows: list) -> list:
+    """core_keyword_tracking 行 → renderKeywordTable(kws) 入参（Tab1 关键词监控表）。
+
+    near_rank/rank_change_7d(周变化) 未落库 → 缺省，前端降级显示「—」。
+    """
+    out = []
+    for r in rows or []:
+        word = r.get("keyword")
+        if not word:
+            continue
+        code = (r.get("keyword_type") or "").upper()
+        out.append({
+            "word": word,
+            "rank": _rank_to_int(r.get("nature_rank")),
+            "rank_change": _change_to_int(r.get("nature_rank_change")),
+            "keyword_class": _KWTYPE_KEY.get(code, ""),
+            "action": r.get("suggest") or "",
+        })
+    return out
+
+
 @router.get("/decision/{decision_id}/preset")
 async def decision_preset(decision_id: str):
     """读取某批次冻结的前置 1-4 快照（只读展示用）。
@@ -374,6 +418,7 @@ async def decision_preset(decision_id: str):
         out["p3_recommend"] = _translate_p3_recommend(snap.get("ai_suggest"))
         out["directions_rich"] = _translate_p4_directions(snap.get("direction_detail") or [])
         out["directions_summary"] = _translate_p4_summary(snap.get("direction_main"))
+        out["core_keywords"] = _translate_core_keywords(snap.get("core_keywords") or [])
         return out
     except Exception as e:
         logger.exception("decision/preset 异常 [%s]: %s", decision_id, e)

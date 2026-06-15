@@ -20,6 +20,8 @@ from app.data.campaign_fetcher import CampaignFetcher
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.steps.campaign_portfolio import (
+    LOW_BID_MAX,
+    LOW_BUDGET_MAX,
     PORTFOLIO_ELIMINATE,
     classify as _classify_portfolio,
 )
@@ -271,21 +273,21 @@ async def _analyze_campaigns_impl(
     # 3. LLM 分析前预过滤
     # 3a. 批量词活动：一个活动名下多个关键词，本期暂不处理
     #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.py:61-68)
-    # 3b. 疑似已淘汰活动：预算 ≈ $1.00 且 Bid ≈ $0.20
-    #     → 符合 KB 21 §4 淘汰池执行值特征，本期暂时过滤不做重复分析
+    # 3b. 疑似已淘汰活动：Bid ≤ $0.21 且 预算 ≤ $1.01（两者都到底=已入淘汰池，KB 21 §6）
+    #     → 本期暂时过滤不做重复分析（仅满足其一的活动放行 LLM，由低价捡漏强制淘汰兜底）
     llm_campaigns: list[CampaignUnit] = []
     skipped_eliminated: list[dict] = []
     for cu in campaign_data.campaigns:
         if (cu.current_budget is not None and cu.current_bid is not None
-                and 0.99 <= cu.current_budget <= 1.01
-                and 0.19 <= cu.current_bid <= 0.21):
+                and cu.current_bid <= LOW_BID_MAX
+                and cu.current_budget <= LOW_BUDGET_MAX):
             skipped_eliminated.append({
                 "campaign_key": cu.campaign_key,
                 "campaign_name": cu.campaign_name,
                 "child_asin": cu.child_asin,
                 "match_type": cu.match_type,
                 "keyword_text": cu.keyword_text,
-                "reason": "已入淘汰池（预算≈$1，出价≈$0.2），请到ERP手动修改",
+                "reason": "已入淘汰池（出价≤$0.21 且 预算≤$1），请到ERP手动修改",
                 "__prefiltered": True,   # 前端按此渲染为灰色不可操作的预过滤卡（无悬停警告）
             })
             continue
@@ -1746,6 +1748,14 @@ def _resolve_budget_conflicts(
     warnings: list[str] = []
 
     for adj in adjustments:
+        # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.21 或 预算 ≤ $1.01 → 强制 eliminate。
+        # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
+        # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
+        if adj.action != "eliminate_to_low_bid_pool" and (
+            (adj.current_bid is not None and adj.current_bid <= LOW_BID_MAX)
+            or (adj.current_budget is not None and adj.current_budget <= LOW_BUDGET_MAX)
+        ):
+            adj.action = "eliminate_to_low_bid_pool"
         # 淘汰执行值硬校验：无条件填充 $1.00/$0.20
         # （LLM 听话留 None 时也要补齐，避免前端淘汰活动出价/预算空白）
         if adj.action == "eliminate_to_low_bid_pool":

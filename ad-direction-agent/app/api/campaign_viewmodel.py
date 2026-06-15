@@ -217,8 +217,9 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             pc["自动广泛组"] = _f(srow.get("broad_auto_budget"))
         if srow.get("test_new_budget") is not None:
             pc["精准测试组"] = _f(srow.get("test_new_budget"))
-    # 总预算约束 = 前置每日预算推荐（decision.daily_budget_suggest），不在 summary 冗余存
-    target_budget = _f(decision.get("daily_budget_suggest"))
+    # 顶部总预算约束 = 各活跃组约束加总 + 低价捡漏组固定 $1（KB 21 §6；前端低价硬编码 $1，口径一致）。
+    # 不再取 decision.daily_budget_suggest（那是回算【前】父级预算推荐，与组加总不同口径，会对不上）。
+    target_budget = round(sum(pc.values()) + 1.0, 2) if pc else None
     if pc or target_budget is not None:
         budget_summary = {}
         if pc:

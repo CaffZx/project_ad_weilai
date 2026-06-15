@@ -8,7 +8,7 @@
    与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
 
 判定优先级 (命中即止) - 2026-06-04 对齐 KB23 §3.1:
-  1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 已在淘汰池 ($1/$0.20)
+  1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 低价捡漏档 (bid≤$0.21 或 预算≤$1.01)
   2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
   3. 测试/新增 — EXACT AND current_budget < $5 (KB23 精准测试组)
   4. 主推      — EXACT AND current_budget ≥ $5 (KB23 精准主力组)
@@ -44,10 +44,11 @@ PORTFOLIO_ELIMINATE = "低价捡漏组"
 
 ALL_PORTFOLIOS = (PORTFOLIO_MAIN, PORTFOLIO_BROAD, PORTFOLIO_TEST, PORTFOLIO_ELIMINATE)
 
-# 淘汰池识别容差
-_ELIMINATION_BUDGET = 1.00
-_ELIMINATION_BID = 0.20
-_FLOAT_EPS = 0.01
+# 低价捡漏判定阈值 (KB 21 §6)：bid ≤ $0.21 或 预算 ≤ $1.01 → 低价捡漏档。
+# 预过滤 (campaign.py) 用 AND (两者都到底 = 已入池，剔除不分析)；
+# 分类/强制淘汰用 OR (满足其一即归低价捡漏组 / 强制淘汰)。campaign.py 复用这两个常量。
+LOW_BID_MAX = 0.21
+LOW_BUDGET_MAX = 1.01
 
 # 精准主力 / 精准测试分界:活动预算 ≥ $5 入主推, < $5 入测试 (KB23 §3.1)
 _MAIN_BUDGET_MIN = 5.0
@@ -57,11 +58,9 @@ _BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
 
 
 def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
-    """活动是否已经处于淘汰池(预算 $1 + Bid $0.20)。"""
-    return (
-        abs(unit.current_budget - _ELIMINATION_BUDGET) < _FLOAT_EPS
-        and abs(unit.current_bid - _ELIMINATION_BID) < _FLOAT_EPS
-    )
+    """低价捡漏判定：当前 bid ≤ $0.21 或 预算 ≤ $1.01（满足其一即归低价捡漏组，KB 21 §6）。"""
+    b, bg = unit.current_bid, unit.current_budget
+    return (b is not None and b <= LOW_BID_MAX) or (bg is not None and bg <= LOW_BUDGET_MAX)
 
 
 def _is_exact_testing(unit: CampaignUnit, effective_budget: float | None = None) -> bool:

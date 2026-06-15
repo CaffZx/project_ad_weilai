@@ -1083,8 +1083,14 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
       ${_snapshotRow('关键词策略', _badgeListHtml(t.target_keyword_strategy, 'badge-blue'))}
     </div>`);
   }
-  setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">历史批次快照不重新拉取关键词监控明细</td></tr>');
-  $('tacticsKwCount').textContent = '0';
+  // Tab1 核心关键词监控：有快照 core_keywords → 复用实时 renderKeywordTable（零改造）；
+  // 无则降级占位。注意排名源头改造未做，快照排名列大概率为「未入榜/—」（数据非渲染问题）。
+  if (Array.isArray(data.core_keywords) && data.core_keywords.length) {
+    renderKeywordTable(data.core_keywords);
+  } else {
+    setHTML('tacticsKwBody', '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--muted-fg)">该批次未记录核心关键词监控</td></tr>');
+    $('tacticsKwCount').textContent = '0';
+  }
 
   // Tab3：有富快照 p3_recommend → 复用实时 renderP3，还原 ACOS/预算推理全文 + 综合判断 + 风险；
   // 无则降级为 config 快照行。renderP3 在 manual_override=false 分支不读 DOM 输入，快照安全。

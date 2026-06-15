@@ -353,9 +353,21 @@ class ErpDualWriterRepository:
                 except Exception as e:  # noqa: BLE001
                     logger.warning("read direction_recommend 降级 [%s]: %s", decision_id, e)
 
+                core_keywords: list = []
+                try:
+                    cur.execute(
+                        "SELECT keyword, nature_rank, nature_rank_change, keyword_type, suggest "
+                        "FROM t_advert_agent_core_keyword_tracking "
+                        "WHERE decision_id=%s ORDER BY create_time",
+                        (decision_id,),
+                    )
+                    core_keywords = cur.fetchall() or []
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("read core_keyword_tracking 降级 [%s]: %s", decision_id, e)
+
             return {"decision": decision, "purpose_scores": purpose_scores,
                     "ai_suggest": ai_suggest, "direction_detail": direction_detail,
-                    "direction_main": direction_main}
+                    "direction_main": direction_main, "core_keywords": core_keywords}
         finally:
             conn.close()
 
