@@ -1,0 +1,166 @@
+{
+  "groups": [
+    {
+      "title": "29个精准词因长期无转化被淘汰至低价池",
+      "action": "eliminate_to_low_bid_pool",
+      "common_reason_code": "NO_CVR_HIGH_SPEND",
+      "narrative": "这批精准词近7天花费均为$0，曝光极少，长期无转化且无自然排名支撑，已无保留价值。统一移入低价捡漏组，预算降至$1、Bid降至$0.20，以极低成本保留捡漏机会，释放预算用于高效关键词。",
+      "campaign_keys": [
+        "fishing net-9369 × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_women_black_black tights-1-black pattern tights for women × B09SGC3YZB",
+        "精准-3pcs-halloween skirt × B09SGC3YZB",
+        "emo accessories-广泛 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_tights-3-patterned tights for women × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_tights-3-pattern tights for women × B09SGC3YZB",
+        "精准-3pcs-sexy womens halloween costumes × B09SGC3YZB",
+        "sexy halloween costumes-1231-3pcs渔网 × B09SGC3YZB",
+        "精准-3pcs-halloween accessories × B09SGC3YZB",
+        "lcx-8pcs渔网fishnet leggings-7890 复制 1 复制 1 × B09SGC3YZB",
+        "emo-21465 × B09SGC3YZB",
+        "festival outfits for women-9千 × B09SGC3YZB",
+        "fishnet stockings for women-19092 复制 1 × B09SGC3YZB",
+        "plus size fishnet stockings-2万8-plus单 × B0D62KVRVG",
+        "sexy lingerie-9547-3pcs渔网 × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_NULL_stocking-1-plus size body stocking × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_women_stocking-1-womens black stockings × B09SGC3YZB",
+        "lcx-black stockings for women-58430 复制 1 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_stocking-2-women stockings × B09SGC3YZB",
+        "fishnet top-71871 × B09SGC3YZB",
+        "halloween costumes women-8446精准 × B09SGC3YZB",
+        "精准-3pcs-halloween costumes women × B09SGC3YZB",
+        "femboy-22178 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_tights-5-womens tights patterned × B09SGC3YZB",
+        "goth clothes-18327-广泛 × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_NULL_stocking-1-stockings sexy × B09SGC3YZB",
+        "精准-fishnet tights 低BD × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_tights-1-star tights for women × B09SGC3YZB",
+        "精准-3pcs-women halloween costumes sexy × B09SGC3YZB"
+      ],
+      "count": 29
+    },
+    {
+      "title": "35个广告活动因预算无法花费被小幅提价",
+      "action": "adjust_bid",
+      "common_reason_code": "BUDGET_NO_SPEND",
+      "narrative": "这批广告活动近7天花费为$0且无点击，曝光量低，当前出价偏低导致预算无法花出。采取小幅提升Bid 5-10%，部分活动同步提高预算以提供更多空间，观察3天能否激活流量；若持续无花费则考虑后续淘汰。",
+      "campaign_keys": [
+        "plus size fishnets-6万8-plus单推 × B0D62KVRVG",
+        "emo clothes-29895 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_stocking-2-womens stockings × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_women_stocking-2-women's stockings × B09SGC3YZB",
+        "sexy lingerie for women-51670 × B09SGC3YZB",
+        "fishnets plus size-8万-plus 单推 × B0D62KVRVG",
+        "精准-fishnet tights 复制 1 × B09SGC3YZB",
+        "halloween costumes for women-10657 × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_NULL_stocking-1-stockings black × B09SGC3YZB",
+        "lcx- fish net stocking for women-22308 复制 1 × B09SGC3YZB",
+        "lcx-black fishnet tights-49856 复制 1 × B09SGC3YZB",
+        "rave outfits for women-8千 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_NULL_tights-2-sexy tights × B09SGC3YZB",
+        "lcx-stockings-3p渔网 × B09SGC3YZB",
+        "lcx-sexy halloween costumes for women-3pcs渔网 × B09SGC3YZB",
+        "fishnet body suits women-27094 × B09SGC3YZB",
+        "lcx-pantyhose-广泛 × B09SGC3YZB",
+        "lcx-stockings--广泛-3pcs渔网 复制 1 复制 1 × B09SGC3YZB",
+        "自动广泛出单组-black lace stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "lrl-tights for women-3p渔网 复制 1 × B09SGC3YZB",
+        "lcx-fishnets-广泛 × B09SGC3YZB",
+        "自动广泛出单组-thigh high stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "halloween costumes-广泛 × B09SGC3YZB",
+        "自动广泛出单组-black tights-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "lcx-stockings--广泛-3pcs渔网 复制 1 × B09SGC3YZB",
+        "halloween tights-广泛-3pcs渔网 × B09SGC3YZB",
+        "自动广泛出单组-stockings for women-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-black stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-fishnet stockings for women-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "lcx-thigh high stockings-广泛-3pcs渔网 × B09SGC3YZB",
+        "自动广泛出单组-black thigh high stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "rave accessories-广泛 × B09SGC3YZB",
+        "lcx-rave outfits-词组 × B09SGC3YZB",
+        "自动广泛出单组-fishnet tights-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-tights plus size-B09SGC3YZB-20250717 × B09SGC3YZB"
+      ],
+      "count": 35
+    },
+    {
+      "title": "16个广告活动因高ACOS被下调出价或预算",
+      "action": "adjust_budget",
+      "common_reason_code": "HIGH_ACOS_NO_ORDER",
+      "narrative": "这些广告活动近7天ACOS远超目标35%，或高花费无转化，整体效率低下。下调出价5-15%，降低商品页/其他位置加价比例以控制成本，部分活动同步减少预算。重点关注头部广告位表现，持续优化以减少无效花费。",
+      "campaign_keys": [
+        "lcx-stockings for women-精准（14435） × B09SGC3YZB",
+        "LCX-fishnet stockings-精准 复制 1 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_plus_plus size_tights-1-tights plus size × B09SGC3YZB",
+        "B0B7S3PWWB_high_small_women_stocking-1-designer stockings for women × B09SGC3YZB",
+        "3pcs渔网-广告受众测试 × B09SGC3YZB",
+        "精准-3pcs-womens sexy halloween costumes × B09SGC3YZB",
+        "lcx-tights-6355(精准） × B09SGC3YZB",
+        "lcx-fishnet lingerie for women-2万（3pcs渔网） × B09SGC3YZB",
+        "自动广泛出单组-stockings for women sexy-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-fishnet thigh high stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-fishnet tights plus size-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-stockings for women plus size-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "halloween costumes sexy-广泛-3pcs渔网 × B09SGC3YZB",
+        "lcx-stockings--广泛-3pcs渔网 × B09SGC3YZB",
+        "自动广泛出单组-tights black-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-plus size stockings-B09SGC3YZB-20250717 × B09SGC3YZB"
+      ],
+      "count": 16
+    },
+    {
+      "title": "4个广泛广告因预算无法有效花费被收缩",
+      "action": "adjust_budget",
+      "common_reason_code": "BUDGET_CANT_SPEND",
+      "narrative": "这批广泛广告近7天虽有曝光但点击极少，花费$0.4左右且无任何转化，预算利用率低于3%。将Bid小幅下调至$0.2或更低，预算降至$1-1.5，以极低成本维持曝光，避免浪费。",
+      "campaign_keys": [
+        "自动广泛出单组-black fishnet stockings-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "lcx-3pcs渔网-stockings for women(否了集中的搜索词） × B09SGC3YZB",
+        "自动广泛出单组-black pantyhose-B09SGC3YZB-20250717 × B09SGC3YZB",
+        "自动广泛出单组-fishnet stockings for women plus size-B09SGC3YZB-20250717 × B09SGC3YZB"
+      ],
+      "count": 4
+    },
+    {
+      "title": "9个广告活动表现健康，维持原设置或微扩",
+      "action": "keep",
+      "common_reason_code": "ALL_HEALTHY",
+      "narrative": "这些广告活动近7天ACOS在目标35%以内，转化数据良好，整体投放效率健康。维持当前出价和预算不变，其中个别活动因预算利用率较高且ACOS健康，小幅提升预算以承接更多流量，持续观察。",
+      "campaign_keys": [
+        "lcx-fishnet-32141低BD × B09SGC3YZB",
+        "lcx-fishnets-精准 × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_black_black stocking-1-black stockings × B09SGC3YZB",
+        "fishnet tights-1626-plus款 × B0D62KVRVG",
+        "lcx- fish net stocking for women-22308 × B09SGC3YZB",
+        "fishnet stockings for women-3pcs渔网胖款 × B0D62KVRVG",
+        "fishnet stockings for women-3pcs渔网胖款 × B09SGC3YZB",
+        "sexy lingerie-广泛-3pcs渔网 × B09SGC3YZB",
+        "自动广泛出单组-fishnet stockings for women thigh high-B09SGC3YZB-20250717 × B09SGC3YZB"
+      ],
+      "count": 9
+    },
+    {
+      "title": "4个广告活动因数据不足暂不调整",
+      "action": "keep",
+      "common_reason_code": "SAMPLE_INSUFFICIENT",
+      "narrative": "这些广告活动近7天花费为$0或仅极低花费，点击和转化数据不足，无法判断效果。维持当前出价和预算原状，继续观察积累数据，待样本充分后再评估调整。",
+      "campaign_keys": [
+        "B0B7S3PWWB_high_big_NULL_tights-2-sparkly tights × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_NULL_stocking-1-lace stockings × B09SGC3YZB",
+        "B0B7S3PWWB_high_big_tight_fishnet tights-2-womens fishnet tights × B09SGC3YZB",
+        "lcx-tights for women-3p渔网 × B09SGC3YZB"
+      ],
+      "count": 4
+    },
+    {
+      "title": "1个广泛广告因搜索词池脏被治理并降出价",
+      "action": "adjust_bid",
+      "common_reason_code": "KEYWORD_POOL_DIRTY",
+      "narrative": "该广泛广告近7天花费$0.42无订单，匹配的搜索词均为无效长尾词，缺乏转化。将Bid降至$0.20，并添加精确否定关键词以净化流量，同时维持低预算观察。",
+      "campaign_keys": [
+        "fishnets-广泛-3pcsplus单 × B0D62KVRVG"
+      ],
+      "count": 1
+    }
+  ],
+  "special_cases": []
+}

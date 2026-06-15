@@ -74,8 +74,13 @@ def _evidence_list(text) -> list:
     return [ln.strip() for ln in str(text).split("\n") if ln.strip()]
 
 
-def _snapshot_action(card: dict, has_bid: bool, has_budget: bool, has_placement: bool) -> str:
-    """card.suggest_category(+group_type 兜底) → 前端 action 串。"""
+def _snapshot_action(card: dict) -> str:
+    """card.suggest_category(+group_type 兜底) → 前端 action 串（粗枚举原样渲染）。
+
+    判定在写入侧 _normalize_action 做完、结果落 suggest_category；读回层只查表，
+    不再按 pending 行有无猜具体子类型（旧实现会把"全维持但有 pending 行"误判成 adjust_bid）。
+    ADJUST/空 → 粗类 "adjust"（前端显示"调整"）；具体改了什么看卡片的 old→new 行。
+    """
     cat = (card.get("suggest_category") or "").upper()
     grp = card.get("campaign_group_type") or ""
     if cat == "ELIMINATE":
@@ -84,14 +89,10 @@ def _snapshot_action(card: dict, has_bid: bool, has_budget: bool, has_placement:
         return "create_campaign"
     if cat == "KEEP":
         return "keep"
-    # ADJUST 或空：旧数据淘汰藏在 group_type=low_bid_retention_group
+    # 旧数据：淘汰藏在 group_type=low_bid_retention_group
     if grp == "low_bid_retention_group":
         return "eliminate_to_low_bid_pool"
-    if has_placement and not has_bid and not has_budget:
-        return "adjust_placement"
-    if has_budget and not has_bid:
-        return "adjust_budget"
-    return "adjust_bid"
+    return "adjust"
 
 
 def _index_pending(rows: list, key: str = "suggest_card_id") -> dict:
@@ -151,7 +152,7 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
 
         cat = (card.get("suggest_category") or "").upper()
         is_pref = bool(card.get("is_prefiltered"))
-        action = _snapshot_action(card, bool(bid_rows), bool(camp_rows), bool(plc_rows))
+        action = _snapshot_action(card)
         if cat == "CREATE":
             item_type = "new"
             create_count += 1

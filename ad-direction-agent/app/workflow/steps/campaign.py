@@ -511,14 +511,25 @@ async def _analyze_campaigns_impl(
             _ln = _rank_evidence_line(cu)
             if _ln and _ln not in item.evidence:
                 item.evidence.append(_ln)
-        if settings.campaign_portfolio_enabled:
-            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action)
-            cu.portfolio = item.ai_portfolio_class
+        # 终态组合分类挪到预算冲突裁决之后（§7b），按 proposed 定组（KB23 §3.1B/§3.5/§3.7）；
+        # 此处 proposed 尚未定稿，故不在 loop 内分类。
         # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
 
     # 7. 预算冲突裁决
     budget_warnings = _resolve_budget_conflicts(adjustments)
     warnings_list.extend(budget_warnings)
+
+    # 7b. 终态组合分类（KB23 §3.1B/§3.5/§3.7：升降组按【本轮建议预算 proposed】跨 $5 阈值判）。
+    # 必须在预算冲突裁决后（proposed 已定稿）、gather 之前（回算 _group_of 读 ai_portfolio_class）。
+    # 同一 ai_portfolio_class 供显示气泡 / ERP campaign_group_type / 预算回算共用，不解耦。
+    if settings.campaign_portfolio_enabled:
+        for item in adjustments:
+            cu = unit_by_key.get(item.campaign_key)
+            if cu is None:
+                continue
+            eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
+            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action, effective_budget=eff)
+            cu.portfolio = item.ai_portfolio_class
 
     # 8 + 8b：Sanity check 与 AI 汇总合成【并行】。
     # 两者都只读已定稿的 adjustments，产出独立（warnings vs 分组叙事），无数据依赖 →
@@ -1688,7 +1699,13 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
         item.proposed_budget is not None and item.current_budget is not None
         and abs(item.proposed_budget - item.current_budget) > _EPS
     )
-    placement_changed = bool(item.placement_adjustments)
+    # 全维持的广告位也会被 _backfill_placement_pcts 填成非空条目(proposed_pct==current_pct)，
+    # 故不能用列表非空判变，须看任一广告位 proposed_pct≠current_pct 才算变(否则健康活动恒被判 adjust_placement)。
+    placement_changed = any(
+        p.get("proposed_pct") is not None and p.get("current_pct") is not None
+        and abs(float(p["proposed_pct"]) - float(p["current_pct"])) > _EPS
+        for p in (item.placement_adjustments or [])
+    )
     # negative_keywords 是叠加建议,不算 action 变更 (KB 22 §3.3)
 
     if budget_changed:

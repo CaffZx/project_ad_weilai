@@ -68,7 +68,10 @@ def _group_of(item: CampaignAdjustmentItem) -> str:
     if mt in ("BROAD", "PHRASE", "AUTO"):
         return PORTFOLIO_BROAD
     if mt == "EXACT":
-        return PORTFOLIO_TEST if _f(item.current_budget) < 5.0 else PORTFOLIO_MAIN
+        # 主路径恒由终态分类(按 proposed)设好 ai_portfolio_class，此兜底罕见命中；
+        # 为一致性也按 proposed（缺省回落 current）判 $5 分界。
+        eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
+        return PORTFOLIO_TEST if _f(eff) < 5.0 else PORTFOLIO_MAIN
     return PORTFOLIO_BROAD
 
 

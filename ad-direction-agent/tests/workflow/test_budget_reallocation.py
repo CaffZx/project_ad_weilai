@@ -23,6 +23,7 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
+    classify,
 )
 
 
@@ -141,4 +142,41 @@ def test_to_budget_summary_constraints_sum_within_target():
     assert pc[PORTFOLIO_MAIN] == 90.0 and pc[PORTFOLIO_TEST] == 25.0 and pc[PORTFOLIO_BROAD] == 25.0
     # 关键回归：3 组约束之和不再超父目标
     assert round(sum(pc.values()), 2) <= 140.0 + 0.5
+
+
+# ── 终态组合分类：按 proposed 定组（KB23 §3.1B/§3.5/§3.7）─────────────────────
+
+def _unit(cur_budget, match="EXACT", cur_bid=0.5):
+    return CampaignUnit(
+        campaign_name="c", campaign_key="c", child_asin="B0", keyword_text="kw",
+        match_type=match, current_budget=cur_budget, current_bid=cur_bid,
+    )
+
+
+def test_classify_proposed_upgrade_testing_to_main():
+    # current $3(测试级) + proposed $7 → 升主力组（§3.1B/§3.5）
+    assert classify(_unit(3.0), llm_action="adjust_budget", effective_budget=7.0) == PORTFOLIO_MAIN
+
+
+def test_classify_proposed_downgrade_main_to_testing():
+    # current $7(主力级) + proposed $3 → 降测试组（§3.7）
+    assert classify(_unit(7.0), llm_action="adjust_budget", effective_budget=3.0) == PORTFOLIO_TEST
+
+
+def test_classify_default_uses_current_when_no_effective_budget():
+    # 不传 effective_budget → 按 current（预分类阶段零改）
+    assert classify(_unit(3.0)) == PORTFOLIO_TEST
+    assert classify(_unit(7.0)) == PORTFOLIO_MAIN
+
+
+def test_classify_eliminate_and_broad_unaffected_by_proposed():
+    # 淘汰 action 优先，proposed 不影响
+    assert classify(_unit(7.0), llm_action="eliminate_to_low_bid_pool", effective_budget=7.0) == PORTFOLIO_ELIMINATE
+    # 广泛永不进主力，即便 proposed≥5
+    assert classify(_unit(3.0, match="BROAD"), effective_budget=7.0) == PORTFOLIO_BROAD
+
+
+def test_classify_elimination_pool_stays_by_current_no_revival_gate():
+    # 本期不加复活闸：在淘汰池($1/$0.20)即归淘汰组，即使 proposed=$6
+    assert classify(_unit(1.0, cur_bid=0.20), llm_action="adjust_budget", effective_budget=6.0) == PORTFOLIO_ELIMINATE
     assert bs["portfolio_budget_summary"]["budget_pool"] == 140.0

@@ -35,6 +35,7 @@ function _fmtChange(cur, prop) {
 function _actionLabel(a) {
   return {
     eliminate_to_low_bid_pool: '淘汰',
+    adjust: '调整',
     adjust_bid: '调出价',
     adjust_budget: '调预算',
     adjust_placement: '调广告位',
@@ -466,11 +467,24 @@ function _renderPortfolioFilterPills(state) {
   const bs = state._budgetSummary;
   if (!bs) { _hide('camp-portfolio-pills-row'); return; }
 
+  const LOW_BID = '低价捡漏组';
   const constraints = bs.portfolio_constraints || {};
+  const money0 = v => '$' + (Number(v) || 0).toFixed(0);
+
+  // 每组活动数 + 调整前/后预算统计（统计值=活动预算之和，前端遍历算，随勾选动态；
+  // 与"执行后预计总预算"同口径：勾选→(低价捡漏$1/否则proposed)，未勾选→current）。
   const countByName = {};
+  const budgetByName = {};
+  PORTFOLIO_NAMES.forEach(n => { countByName[n] = 0; budgetByName[n] = { cur: 0, prop: 0 }; });
   state._campaignItems.forEach(it => {
-    const name = it.ai_portfolio_class || '';
-    if (name) countByName[name] = (countByName[name] || 0) + 1;
+    if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
+    const p = it.ai_portfolio_class || '自动广泛组';
+    if (budgetByName[p] == null) return;
+    countByName[p]++;
+    budgetByName[p].cur += Number(it.current_budget) || 0;
+    budgetByName[p].prop += state._selection.has(it.item_id)
+      ? (p === LOW_BID ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0))
+      : (Number(it.current_budget) || 0);
   });
 
   const editing = state._editingConstraint;
@@ -478,17 +492,23 @@ function _renderPortfolioFilterPills(state) {
   const pills = PORTFOLIO_NAMES.map(name => {
     const esc = name.replace(/'/g, "\\'");
     const active = state._portfolioFilter === name ? ' active' : '';
-    const isElim = name === '低价捡漏组';
+    const isElim = name === LOW_BID;
+    const ov = state._portfolioOverride[name];
 
-    // 金额行
-    let amt = '—';
-    if (!isElim && bs.target_budget != null) {
-      const constraint = constraints[name];
-      if (constraint != null) amt = '$' + constraint.toFixed(0);
-    }
-    const amtLabel = isElim ? '' : (constraints[name] != null ? '约束' : '');
+    // 约束行：低价捡漏组硬编码 $1（KB 21 §6 每活动 $1，组合约束固定 $1）；其余 override > 推荐
+    let amt, amtLabel;
+    if (isElim) { amt = '$1'; amtLabel = '约束'; }
+    else if (ov != null) { amt = money0(ov); amtLabel = '约束(覆盖)'; }
+    else if (constraints[name] != null) { amt = money0(constraints[name]); amtLabel = '推荐约束'; }
+    else { amt = '—'; amtLabel = '约束'; }
 
-    // 约束编辑行（仅在交互模式 + 非淘汰组 + 目标预算存在时显示）
+    // 调整前/后预算（统计值）。低价捡漏组淘汰活动预算固定 $1、统计无意义 → 占位 "—"（美观对齐）
+    const b = budgetByName[name];
+    const budgetLine = isElim
+      ? `<span class="pp-budget" style="opacity:.4;">调整前 — | 调整后 —</span>`
+      : `<span class="pp-budget">调整前 ${money0(b.cur)} | 调整后 ${money0(b.prop)}</span>`;
+
+    // 约束编辑行（交互模式 + 非淘汰组 + 目标预算存在时；低价捡漏组固定 $1 不可编辑）
     const canEdit = state.executable !== false && !isElim && bs.target_budget != null;
     const actLine = !canEdit ? ''
       : (editing === name
@@ -505,6 +525,7 @@ function _renderPortfolioFilterPills(state) {
     return `<button class="camp-portfolio-pill${active}" type="button" data-action="camp-toggle-portfolio" data-portfolio="${esc}">
       <span class="pp-name">${_esc(name)} (${countByName[name] || 0})</span>
       <span class="pp-amount">${amtLabel} ${amt}</span>
+      ${budgetLine}
       ${actLine}
     </button>`;
   }).join('');
@@ -525,22 +546,40 @@ function _renderBudgetSummary(state) {
   const bs = state._budgetSummary;
   if (!bs) { _hide('camp-budget-summary'); return; }
 
-  let selTotal = 0;
-  // 遍历全集 _campaignItems（非 _filteredItems）：勾选后再切筛选时，
-  // 被藏住的已勾选项仍须计入"已勾选合计"，与"执行后预计总预算"语义一致。
+  const LOW_BID = '低价捡漏组';
+  // 执行后预计总预算 = Σ(已勾选→(低价捡漏$1/否则proposed)，未勾选→current)，随勾选动态（统计值）。
+  // 遍历全集 _campaignItems（非 _filteredItems）：被筛选藏住的已勾选项仍须计入。
+  let execTotal = 0, selectedCount = 0, totalCount = 0;
   state._campaignItems.forEach(it => {
     if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
-    if (it.proposed_budget != null && state._selection.has(it.item_id)) {
-      selTotal += it.proposed_budget;
+    totalCount++;
+    const p = it.ai_portfolio_class || '自动广泛组';
+    if (state._selection.has(it.item_id)) {
+      execTotal += (p === LOW_BID) ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0);
+      selectedCount++;
+    } else {
+      execTotal += Number(it.current_budget) || 0;
     }
   });
 
+  const target = bs.target_budget;
+  const over = (target != null && execTotal > target);
+  const selStyle = over ? 'color:#DC2626;' : '';
+  const src = bs.target_budget_source || '';
+  const srcHint =
+      src === 'override'   ? '<span style="font-size:11px;color:var(--camp-muted-fg)">来源: 运营 override</span>'
+    : src === 'asin_data'  ? '<span style="font-size:11px;color:var(--camp-muted-fg)">来源: 数仓 asin_data</span>'
+    : src === 'fallback_spend_x1.15' ? '<span style="font-size:11px;color:#D97706">⚠ 按日均花费×1.15 兜底</span>'
+    : '';
+
   el.innerHTML = `
     <div class="camp-card">
-      <div class="camp-card-title">执行后预计总预算</div>
+      <div class="camp-card-title">组合预算汇总（预算约束 + 运营同意动态汇总）</div>
       <div class="camp-budget-summary-totals">
-        <span class="stat">预算约束 <strong>$${_fmtMoney(bs.target_budget)}</strong></span>
-        <span class="stat">已勾选合计 <strong>$${selTotal.toFixed(2)}</strong></span>
+        <span class="stat">预算约束 <strong>$${_fmtMoney(target)}</strong> ${srcHint}</span>
+        <span class="stat">执行后预计总预算 <strong style="${selStyle}">$${execTotal.toFixed(2)}</strong>
+          <span style="font-size:11px;color:var(--camp-muted-fg)">(${selectedCount}/${totalCount} 个已勾选${over ? '，超约束' : ''})</span>
+        </span>
       </div>
     </div>`;
   _show('camp-budget-summary');

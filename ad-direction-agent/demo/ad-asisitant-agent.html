@@ -1091,6 +1091,17 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   if (data.p3_recommend) {
     renderP3(data.p3_recommend);
     hide('p3CacheBadge');
+    // 快照有数值但无任何 AI 推理（人工覆盖值 / 未经 LLM 推荐）→ 复用 p3Warnings 告警条提示。
+    // renderP3 已在无 risk_warnings 时隐藏 p3Warnings，此处仅在"有值无推理"时覆盖显示。
+    const _pr = data.p3_recommend;
+    const _hasReasoning = !!((_pr.target_acos && _pr.target_acos.reasoning) ||
+                             (_pr.budget_bid && _pr.budget_bid.reason) || _pr.overall_reasoning);
+    const _hasValue = (_pr.target_acos && _pr.target_acos.recommended_target != null) ||
+                      (_pr.budget_bid && _pr.budget_bid.suggested != null);
+    if (_hasValue && !_hasReasoning) {
+      show('p3Warnings');
+      setHTML('p3Warnings', '⚠ 人工覆盖值，未经 LLM 推理建议');
+    }
   } else {
     setHTML('p3AcosColumn', `<div class="card" style="margin:0">${_snapshotRow('目标 ACOS', p3.target_acos != null ? `<b>${escapeHtml(String(p3.target_acos))}%</b>` : '—')}</div>`);
     setHTML('p3BudgetColumn', `<div class="card" style="margin:0">${_snapshotRow('每日预算', p3.daily_budget != null ? `<b>$${escapeHtml(String(Math.round(p3.daily_budget)))}</b>` : '—')}</div>`);

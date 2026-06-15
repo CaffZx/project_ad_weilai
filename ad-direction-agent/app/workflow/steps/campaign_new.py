@@ -301,7 +301,7 @@ async def analyze_new_campaigns(
     # （改 gather 后必须共享同一把，否则真的不限流）。sem 实际由调用方传入(new_sem)。
     round_sem = sem or asyncio.Semaphore(1)
 
-    async def _run_round(seed: int) -> dict[str, dict]:
+    async def _run_round(seed: int) -> tuple[dict[str, dict], bool]:
         import random as _rnd
         ordered = cand_dump[:]
         _rnd.Random(seed).shuffle(ordered)
@@ -320,11 +320,13 @@ async def analyze_new_campaigns(
             *[_call_one(b) for b in batches], return_exceptions=True,
         )
         out: dict[str, dict] = {}
+        any_success = False  # 本轮至少一个批次成功执行 → 区分"失败"与"真判都不建"
         for res in results:
             if isinstance(res, BaseException):
                 warnings.append(f"new_campaigns 批次异常: {type(res).__name__}: {res}")
                 continue
             if res.get("success") and isinstance(res.get("parsed"), dict):
+                any_success = True
                 for it in res["parsed"].get("new_campaigns", []) or []:
                     if not isinstance(it, dict):
                         continue
@@ -335,33 +337,60 @@ async def analyze_new_campaigns(
                         out[kw] = it
             else:
                 warnings.append(f"new_campaigns 批次失败: {res.get('error', 'unknown')}")
-        return out
+        return out, any_success
 
     # LLM 轮前等策略总览 gate：保证 ctx_dict 含 posture_brief（候选词发现/建议竞价已跑完，不串行）
     if overview_gate is not None:
         await overview_gate
 
     try:
-        r1, r2 = await asyncio.gather(_run_round(1), _run_round(2))
+        (r1, r1_ok), (r2, r2_ok) = await asyncio.gather(_run_round(1), _run_round(2))
     except Exception as e:  # noqa: BLE001
         logger.warning("new_campaigns 双轮 LLM 异常 [%s]: %s", parent_asin, e)
         warnings.append(f"new_campaigns LLM 异常: {type(e).__name__}: {e}")
         return [], warnings, search_volume_map
 
-    # 4. 取交集 + 组装（代码补齐 match_type/bid/budget/name/归组）
+    # 4. 容错选词：
+    #    两轮都成功执行 → 取交集（降幻觉，两轮 keyword_class 一致才 high）
+    #    仅一轮成功（另一轮整轮失败）→ 退化为成功那轮，但全部标 MANUAL_REVIEW/low
+    #      （没有双轮验证，不冒充 high；保住结果不因一轮失败全丢）
+    #    两轮都失败 → 空
+    if r1_ok and r2_ok:
+        selected_keys = set(r1.keys() & r2.keys())
+        degraded_round: dict | None = None
+    elif r1_ok or r2_ok:
+        degraded_round = r1 if r1_ok else r2
+        selected_keys = set(degraded_round.keys())
+        warnings.append("new_campaigns：双轮中一轮整轮失败，退化为单轮结果（全部标记需人工复核）")
+        logger.warning(
+            "Campaign new [%s]: 一轮失败(r1_ok=%s r2_ok=%s)，退化单轮 %d 词",
+            parent_asin, r1_ok, r2_ok, len(selected_keys),
+        )
+    else:
+        warnings.append("new_campaigns：双轮均失败，无新增建议")
+        return [], warnings, search_volume_map
+
+    # 5. 组装（代码补齐 match_type/bid/budget/name/归组）
     cand_by_kw = {c.keyword_text: c for c in candidates}
     items: list[NewCampaignItem] = []
-    for kw in r1.keys() & r2.keys():            # 两轮都判"建"的词才保留（交集降幻觉）
+    for kw in selected_keys:
         cand = cand_by_kw.get(kw)
         if cand is None:
             continue
-        o1, o2 = r1[kw], r2[kw]
-        kc1 = str(o1.get("keyword_class", "")).strip().lower()
-        kc2 = str(o2.get("keyword_class", "")).strip().lower()
-        if kc1 == kc2 and kc1:
-            keyword_class, conf, review = kc1, "high", "AUTO_BATCHABLE"
+        if degraded_round is None:
+            # 双轮交集：两轮 keyword_class 一致 → high，否则 low
+            o1, o2 = r1[kw], r2[kw]
+            kc1 = str(o1.get("keyword_class", "")).strip().lower()
+            kc2 = str(o2.get("keyword_class", "")).strip().lower()
+            if kc1 == kc2 and kc1:
+                keyword_class, conf, review = kc1, "high", "AUTO_BATCHABLE"
+            else:
+                keyword_class, conf, review = (kc1 or kc2), "low", "MANUAL_REVIEW"
         else:
-            keyword_class, conf, review = (kc1 or kc2), "low", "MANUAL_REVIEW"
+            # 退化单轮：无双轮验证，统一低置信 + 人工复核（o1 供下方组装复用）
+            o1 = degraded_round[kw]
+            keyword_class = str(o1.get("keyword_class", "")).strip().lower()
+            conf, review = "low", "MANUAL_REVIEW"
 
         mt = _derive_match_type(keyword_class, cand)
         is_exact = mt == "EXACT"

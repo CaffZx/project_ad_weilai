@@ -64,16 +64,22 @@ def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
     )
 
 
-def _is_exact_testing(unit: CampaignUnit) -> bool:
+def _is_exact_testing(unit: CampaignUnit, effective_budget: float | None = None) -> bool:
     """精准测试组判定:活动预算 < $5 (KB23 §3.1)。
 
     仅对 EXACT 流调用 (调用方已过滤 match_type)。
-    预算未知按 0 处理 → 归测试组 (尚未达 $5 主推门槛)。
+    effective_budget 给定时按它判 (终态分类传 proposed,KB23 §3.1B/§3.5/§3.7 升降组按本轮建议预算);
+    缺省 None → current (预分类阶段)。预算未知按 0 处理 → 归测试组 (尚未达 $5 主推门槛)。
     """
-    return (unit.current_budget or 0) < _MAIN_BUDGET_MIN
+    budget = effective_budget if effective_budget is not None else unit.current_budget
+    return (budget or 0) < _MAIN_BUDGET_MIN
 
 
-def classify(unit: CampaignUnit, llm_action: str | None = None) -> str:
+def classify(
+    unit: CampaignUnit,
+    llm_action: str | None = None,
+    effective_budget: float | None = None,
+) -> str:
     """按优先级判定 4 组合归属,返回常量字符串。
 
     顺序 (命中即止): 淘汰 → 广泛/自动 → 测试/新增 → 主推
@@ -82,8 +88,11 @@ def classify(unit: CampaignUnit, llm_action: str | None = None) -> str:
         unit: 活动单元。current_budget/current_bid/match_type 是关键输入。
         llm_action: 本批 LLM 输出的 action (合并后才有);分析前阶段传 None,
                     淘汰组只能通过"已在淘汰池"判定。
+        effective_budget: 主力↔测试 $5 分界的判定预算。终态分类传 proposed
+                    (KB23 §3.1B/§3.5/§3.7 按本轮建议预算升降组);缺省 None → current。
+                    仅作用于 EXACT 主力↔测试,淘汰/广泛分支不受影响。
     """
-    # 1. 淘汰 (LLM 标记 OR 已在淘汰池 $1/$0.20)
+    # 1. 淘汰 (LLM 标记 OR 已在淘汰池 $1/$0.20) —— 读 current,不受 effective_budget 影响
     if llm_action == "eliminate_to_low_bid_pool" or _is_in_elimination_pool(unit):
         return PORTFOLIO_ELIMINATE
     mt = (unit.match_type or "").upper()
@@ -91,8 +100,8 @@ def classify(unit: CampaignUnit, llm_action: str | None = None) -> str:
     #    一个 BROAD 即使刚上线/小预算,本质仍是测词,不算"测试新活动"
     if mt in _BROAD_MATCH_TYPES:
         return PORTFOLIO_BROAD
-    # 3. 精准流: 预算 ≥ $5 入主推, < $5 入测试 (KB23 §3.1)
+    # 3. 精准流: 预算 ≥ $5 入主推, < $5 入测试 (KB23 §3.1;终态按 proposed)
     if mt == "EXACT":
-        return PORTFOLIO_TEST if _is_exact_testing(unit) else PORTFOLIO_MAIN
+        return PORTFOLIO_TEST if _is_exact_testing(unit, effective_budget) else PORTFOLIO_MAIN
     # 兜底: 未知 match_type → 归广泛 (与 campaign.py 既有口径一致)
     return PORTFOLIO_BROAD

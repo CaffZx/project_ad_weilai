@@ -1948,11 +1948,10 @@ class LLMReasoner:
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                max_tokens=16384,                                    # pro思考也吃 token 预算
+                max_tokens=8192,
                 timeout_override=max(timeout_override or 0, 240),   # 强档慢，至少 240s
                 model=settings.llm_model_strong,                    # 汇总=重要节点→强档
-                thinking=True,
-                reasoning_effort=settings.llm_strong_reasoning_effort,
+                # 不传 thinking：synthesis 是语义聚类不是复杂推理；思考吃 token 会导致 JSON 截断
             )
             parsed = self._parse_json(raw)
             groups = parsed.get("groups", []) or []
