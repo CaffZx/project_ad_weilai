@@ -1868,7 +1868,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=temperature,
                 response_format={"type": "json_object"},
-                max_tokens=2048,
+                max_tokens=8192,
                 timeout_override=max(timeout_override or 0, 180),   # 强档慢，至少 180s
                 model=settings.llm_model_strong,                    # 总览=重要节点→强档
                 thinking=True,
