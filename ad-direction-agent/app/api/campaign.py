@@ -412,3 +412,57 @@ async def campaign_confirm(req: CampaignConfirmRequest):
         req.operator or "anonymous",
     )
     return result
+
+
+# ── 广告调整真实执行（Part 6）─────────────────────────────────────────────
+
+
+@router.post("/campaign/execute")
+async def campaign_execute(req: dict):
+    """执行已确认(CONFIRMED)的广告调整 → 调广告调整 MCP（dry-run 默认空跑）。
+
+    门禁与 confirm 一致：批次必须无进行中分析事件（state 库）。幂等由
+    load_confirmed_pending 只取 execute_status=PENDING 保证。
+    """
+    decision_id = str(req.get("decision_id") or req.get("run_id") or "").strip()
+    asin = str(req.get("asin") or "").strip()
+    operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
+    if not decision_id:
+        return {"ok": False, "error": "decision_id 必填"}
+    try:
+        sess = get_state_manager().get_analysis_session(asin) if asin else None
+        if sess and sess.get("run_id"):
+            return {"ok": False, "error": "存在进行中分析事件，执行权已冻结"}
+        from app.workflow.steps.advert_execution import submit_execution
+        return await submit_execution(decision_id, operator=operator)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Campaign execute 失败 [%s] decision_id=%s: %s", asin, decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@router.get("/campaign/execute/status")
+async def campaign_execute_status(decision_id: str = "", record_id: str = ""):
+    """轮询异步执行结果并回写终态。"""
+    if not decision_id and not record_id:
+        return {"ok": False, "error": "decision_id 或 record_id 必填"}
+    try:
+        from app.workflow.steps.advert_execution import poll_execution
+        return await poll_execution(decision_id=decision_id, record_id=record_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Campaign execute status 失败 [%s]: %s", decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@router.get("/campaign/execution-records")
+async def campaign_execution_records(asin: str = "", decision_id: str = ""):
+    """调整记录视图：主记录 + 子记录（按 ASIN 或批次）。"""
+    if not asin and not decision_id:
+        return {"ok": False, "error": "asin 或 decision_id 必填", "records": []}
+    try:
+        records = await asyncio.to_thread(
+            _get_repository().list_execution_records, asin=asin, decision_id=decision_id
+        )
+        return {"ok": True, "records": records}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("execution-records 失败 [%s/%s]: %s", asin, decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "records": []}

@@ -129,6 +129,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <span id="camp-batch-count" style="font-size:12px;color:var(--camp-muted-fg);">已选 0 / 0</span>
             <button class="primary" data-action="camp-batch-approve">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
+            <span class="sep"></span>
+            <button class="primary" data-action="camp-execute-confirmed" title="对已同意(CONFIRMED)的调整调用广告调整工具执行（dry-run 下不真实修改）">执行已确认调整</button>
+            <button data-action="camp-view-records">调整记录</button>
           </div>
 
           <!-- 卡片列表 -->
@@ -136,6 +139,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
           <!-- 汇总区 -->
           <div id="camp-synthesis" class="hidden"></div>
+
+          <!-- 调整记录（真实执行回写）-->
+          <div id="camp-exec-records" class="camp-card hidden" style="margin-top:12px;"></div>
 
         </div>
       </div>

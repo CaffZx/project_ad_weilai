@@ -206,6 +206,15 @@ class Settings(BaseSettings):
     erp_password: str = "erp_agentadvert#weilai123"
     erp_database: str = "erp_agentadvert"
     erp_write_timeout: int = 30
+    # ERP 走 TLS：服务器同内网可不开；本机/VPN 经 caching_sha2_password 必须 TLS 才能握手。
+    erp_use_tls: bool = False
+
+    # 广告调整 MCP（whp-advert-agent，真实执行广告调整）— Part 6
+    advert_mcp_url: str = "http://192.168.2.31:5678/mcp"
+    advert_mcp_token: str = ""                 # Bearer token（sk-…），生产经 .env 注入，勿硬编码
+    advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
+    advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
+    advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

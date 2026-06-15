@@ -18,21 +18,6 @@ class McpClientError(RuntimeError):
     """MCP protocol or tool-level failure."""
 
 
-def _auth_headers() -> dict[str, str]:
-    headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-    }
-    token = settings.mcp_gateway_token
-    if not token:
-        return headers
-    name = settings.mcp_gateway_header_name
-    if name.lower() == "authorization":
-        headers["Authorization"] = f"Bearer {token}"
-    else:
-        headers[name] = token
-    return headers
-
 
 def _next_id() -> int:
     if not hasattr(_next_id, "_counter"):
@@ -105,14 +90,26 @@ def unwrap_tool_payload(result: dict[str, Any]) -> Any:
 class StreamableHttpMcpInvoker:
     """MCP Streamable HTTP transport with session reuse."""
 
-    def __init__(self) -> None:
-        if not settings.mcp_gateway_url:
-            raise RuntimeError("MCP 网关未配置: mcp_gateway_url")
-        self._endpoint = settings.mcp_gateway_url.rstrip("/")
+    def __init__(
+        self,
+        *,
+        endpoint: str | None = None,
+        token: str | None = None,
+        header_name: str | None = None,
+        timeout: float | None = None,
+        max_connections: int | None = None,
+    ) -> None:
+        ep = (endpoint or settings.mcp_gateway_url or "").rstrip("/")
+        if not ep:
+            raise RuntimeError("MCP 网关未配置: endpoint / mcp_gateway_url")
+        self._endpoint = ep
+        # token/header 默认走数据服务器配置；显式传入则指向别的 MCP（如广告调整服务）
+        self._token = token if token is not None else settings.mcp_gateway_token
+        self._header_name = header_name or settings.mcp_gateway_header_name
         self._client = httpx.AsyncClient(
-            timeout=settings.mcp_timeout,
+            timeout=timeout or settings.mcp_timeout,
             limits=httpx.Limits(
-                max_connections=settings.mcp_max_connections,
+                max_connections=max_connections or settings.mcp_max_connections,
                 max_keepalive_connections=40,
             ),
         )
@@ -120,7 +117,15 @@ class StreamableHttpMcpInvoker:
         self._init_lock = asyncio.Lock()
 
     def _headers(self) -> dict[str, str]:
-        headers = _auth_headers()
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+        if self._token:
+            if self._header_name.lower() == "authorization":
+                headers["Authorization"] = f"Bearer {self._token}"
+            else:
+                headers[self._header_name] = self._token
         if self._session_id:
             headers["mcp-session-id"] = self._session_id
         return headers

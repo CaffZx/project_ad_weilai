@@ -286,6 +286,79 @@ export function createCampaignState() {
     _toast(`已恢复「${name}」推荐约束`);
   };
 
+  // ── 真实执行（Part 6）──
+  const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
+  function _operator() { return ((window._erpParams || {}).userId) || 'tab5'; }
+
+  state.executeConfirmed = async function () {
+    if (!state.executable) return;  // 仅最新已完成批次可执行
+    const did = state._currentRunId;
+    if (!did) { _toast('无可执行批次'); return; }
+    if (!confirm('确认对【已同意】的调整执行真实广告调整？\n将调用广告调整工具（dry-run 模式下不会真实修改）。')) return;
+    _toast('执行中…');
+    try {
+      const resp = await fetch(_API + '/campaign/execute', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ asin: state.asin, decision_id: did, operator: _operator() }),
+      });
+      const body = await resp.json().catch(() => null);
+      if (!resp.ok || !body || body.ok === false) {
+        throw new Error((body && body.error) || `HTTP ${resp.status}`);
+      }
+      if (body.dry_run) _toast(`空跑完成：构造 ${body.ops || 0} 项（dry_run，未真实调整）`);
+      else _toast(`已提交 ${body.ops || 0} 项${(body.task_ids && body.task_ids.length) ? `，任务 ${body.task_ids.join(',')}` : ''}`);
+      await state.loadExecutionRecords();
+      if (body.task_ids && body.task_ids.length) setTimeout(() => state.pollExecStatus(did), 4000);
+    } catch (e) {
+      _toast('执行失败：' + (e.message || '未知错误'));
+    }
+  };
+
+  state.pollExecStatus = async function (did) {
+    try {
+      await fetch(_API + '/campaign/execute/status?decision_id=' + encodeURIComponent(did || state._currentRunId));
+      await state.loadExecutionRecords();
+    } catch (_) {}
+  };
+
+  state.loadExecutionRecords = async function () {
+    const did = state._currentRunId;
+    if (!did) return;
+    try {
+      const resp = await fetch(_API + '/campaign/execution-records?decision_id=' + encodeURIComponent(did));
+      const body = await resp.json().catch(() => null);
+      state._execRecords = (body && body.records) || [];
+    } catch (_) { state._execRecords = []; }
+    _renderExecRecords();
+  };
+
+  function _renderExecRecords() {
+    const box = document.getElementById('camp-exec-records');
+    if (!box) return;
+    const recs = state._execRecords || [];
+    if (!recs.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    const esc = (s) => { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; };
+    const KIND = { campaign: '活动', keyword: '关键词', placement: '广告位' };
+    const rows = [];
+    recs.forEach((r) => {
+      (r.items || []).forEach((it) => {
+        const kind = it._kind;
+        let chg = '';
+        if (kind === 'campaign') chg = `预算 ${it.old_budget ?? '—'} → ${it.new_budget ?? '—'}` + (it.new_state ? ` / 状态 ${esc(it.new_state)}` : '');
+        else if (kind === 'keyword') chg = `竞价 ${it.old_bid ?? '—'} → ${it.new_bid ?? '—'}` + (it.keyword_text ? `（${esc(it.keyword_text)}）` : '');
+        else if (kind === 'placement') chg = `${esc(it.placement_type)} ${it.old_percent ?? '—'}% → ${it.new_percent ?? '—'}%`;
+        const res = it.modify_result || 'PENDING';
+        const color = res === 'SUCCESS' ? '#16A34A' : (res === 'FAIL' ? '#DC2626' : (res === 'DRY_RUN' ? '#6B7280' : '#D97706'));
+        rows.push(`<tr><td>${esc(r.create_time || '')}</td><td>${esc(it.campaign_id || '')}</td><td>${KIND[kind] || kind}</td><td>${chg}</td><td style="color:${color};font-weight:600">${esc(res)}</td><td>${esc(it.error_msg || '')}</td></tr>`);
+      });
+    });
+    box.classList.remove('hidden');
+    box.innerHTML = `<div class="camp-card-title">调整记录（${recs.length} 批 / ${rows.length} 项）</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:var(--camp-muted-fg)"><th>时间</th><th>活动ID</th><th>类型</th><th>变更</th><th>结果</th><th>错误</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table>`;
+  }
+
   // ── 设置数据 ──
   state.setData = function (vm) {
     state.mode = vm.mode;

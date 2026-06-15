@@ -28,6 +28,15 @@ from .text_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _audit_int(v: Any) -> int | None:
+    """审计列 create_by/editor_by(int) / creator_id/editor_id(bigint) 需数值；
+    operator 可能是非数字串（如 'tab5'）→ 返回 None 入 NULL，数字串→int。"""
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class WriteReport:
     decision_id: str
@@ -69,7 +78,8 @@ class WriteReport:
 
 
 class ErpDualWriterRepository:
-    def __init__(self, *, host: str, port: int, user: str, password: str, database: str):
+    def __init__(self, *, host: str, port: int, user: str, password: str,
+                 database: str, use_tls: bool = False):
         self._conn_kwargs = {
             "host": host,
             "port": port,
@@ -83,6 +93,13 @@ class ErpDualWriterRepository:
             "write_timeout": 30,
             "autocommit": False,
         }
+        if use_tls:
+            # caching_sha2_password 经非 LAN（本机/VPN）需 TLS 握手；CERT_NONE 不校验证书即可
+            import ssl as _ssl
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            self._conn_kwargs["ssl"] = ctx
 
     def _connect(self):
         return pymysql.connect(**self._conn_kwargs)
@@ -265,6 +282,226 @@ class ErpDualWriterRepository:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    # ── 广告调整 MCP 真实执行（Part 6） ─────────────────────────────────────
+    # 链路：confirm(标 CONFIRMED) → load_confirmed_pending → mapper → 调 MCP →
+    #       insert_advert_record(主) + insert_*_record(子) + update_pending_execute_status
+
+    def load_confirmed_pending(self, decision_id: str) -> dict | None:
+        """读取某批次 CONFIRMED 且 execute_status=PENDING 的待执行 pending 行 + cards。
+
+        仅取已确认(approve)且未执行的行 → 天然幂等（已执行的 execute_status≠PENDING 不再取）。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no "
+                    "FROM t_advert_agent_decision WHERE id=%s",
+                    (decision_id,),
+                )
+                decision = cur.fetchone()
+                if not decision:
+                    return None
+                cur.execute(
+                    "SELECT id, campaign_id, campaign_name, suggest_category, "
+                    "campaign_group_type, keyword_match_type, asin, keyword "
+                    "FROM t_advert_agent_modify_suggest_card "
+                    "WHERE decision_id=%s AND confirm_status='CONFIRMED'",
+                    (decision_id,),
+                )
+                cards = cur.fetchall() or []
+                rows: dict[str, list] = {}
+                for table, key in (
+                    ("t_advert_agent_modify_campaign_pending", "campaign_pending"),
+                    ("t_advert_agent_modify_keyword_pending", "keyword_pending"),
+                    ("t_advert_agent_modify_placement_pending", "placement_pending"),
+                ):
+                    cur.execute(
+                        f"SELECT * FROM {table} WHERE decision_id=%s "
+                        "AND confirm_status='CONFIRMED' AND execute_status='PENDING'",
+                        (decision_id,),
+                    )
+                    rows[key] = cur.fetchall() or []
+            return {"decision": decision, "cards": cards, **rows}
+        finally:
+            conn.close()
+
+    def insert_advert_record(
+        self, *, decision_id: str, shop_id: int, parent_asin: str,
+        parent_seller_sku: str, current_user_id: str, request_params_json: str,
+        task_id: str = "", response_params_json: str = "",
+    ) -> str:
+        """插主执行记录，返回 record_id（一次 execute 一行）。"""
+        record_id = stable_id("aer", decision_id, datetime.now().isoformat())
+        aud = _audit_int(current_user_id)
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_modify_advert_record (
+                        id, task_id, decision_id, shop_id, parent_asin, parent_seller_sku,
+                        current_user_id, request_params_json, response_params_json,
+                        create_by, editor_by, creator_id, editor_id, create_time, update_time
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (record_id, task_id or None, decision_id, shop_id, parent_asin,
+                     parent_seller_sku, current_user_id, request_params_json,
+                     response_params_json or None, aud, aud,
+                     aud, aud, now, now),
+                )
+            conn.commit()
+            return record_id
+        finally:
+            conn.close()
+
+    def update_advert_record_result(
+        self, record_id: str, *, task_id: str = "", response_params_json: str = "",
+    ) -> None:
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE t_advert_agent_modify_advert_record "
+                    "SET task_id=COALESCE(NULLIF(%s,''), task_id), "
+                    "response_params_json=%s, update_time=%s WHERE id=%s",
+                    (task_id, response_params_json or None, now, record_id),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def insert_exec_sub_records(self, record_id: str, ops: list[dict], operator: str) -> int:
+        """把 mapper 产出的逐项 ops 写入对应 *_record 子表（带 modify_result）。"""
+        conn = self._connect()
+        now = datetime.now()
+        aud = _audit_int(operator)
+        n = 0
+        try:
+            with conn.cursor() as cur:
+                for op in ops:
+                    kind = op.get("record_kind")
+                    res = op.get("modify_result") or "PENDING"
+                    err = (op.get("error_msg") or None)
+                    rc = 1 if op.get("risk_check_pass", True) else 0
+                    if kind == "campaign":
+                        cur.execute(
+                            """INSERT INTO t_advert_agent_modify_campaign_record (
+                                id, record_id, portfolio_id, campaign_id, risk_check_pass,
+                                old_budget, new_budget, old_state, new_state,
+                                modify_result, error_msg, create_by, editor_by, creator_id,
+                                editor_id, create_time, update_time
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (stable_id("cmr", record_id, op.get("campaign_id"), op.get("suggest_card_id")),
+                             record_id, None, op.get("campaign_id"), rc,
+                             op.get("old_budget"), op.get("new_budget"),
+                             op.get("old_state"), op.get("new_state"),
+                             res, err, aud, aud, aud, aud, now, now),
+                        )
+                        n += 1
+                    elif kind == "keyword":
+                        cur.execute(
+                            """INSERT INTO t_advert_agent_modify_keyword_record (
+                                id, record_id, campaign_id, keyword_id, keyword_text,
+                                risk_check_pass, old_bid, new_bid, old_state, new_state,
+                                modify_result, error_msg, create_by, editor_by, creator_id,
+                                editor_id, create_time, update_time
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (stable_id("kwr", record_id, op.get("campaign_id"), op.get("keyword_id"), op.get("keyword_text")),
+                             record_id, op.get("campaign_id"), op.get("keyword_id"),
+                             op.get("keyword_text"), rc, op.get("old_bid"), op.get("new_bid"),
+                             op.get("old_state"), op.get("new_state"),
+                             res, err, aud, aud, aud, aud, now, now),
+                        )
+                        n += 1
+                    elif kind == "placement":
+                        cur.execute(
+                            """INSERT INTO t_advert_agent_modify_placement_record (
+                                id, record_id, campaign_id, placement_type, risk_check_pass,
+                                old_percent, new_percent, modify_result, error_msg,
+                                create_by, editor_by, creator_id, editor_id,
+                                create_time, update_time
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (stable_id("plr", record_id, op.get("campaign_id"), op.get("placement_type")),
+                             record_id, op.get("campaign_id"), op.get("placement_type"), rc,
+                             op.get("old_percent"), op.get("new_percent"),
+                             res, err, aud, aud, aud, aud, now, now),
+                        )
+                        n += 1
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+
+    def update_pending_execute_status(
+        self, ops: list[dict], status: str, *, operator: str = "", msg: str = "",
+    ) -> None:
+        """按 ops 的 pending_id 回写各 pending 表 execute_status / execute_msg / execute_time。"""
+        by_table = {
+            "campaign": "t_advert_agent_modify_campaign_pending",
+            "keyword": "t_advert_agent_modify_keyword_pending",
+            "placement": "t_advert_agent_modify_placement_pending",
+        }
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                for op in ops:
+                    pid = op.get("pending_id")
+                    table = by_table.get(op.get("record_kind"))
+                    if not pid or not table:
+                        continue
+                    st = op.get("execute_status") or status
+                    em = op.get("error_msg") or msg or None
+                    cur.execute(
+                        f"UPDATE {table} SET execute_status=%s, execute_msg=%s, "
+                        "execute_time=%s, update_time=%s WHERE id=%s",
+                        (st, em, now, now, pid),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_execution_records(
+        self, *, asin: str = "", decision_id: str = "",
+    ) -> list[dict]:
+        """调整记录视图：主记录 + 子记录（按 ASIN 或批次）。供前端「调整记录」表。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                where, params = [], []
+                if decision_id:
+                    where.append("decision_id=%s"); params.append(decision_id)
+                if asin:
+                    where.append("parent_asin=%s"); params.append(asin)
+                wc = (" WHERE " + " AND ".join(where)) if where else ""
+                cur.execute(
+                    "SELECT id, task_id, decision_id, shop_id, parent_asin, parent_seller_sku, "
+                    "current_user_id, response_params_json, create_time "
+                    f"FROM t_advert_agent_modify_advert_record{wc} ORDER BY create_time DESC LIMIT 200",
+                    tuple(params),
+                )
+                records = cur.fetchall() or []
+                if not records:
+                    return []
+                rec_ids = [r["id"] for r in records]
+                ph = ",".join(["%s"] * len(rec_ids))
+                subs: dict[str, list] = {r["id"]: [] for r in records}
+                for table, kind in (
+                    ("t_advert_agent_modify_campaign_record", "campaign"),
+                    ("t_advert_agent_modify_keyword_record", "keyword"),
+                    ("t_advert_agent_modify_placement_record", "placement"),
+                ):
+                    cur.execute(f"SELECT * FROM {table} WHERE record_id IN ({ph})", tuple(rec_ids))
+                    for row in cur.fetchall() or []:
+                        row["_kind"] = kind
+                        subs.get(row.get("record_id"), []).append(row)
+                for r in records:
+                    r["items"] = subs.get(r["id"], [])
+            return records
         finally:
             conn.close()
 
@@ -1430,6 +1667,7 @@ def _get_repository() -> ErpDualWriterRepository:
             user=settings.erp_user,
             password=settings.erp_password,
             database=settings.erp_database,
+            use_tls=settings.erp_use_tls,
         )
     return _repo_instance
 
