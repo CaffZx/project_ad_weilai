@@ -82,11 +82,28 @@ def wizard_payload_from_state(
     asin: str,
     days: int,
     state: _StateReader,
+    *,
+    resolved_target_acos: int | None = None,
+    resolved_daily_budget: float | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """从工作流状态组装 wizard JSON（不重跑向导 LLM）。返回 (payload, wizard_partial)."""
+    """从工作流状态组装 wizard JSON（不重跑向导 LLM）。返回 (payload, wizard_partial).
+
+    resolved_* = 分析已解析的最终 ACOS/预算（override→p3缓存→recommender 三级兜底，
+    见 api/campaign.py _do_analyze）。用于兜底 p3 的 recommended_target/suggested，
+    避免 new-event 清空 p3_recommendation 后落库写空值 → 数值列 1366 报错。
+    """
     long_term = state.get_long_term_config(asin) or {}
     wf = state.get_workflow_state(asin) or {}
-    p3 = state.get_p3_recommendation(asin) or {}
+    p3 = dict(state.get_p3_recommendation(asin) or {})
+    # 兜底填充 ACOS/预算（p3 自身有值则不覆盖；否则用分析解析值）
+    _ta = dict(p3.get("target_acos") or {})
+    _bb = dict(p3.get("budget_bid") or {})
+    if not _ta.get("recommended_target") and resolved_target_acos is not None:
+        _ta["recommended_target"] = resolved_target_acos
+    if not _bb.get("suggested") and resolved_daily_budget is not None:
+        _bb["suggested"] = resolved_daily_budget
+    p3["target_acos"] = _ta
+    p3["budget_bid"] = _bb
 
     target_scores = _unwrap_by_days(wf.get("target_scores"), days)
     if not isinstance(target_scores, list):

@@ -129,7 +129,6 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <span id="camp-batch-count" style="font-size:12px;color:var(--camp-muted-fg);">已选 0 / 0</span>
             <button class="primary" data-action="camp-batch-approve">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
-            <button data-action="camp-export-review">导出审核 JSON</button>
           </div>
 
           <!-- 卡片列表 -->
@@ -147,7 +146,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
   // 2. 创建状态
   const state = createCampaignState();
-  Object.assign(state, { asin, days, mode, executable });
+  // executable 不再由调用方传入决定显隐；改由 state.setData 依据 vm.is_latest 自决
+  // （「已完成且最新批次」）。options.executable 保留接收但忽略，避免页面层与 ERP 上下文耦合。
+  Object.assign(state, { asin, days, mode });
 
   // 3. 注入渲染回调
   state.setRenderer((st) => { _fullRender(st); });

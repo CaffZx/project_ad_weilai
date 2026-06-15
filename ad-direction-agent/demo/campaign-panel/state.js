@@ -8,7 +8,7 @@ export function createCampaignState() {
     asin: '',
     days: 7,
     mode: null,
-    executable: true,  // 决策批次驱动: false 时隐藏批量栏+禁勾选
+    executable: false,  // 由 setData 依 vm.is_latest 自决；默认关闭（未确认最新批次前不显示执行控件）
     _campaignItems: [],
     _filteredItems: [],
     _currentRunId: '',
@@ -181,20 +181,6 @@ export function createCampaignState() {
     }
   };
 
-  state.exportReview = function () {
-    const items = [];
-    state._campaignItems.forEach(it => {
-      if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
-      const dec = state._reviewState[it.item_id] || 'pending';
-      items.push({ campaign_key: it.campaign_key, campaign_name: it.campaign_name, decision: dec });
-    });
-    const blob = new Blob([JSON.stringify({ asin: state.asin, days: state.days, run_id: state._currentRunId, decisions: items }, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `campaign_review_${state.asin}_${state._currentRunId || 'unknown'}.json`;
-    a.click();
-  };
-
   // ── 汇总联动 ──
   state.selectGroup = function (gi) {
     if (!state.executable) return;  // 决策批次不可执行时禁用操作
@@ -303,6 +289,10 @@ export function createCampaignState() {
   // ── 设置数据 ──
   state.setData = function (vm) {
     state.mode = vm.mode;
+    // 显隐门禁（勾选框/批量栏/执行按钮）唯一由「展示中的批次是否为已完成的最新批次」决定：
+    // vm.is_latest = read_snapshot 读 decision.is_latest（finalize_batch 维护，每 ASIN 唯一最新）。
+    // 不再依赖页面层传入 executable / /decision/context —— 解除与 in_progress、ERP 可达性的耦合。
+    state.executable = vm.is_latest === true;
     state._currentRunId = vm.run_id || '';
     state._campaignItems = vm.items || [];
     state._filteredItems = [...state._campaignItems];

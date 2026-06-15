@@ -380,7 +380,7 @@ async def _analyze_campaigns_impl(
     target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
 
     async def _no_op_new_campaigns():
-        return [], []
+        return [], [], {}
 
     stream_results = await asyncio.gather(
         _analyze_one_stream(
@@ -430,15 +430,17 @@ async def _analyze_campaigns_impl(
     (exact_adjustments, exact_rd, exact_summaries, exact_skipped) = _unpack_stream(stream_results[0], "exact")
     (broad_adjustments, broad_rd, broad_summaries, broad_skipped) = _unpack_stream(stream_results[1], "broad")
 
-    # 新增活动线解包（返回 tuple[list[NewCampaignItem], list[str]]）
+    # 新增活动线解包（返回 tuple[list[NewCampaignItem], list[str], dict[str,int]]）
+    # 第 3 元 flow_sv_map = flow_keywords 全量搜索量映射，透传给预算回算 agent（零新增 MCP）。
     new_campaigns: list = []
     new_campaigns_warnings: list[str] = []
+    flow_sv_map: dict = {}
     nc_result = stream_results[2]
     if isinstance(nc_result, BaseException):
         logger.exception("new_campaigns 流异常 [%s]: %s", parent_asin, nc_result)
         warnings_list.append(f"新增活动分析异常: {type(nc_result).__name__}: {nc_result}")
     else:
-        new_campaigns, new_campaigns_warnings = nc_result
+        new_campaigns, new_campaigns_warnings, flow_sv_map = nc_result
         warnings_list.extend(new_campaigns_warnings)
 
     rounds_detail["exact"] = exact_rd
@@ -560,8 +562,47 @@ async def _analyze_campaigns_impl(
             logger.warning("Campaign synthesis 异常 [%s]: %s", parent_asin, e)
             return None, [f"AI 汇总合成异常: {e}"]
 
-    sanity_res, synth_res = await asyncio.gather(
-        _run_sanity(), _run_synth(), return_exceptions=True,
+    async def _run_realloc() -> dict | None:
+        # 预算回算：agent 优先（KB23），失败/超时/校验不过 → 规则引擎兜底（build_summary）。
+        # 与 sanity/synth 同为 merge 后独立 LLM 调用 → 并入 gather 并行，无额外串行延迟。
+        if not settings.campaign_portfolio_enabled:
+            return None
+        from app.workflow.steps.campaign_budget_summary import build_summary
+        from app.workflow.steps import campaign_budget_reallocation as bra
+
+        def _fallback(reason: str = "", source: str = "rule_fallback") -> dict | None:
+            try:
+                bs = build_summary(adjustments=adjustments, all_units=llm_campaigns, ctx=strategy_context)
+                if bs is not None:
+                    bs["source"] = source
+                if reason:
+                    warnings_list.append(f"预算回算 agent 回落规则引擎: {reason}")
+                return bs
+            except Exception as e:  # noqa: BLE001
+                logger.exception("budget_summary 规则兜底失败 [%s]: %s", parent_asin, e)
+                warnings_list.append(f"预算汇总构建失败: {type(e).__name__}: {e}")
+                return None
+
+        if not (settings.campaign_budget_agent_enabled and adjustments):
+            return _fallback(source="rule")          # agent 关 / 无调整 → 规则引擎（正常路径，无 warning）
+        try:
+            agg = bra.aggregate(adjustments, llm_campaigns, strategy_context, search_volume_map=flow_sv_map)
+            agent_out = await reasoner.recommend_budget_reallocation(
+                parent_asin, agg, temperature=temperature,
+            )
+            if not isinstance(agent_out, dict) or agent_out.get("error"):
+                return _fallback((agent_out or {}).get("error", "agent 返回非法"))
+            ok, why = bra.validate(agent_out, agg)
+            if not ok:
+                return _fallback(why)
+            _t("DONE budget_realloc(agent)")
+            return bra.to_budget_summary(agent_out, agg, source="agent")
+        except Exception as e:  # noqa: BLE001
+            logger.exception("预算回算 agent 异常 [%s]: %s", parent_asin, e)
+            return _fallback(f"{type(e).__name__}: {e}")
+
+    sanity_res, synth_res, realloc_res = await asyncio.gather(
+        _run_sanity(), _run_synth(), _run_realloc(), return_exceptions=True,
     )
 
     if isinstance(sanity_res, BaseException):
@@ -593,21 +634,14 @@ async def _analyze_campaigns_impl(
         ), 2),
     }
 
-    # 10. 预算汇总 (极简版: 只返 target_budget + source,前端按勾选动态算"已勾选总和")
+    # 10. 预算汇总：_run_realloc 已在上方 gather 并行算好（agent 优先 + 规则兜底，恒返有效或 None）
     budget_summary: dict | None = None
-    if settings.campaign_portfolio_enabled:
-        try:
-            from app.workflow.steps.campaign_budget_summary import build_summary
-            budget_summary = build_summary(
-                adjustments=adjustments,
-                all_units=llm_campaigns,
-                ctx=strategy_context,
-            )
-            _t("DONE budget_summary")
-        except Exception as e:
-            logger.exception("budget_summary 构建失败 [%s]: %s", parent_asin, e)
-            warnings_list.append(f"预算汇总构建失败: {type(e).__name__}: {e}")
-            budget_summary = None
+    if isinstance(realloc_res, BaseException):
+        logger.warning("Campaign budget realloc gather 异常 [%s]: %s", parent_asin, realloc_res)
+        warnings_list.append(f"预算回算 gather 异常: {realloc_res}")
+    else:
+        budget_summary = realloc_res
+    _t("DONE budget_summary")
 
     _t("DONE total")
     return CampaignAnalysisResult(

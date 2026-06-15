@@ -163,6 +163,8 @@ body {
 .dd-panel, .md-panel { position: absolute; z-index: 50; top: 100%; left: 0; right: 0; margin-top: 3px;
   background: var(--card-bg); border: 1.5px solid var(--border); border-radius: var(--radius-card);
   box-shadow: 0 8px 24px rgba(0,0,0,.1); max-height: 260px; overflow-y: auto; }
+/* 向上展开（用于最底部的下拉，避免面板向下溢出视口） */
+.md-panel-up { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 3px; }
 .dd-option { padding: 8px 12px; cursor: pointer; transition: background .1s; border-bottom: 1px solid var(--surface); font-size: 12px; }
 .dd-option:last-child { border-bottom: none; }
 .dd-option:hover { background: var(--primary-bg); }
@@ -597,60 +599,66 @@ body {
         <p class="card-desc">保存战略层后显示</p>
       </div>
       <div id="sec2Loader" class="hidden loading-text" style="margin-top:6px"><span class="spinner"></span>加载中...</div>
-      <div class="flex gap-2" style="margin-top:8px">
-        <button onclick="confirmTactics()" id="btnTactics" class="btn btn-primary btn-sm hidden">保存</button>
-        <button onclick="refreshTacticsRecommendations()" id="btnRefreshRec" class="btn btn-amber btn-sm hidden">AI 重新推荐</button>
-      </div>
+      <!-- 「保存」「AI 重新推荐」按钮已内联到 tacticsContent 两行下拉的右侧（loadTactics 渲染，id 不变） -->
       <span id="tacticsRecLoader" class="hidden loading-text" style="margin-top:4px"><span class="spinner"></span>AI 重新推荐中...</span>
       <span id="tacticsRecErr" class="hidden" style="color:var(--danger);font-size:12px;margin-top:4px;display:block"></span>
       <p id="errSec2" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
 
       <!-- 目标 ACOS / 预算 / 广告方向：并入策略层同一气泡（子区，带分隔线） -->
       <div class="hidden" id="cardP3Override" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
-        <div class="card-title" style="margin-bottom:10px">目标 ACOS 与预算推荐</div>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <!-- 目标 ACOS -->
+        <!-- 实时态：可编辑输入 + 保存（快照态隐藏，见 p3ReadonlyView） -->
+        <div id="p3EditRows" style="display:flex;flex-direction:column;gap:8px">
+        <!-- 目标 ACOS（单位 % 常灰显示在输入框右侧；字段 flex:1 与其它行对齐，按钮右对齐） -->
         <div>
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">目标 ACOS 推荐</label>
-          <div class="flex items-center gap-2">
+          <div style="display:flex;gap:8px;align-items:center">
             <input type="number" id="p3AcosLeftInput" min="5" max="100" step="5"
-                   class="input flex-1" style="max-width:100px" placeholder="AI 推荐">
-            <span style="font-size:13px;color:var(--muted-fg)">%</span>
-            <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm">保存</button>
+                   class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
+            <span style="font-size:13px;color:var(--muted-fg);flex:0 0 auto">%</span>
+            <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
           </div>
           <div id="p3AcosLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
         </div>
-        <!-- 预算 -->
+        <!-- 每日预算（去掉单位） -->
         <div>
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">每日预算推荐</label>
-          <div class="flex items-center gap-2">
-            <span style="font-size:13px;color:var(--muted-fg)">$</span>
+          <div style="display:flex;gap:8px;align-items:center">
             <input type="number" id="p3BudgetLeftInput" min="1" step="1"
-                   class="input flex-1" style="max-width:120px" placeholder="AI 推荐">
-            <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm">保存</button>
-
+                   class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
+            <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
           </div>
           <div id="p3BudgetLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
         </div>
-        <!-- 广告方向（config 项；快照轨只读 badges，实时态下拉操作台） -->
+        </div>
+        <!-- 快照态：只读大字展示（无输入框/保存按钮） -->
+        <div id="p3ReadonlyView" class="hidden" style="display:flex;gap:32px;padding:2px 0 4px">
+          <div>
+            <div style="font-size:11px;color:var(--muted-fg);margin-bottom:2px">目标 ACOS</div>
+            <div id="p3ReadonlyAcos" style="font-size:24px;font-weight:700;color:#7C3AED">—</div>
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--muted-fg);margin-bottom:2px">每日预算</div>
+            <div id="p3ReadonlyBudget" style="font-size:24px;font-weight:700;color:#16A34A">—</div>
+          </div>
+        </div>
+        <!-- 广告方向（config 项；快照轨只读 badges，实时态下拉操作台；面板向上展开避免最底部溢出） -->
         <div id="leftDirectionsBlock" class="hidden">
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">广告方向</label>
           <!-- 快照只读 -->
           <div id="leftDirections" style="display:flex;flex-wrap:wrap;gap:4px"></div>
-          <!-- 实时操作台：多选下拉 + 保存 -->
+          <!-- 实时操作台：多选下拉(向上展开) + 右侧保存 -->
           <div id="leftDirectionsEdit" class="hidden">
-            <div class="tactics-dropdown" style="min-width:0">
-              <div style="position:relative">
+            <div style="display:flex;gap:8px;align-items:center">
+              <div class="tactics-dropdown" style="position:relative;flex:1;min-width:0">
                 <button type="button" class="md-btn" data-dim="directions" onclick="toggleMultiDropdown(this)">
                   <span class="md-tags" id="mtags_directions"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
                 </button>
-                <div class="md-panel hidden" id="leftDirectionsOptions"></div>
+                <div class="md-panel md-panel-up hidden" id="leftDirectionsOptions"></div>
               </div>
+              <button onclick="saveDirectionsLeft()" id="btnSaveDirections" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
             </div>
-            <div class="flex items-center gap-2" style="margin-top:6px">
-              <button onclick="saveDirectionsLeft()" id="btnSaveDirections" class="btn btn-primary btn-sm">保存</button>
-              <span id="leftDirectionsStatus" class="hidden" style="font-size:10px;margin-left:4px"></span>
-            </div>
+            <span id="leftDirectionsStatus" class="hidden" style="font-size:10px;margin-top:4px;display:block"></span>
           </div>
         </div>
       </div>
@@ -963,13 +971,21 @@ function applyBatchBarFromCtx(ctx) {
 }
 
 async function switchBatch(batch) {
-  // 以选中批次 decision_id + executable 重挂 campaign 面板（tab5 已挂载时即时生效）
-  const exec = !!batch.executable && !(_decisionContext && _decisionContext.in_progress);
-  if (batch.decision_id && !(_decisionContext && _decisionContext.in_progress)) {
-    await renderReadonlyDecisionPreset(batch.decision_id, { switchDefault: false });
+  const decisionId = batch.decision_id;
+  // 以防万一：每次切换批次都先刷新决策批次上下文，让下拉框「最新」标签 + 三态徽标取当下真值，
+  // 避免页面停留久了 is_latest 已翻而下拉仍是旧快照。控件显隐由面板 vm.is_latest 自决，
+  // 此处保证下拉与之同步（两者同读 decision.is_latest）。
+  await refreshDecisionContext();
+  const ctx = _decisionContext || {};
+  applyBatchBarFromCtx(ctx);                       // 重渲下拉（重算最新标签 + 三态徽标）
+  const sel = $('batchSelect');
+  if (sel && decisionId) sel.value = decisionId;   // 保持用户刚选中的批次为当前项（renderBatchBar 默认会选回最新）
+
+  if (decisionId && !ctx.in_progress) {
+    await renderReadonlyDecisionPreset(decisionId, { switchDefault: false });
   }
   if (window._mountCampaignBatch) {
-    await window._mountCampaignBatch({ decision_id: batch.decision_id, executable: exec });
+    await window._mountCampaignBatch({ decision_id: decisionId });
   }
 }
 
@@ -1052,10 +1068,10 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   );
 
   show('cardP3Override');
-  $('p3AcosLeftInput').value = p3.target_acos != null ? p3.target_acos : '';
-  $('p3BudgetLeftInput').value = p3.daily_budget != null ? Math.round(p3.daily_budget) : '';
-  $('p3AcosLeftInput').disabled = true;
-  $('p3BudgetLeftInput').disabled = true;
+  // 快照态：隐藏可编辑输入行，改只读大字展示（无输入框/保存按钮）
+  hide('p3EditRows'); show('p3ReadonlyView');
+  $('p3ReadonlyAcos').textContent = p3.target_acos != null ? p3.target_acos + '%' : '—';
+  $('p3ReadonlyBudget').textContent = p3.daily_budget != null ? Number(p3.daily_budget).toFixed(1) : '—';
 
   // Tab1 评分卡：优先复用实时渲染器（零改造），无富数据时降级为 config badge 快照
   if (Array.isArray(data.tactics_scores) && data.tactics_scores.length) {
@@ -1592,6 +1608,7 @@ async function loadAll(skipContextRefresh = false) {
 
   // 重置状态
   sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
+  _strategyLayerSaved.tactics = _strategyLayerSaved.acos = _strategyLayerSaved.budget = _strategyLayerSaved.directions = false;
   ['tab1','tab2','tab3','tab4','tab5'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
   // 换 ASIN 时卸载旧的 campaign panel
   if (window._campaignPanelAPI) {
@@ -1605,6 +1622,7 @@ async function loadAll(skipContextRefresh = false) {
   setSnapshotReadonlyControls(false);
   $('p3AcosLeftInput').disabled = false;
   $('p3BudgetLeftInput').disabled = false;
+  show('p3EditRows'); hide('p3ReadonlyView');   // 实时态：恢复可编辑输入行
   $('sec1Done').textContent = '已保存';
   $('sec2Done').textContent = '已保存';
   activeTab = null;
@@ -1753,6 +1771,23 @@ function _applyUrlStrategyPrefill() {
 let _lastTacticsAiRec = { ad_purposes: [], target_keyword_strategy: [] };
 let _lastExecAiDirs = [];
 
+// 策略层整体保存态：四项全部保存才点亮右上「已保存」（广告目的·关键词 / 目标ACOS / 预算 / 广告方向）。
+// 实时态用此判定；快照态由 renderReadonlyPreset 直接接管（文案改为「快照」），此处不干预。
+const _strategyLayerSaved = { tactics: false, acos: false, budget: false, directions: false };
+function refreshStrategyLayerBadge() {
+  const el = $('sec2Done');
+  if (!el || el.textContent === '快照') return;
+  const all = _strategyLayerSaved.tactics && _strategyLayerSaved.acos
+           && _strategyLayerSaved.budget && _strategyLayerSaved.directions;
+  if (all) show('sec2Done'); else hide('sec2Done');
+}
+// 从 /execution/recommend 响应回写 ACOS/预算 保存态（manual_override = 用户已保存的手动值）。
+function _setP3SavedFlags(data) {
+  _strategyLayerSaved.acos = !!(data && data.target_acos && data.target_acos.manual_override);
+  _strategyLayerSaved.budget = !!(data && data.budget_bid && data.budget_bid.manual_override);
+  refreshStrategyLayerBadge();
+}
+
 async function confirmStrategy() {
   const btn = $('btnStrategy');
   const g = dim => {
@@ -1853,21 +1888,28 @@ async function loadTactics() {
   }
 
   const prefilled = data.current_selection && data.current_selection.ad_purposes;
-  if (prefilled) { show('sec2Done'); sec2Confirmed = true; }
+  if (prefilled) { sec2Confirmed = true; _strategyLayerSaved.tactics = true; }  // 徽标由 refreshStrategyLayerBadge 统一判定（需四项全存）
 
   // 评分卡片 — 首次加载用 renderTargetScores
   const scores = data.target_scores || [];
   if (scores.length > 0) renderTargetScores(scores); else renderTargetScoresEmpty(data.scoring_error || '');
 
-  // 策略层多选下拉框
-  let html = `<div style="display:flex;gap:10px">`;
+  // 策略层多选下拉框（竖排：每行下拉右侧带按钮 —— 广告目的→AI 重新推荐(右上)，目标关键词→保存(右下)）。
+  // 两按钮内联渲染进 tacticsContent，id 与 onclick 不变；按 dim.id 绑定（与维度顺序无关）。
+  const _ROW_BTN = {
+    ad_purposes: `<button onclick="refreshTacticsRecommendations()" id="btnRefreshRec" class="btn btn-amber btn-sm">AI 重新推荐</button>`,
+    target_keyword_strategy: `<button onclick="confirmTactics()" id="btnTactics" class="btn btn-primary btn-sm">保存</button>`,
+  };
+  let html = `<div style="display:flex;flex-direction:column;gap:10px">`;
   data.dimensions.forEach(dim => {
     const recs = dim.recommendations || [];
     const selVals = prefilled ? (data.current_selection[dim.id]||[]) : [];
-    html += `<div class="tactics-dropdown" style="flex:1;min-width:0"><label class="dd-label">${dim.label} <span style="font-weight:400;color:var(--muted-fg)">多选</span></label>
-      <div style="position:relative"><button type="button" class="md-btn" data-dim="${dim.id}" onclick="toggleMultiDropdown(this)">
-        <span class="md-tags" id="mtags_${dim.id}"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
-      </button><div class="md-panel hidden">`;
+    const rowBtn = _ROW_BTN[dim.id] || '';
+    html += `<div class="tactics-dropdown" style="min-width:0"><label class="dd-label">${dim.label} <span style="font-weight:400;color:var(--muted-fg)">多选</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <div style="position:relative;flex:1;min-width:0"><button type="button" class="md-btn" data-dim="${dim.id}" onclick="toggleMultiDropdown(this)">
+          <span class="md-tags" id="mtags_${dim.id}"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
+        </button><div class="md-panel hidden">`;
     dim.options.forEach(opt => {
       const isRec = recs.includes(opt.id);
       const ck = selVals.includes(opt.id) ? 'checked' : '';
@@ -1875,7 +1917,7 @@ async function loadTactics() {
         <div class="md-opt-text"><div class="md-opt-label">${opt.label}${isRec?' <span class="md-check-rec">AI推荐</span>':''}</div>
         <div class="md-opt-desc">${opt.description||''}</div></div></label>`;
     });
-    html += '</div></div></div>';
+    html += `</div></div>${rowBtn ? `<div style="flex:0 0 auto">${rowBtn}</div>` : ''}</div></div>`;
   });
   html += '</div>';
   setHTML('tacticsContent', html);
@@ -1896,7 +1938,7 @@ async function loadTactics() {
 
   const returnVisit = !!(prefilled && sec1Confirmed);
   if (returnVisit) {
-    sec2Confirmed = true;
+    sec2Confirmed = true; _strategyLayerSaved.tactics = true;
     try {
       await enableTabsForReturnVisit();
     } catch (e) {
@@ -1917,7 +1959,7 @@ async function confirmTactics() {
   try {
     const res = await callAPI('/tactics/confirm', { asin, ad_purposes:ap, target_keyword_strategy:kt });
     if (!res.accepted) { err('errSec2', '保存失败'); btn.disabled = false; btn.textContent = '保存'; return; }
-    show('sec2Done'); sec2Confirmed = true;
+    sec2Confirmed = true; _strategyLayerSaved.tactics = true; refreshStrategyLayerBadge();
     btn.disabled = false; btn.textContent = '保存';
   } catch (e) {
     err('errSec2', e.message);
@@ -2224,6 +2266,7 @@ async function loadP3Rec() {
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
+    _setP3SavedFlags(data);
     // 反馈：捕获 AI P3 推荐值
     const ta = data.target_acos, bb = data.budget_bid;
     if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
@@ -2242,6 +2285,7 @@ async function refreshP3() {
     window._p3data = data;
     autoFillLeftInputs(data);
     renderP3(data);
+    _setP3SavedFlags(data);
     const ta = data.target_acos, bb = data.budget_bid;
     if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
     if (bb) fbCaptureP3Budget(bb.suggested, bb.manual_override ? $('p3BudgetLeftInput').value || null : null);
@@ -2377,6 +2421,7 @@ async function saveP3AcosLeft() {
     const aiVal = window._p3data?.target_acos?.recommended_target;
     fbCaptureP3Acos(aiVal != null ? aiVal : null, val);
     renderP3(window._p3data);
+    _strategyLayerSaved.acos = true; refreshStrategyLayerBadge();
     $('p3AcosLeftStatus').textContent = '✓ 已保存手动值'; $('p3AcosLeftStatus').style.color = 'var(--success)'; show('p3AcosLeftStatus');
     setTimeout(() => hide('p3AcosLeftStatus'), 2000);
   } catch (e) {
@@ -2399,6 +2444,7 @@ async function saveP3BudgetLeft() {
     const aiVal = window._p3data?.budget_bid?.suggested;
     fbCaptureP3Budget(aiVal != null ? aiVal : null, val);
     renderP3(window._p3data);
+    _strategyLayerSaved.budget = true; refreshStrategyLayerBadge();
     $('p3BudgetLeftStatus').textContent = '✓ 已保存手动值'; $('p3BudgetLeftStatus').style.color = 'var(--success)'; show('p3BudgetLeftStatus');
     setTimeout(() => hide('p3BudgetLeftStatus'), 2000);
   } catch (e) {
@@ -2690,6 +2736,7 @@ async function saveDirectionsLeft() {
   try {
     await callAPI('/execution/select', { asin, selected_directions: selected, sub_options: {} });
     fbCaptureExecution(_lastExecAiDirs, selected);
+    _strategyLayerSaved.directions = true; refreshStrategyLayerBadge();
     if (st) { st.textContent = '✓ 已保存'; st.style.color = 'var(--success)'; show('leftDirectionsStatus'); }
   } catch (e) {
     if (st) { st.textContent = '保存失败: ' + e.message; st.style.color = 'var(--danger)'; show('leftDirectionsStatus'); }

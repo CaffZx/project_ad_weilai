@@ -459,7 +459,6 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
       <span class="sep"></span>
       <button class="primary" onclick="batchConfirm('approve')">同意所选</button>
       <button class="danger" onclick="batchConfirm('reject')">不同意所选</button>
-      <button onclick="exportReview()">导出审核 JSON</button>
     </div>
 
     <div id="campaignList"></div>
@@ -1387,24 +1386,6 @@ async function batchConfirm(decision) {
   _selection.clear();
   applyFilters();
   updateSelectionCount();  // updateSelectionCount 内部已会重渲 budget summary
-}
-
-function exportReview() {
-  const decisions = Object.entries(_reviewState).map(([campaign_key, decision]) => ({
-    campaign_key, decision, note: '',
-  }));
-  if (!decisions.length) { alert('当前没有审核记录'); return; }
-  const payload = {
-    asin, days, run_id: _currentRunId, exported_at: new Date().toISOString(),
-    decisions,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `campaign_review_${asin}_${_currentRunId || 'unknown'}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function renderEvidence(adj) {

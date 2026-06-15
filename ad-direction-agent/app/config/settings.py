@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     campaign_portfolio_share_test: int = 20   # 测试/新增
     campaign_portfolio_share_broad: int = 20  # 广泛/自动
 
+    # 预算回算 LLM agent (KB23): 把 3 组推荐值的产出方式从规则引擎换成 LLM；
+    # 失败/超时/校验不过 → 回落 campaign_budget_summary.build_summary (规则兜底)。
+    campaign_budget_agent_enabled: bool = True   # 默认开;关闭则纯走 60/20/20 规则引擎
+    campaign_budget_agent_timeout: int = 240     # 强档(pro+思考)慢,仿 synthesis 至少 240s
+    # KB23 parent_allowed_net_increase (父 ASIN 本轮允许净增多少): 无数据源,占位 0,运维可调。
+    campaign_parent_allowed_net_increase: float = 0.0
+
     # Campaign 新增活动分析 (KB 16, 独立并行分析线)
     campaign_new_enabled: bool = True         # 总开关 (关闭退化到无新增建议)
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数

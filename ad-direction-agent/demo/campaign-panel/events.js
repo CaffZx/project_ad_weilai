@@ -42,9 +42,6 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-batch-reject':
         st.batchConfirm('reject');
         return;
-      case 'camp-export-review':
-        st.exportReview();
-        return;
       case 'camp-select-group':
         st.selectGroup(parseInt(data.groupIndex));
         return;

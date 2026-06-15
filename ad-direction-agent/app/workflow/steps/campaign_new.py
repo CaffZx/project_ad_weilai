@@ -173,20 +173,23 @@ async def analyze_new_campaigns(
     days: int = 7,
     sem: asyncio.Semaphore | None = None,
     overview_gate: "asyncio.Task | None" = None,
-) -> tuple[list[NewCampaignItem], list[str]]:
-    """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings)。
+) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
+    """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings, search_volume_map)。
 
+    search_volume_map = flow_keywords 全量 {keyword_lower: 搜索量}（含已有活动词），
+    透传给预算回算 agent 用（KB23 §3.1A），零新增 MCP 调用；失败/未跑时为 {}。
     ctx_dict 含 _strategic_overview_text(posture_brief)，注入 LLM 作今日总纲。
     fail-open：任何阶段失败仅记 warning，返回空列表。
     """
     warnings: list[str] = []
+    search_volume_map: dict[str, int] = {}
 
     # 0. ASIN 级阻断 (KB 16 §6)
     block = _is_blocked_by_asin(strategy_context)
     if block:
         logger.info("Campaign new [%s]: 阻断 %s", parent_asin, block)
         warnings.append(f"新增活动分析被阻断: {block}")
-        return [], warnings
+        return [], warnings, search_volume_map
 
     # 1. 候选词发现 (MCP flow_keywords + own_keyword_flow)
     try:
@@ -200,11 +203,21 @@ async def analyze_new_campaigns(
     except Exception as e:  # noqa: BLE001
         logger.warning("new_campaigns 候选词发现失败 [%s]: %s", parent_asin, e)
         warnings.append(f"候选词发现失败: {type(e).__name__}: {e}")
-        return [], warnings
+        return [], warnings, search_volume_map
 
     if not flow_rows and not own_rows:
         warnings.append("候选词发现返回空 (MCP 数据不可用)")
-        return [], warnings
+        return [], warnings, search_volume_map
+
+    # 全量搜索量映射（不过滤、含已有活动词）→ 透传给预算回算 agent（KB23 §3.1A），零新增 MCP
+    for r in flow_rows:
+        kw = str(r.get("关键词") or r.get("keyword") or "").strip().lower()
+        if not kw:
+            continue
+        try:
+            search_volume_map[kw] = int(float(r.get("搜索量") or r.get("search_volume") or 0))
+        except (TypeError, ValueError):
+            continue
 
     # 2. 归一化 + 硬过滤
     own_rank_map: dict[str, int] = {}
@@ -252,7 +265,7 @@ async def analyze_new_campaigns(
 
     if not candidates:
         logger.info("Campaign new [%s]: 硬过滤后无候选词", parent_asin)
-        return [], warnings
+        return [], warnings, search_volume_map
 
     # ★量控: 按"有自然位优先 + 搜索量降序"排序，再截断 Top-N
     candidates.sort(key=lambda c: (c.natural_rank is None, -c.search_volume))
@@ -333,7 +346,7 @@ async def analyze_new_campaigns(
     except Exception as e:  # noqa: BLE001
         logger.warning("new_campaigns 双轮 LLM 异常 [%s]: %s", parent_asin, e)
         warnings.append(f"new_campaigns LLM 异常: {type(e).__name__}: {e}")
-        return [], warnings
+        return [], warnings, search_volume_map
 
     # 4. 取交集 + 组装（代码补齐 match_type/bid/budget/name/归组）
     cand_by_kw = {c.keyword_text: c for c in candidates}
@@ -380,4 +393,4 @@ async def analyze_new_campaigns(
         "Campaign new [%s]: R1=%d R2=%d 交集=%d 个新增建议",
         parent_asin, len(r1), len(r2), len(items),
     )
-    return items, warnings
+    return items, warnings, search_volume_map

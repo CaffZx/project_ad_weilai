@@ -46,6 +46,8 @@ async def _maybe_push_erp(
     write_erp: bool,
     state,
     analysis_mode: str = "REALTIME",
+    resolved_target_acos: int | None = None,
+    resolved_daily_budget: float | None = None,
 ) -> dict:
     """分析成功后可选写入 ERP；失败不抛异常。"""
     enabled = write_erp or settings.erp_auto_write
@@ -56,7 +58,11 @@ async def _maybe_push_erp(
     if not ok:
         return {"attempted": False, "ok": False, "skipped": reason}
 
-    wizard_payload, wizard_partial = wizard_payload_from_state(asin, days, state)
+    wizard_payload, wizard_partial = wizard_payload_from_state(
+        asin, days, state,
+        resolved_target_acos=resolved_target_acos,
+        resolved_daily_budget=resolved_daily_budget,
+    )
     kb_payload = analysis_to_kb_payload(result, temperature=temperature)
     try:
         report = await asyncio.to_thread(
@@ -113,6 +119,8 @@ async def campaign_analyze(req: dict):
             write_erp=extra["write_erp"],
             state=extra["state"],
             analysis_mode=extra["analysis_mode"],
+            resolved_target_acos=extra.get("resolved_target_acos"),
+            resolved_daily_budget=extra.get("resolved_daily_budget"),
         )
     return body
 
@@ -138,6 +146,8 @@ async def campaign_viewmodel(req: dict):
         write_erp=True,
         state=extra["state"],
         analysis_mode=extra["analysis_mode"],
+        resolved_target_acos=extra.get("resolved_target_acos"),
+        resolved_daily_budget=extra.get("resolved_daily_budget"),
     )
     decision_id = erp.get("decision_id")
     if not erp.get("ok") or not decision_id:
@@ -340,6 +350,10 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             "temperature": effective_temp,
             "write_erp": write_erp,
             "analysis_mode": analysis_mode,
+            # 分析已解析的最终值（override→p3缓存→recommender 三级兜底），透传给落库，
+            # 避免 wizard_payload_from_state 只读被 new-event 清空的 p3_recommendation → 空 ACOS。
+            "resolved_target_acos": strat_ctx.target_acos,
+            "resolved_daily_budget": strat_ctx.daily_budget,
         }
         return (result, extra)
 
