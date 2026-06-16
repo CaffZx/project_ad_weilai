@@ -20,6 +20,8 @@ from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
 from app.data.mcp_db_context import resolve_mcp_context_from_db
 from app.data.mcp_normalizers import (
+    _as_rows,
+    _int,
     compute_natural_order_ratio,
     normalize_ad_placement,
     normalize_ad_summary,
@@ -328,12 +330,14 @@ class McpAdapter(DataSourceAdapter):
         if nor is not None:
             data.natural_order_ratio = nor
 
-        stock_qty = None
-        if isinstance(inventory_rows, list) and inventory_rows:
-            # Latest snapshot usually first row in MCP outputs.
-            row = inventory_rows[0] if isinstance(inventory_rows[0], dict) else {}
-            stock_qty = row.get("can_sale_num") or row.get("stock")
-        data.signals = SpecialSignals(inventory_qty=int(stock_qty) if stock_qty is not None else None)
+        # listing_inventory 原始返回可能是 envelope（{"rows":[...]}/{"data":[...]}/单行 dict），
+        # 必须经 _as_rows 解包（与空检查、其它工具口径一致）；原先裸 isinstance(list) 在 envelope 下
+        # 恒为 False → 库存被丢成 None（数据查到了但没透传）。
+        inv_rows = _as_rows(inventory_rows)
+        # FBA可售：实测中文 key，父 ASIN 下各子 ASIN 加总
+        data.signals = SpecialSignals(
+            inventory_qty=sum(_int(r.get("FBA可售")) or 0 for r in inv_rows)
+        )
 
         for row in trend_rows:
             row_orders = float(row.get("orders") or 0)

@@ -872,6 +872,22 @@ async def run_campaign_analysis(
 # ── 策略上下文组装 ──────────────────────────────────────────────────────────
 
 
+# 广告方向 英文 id（前端 selected_directions 存的形态）→ 中文方向名。
+# 所有下游消费方（总览 prompt / 逐活动 prompt / KB23 回算 has_ranking_push）均按中文匹配，
+# 故在此唯一汇聚点统一翻译；已是中文的原样返回（fallback），幂等安全。
+_AD_DIRECTION_ID_ZH = {
+    "push_natural": "推进自然位",
+    "push_natural_rank": "推进自然位",
+    "expand_keywords": "新增扩词",
+    "optimize_acos": "优化ACOS",
+    "balance_maintain": "平衡维持",
+}
+
+
+def _zh_ad_direction(d) -> str:
+    return _AD_DIRECTION_ID_ZH.get(str(d).strip().lower(), str(d))
+
+
 def build_campaign_strategy_context(
     asin: str,
     asin_data: ASINData,
@@ -956,7 +972,7 @@ def build_campaign_strategy_context(
         product_level=long_term.get("product_level", ""),
         season_stage=long_term.get("season_stage", ""),
         ad_purposes=long_term.get("ad_purposes", []),
-        ad_directions=ad_directions or [],
+        ad_directions=[_zh_ad_direction(d) for d in (ad_directions or [])],
         target_keyword_strategy=long_term.get("target_keyword_strategy", []),
         margin=asin_data.margin,
         natural_order_ratio=asin_data.natural_order_ratio,

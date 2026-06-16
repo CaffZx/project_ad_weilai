@@ -267,6 +267,8 @@
 }
 .camp-pp-actions .pp-act:hover,
 .camp-modal .pp-act:hover { background: #E0F2FE; }
+/* 「组合预算修改」标签较长，单独调小字号以保持按钮紧凑、不换行 */
+.camp-pp-actions .pp-act[data-action="camp-open-realloc"] { font-size: 11px; padding-left: 8px; padding-right: 8px; }
 .camp-modal .pp-act.primary { background: #0EA5E9; color: #fff; border-color: #0EA5E9; }
 .camp-modal .pp-act.primary:hover { background: #0284C7; }
 

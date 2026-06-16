@@ -523,7 +523,7 @@ function _renderPortfolioFilterPills(state) {
   const canEdit = state.executable !== false && bs.target_budget != null;
   const hasOverride = Object.keys(state._portfolioOverride || {}).length > 0;
   const actionsHtml = !canEdit ? '' : `<span class="camp-pp-actions">
-      <a class="pp-act" data-action="camp-open-realloc">回算修改</a>
+      <a class="pp-act" data-action="camp-open-realloc">组合预算修改</a>
       <a class="pp-act" data-action="camp-exec-all">执行</a>
       ${hasOverride ? '<a class="pp-act" data-action="camp-reset-all">恢复</a>' : ''}
     </span>`;

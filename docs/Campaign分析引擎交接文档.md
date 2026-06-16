@@ -795,7 +795,49 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-15（v2.3: 双轨读回 Tab3/4 + tab5 action粗类化/placement判据/预算约束backend化 + 低价捡漏0.21·1.01重做 + Part 6 真实执行 §15）*
+## 16. 2026-06-16：双轨读回补全（Tab1关键词/Tab3接线/Tab4） + 前端重构 + 总览·方向·预算·库存 根因修复
+
+> 承 §15。`app/**.py` 改动需**重启 uvicorn**；`demo/**` 刷新浏览器。
+
+### 16.1 前置双轨读回补全（接 §15.1）
+- **Tab1 核心关键词监控（新增）**：`repository.read_decision_preset_rich` 加读 `core_keyword_tracking`；`decision.py:_translate_core_keywords`（keyword_type ERP码→前端 Broad/Long-tail 键、nature_rank varchar→int，near_rank/周变化未落库→缺省）→ endpoint `core_keywords`；`renderReadonlyPreset` 复用 `renderKeywordTable`。**排名列大概率仍空**（源头改造未做，06-14 §5.3；真库 nature_rank 99% 空）。
+- **Tab3 前端接线（补 §15.1 落地）**：`renderReadonlyPreset` 改为 `renderP3(data.p3_recommend)`（原只渲 badge）；`renderP3` 预算 delta 加 `if(bb.current!=null)` 守卫（快照零 delta 不渲丑串，实时零回归）。
+- **Tab3 人工覆盖提示（新增）**：快照有数值但三段推理全空（人工覆盖/未经 LLM）→ 复用 `p3Warnings` 显示「⚠ 人工覆盖值，未经 LLM 推理建议」（无 manual_override 列，以「有值无推理」作代理）。
+- **Tab4 写入轨缺陷（诊断锐化，承 §15.1 前提）**：根因锁死——完整方向对象**从未落 state**（`run_get_execution_options` 只返 response、`ExecutionSelectRequest` 只有 selected_directions、`save_execution` 只存 id、全工程无 `wf["directions"]=`）→ `_upsert_wizard_direction` 整段不写。真库有 detail 的老决策是早期 `/wizard/report` 遗留。**修法待办**：`run_get_execution_options` 落 `wf["directions"]` 或 `_do_analyze` resolved_directions 透传（零映射，与 ACOS resolved_* 对称）；修后新批次 Tab4 读回零改点亮。
+
+### 16.2 Tab5 显隐门禁改 vm.is_latest 自决
+执行控件（勾选框/批量栏/执行按钮）原由页面层 `/decision/context`（latest_completed_id + in_progress）决定，与 ERP 可达性强耦合（断则控件静默全消失）。改：`state.js:setData` 里 `state.executable = vm.is_latest===true`（展示批次自身），`panel.js` 不再用调用方传入值；`ad-asisitant-agent.html:switchBatch` 每次切批次先 `refreshDecisionContext` + 重渲批次栏。门禁真相源 = 展示批次 `decision.is_latest`（与下拉「· 最新」同源）。
+
+### 16.3 campaign-panel 前端重构（纯前端）
+1. 组合气泡标签「约束」→「广告组合预算」。
+2. **回算修改弹窗**：改/执行移出气泡到行末统一操作区 `[回算修改][执行]`（竖排等宽，+override 时[恢复]）；弹窗内 4 列两行表（上行 AI 回算推荐、下行 3 输入框+灰禁 `1`），3 组同改；输入框数字居中防误点；挂载点 `#camp-modal-mount`（camp-root 内保事件委托）。
+3. **三执行按钮加确认弹窗**（同意/不同意/回算执行）：点击先弹确认，执行流绑「确认」`runConfirm`、「取消」不执行；挂载点 `#camp-confirm-mount`。
+4. 去「执行已确认调整」按钮 + 前端调用点（`executeConfirmed`/`pollExecStatus`/`_operator` 删；后端 `/campaign/execute` 保留）。
+5. 批量栏重排：同意/不同意挨着调整记录。
+6. **处理状态分段筛选**「全部/待处理/已处理」（`camp-set-process`）；已处理=本地 `_reviewState` 或快照 `confirm_status∈{CONFIRMED,REJECTED}`；预过滤/丢失仅「全部」可见。
+7. **sticky 控制区**：明细/汇总+筛选+组合气泡+批量栏钉顶、卡片列表内部独立滚动。配套修高度链：`.camp-root` 加 flex 列 + min-height:0、`camp-app-layout/camp-main-area` 调整；**主看板**补 `#panel-tab5.tab-panel.active{flex:1;min-height:0}` + `#mainContent`/`#campPanelRoot` min-height:0（原 `.tab-panel.active` 缺 flex:1 致高度链断、整体一起滚）。⚠ iframe 嵌入的 live 生效未验。
+
+### 16.4 总览/广告方向/预算/库存 根因
+- **总览缺数据过度阻断（已修 prompt）**：库存 N/A → 总览硬断「禁一切增长」冻结健康活动。`reasoner.py:507` 改「数据缺失既不当正常也不当风险、不得据此阻断；只有数值确认越线（库存<7天）才阻断」（只改 507）。
+- **广告方向英文 id 未翻译（已修，一处堵三处）**：`saveDirectionsLeft` 存英文 id（`expand_keywords`），`build_campaign_strategy_context` 原样透传；而总览/逐活动 prompt/KB23（查 `"推进自然位" in ad_directions`）全按中文匹配 → 认不出选中方向（"选了新增扩词、总览却禁新增扩词"）。`campaign.py` 加 `_zh_ad_direction`（id→中文，幂等），翻译后进 `strat_ctx.ad_directions`，一处修好总览+逐活动+KB23。
+- **KB23 父目标未接进回算（诊断，未修）**：`campaign_parent_allowed_net_increase=0.0`（占位无源）→ `available=只有释放预算`，父目标只作 LLM 文字 context、不入 `aggregate()`；`validate()` 无「proposed 合计 vs 父目标」绝对护栏；GROUP-009 超目标压缩/「建议提父预算」未实现。澄清 §4.2：caps 允许超父目标（caps≠花费），proposed_group_budget 是自底向上回算值。**修法待办**：算 `expected_total_spend=Σ(perf_7d.cost/7)` 与 headroom，<0 触发 GROUP-009 或建议提预算（perf_7d.cost 现成）。
+- **库存 MCP 透传 bug（已修解包）**：`mcp_adapter` 库存解析原用裸 `isinstance(list)` 判**原始 payload**，MCP 返回是 envelope（`{"rows"}`/单行 dict）→ 恒 False → 库存丢 None（数据查到却没透传）。改经 `_as_rows` 解包 + `_int`，保持 `can_sale_num`（FBA可售=可售天数指标，**不混** `in_stock_num`/`stock`，口径不同）。**待办**：① 真库 live 调 `listing_inventory` 确认 envelope/列名（当日分类器故障未调成）；② Doris 回落用 `in_stock_num`（不同指标）→ 两路径口径不一致，需确认数仓有 `can_sale_num` 后统一。
+
+### 16.5 `summary total_count mismatch` 告警（仅解释）
+`_upsert_modern_summary`（repository.py:786）落库前校验：`declared=total_campaigns` vs `categorized=淘汰+调整+保持` 不等则告警，按 categorized 写 `total_count`。差值正常 = 新增+预过滤+丢失（三桶不含）；若差值 > 这三类合计 → 有活动真丢（多为 LLM 分批解析异常未记 lost），查 `warnings`。
+
+### 16.6 待办（本期新增/锐化）
+- [ ] **Tab4 写入轨修复**（16.1）—— 阻塞 Tab4 富卡见数。
+- [ ] **KB23 父目标接进回算 + GROUP-009 压缩**（16.4）。
+- [ ] **库存 live 确认 + Doris 口径统一**（16.4）。
+- [ ] 重启 uvicorn + 真库回归（Tab1关键词/Tab3/Tab4 还原；总览不误禁增长+认得方向；库存 N/A 消失）。
+- [ ] Tab2 诊断/趋势双轨（ECharts 隐藏容器懒渲染 + 列名核 + nor 缺线）。
+- [ ] sticky 控制区 iframe live 验证（不生效则改 JS 实测高度兜底）。
+
+---
+
+*最后更新：2026-06-16（v2.4: 双轨读回补全 Tab1关键词/Tab3接线/Tab4 + campaign-panel 前端重构（广告组合预算/回算弹窗/确认弹窗/处理状态筛选/sticky）+ 总览缺数据阻断·广告方向中文化·库存MCP解包 修复 + KB23父目标/Tab4写入 诊断 §16）*
+*v2.3: 双轨读回 Tab3/4 + tab5 action粗类化/placement判据/预算约束backend化 + 低价捡漏0.21·1.01重做 + Part 6 真实执行 §15*
 *v2.2: 执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复 §14*
 *v2.1: 自然排名（周排名）接入精准活动分析 §13*
 *v2.0: 建议竞价 MCP 接入 + 前端闭环 + session TTL + userId 接线 §12*
