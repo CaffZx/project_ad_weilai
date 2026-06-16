@@ -104,11 +104,11 @@ def normalize_ad_placement(payload: Any) -> dict:
         return {}
     result = {}
     for row in rows:
-        placement = str(row.get("placement", "")).lower()
-        cost = _float(row.get("cost")) or 0
-        sale = _float(row.get("sale")) or 0
-        clicks = _float(row.get("clicks")) or 0
-        if "top" in placement or "tos" in placement:
+        placement = str(_pick(row, "placement", "广告位", "广告位置", "投放位置") or "").lower()
+        cost = _float(_pick(row, "cost", "spend", "花费", "广告花费")) or 0
+        sale = _float(_pick(row, "sale", "sales", "销售额")) or 0
+        clicks = _float(_pick(row, "clicks", "点击量")) or 0
+        if "top" in placement or "tos" in placement or "头部" in placement or "顶部" in placement:
             result["placement_tos_acos"] = round(cost / sale * 100, 1) if sale else None
             result["placement_tos_cpc"] = round(cost / clicks, 2) if clicks else None
         else:
@@ -160,11 +160,11 @@ def normalize_competitors(payload: Any) -> list[dict]:
     for row in rows:
         out.append(
             {
-                "asin": row.get("asin"),
-                "price": _float(row.get("price")),
-                "asin_star": _float(row.get("asin_star") or row.get("rating")),
-                "reviews_num": _int(row.get("reviews_num") or row.get("review_count")),
-                "top_category_rank": _int(row.get("top_category_rank")),
+                "asin": _pick(row, "asin", "ASIN", "竞品asin", "竞品ASIN"),
+                "price": _float(_pick(row, "price", "product_price", "售价", "价格")),
+                "asin_star": _float(_pick(row, "asin_star", "rating", "star_level", "星级", "评分")),
+                "reviews_num": _int(_pick(row, "reviews_num", "review_count", "comment_num", "评论数")),
+                "top_category_rank": _int(_pick(row, "top_category_rank", "大类目排名", "类目排名", "BSR")),
             }
         )
     return out
