@@ -94,6 +94,8 @@ function _fullRender(state) {
   _renderBudgetSummary(state);
   _renderSummaryStats(vm);
   _renderTabButtons(state);
+  _renderReallocModal(state);
+  _renderConfirmModal(state);
 }
 
 // ── 总览 ──
@@ -490,8 +492,6 @@ function _renderPortfolioFilterPills(state) {
       : (Number(it.current_budget) || 0);
   });
 
-  const editing = state._editingConstraint;
-
   const pills = PORTFOLIO_NAMES.map(name => {
     const esc = name.replace(/'/g, "\\'");
     const active = state._portfolioFilter === name ? ' active' : '';
@@ -511,35 +511,103 @@ function _renderPortfolioFilterPills(state) {
       ? `<span class="pp-budget" style="opacity:.4;">调整前 — | 调整后 —</span>`
       : `<span class="pp-budget">调整前 ${money0(b.cur)} | 调整后 ${money0(b.prop)}</span>`;
 
-    // 约束编辑行（交互模式 + 非淘汰组 + 目标预算存在时；低价捡漏组固定 $1 不可编辑）
-    const canEdit = state.executable !== false && !isElim && bs.target_budget != null;
-    const actLine = !canEdit ? ''
-      : (editing === name
-        ? `<span class="pp-acts">
-             <input class="camp-pp-edit-input" type="number" step="1" min="0" value="${state._curConstraint(name) || ''}">
-             <a class="pp-act" data-action="camp-save-constraint" data-portfolio="${esc}">保存</a>
-           </span>`
-        : `<span class="pp-acts">
-             <a class="pp-act" data-action="camp-edit-constraint" data-portfolio="${esc}">改</a>
-             <a class="pp-act" data-action="camp-exec-constraint" data-portfolio="${esc}">执行</a>
-             ${state._portfolioOverride[name] != null ? `<a class="pp-act" data-action="camp-reset-constraint" data-portfolio="${esc}">恢复</a>` : ''}
-           </span>`);
-
     return `<button class="camp-portfolio-pill${active}" type="button" data-action="camp-toggle-portfolio" data-portfolio="${esc}">
       <span class="pp-name">${_esc(name)} (${countByName[name] || 0})</span>
       <span class="pp-amount">${amtLabel} ${amt}</span>
       ${budgetLine}
-      ${actLine}
     </button>`;
   }).join('');
+
+  // 统一操作区（行末，不在气泡内）：回算修改（弹窗内 3 组同改）/ 执行 / 恢复。
+  // 门禁 = 可执行 且 有目标预算（提到行级，与单组无关）。低价捡漏组固定 $1 不参与。
+  const canEdit = state.executable !== false && bs.target_budget != null;
+  const hasOverride = Object.keys(state._portfolioOverride || {}).length > 0;
+  const actionsHtml = !canEdit ? '' : `<span class="camp-pp-actions">
+      <a class="pp-act" data-action="camp-open-realloc">回算修改</a>
+      <a class="pp-act" data-action="camp-exec-all">执行</a>
+      ${hasOverride ? '<a class="pp-act" data-action="camp-reset-all">恢复</a>' : ''}
+    </span>`;
 
   const src = bs.target_budget_source || '';
   const hint = (src === 'fallback_spend_x1.15')
     ? '<span class="camp-portfolio-fallback-hint">⚠ 按日均花费×1.15 兜底</span>'
     : '';
 
-  el.innerHTML = pills + hint;
+  el.innerHTML = pills + actionsHtml + hint;
   _show('camp-portfolio-pills-row');
+}
+
+// ── 回算修改弹窗（一次改 3 个活动组；低价捡漏固定 $1 不可改）──
+// 挂载于 camp-root 内的 #camp-modal-mount，以保事件委托命中。遮罩/对话框均无 data-action，
+// 点输入框/空白不触发任何分发；仅底部「取消/保存」按钮有 data-action。
+function _renderReallocModal(state) {
+  const mount = _$('camp-modal-mount');
+  if (!mount) return;
+  if (!state._reallocOpen) { mount.innerHTML = ''; return; }
+
+  const bs = state._budgetSummary || {};
+  const constraints = bs.portfolio_constraints || {};
+  const LOW_BID = '低价捡漏组';
+  const money0 = v => '$' + (Number(v) || 0).toFixed(0);
+
+  const heads = PORTFOLIO_NAMES.map(n => `<th>${_esc(n)}</th>`).join('');
+  const aiRow = PORTFOLIO_NAMES.map(n => {
+    const v = (n === LOW_BID) ? '$1' : (constraints[n] != null ? money0(constraints[n]) : '—');
+    return `<td>${v}</td>`;
+  }).join('');
+  const editRow = PORTFOLIO_NAMES.map(n => {
+    if (n === LOW_BID) {
+      return `<td><input type="number" value="1" disabled class="camp-realloc-input camp-realloc-fixed"></td>`;
+    }
+    const esc = _esc(n);
+    const init = (state._portfolioOverride[n] != null)
+      ? state._portfolioOverride[n]
+      : (constraints[n] != null ? Math.round(constraints[n]) : '');
+    return `<td><input type="number" step="1" min="0" class="camp-realloc-input" data-portfolio="${esc}" value="${init}"></td>`;
+  }).join('');
+
+  mount.innerHTML = `
+    <div class="camp-modal-overlay">
+      <div class="camp-modal">
+        <div class="camp-modal-header">回算修改 · 广告组合预算（3 组同改，低价捡漏固定 $1）</div>
+        <div class="camp-modal-body">
+          <table class="camp-realloc-table">
+            <thead><tr><th></th>${heads}</tr></thead>
+            <tbody>
+              <tr><td class="rowlab">AI 回算推荐</td>${aiRow}</tr>
+              <tr><td class="rowlab">运营修改</td>${editRow}</tr>
+            </tbody>
+          </table>
+          <div class="camp-modal-note">保存为临时占位（未持久化），仅改各组「广告组合预算」显示，不影响顶部父目标预算与执行后预计总预算。</div>
+        </div>
+        <div class="camp-modal-footer">
+          <button class="pp-act" data-action="camp-realloc-cancel">取消</button>
+          <button class="pp-act primary" data-action="camp-realloc-save">保存</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── 执行前确认弹窗（同意/不同意/回算执行）──
+// 渲染于独立挂载点 camp-confirm-mount（与回算弹窗互不覆盖）。仅底部「取消/确认」有 data-action。
+function _renderConfirmModal(state) {
+  const mount = _$('camp-confirm-mount');
+  if (!mount) return;
+  const c = state._confirm;
+  if (!c) { mount.innerHTML = ''; return; }
+  mount.innerHTML = `
+    <div class="camp-modal-overlay">
+      <div class="camp-modal" style="width:min(420px,92vw)">
+        <div class="camp-modal-header">${_esc(c.title || '请确认')}</div>
+        <div class="camp-modal-body">
+          <div class="text-sm" style="line-height:1.6;color:var(--camp-foreground);">${_esc(c.msg || '')}</div>
+        </div>
+        <div class="camp-modal-footer">
+          <button class="pp-act" data-action="camp-confirm-cancel">取消</button>
+          <button class="pp-act primary" data-action="camp-confirm-ok">确认</button>
+        </div>
+      </div>
+    </div>`;
 }
 
 // ── 预算汇总卡 ──

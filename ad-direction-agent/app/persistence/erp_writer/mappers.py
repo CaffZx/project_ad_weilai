@@ -51,6 +51,10 @@ _PLACEMENT_MAP = {
 
 _ACTION_TO_CATEGORY = {
     "eliminate": "ELIMINATE",
+    # 真实淘汰 action 是长形式 eliminate_to_low_bid_pool（短 "eliminate" 从未被产出）。
+    # 漏此键 → 淘汰卡 suggest_category 落默认 ADJUST，淘汰复评 WHERE='ELIMINATE' 永远 0 候选。
+    # 快照渲染侧 _card_action 已含 ELIMINATE 分支 + group_type 兜底，对齐 DDL「启用 ELIMINATE 枚举」。
+    "eliminate_to_low_bid_pool": "ELIMINATE",
     "adjust": "ADJUST",
     "keep": "KEEP",
 }

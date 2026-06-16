@@ -140,6 +140,9 @@ body {
 /* Tab 面板 */
 .tab-panel { display: none; flex-direction: column; gap: 12px; }
 .tab-panel.active { display: flex; }
+/* tab5(广告活动分析)填满 mainContent 余高，使内部 campPanelRoot/camp-main-area 内部滚动、sticky 控制区钉顶；
+   仅作用 tab5，tab1-4 仍按内容高度、由 .main-area 滚动 */
+#panel-tab5.tab-panel.active { flex: 1; min-height: 0; }
 .tab-panel.crossfading-out { opacity: 0; transition: opacity var(--transition-fast); }
 .tab-panel.crossfading-in { opacity: 1; transition: opacity var(--transition-fast); }
 .tab-placeholder {
@@ -675,7 +678,7 @@ body {
     </div>
 
     <!-- 右侧内容区（初始隐藏） -->
-    <div id="mainContent" class="hidden" style="display:none;flex-direction:column;gap:0;flex:1">
+    <div id="mainContent" class="hidden" style="display:none;flex-direction:column;gap:0;flex:1;min-height:0">
 
       <!-- 决策批次栏 -->
       <div id="batchBar" class="hidden" style="display:flex;gap:10px;align-items:center;padding:8px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;">
@@ -770,7 +773,7 @@ body {
 
       <!-- Tab5 面板 — 广告活动分析 -->
       <div class="tab-panel" id="panel-tab5">
-        <div id="campPanelRoot" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0;"></div>
+        <div id="campPanelRoot" style="flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:0;"></div>
       </div>
 
     </div>

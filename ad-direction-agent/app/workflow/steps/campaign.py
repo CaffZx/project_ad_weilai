@@ -143,6 +143,17 @@ async def _save_cached_campaigns(asin: str, days: int, data: CampaignData) -> No
 # ── 淘汰复评 I/O 编排（KB 21 §7；纯判定在 campaign_restart.analyze_eliminated_restart） ──
 
 
+async def _sem_gather(coros: list, limit: int):
+    """信号量限并发的 gather（复评拉数防大池一次打爆 MCP）。"""
+    sem = asyncio.Semaphore(max(1, limit))
+
+    async def _run(c):
+        async with sem:
+            return await c
+
+    return await asyncio.gather(*[_run(c) for c in coros], return_exceptions=True)
+
+
 async def _run_restart_review(
     pool_units: list[CampaignUnit],
     entry_dates: dict,
@@ -158,6 +169,7 @@ async def _run_restart_review(
     today = date.today()
     shop_account = getattr(fetcher, "_last_shop_account", "") or ""
     review_days = settings.campaign_restart_review_days
+    fetch_conc = settings.campaign_restart_fetch_concurrency
 
     def _days(rec: dict) -> int:
         ed = rec.get("entry_date")
@@ -173,13 +185,21 @@ async def _run_restart_review(
     if not candidates:
         return [], set()
 
-    # 在池窗口订单（并行；窗口 = min(入池天数, 上限)，评审 #1）
+    # 候选封顶（按入池天数降序，久的优先）——防大池(如 100+)一次拉爆 MCP
+    max_n = settings.campaign_restart_max_candidates
+    if len(candidates) > max_n:
+        logger.warning("Campaign 复评 [%s]: 候选 %d 超上限 %d，按入池天数降序截断",
+                       parent_asin, len(candidates), max_n)
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        candidates = candidates[:max_n]
+
+    # 在池窗口订单（限并发；窗口 = min(入池天数, 上限)，评审 #1）
     orders_inpool: dict[str, int] = {}
-    tasks = [
+    coros = [
         fetcher._fetch_perf_one(cu.campaign_name, shop_account, *make_date_window(restart_orders_window_days(d)))
         for cu, d, _ in candidates
     ]
-    for (cu, _, _), r in zip(candidates, await asyncio.gather(*tasks, return_exceptions=True)):
+    for (cu, _, _), r in zip(candidates, await _sem_gather(coros, fetch_conc)):
         if isinstance(r, tuple) and len(r) == 2 and getattr(r[1], "ok", False) and isinstance(r[1].value, dict):
             orders_inpool[(cu.campaign_id or "").strip()] = int(r[1].value.get("orders") or 0)
 
@@ -212,10 +232,10 @@ async def _fetch_exact_cpc_30d(
     if not exacts:
         return None
     sd, ed = make_date_window(30)
-    tasks = [fetcher._fetch_perf_one(cu.campaign_name, shop_account, sd, ed) for cu in exacts]
+    coros = [fetcher._fetch_perf_one(cu.campaign_name, shop_account, sd, ed) for cu in exacts]
     cpc_ordered: list[float] = []
     cpc_all: list[float] = []
-    for r in await asyncio.gather(*tasks, return_exceptions=True):
+    for r in await _sem_gather(coros, settings.campaign_restart_fetch_concurrency):
         if not (isinstance(r, tuple) and len(r) == 2 and getattr(r[1], "ok", False) and isinstance(r[1].value, dict)):
             continue
         cpc = r[1].value.get("cpc")
@@ -280,6 +300,7 @@ async def analyze_campaigns(
             days=days, bs=bs, cc=cc, temperature=temperature, refresh=refresh,
             campaign_data=campaign_data, keyword_analysis=keyword_analysis,
             run_id=run_id, _t=_t, erp_override=erp_override,
+            elimination_entry_dates=elimination_entry_dates,
         )
         return result
     finally:
@@ -303,6 +324,7 @@ async def _analyze_campaigns_impl(
     run_id: str,
     _t,
     erp_override: dict | None = None,
+    elimination_entry_dates: dict | None = None,
 ) -> CampaignAnalysisResult:
 
     # 1. 获取活动数据 — 优先 Redis 缓存（refresh=True 时跳过），miss 时拉 MCP/Doris

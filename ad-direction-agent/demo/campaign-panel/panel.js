@@ -76,6 +76,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           <!-- 预算汇总 -->
           <div id="camp-budget-summary" style="margin-bottom:8px;" class="hidden"></div>
 
+          <!-- 始终可见的操作控制区（明细/汇总 + 筛选 + 组合气泡 + 批量栏）：sticky 钉顶，卡片列表在其下独立滚动 -->
+          <div class="camp-sticky-controls">
+
           <!-- 明细/汇总 Tab -->
           <div id="camp-tabs" class="camp-tab-bar hidden"></div>
 
@@ -117,6 +120,12 @@ export async function mountCampaignPanel(containerEl, options = {}) {
               </select>
             </div>
             <input type="text" id="camp-search" placeholder="搜索关键词/活动名/ASIN...">
+            <!-- 处理状态分段筛选：全部 / 待处理 / 已处理（已处理 = 已复核/已确认） -->
+            <div class="camp-seg" id="camp-process-seg">
+              <button type="button" data-action="camp-set-process" data-process="" class="active">全部</button>
+              <button type="button" data-action="camp-set-process" data-process="pending">待处理</button>
+              <button type="button" data-action="camp-set-process" data-process="done">已处理</button>
+            </div>
           </div>
 
           <!-- 组合筛选气泡 -->
@@ -128,12 +137,13 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <button data-action="camp-clear-selection">清空选择</button>
             <span class="sep"></span>
             <span id="camp-batch-count" style="font-size:12px;color:var(--camp-muted-fg);">已选 0 / 0</span>
+            <span class="sep"></span>
             <button class="primary" data-action="camp-batch-approve">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
-            <span class="sep"></span>
-            <button class="primary" data-action="camp-execute-confirmed" title="对已同意(CONFIRMED)的调整调用广告调整工具执行（dry-run 下不真实修改）">执行已确认调整</button>
             <button data-action="camp-view-records">调整记录</button>
           </div>
+
+          </div><!-- /camp-sticky-controls -->
 
           <!-- 卡片列表 -->
           <div id="camp-list"></div>
@@ -143,6 +153,11 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
           <!-- 调整记录（真实执行回写）-->
           <div id="camp-exec-records" class="camp-card hidden" style="margin-top:12px;"></div>
+
+          <!-- 回算修改弹窗挂载点（_renderReallocModal 渲染于此；在 camp-root 内以保事件委托） -->
+          <div id="camp-modal-mount"></div>
+          <!-- 确认弹窗挂载点（同意/不同意/回算执行 前的确认） -->
+          <div id="camp-confirm-mount"></div>
 
         </div>
       </div>

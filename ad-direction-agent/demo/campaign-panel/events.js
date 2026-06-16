@@ -22,6 +22,9 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-toggle-portfolio':
         st.togglePortfolioFilter(data.portfolio);
         return;
+      case 'camp-set-process':
+        st.setProcessFilter(data.process, el);
+        return;
       case 'camp-toggle-select': {
         const cb = el;
         if (cb && cb.dataset && cb.dataset.key) st.toggleSelection(cb.dataset.key);
@@ -37,13 +40,16 @@ export function mountEventDelegation(rootEl, state) {
         st.clearSelection();
         return;
       case 'camp-batch-approve':
-        st.batchConfirm('approve');
+        st.askConfirm('approve');
         return;
       case 'camp-batch-reject':
-        st.batchConfirm('reject');
+        st.askConfirm('reject');
         return;
-      case 'camp-execute-confirmed':
-        st.executeConfirmed();
+      case 'camp-confirm-ok':
+        st.runConfirm();
+        return;
+      case 'camp-confirm-cancel':
+        st.cancelConfirm();
         return;
       case 'camp-view-records':
         st.loadExecutionRecords();
@@ -57,17 +63,20 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-jump-group-member':
         st.jumpToGroupMember(parseInt(data.groupIndex), parseInt(data.keyIndex));
         return;
-      case 'camp-edit-constraint':
-        st.startEditConstraint(data.portfolio);
+      case 'camp-open-realloc':
+        st.openRealloc();
         return;
-      case 'camp-save-constraint':
-        st.saveConstraint(data.portfolio);
+      case 'camp-realloc-save':
+        st.saveRealloc();
         return;
-      case 'camp-exec-constraint':
-        st.execConstraint(data.portfolio);
+      case 'camp-realloc-cancel':
+        st.closeRealloc();
         return;
-      case 'camp-reset-constraint':
-        st.resetConstraint(data.portfolio);
+      case 'camp-exec-all':
+        st.askConfirm('exec');
+        return;
+      case 'camp-reset-all':
+        st.resetConstraints();
         return;
       default:
         break;
@@ -81,16 +90,6 @@ export function mountEventDelegation(rootEl, state) {
     const el = e.target.closest('[data-action]');
     if (!el) return;
     dispatch(el.dataset.action, el.dataset, el, state);
-  }
-
-  // mousedown 委托（仅 camp-save-constraint：必须抢在 blur 前执行）
-  function onMouseDown(e) {
-    const el = e.target.closest('[data-action="camp-save-constraint"]');
-    if (el) {
-      e.preventDefault();
-      e.stopPropagation();
-      dispatch('camp-save-constraint', el.dataset, el, state);
-    }
   }
 
   // change 委托（筛选下拉 + 卡片 checkbox）
@@ -108,35 +107,23 @@ export function mountEventDelegation(rootEl, state) {
     }
   }
 
-  // keydown 委托（约束编辑 Enter 键）
+  // keydown 委托（回算修改弹窗内 Enter 保存）
   function onKeyDown(e) {
-    if (e.target.matches('.camp-pp-edit-input') && e.key === 'Enter') {
+    if (e.target.matches('.camp-realloc-input') && e.key === 'Enter') {
       e.preventDefault();
-      const pill = e.target.closest('[data-portfolio]');
-      if (pill) state.saveConstraint(pill.dataset.portfolio);
-    }
-  }
-
-  // blur 捕获（blur 不冒泡但可捕获）
-  function onBlurCapture(e) {
-    if (e.target.matches('.camp-pp-edit-input')) {
-      state.onConstraintBlur();
+      state.saveRealloc();
     }
   }
 
   rootEl.addEventListener('click', onClick);
-  rootEl.addEventListener('mousedown', onMouseDown);
   rootEl.addEventListener('change', onChange);
   rootEl.addEventListener('input', onInput);
   rootEl.addEventListener('keydown', onKeyDown);
-  rootEl.addEventListener('blur', onBlurCapture, true);
 
   return function cleanup() {
     rootEl.removeEventListener('click', onClick);
-    rootEl.removeEventListener('mousedown', onMouseDown);
     rootEl.removeEventListener('change', onChange);
     rootEl.removeEventListener('input', onInput);
     rootEl.removeEventListener('keydown', onKeyDown);
-    rootEl.removeEventListener('blur', onBlurCapture, true);
   };
 }

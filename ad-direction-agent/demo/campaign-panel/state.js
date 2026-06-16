@@ -16,8 +16,10 @@ export function createCampaignState() {
     _selection: new Set(),
     _budgetSummary: null,
     _portfolioFilter: '',
+    _processFilter: '',
     _portfolioOverride: {},
-    _editingConstraint: null,
+    _reallocOpen: false,
+    _confirm: null,            // {kind:'approve'|'reject'|'exec', title, msg} 确认弹窗
     _synthesisGroups: [],
     _synthesisSpecials: [],
     _activeTab: 'detail',
@@ -125,11 +127,23 @@ export function createCampaignState() {
     const fm = (matchEl && matchEl.value) || '';
     const q  = ((searchEl && searchEl.value) || '').toLowerCase();
 
+    const pf = state._processFilter || '';
+    const _isProcessed = (it) =>
+      !!state._reviewState[it.item_id] ||
+      ['CONFIRMED', 'REJECTED'].includes(String(it.confirm_status || '').toUpperCase());
+
     state._filteredItems = state._campaignItems.filter(it => {
       if (fa && it.action_klass !== fa) return false;
       if (fs && it.conf_klass !== fs) return false;
       if (fm && it.match_type !== fm) return false;
       if (state._portfolioFilter && it.ai_portfolio_class !== state._portfolioFilter) return false;
+      if (pf) {
+        // 预过滤/丢失非可复核项，待处理/已处理均不纳入（仅在「全部」下可见）
+        if (it.item_type === 'prefiltered' || it.item_type === 'lost') return false;
+        const done = _isProcessed(it);
+        if (pf === 'done' && !done) return false;
+        if (pf === 'pending' && done) return false;
+      }
       if (q) {
         const hay = (it.keyword_text + ' ' + it.campaign_name + ' ' + (it.keyword_class || '') + ' ' + it.child_asin).toLowerCase();
         if (!hay.includes(q)) return false;
@@ -137,6 +151,50 @@ export function createCampaignState() {
       return true;
     });
     _reRender();
+  };
+
+  // 处理状态分段筛选（全部/待处理/已处理）。#camp-filters 静态不重渲，active 类在此手动切。
+  state.setProcessFilter = function (val, el) {
+    state._processFilter = val || '';
+    if (el && el.parentElement) {
+      el.parentElement.querySelectorAll('[data-action="camp-set-process"]')
+        .forEach(b => b.classList.toggle('active', b === el));
+    }
+    state.applyFilters();
+  };
+
+  // ── 执行前确认弹窗（同意所选 / 不同意所选 / 回算执行 三按钮共用）──
+  // 校验通过才弹窗；执行流绑定在「确认」(runConfirm) 上，「取消」(cancelConfirm) 不执行。
+  state.askConfirm = function (kind) {
+    if (!state.executable) return;
+    if (kind === 'approve' || kind === 'reject') {
+      if (state._selection.size === 0) { _toast('请先勾选至少一项'); return; }
+      const n = state._selection.size;
+      state._confirm = {
+        kind,
+        title: kind === 'approve' ? '确认同意所选调整' : '确认不同意所选调整',
+        msg: `将对已勾选的 ${n} 项执行「${kind === 'approve' ? '同意' : '不同意'}」并写回审核状态。`,
+      };
+    } else if (kind === 'exec') {
+      state._confirm = {
+        kind,
+        title: '确认回算执行',
+        msg: '将对 3 个活动组的回算预算执行调整（执行流待接入，当前为占位）。',
+      };
+    } else { return; }
+    _reRender();
+  };
+
+  state.cancelConfirm = function () { state._confirm = null; _reRender(); };
+
+  state.runConfirm = function () {
+    const c = state._confirm;
+    state._confirm = null;
+    _reRender();
+    if (!c) return;
+    if (c.kind === 'approve') state.batchConfirm('approve');
+    else if (c.kind === 'reject') state.batchConfirm('reject');
+    else if (c.kind === 'exec') state.execConstraints();
   };
 
   // ── 批量确认 / 导出 ──
@@ -239,87 +297,50 @@ export function createCampaignState() {
   };
 
   // ── 预算约束编辑 ──
-  state._curConstraint = function (name) {
-    if (state._portfolioOverride[name] != null) return state._portfolioOverride[name];
-    if (state._budgetSummary && state._budgetSummary.portfolio_constraints) {
-      return state._budgetSummary.portfolio_constraints[name];
-    }
-    return null;
-  };
-
-  state.startEditConstraint = function (name) {
-    state._editingConstraint = name;
+  // ── 回算修改弹窗（一次改 3 个活动组；低价捡漏固定 $1 不参与）──
+  state.openRealloc = function () {
+    if (!state.executable) return;  // 仅最新已完成批次可改
+    state._reallocOpen = true;
     _reRender();
     setTimeout(() => {
-      const input = document.querySelector('.camp-pp-edit-input');
+      const input = document.querySelector('.camp-realloc-input:not([disabled])');
       if (input) { input.focus(); input.select(); }
     }, 0);
   };
 
-  state.onConstraintBlur = function () {
-    setTimeout(() => {
-      if (state._editingConstraint != null) {
-        state._editingConstraint = null;
-        _reRender();
-      }
-    }, 150);
-  };
-
-  state.saveConstraint = function (name) {
-    const input = document.querySelector('.camp-pp-edit-input');
-    if (!input) return;
-    const num = parseFloat(input.value);
-    if (isNaN(num) || num < 0) { alert('请输入有效金额'); return; }
-    state._portfolioOverride[name] = num;
-    state._editingConstraint = null;
+  state.closeRealloc = function () {
+    state._reallocOpen = false;
     _reRender();
-    _toast(`已修改「${name}」约束 $${num.toFixed(0)}（占位，未持久化）`);
   };
 
-  state.execConstraint = function (name) {
-    _toast(`「${name}」执行：占位，执行流待接入`);
-  };
-
-  state.resetConstraint = function (name) {
-    delete state._portfolioOverride[name];
+  state.saveRealloc = function () {
+    const inputs = document.querySelectorAll('.camp-realloc-input[data-portfolio]');
+    let n = 0;
+    inputs.forEach((inp) => {
+      const name = inp.dataset.portfolio;
+      const num = parseFloat(inp.value);
+      if (name && !isNaN(num) && num >= 0) { state._portfolioOverride[name] = num; n++; }
+    });
+    state._reallocOpen = false;
     _reRender();
-    _toast(`已恢复「${name}」推荐约束`);
+    _toast(`已修改 ${n} 组广告组合预算（占位，未持久化）`);
   };
 
-  // ── 真实执行（Part 6）──
+  // 「执行」：3 组一起；后端 override 执行流未接，仅占位提示。
+  state.execConstraints = function () {
+    if (!state.executable) return;
+    _toast('回算执行：占位，执行流待接入');
+  };
+
+  state.resetConstraints = function () {
+    state._portfolioOverride = {};
+    state._reallocOpen = false;
+    _reRender();
+    _toast('已恢复 AI 回算推荐');
+  };
+
+  // ── 调整记录读取（「调整记录」按钮）──
   const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
-  function _operator() { return ((window._erpParams || {}).userId) || 'tab5'; }
-
-  state.executeConfirmed = async function () {
-    if (!state.executable) return;  // 仅最新已完成批次可执行
-    const did = state._currentRunId;
-    if (!did) { _toast('无可执行批次'); return; }
-    if (!confirm('确认对【已同意】的调整执行真实广告调整？\n将调用广告调整工具（dry-run 模式下不会真实修改）。')) return;
-    _toast('执行中…');
-    try {
-      const resp = await fetch(_API + '/campaign/execute', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ asin: state.asin, decision_id: did, operator: _operator() }),
-      });
-      const body = await resp.json().catch(() => null);
-      if (!resp.ok || !body || body.ok === false) {
-        throw new Error((body && body.error) || `HTTP ${resp.status}`);
-      }
-      if (body.dry_run) _toast(`空跑完成：构造 ${body.ops || 0} 项（dry_run，未真实调整）`);
-      else _toast(`已提交 ${body.ops || 0} 项${(body.task_ids && body.task_ids.length) ? `，任务 ${body.task_ids.join(',')}` : ''}`);
-      await state.loadExecutionRecords();
-      if (body.task_ids && body.task_ids.length) setTimeout(() => state.pollExecStatus(did), 4000);
-    } catch (e) {
-      _toast('执行失败：' + (e.message || '未知错误'));
-    }
-  };
-
-  state.pollExecStatus = async function (did) {
-    try {
-      await fetch(_API + '/campaign/execute/status?decision_id=' + encodeURIComponent(did || state._currentRunId));
-      await state.loadExecutionRecords();
-    } catch (_) {}
-  };
 
   state.loadExecutionRecords = async function () {
     const did = state._currentRunId;

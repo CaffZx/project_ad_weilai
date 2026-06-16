@@ -16,13 +16,24 @@
   --camp-primary-light: #EEF2FF;
   --camp-radius-card: 8px;
   --camp-transition-ctl: .15s ease;
+  /* 撑起高度链：父 #campPanelRoot 为 flex 列容器 → camp-root flex:1 取得有界高度，
+     使 camp-main-area 的 overflow-y:auto 真正生效（内部滚动），sticky 控制区才能钉顶 */
+  display: flex; flex-direction: column; flex: 1; min-height: 0;
 }
 
 .camp-root * { box-sizing: border-box; }
 
 /* ── 布局 ── */
-.camp-app-layout { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
-.camp-main-area { flex: 1; overflow-y: auto; padding: 16px; }
+.camp-app-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.camp-main-area { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px 16px; }
+/* 操作控制区：明细/汇总 + 筛选 + 组合气泡 + 批量栏，sticky 钉顶；卡片列表在其下独立滚动。
+   margin:0 -16px 抵消左右 padding 使钉顶时横向铺满（无卡片透出）；top:0 配合 camp-main-area 顶 padding=0 无缝隙。 */
+.camp-sticky-controls {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--camp-bg);
+  margin: 0 -16px; padding: 12px 16px 6px;
+  box-shadow: 0 4px 6px -4px rgba(0,0,0,.12);
+}
 
 /* ── 卡片 ── */
 .camp-card {
@@ -95,6 +106,16 @@
   flex: 1; max-width: 280px; padding: 4px 8px; font-size: 12px;
   border: 1px solid var(--camp-border); border-radius: 6px;
 }
+/* 处理状态分段筛选（全部/待处理/已处理）*/
+.camp-seg { display: inline-flex; border: 1px solid var(--camp-border); border-radius: 8px; overflow: hidden; }
+.camp-seg button {
+  border: none; border-right: 1px solid var(--camp-border);
+  background: #fff; color: var(--camp-muted-fg);
+  font-size: 12px; padding: 6px 14px; cursor: pointer; line-height: 1.4;
+}
+.camp-seg button:last-child { border-right: none; }
+.camp-seg button:hover:not(.active) { background: var(--camp-primary-light); }
+.camp-seg button.active { background: var(--camp-primary); color: #fff; }
 .camp-filter-btn {
   font-size: 12px; padding: 4px 12px; border-radius: 6px;
   border: 1px solid var(--camp-border); background: white; cursor: pointer;
@@ -234,6 +255,55 @@
 .camp-portfolio-fallback-hint {
   font-size: 11px; color: #B45309; background: #FEF3C7;
   padding: 4px 10px; border-radius: 6px; margin-left: 6px;
+}
+
+/* ── 组合气泡行末统一操作区（回算修改 / 执行 / 恢复）：竖排、等宽 ── */
+.camp-pp-actions { display: inline-flex; flex-direction: column; gap: 6px; align-items: stretch; margin-left: auto; }
+.camp-pp-actions .pp-act,
+.camp-modal .pp-act {
+  font-size: 12px; padding: 5px 12px; border-radius: 6px;
+  border: 1px solid #0EA5E9; color: #0369A1; background: #fff;
+  cursor: pointer; line-height: 1.4; text-align: center;
+}
+.camp-pp-actions .pp-act:hover,
+.camp-modal .pp-act:hover { background: #E0F2FE; }
+.camp-modal .pp-act.primary { background: #0EA5E9; color: #fff; border-color: #0EA5E9; }
+.camp-modal .pp-act.primary:hover { background: #0284C7; }
+
+/* ── 回算修改弹窗 ── */
+.camp-modal-overlay {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(0,0,0,.35);
+  display: flex; align-items: center; justify-content: center;
+}
+.camp-modal {
+  background: #fff; border-radius: 12px; width: min(680px, 92vw);
+  max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,.2);
+  display: flex; flex-direction: column;
+}
+.camp-modal-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--camp-border);
+  font-size: 14px; font-weight: 600; color: var(--camp-foreground);
+}
+.camp-modal-body { padding: 16px 18px; }
+.camp-modal-footer {
+  padding: 12px 18px; border-top: 1px solid var(--camp-border);
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.camp-modal-note { font-size: 11px; color: var(--camp-muted-fg); margin-top: 10px; line-height: 1.5; }
+.camp-realloc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.camp-realloc-table th, .camp-realloc-table td {
+  border: 1px solid var(--camp-border); padding: 8px 10px; text-align: center;
+}
+.camp-realloc-table th { background: var(--camp-surface, #F1F5F9); font-weight: 600; }
+.camp-realloc-table td.rowlab { text-align: left; font-weight: 600; white-space: nowrap; background: #FAFAFA; }
+.camp-realloc-input {
+  width: 80px; font-size: 12px; padding: 4px 6px;
+  border: 1px solid #0EA5E9; border-radius: 4px; text-align: center;
+}
+.camp-realloc-input.camp-realloc-fixed {
+  border-color: var(--camp-border); color: var(--camp-muted-fg);
+  background: #F1F5F9; cursor: not-allowed;
 }
 
 /* ── 预算汇总 ── */

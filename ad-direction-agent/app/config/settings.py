@@ -172,6 +172,8 @@ class Settings(BaseSettings):
     campaign_restart_bid_cap: float = 0.5             # 情况二 min(0.5, 均CPC) 上限 (KB §7)
     campaign_restart_high_spend_7d: float = 15.0      # 情况二「淘汰前花费较高」阈值 (借 §1，运营已确认，可调)
     campaign_restart_orders_window_max_days: int = 30 # 在池订单窗口上限 = min(入池天数, 此值)
+    campaign_restart_max_candidates: int = 50         # 复评候选封顶 (按入池天数降序取，防大池一次拉爆 MCP)
+    campaign_restart_fetch_concurrency: int = 16      # 复评拉在池订单/30dCPC 的并发上限
 
     # CSV适配器配置
     csv_filename: str = "asin_test_data.xlsx"
