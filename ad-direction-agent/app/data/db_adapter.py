@@ -401,10 +401,12 @@ class DbAdapter(DataSourceAdapter):
         if gp_total_orders and gp_ad_orders is not None and gp_total_orders > 0:
             data.natural_order_ratio = max(0, (gp_total_orders - gp_ad_orders) / gp_total_orders * 100)
 
-        # 信号：库存优先取利润表的 fba_stock（父 ASIN 级别），无则用 listing 聚合
-        stock = _int(gross_profit.get("stock")) if gross_profit else None
+        # 库存口径完全统一为 MCP listing_inventory 的「FBA可售」：仅用 listing 各子ASIN
+        # can_sale_num(可售)之和（= mcp_adapter 的 sum(FBA可售)，同口径、同为当前快照、无窗口、无兜底）。
+        # 不用「在库」in_stock_num（口径不同），也不回退 gross_profit.stock（同列但带 7 天窗口易过期，
+        # 且会把"真实售罄=0"误回退成陈旧正值，制造幻影库存）。
         data.signals = SpecialSignals(
-            inventory_qty=stock or _int(listing.get("in_stock_num")),
+            inventory_qty=_int(listing.get("can_sale_num")),
             in_transit_inventory=_int(listing.get("in_stock_receiving_num")),
         )
 
