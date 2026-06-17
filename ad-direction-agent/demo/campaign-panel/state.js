@@ -170,22 +170,24 @@ export function createCampaignState() {
     if (kind === 'approve' || kind === 'reject') {
       if (state._selection.size === 0) { _toast('请先勾选至少一项'); return; }
       const n = state._selection.size;
-      state._confirm = {
-        kind,
-        title: kind === 'approve' ? '确认同意所选调整' : '确认不同意所选调整',
-        msg: `将对已勾选的 ${n} 项执行「${kind === 'approve' ? '同意' : '不同意'}」并写回审核状态。`,
-      };
+      if (kind === 'approve') {
+        state._confirm = {
+          kind,
+          title: '确认同意并下发所选调整',
+          msg: '将直接通过ERP对亚马逊广告进行调整，不可撤销，是否确认',
+        };
+      } else {
+        state._confirm = {
+          kind,
+          title: '确认不同意所选调整',
+          msg: `将把已勾选的 ${n} 项标记为不同意（REJECTED），不会调用 MCP。`,
+        };
+      }
     } else if (kind === 'exec') {
       state._confirm = {
         kind,
         title: '确认组合预算调整执行',
-        msg: '将通过 MCP 真实下发 3 个活动组的预算调整到亚马逊广告，并写入调整记录。',
-      };
-    } else if (kind === 'execApproved') {
-      state._confirm = {
-        kind,
-        title: '确认执行已同意的调整',
-        msg: '将把本批次所有已同意(CONFIRMED)的调整通过 MCP 真实下发到亚马逊广告，并写入调整记录。该动作不可撤销。',
+        msg: '将通过 MCP 真实下发 3 个活动组的预算调整到亚马逊广告。',
       };
     } else { return; }
     _reRender();
@@ -201,7 +203,6 @@ export function createCampaignState() {
     if (c.kind === 'approve') state.batchConfirm('approve');
     else if (c.kind === 'reject') state.batchConfirm('reject');
     else if (c.kind === 'exec') state.execConstraints();
-    else if (c.kind === 'execApproved') state.execApproved();
   };
 
   // ── 批量确认 / 导出 ──
@@ -370,7 +371,6 @@ export function createCampaignState() {
           ? `已 DRY-RUN 落库 ${applied} 组预算调整（未真改广告）record=${recordId}${warn}`
           : `已下发 ${applied} 组预算调整到 MCP record=${recordId}${warn}`
       );
-      try { await state.loadExecutionRecords(); } catch (_) {}
     } catch (e) {
       console.warn('[campaign-panel] /campaign/execute-portfolio-budget 失败:', e.message);
       _toast(`组合预算执行失败：${e.message || '未知错误'}`);
@@ -384,84 +384,6 @@ export function createCampaignState() {
     _toast('已恢复 AI 回算推荐');
   };
 
-  // ── 「执行已同意」: 把本批次所有 CONFIRMED 的调整通过 MCP 真实下发 ──
-  // 后端走 /campaign/execute → submit_execution → build_exec_plan → advert_mcp_client
-  // dry-run 由后端 advert_exec_dry_run 开关控制（.env）；真跑时通过轮询 /campaign/execute/status 查终态
-  state.execApproved = async function () {
-    if (!state.executable) return;
-    const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
-    try {
-      _toast('正在下发已同意的调整到 MCP...');
-      const resp = await fetch(_API + '/campaign/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          asin: state.asin,
-          decision_id: state._currentRunId,
-          operator: ((window._erpParams || {}).userId) || 'tab5',
-        }),
-      });
-      let body = null;
-      try { body = await resp.json(); } catch (_) {}
-      if (!resp.ok || !body || body.ok === false) {
-        throw new Error((body && body.error) || `HTTP ${resp.status}`);
-      }
-      const isDryRun = body.dry_run === true;
-      const ops = body.ops ?? 0;
-      const recordId = (body.record_id || '').slice(0, 8);
-      _toast(
-        isDryRun
-          ? `已 DRY-RUN 落库 ${ops} 项调整（未真改广告）record=${recordId}…`
-          : `已下发 ${ops} 项调整到 MCP（异步执行中）record=${recordId}…`
-      );
-      // 真跑模式下后端返回 task_ids，可后续轮询 /campaign/execute/status 查终态
-      try { await state.loadExecutionRecords(); } catch (_) {}
-    } catch (e) {
-      console.warn('[campaign-panel] /campaign/execute 失败:', e.message);
-      _toast(`执行失败：${e.message || '未知错误'}`);
-    }
-  };
-
-  // ── 调整记录读取（「调整记录」按钮）──
-  const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
-
-  state.loadExecutionRecords = async function () {
-    const did = state._currentRunId;
-    if (!did) return;
-    try {
-      const resp = await fetch(_API + '/campaign/execution-records?decision_id=' + encodeURIComponent(did));
-      const body = await resp.json().catch(() => null);
-      state._execRecords = (body && body.records) || [];
-    } catch (_) { state._execRecords = []; }
-    _renderExecRecords();
-  };
-
-  function _renderExecRecords() {
-    const box = document.getElementById('camp-exec-records');
-    if (!box) return;
-    const recs = state._execRecords || [];
-    if (!recs.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
-    const esc = (s) => { const d = document.createElement('div'); d.textContent = String(s == null ? '' : s); return d.innerHTML; };
-    const KIND = { campaign: '活动', keyword: '关键词', placement: '广告位' };
-    const rows = [];
-    recs.forEach((r) => {
-      (r.items || []).forEach((it) => {
-        const kind = it._kind;
-        let chg = '';
-        if (kind === 'campaign') chg = `预算 ${it.old_budget ?? '—'} → ${it.new_budget ?? '—'}` + (it.new_state ? ` / 状态 ${esc(it.new_state)}` : '');
-        else if (kind === 'keyword') chg = `竞价 ${it.old_bid ?? '—'} → ${it.new_bid ?? '—'}` + (it.keyword_text ? `（${esc(it.keyword_text)}）` : '');
-        else if (kind === 'placement') chg = `${esc(it.placement_type)} ${it.old_percent ?? '—'}% → ${it.new_percent ?? '—'}%`;
-        const res = it.modify_result || 'PENDING';
-        const color = res === 'SUCCESS' ? '#16A34A' : (res === 'FAIL' ? '#DC2626' : (res === 'DRY_RUN' ? '#6B7280' : '#D97706'));
-        rows.push(`<tr><td>${esc(r.create_time || '')}</td><td>${esc(it.campaign_id || '')}</td><td>${KIND[kind] || kind}</td><td>${chg}</td><td style="color:${color};font-weight:600">${esc(res)}</td><td>${esc(it.error_msg || '')}</td></tr>`);
-      });
-    });
-    box.classList.remove('hidden');
-    box.innerHTML = `<div class="camp-card-title">调整记录（${recs.length} 批 / ${rows.length} 项）</div>
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <thead><tr style="text-align:left;color:var(--camp-muted-fg)"><th>时间</th><th>活动ID</th><th>类型</th><th>变更</th><th>结果</th><th>错误</th></tr></thead>
-      <tbody>${rows.join('')}</tbody></table>`;
-  }
 
   // ── 设置数据 ──
   state.setData = function (vm) {

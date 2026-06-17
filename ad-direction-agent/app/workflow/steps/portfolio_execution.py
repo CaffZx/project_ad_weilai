@@ -164,9 +164,7 @@ async def execute_portfolio_budget(
             for op in ops:
                 if op.get("modify_result") != "SKIP":
                     op["modify_result"] = "DRY_RUN"
-            repo.insert_portfolio_records(
-                record_id, ops, operator, shop_id=shop_id,
-                parent_asin=parent_asin, parent_seller_sku=parent_sku)
+            # 跳过 t_advert_agent_modify_portfolio_record 写入（由 ERP 系统自身记录）
             repo.update_advert_record_result(
                 record_id, response_params_json=json_dumps({"dry_run": True}))
             logger.info("Portfolio budget DRY-RUN [%s] record=%s ops=%d applied=%d",
@@ -196,9 +194,7 @@ async def execute_portfolio_budget(
                         op["modify_result"] = "FAIL"
                         op["error_msg"] = f"{type(e).__name__}: {e}"
 
-        repo.insert_portfolio_records(
-            record_id, ops, operator, shop_id=shop_id,
-            parent_asin=parent_asin, parent_seller_sku=parent_sku)
+        # 跳过 t_advert_agent_modify_portfolio_record 写入（由 ERP 系统自身记录）
         repo.update_advert_record_result(
             record_id, task_id=(task_ids[0] if task_ids else ""),
             response_params_json=json_dumps({"result": result_env, "task_ids": task_ids}))

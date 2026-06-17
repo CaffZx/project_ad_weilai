@@ -401,35 +401,83 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
 
 @router.post("/campaign/confirm")
 async def campaign_confirm(req: CampaignConfirmRequest):
-    """运营批量审核 → 写 card + pending 的 confirm_status（PENDING→CONFIRMED/REJECTED）。
+    """双路审核：
+    - approve → 直接调 MCP 真改广告，不写库（合并"同意+执行"）
+    - reject  → 走原 confirm_decisions：UPDATE suggest_card / *_pending.confirm_status='REJECTED'
 
-    req.run_id 为快照的 decision_id（write_full 落库时生成）；decision.campaign_key 即 card_id。
-    校验：批次 is_latest=1 且该 ASIN 无进行中事件（state 库）；每活动只处理一次（幂等，重复→skipped）。
+    一次请求里 approve / reject 可混合存在，分别处理后合并返回。
     """
     decision_id = (req.run_id or "").strip()
     if not decision_id:
-        return {"ok": False, "error": "run_id(decision_id) 必填", "applied": 0, "skipped": 0}
+        return {"ok": False, "error": "run_id(decision_id) 必填", "ops": 0}
 
-    decisions = [{"campaign_key": d.campaign_key, "decision": d.decision} for d in req.decisions]
+    approve_ids: list[str] = []
+    reject_items: list[dict] = []
+    for d in req.decisions:
+        cid = (d.campaign_key or "").strip()
+        dec = (d.decision or "").lower()
+        if not cid:
+            continue
+        if dec == "approve":
+            approve_ids.append(cid)
+        elif dec == "reject":
+            reject_items.append({"campaign_key": cid, "decision": "reject"})
+
+    if not approve_ids and not reject_items:
+        return {"ok": True, "ops": 0, "msg": "无可处理的勾选项"}
+
+    # in-progress 互斥（分析中不让执行）
+    sess = get_state_manager().get_analysis_session(req.asin) if req.asin else None
+    in_progress = bool(sess and sess.get("run_id"))
+    if in_progress and approve_ids:
+        return {"ok": False, "error": "存在进行中分析事件，执行权已冻结", "ops": 0}
+
     from app.persistence.erp_writer.repository import _get_repository
-    try:
-        sess = get_state_manager().get_analysis_session(req.asin) if req.asin else None
-        in_progress = bool(sess and sess.get("run_id"))
-        repo = _get_repository()
-        result = await asyncio.to_thread(
-            repo.confirm_decisions, decision_id, decisions, req.operator or None,
-            in_progress=in_progress,
-        )
-    except Exception as e:
-        logger.exception("Campaign confirm 失败 [%s] decision_id=%s: %s", req.asin, decision_id, e)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "applied": 0, "skipped": 0}
+    repo = _get_repository()
+
+    # ── reject 路径：原 confirm_decisions（写 REJECTED）──
+    reject_result: dict = {}
+    if reject_items:
+        try:
+            reject_result = await asyncio.to_thread(
+                repo.confirm_decisions, decision_id, reject_items, req.operator or None,
+                in_progress=in_progress,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Campaign confirm(reject) 失败 [%s] did=%s: %s", req.asin, decision_id, e)
+            reject_result = {"ok": False, "error": f"{type(e).__name__}: {e}", "applied": 0, "skipped": 0}
+
+    # ── approve 路径：直接 MCP 真跑（不写库）──
+    approve_result: dict = {}
+    if approve_ids:
+        try:
+            from app.workflow.steps.advert_execution import submit_execution_direct
+            approve_result = await submit_execution_direct(
+                decision_id, approve_ids, operator=(req.operator or "tab5"),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Campaign confirm(approve) 失败 [%s] did=%s: %s", req.asin, decision_id, e)
+            approve_result = {"ok": False, "error": f"{type(e).__name__}: {e}", "ops": 0}
 
     logger.info(
-        "Campaign confirm [%s decision_id=%s] applied=%s skipped=%s from %s",
-        req.asin, decision_id, result.get("applied"), result.get("skipped"),
+        "Campaign confirm [%s did=%s] approve=%d→ops=%s reject=%d→applied=%s from %s",
+        req.asin, decision_id,
+        len(approve_ids), approve_result.get("ops"),
+        len(reject_items), reject_result.get("applied"),
         req.operator or "anonymous",
     )
-    return result
+
+    return {
+        "ok": (approve_result.get("ok", True) and reject_result.get("ok", True)),
+        "approve": approve_result if approve_ids else None,
+        "reject": reject_result if reject_items else None,
+        # 兼容老前端：扁平展示
+        "ops": approve_result.get("ops", 0),
+        "applied": reject_result.get("applied", 0),
+        "skipped": reject_result.get("skipped", 0),
+        "task_ids": approve_result.get("task_ids") or [],
+        "errors": approve_result.get("errors") or [],
+    }
 
 
 # ── 广告调整真实执行（Part 6）─────────────────────────────────────────────

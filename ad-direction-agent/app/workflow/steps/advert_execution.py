@@ -167,3 +167,81 @@ async def poll_execution(decision_id: str = "", record_id: str = "") -> dict:
             repo.update_advert_record_result(
                 r["id"], response_params_json=json_dumps(res))
     return {"ok": True, "finalized": len(task_ids), "state_ok": ok, "msg": msg}
+
+
+async def submit_execution_direct(
+    decision_id: str, card_ids: list[str], *, operator: str
+) -> dict:
+    """合并"同意+执行"：按 card_ids 直接拉 pending → 调 MCP 真跑 → 不写任何 confirm_status / record / pending.execute_status。
+
+    用于前端"同意所选"弹窗确认后的一步式真实下发。
+    """
+    if not settings.advert_mcp_enabled:
+        return {"ok": False, "error": "广告调整执行通道未启用（advert_mcp_enabled=false）"}
+    if not card_ids:
+        return {"ok": False, "error": "card_ids 必填"}
+
+    repo = _get_repository()
+    pending = repo.load_pending_by_card_ids(decision_id, card_ids)
+    if not pending:
+        return {"ok": False, "error": f"批次 {decision_id} 不存在或 card_ids 无匹配"}
+
+    plan = build_exec_plan(pending, operator=operator)
+    if plan.is_empty():
+        return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}
+
+    # DRY-RUN
+    if settings.advert_exec_dry_run:
+        logger.info("Advert exec DRY-RUN(direct) [%s] ops=%d cards=%d",
+                    decision_id, len(plan.ops), len(card_ids))
+        return {"ok": True, "dry_run": True, "ops": len(plan.ops),
+                "warnings": plan.warnings}
+
+    # 真跑：调 MCP，不写库
+    client = AdvertMcpClient()
+    results: dict = {"async": None, "create": [], "negative": []}
+    task_ids: list[str] = []
+    errors: list[str] = []
+    try:
+        if plan.params_vo_list:
+            try:
+                res = await client.async_batch_update(plan.params_vo_list)
+                results["async"] = res
+                task_ids = extract_task_ids(res)
+                ok, msg = parse_result_envelope(res)
+                if not ok:
+                    errors.append(f"async: {msg}")
+            except Exception as e:  # noqa: BLE001
+                logger.exception("async_batch_update 失败(direct) [%s]: %s", decision_id, e)
+                errors.append(f"async: {type(e).__name__}: {e}")
+
+        for call in plan.create_calls:
+            call.pop("_card_id", "")
+            try:
+                res = await client.create_portfolio_campaign(call)
+                results["create"].append(res)
+                ok, msg = parse_result_envelope(res)
+                if not ok:
+                    errors.append(f"create: {msg}")
+            except Exception as e:  # noqa: BLE001
+                logger.exception("create_portfolio_campaign 失败(direct) [%s]: %s", decision_id, e)
+                errors.append(f"create: {type(e).__name__}: {e}")
+
+        for call in plan.negative_calls:
+            try:
+                res = await client.create_negative_keywords(call)
+                results["negative"].append(res)
+                ok, msg = parse_result_envelope(res)
+                if not ok:
+                    errors.append(f"negative: {msg}")
+            except Exception as e:  # noqa: BLE001
+                logger.exception("create_negative_keywords 失败(direct) [%s]: %s", decision_id, e)
+                errors.append(f"negative: {type(e).__name__}: {e}")
+    finally:
+        await client.aclose()
+
+    logger.info("Advert exec direct [%s] ops=%d task_ids=%s errs=%d",
+                decision_id, len(plan.ops), task_ids, len(errors))
+    return {"ok": not errors, "ops": len(plan.ops), "task_ids": task_ids,
+            "errors": errors, "warnings": plan.warnings}
+

@@ -138,10 +138,8 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <span class="sep"></span>
             <span id="camp-batch-count" style="font-size:12px;color:var(--camp-muted-fg);">已选 0 / 0</span>
             <span class="sep"></span>
-            <button class="primary" data-action="camp-batch-approve">同意所选</button>
+            <button class="primary" data-action="camp-batch-approve" title="对勾选项确认后直接通过 MCP 真实下发到亚马逊广告，不可撤销">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
-            <button class="exec" data-action="camp-batch-execute" title="把所有已同意(CONFIRMED)的调整通过 MCP 真实下发到亚马逊广告">执行已同意</button>
-            <button data-action="camp-view-records">调整记录</button>
           </div>
 
           </div><!-- /camp-sticky-controls -->
@@ -151,9 +149,6 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
           <!-- 汇总区 -->
           <div id="camp-synthesis" class="hidden"></div>
-
-          <!-- 调整记录（真实执行回写）-->
-          <div id="camp-exec-records" class="camp-card hidden" style="margin-top:12px;"></div>
 
           <!-- 回算修改弹窗挂载点（_renderReallocModal 渲染于此；在 camp-root 内以保事件委托） -->
           <div id="camp-modal-mount"></div>

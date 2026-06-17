@@ -371,6 +371,49 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
+    def load_pending_by_card_ids(self, decision_id: str, card_ids: list[str]) -> dict | None:
+        """按 card_id 拉 cards + pending（不要求 confirm_status='CONFIRMED'）。
+
+        供"合并审核+执行"流程：前端选中即跑，不写任何 confirm_status / record。
+        """
+        if not card_ids:
+            return None
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no "
+                    "FROM t_advert_agent_decision WHERE id=%s",
+                    (decision_id,),
+                )
+                decision = cur.fetchone()
+                if not decision:
+                    return None
+                ph = ",".join(["%s"]*len(card_ids))
+                cur.execute(
+                    "SELECT id, campaign_id, campaign_name, suggest_category, "
+                    "campaign_group_type, keyword_match_type, asin, keyword "
+                    f"FROM t_advert_agent_modify_suggest_card "
+                    f"WHERE decision_id=%s AND id IN ({ph})",
+                    (decision_id, *card_ids),
+                )
+                cards = cur.fetchall() or []
+                rows: dict[str, list] = {}
+                for table, key in (
+                    ("t_advert_agent_modify_campaign_pending", "campaign_pending"),
+                    ("t_advert_agent_modify_keyword_pending", "keyword_pending"),
+                    ("t_advert_agent_modify_placement_pending", "placement_pending"),
+                ):
+                    cur.execute(
+                        f"SELECT * FROM {table} WHERE decision_id=%s "
+                        f"AND suggest_card_id IN ({ph}) AND execute_status='PENDING'",
+                        (decision_id, *card_ids),
+                    )
+                    rows[key] = cur.fetchall() or []
+            return {"decision": decision, "cards": cards, **rows}
+        finally:
+            conn.close()
+
     def get_decision_basic(self, decision_id: str) -> dict | None:
         """读取批次基础上下文（shop_id/parent_asin/parent_seller_sku 等）。供组合预算执行。"""
         conn = self._connect()
@@ -390,146 +433,29 @@ class ErpDualWriterRepository:
         parent_seller_sku: str, current_user_id: str, request_params_json: str,
         task_id: str = "", response_params_json: str = "",
     ) -> str:
-        """插主执行记录，返回 record_id（一次 execute 一行）。"""
-        record_id = stable_id("aer", decision_id, datetime.now().isoformat())
-        aud = _audit_int(current_user_id)
-        conn = self._connect()
-        now = datetime.now()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO t_advert_agent_modify_advert_record (
-                        id, task_id, decision_id, shop_id, parent_asin, parent_seller_sku,
-                        current_user_id, request_params_json, response_params_json,
-                        create_by, editor_by, creator_id, editor_id, create_time, update_time
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (record_id, task_id or None, decision_id, shop_id, parent_asin,
-                     parent_seller_sku, current_user_id, request_params_json,
-                     response_params_json or None, aud, aud,
-                     aud, aud, now, now),
-                )
-            conn.commit()
-            return record_id
-        finally:
-            conn.close()
+        # 不写 t_advert_agent_modify_advert_record（操作记录由 ERP 系统自身维护）
+        return stable_id("aer", decision_id, datetime.now().isoformat())
+
 
     def update_advert_record_result(
         self, record_id: str, *, task_id: str = "", response_params_json: str = "",
     ) -> None:
-        conn = self._connect()
-        now = datetime.now()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE t_advert_agent_modify_advert_record "
-                    "SET task_id=COALESCE(NULLIF(%s,''), task_id), "
-                    "response_params_json=%s, update_time=%s WHERE id=%s",
-                    (task_id, response_params_json or None, now, record_id),
-                )
-            conn.commit()
-        finally:
-            conn.close()
+        # 不更新 t_advert_agent_modify_advert_record（操作记录由 ERP 系统自身维护）
+        return None
+
 
     def insert_exec_sub_records(self, record_id: str, ops: list[dict], operator: str) -> int:
-        """把 mapper 产出的逐项 ops 写入对应 *_record 子表（带 modify_result）。"""
-        conn = self._connect()
-        now = datetime.now()
-        aud = _audit_int(operator)
-        n = 0
-        try:
-            with conn.cursor() as cur:
-                for op in ops:
-                    kind = op.get("record_kind")
-                    res = op.get("modify_result") or "PENDING"
-                    err = (op.get("error_msg") or None)
-                    rc = 1 if op.get("risk_check_pass", True) else 0
-                    if kind == "campaign":
-                        cur.execute(
-                            """INSERT INTO t_advert_agent_modify_campaign_record (
-                                id, record_id, portfolio_id, campaign_id, risk_check_pass,
-                                old_budget, new_budget, old_state, new_state,
-                                modify_result, error_msg, create_by, editor_by, creator_id,
-                                editor_id, create_time, update_time
-                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (stable_id("cmr", record_id, op.get("campaign_id"), op.get("suggest_card_id")),
-                             record_id, None, op.get("campaign_id"), rc,
-                             op.get("old_budget"), op.get("new_budget"),
-                             op.get("old_state"), op.get("new_state"),
-                             res, err, aud, aud, aud, aud, now, now),
-                        )
-                        n += 1
-                    elif kind == "keyword":
-                        cur.execute(
-                            """INSERT INTO t_advert_agent_modify_keyword_record (
-                                id, record_id, campaign_id, keyword_id, keyword_text,
-                                risk_check_pass, old_bid, new_bid, old_state, new_state,
-                                modify_result, error_msg, create_by, editor_by, creator_id,
-                                editor_id, create_time, update_time
-                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (stable_id("kwr", record_id, op.get("campaign_id"), op.get("keyword_id"), op.get("keyword_text")),
-                             record_id, op.get("campaign_id"), op.get("keyword_id"),
-                             op.get("keyword_text"), rc, op.get("old_bid"), op.get("new_bid"),
-                             op.get("old_state"), op.get("new_state"),
-                             res, err, aud, aud, aud, aud, now, now),
-                        )
-                        n += 1
-                    elif kind == "placement":
-                        cur.execute(
-                            """INSERT INTO t_advert_agent_modify_placement_record (
-                                id, record_id, campaign_id, placement_type, risk_check_pass,
-                                old_percent, new_percent, modify_result, error_msg,
-                                create_by, editor_by, creator_id, editor_id,
-                                create_time, update_time
-                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (stable_id("plr", record_id, op.get("campaign_id"), op.get("placement_type")),
-                             record_id, op.get("campaign_id"), op.get("placement_type"), rc,
-                             op.get("old_percent"), op.get("new_percent"),
-                             res, err, aud, aud, aud, aud, now, now),
-                        )
-                        n += 1
-            conn.commit()
-            return n
-        finally:
-            conn.close()
+        # 不写 t_advert_agent_modify_{campaign,keyword,placement}_record（操作记录由 ERP 系统自身维护）
+        return 0
+
 
     def insert_portfolio_records(
         self, record_id: str, ops: list[dict], operator: str, *,
         shop_id: int = 0, parent_asin: str = "", parent_seller_sku: str = "",
     ) -> int:
-        """把组合(portfolio)预算调整逐项 ops 写入 t_advert_agent_modify_portfolio_record。
+        # 不写 t_advert_agent_modify_portfolio_record（操作记录由 ERP 系统自身维护）
+        return 0
 
-        op: {portfolio_id, portfolio_name, old_budget, new_budget,
-             modify_result, error_msg, risk_check_pass, risk_reject_reason}
-        """
-        conn = self._connect()
-        now = datetime.now()
-        aud = _audit_int(operator)
-        n = 0
-        try:
-            with conn.cursor() as cur:
-                for op in ops:
-                    res = op.get("modify_result") or "PENDING"
-                    err = op.get("error_msg") or None
-                    rc = 1 if op.get("risk_check_pass", True) else 0
-                    cur.execute(
-                        """INSERT INTO t_advert_agent_modify_portfolio_record (
-                            id, record_id, portfolio_id, risk_check_pass, risk_reject_reason,
-                            old_budget, new_budget, modify_result, error_msg,
-                            create_by, editor_by, creator_id, editor_id,
-                            create_time, update_time, shop_id, parent_asin, parent_seller_sku
-                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (stable_id("ptr", record_id, str(op.get("portfolio_name") or ""),
-                                   str(op.get("portfolio_id") or "")),
-                         record_id, op.get("portfolio_id"), rc, op.get("risk_reject_reason"),
-                         op.get("old_budget"), op.get("new_budget"), res, err,
-                         aud, aud, aud, aud, now, now,
-                         shop_id or None, parent_asin or None, parent_seller_sku or None),
-                    )
-                    n += 1
-            conn.commit()
-            return n
-        finally:
-            conn.close()
 
     def update_pending_execute_status(
         self, ops: list[dict], status: str, *, operator: str = "", msg: str = "",

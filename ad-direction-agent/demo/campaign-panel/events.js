@@ -45,17 +45,11 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-batch-reject':
         st.askConfirm('reject');
         return;
-      case 'camp-batch-execute':
-        st.askConfirm('execApproved');
-        return;
       case 'camp-confirm-ok':
         st.runConfirm();
         return;
       case 'camp-confirm-cancel':
         st.cancelConfirm();
-        return;
-      case 'camp-view-records':
-        st.loadExecutionRecords();
         return;
       case 'camp-select-group':
         st.selectGroup(parseInt(data.groupIndex));
