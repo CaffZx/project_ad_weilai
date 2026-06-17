@@ -523,7 +523,7 @@ function _renderPortfolioFilterPills(state) {
   const canEdit = state.executable !== false && bs.target_budget != null;
   const hasOverride = Object.keys(state._portfolioOverride || {}).length > 0;
   const actionsHtml = !canEdit ? '' : `<span class="camp-pp-actions">
-      <a class="pp-act" data-action="camp-open-realloc">组合预算修改</a>
+      <a class="pp-act" data-action="camp-open-realloc">组合预算调整</a>
       <a class="pp-act" data-action="camp-exec-all">执行</a>
       ${hasOverride ? '<a class="pp-act" data-action="camp-reset-all">恢复</a>' : ''}
     </span>`;
@@ -569,7 +569,7 @@ function _renderReallocModal(state) {
   mount.innerHTML = `
     <div class="camp-modal-overlay">
       <div class="camp-modal">
-        <div class="camp-modal-header">回算修改 · 广告组合预算（3 组同改，低价捡漏固定 $1）</div>
+        <div class="camp-modal-header">组合预算调整 · 广告组合预算（3 组同改，低价捡漏固定 $1）</div>
         <div class="camp-modal-body">
           <table class="camp-realloc-table">
             <thead><tr><th></th>${heads}</tr></thead>

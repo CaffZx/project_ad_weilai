@@ -2026,6 +2026,7 @@ async function confirmTactics() {
 
 async function refreshTacticsRecommendations() {
   show('tacticsRecLoader');
+  hide('tacticsRecErr');  // 清上一轮的「数据不足」错误条，避免脏缓存残留
   try {
     const data = await callAPI('/tactics/recommend', { asin, days }, API_TIMEOUT.tactics);
     if (isLlmBlocked(data)) {
@@ -2314,6 +2315,10 @@ async function loadP3Rec() {
 async function refreshP3() {
   show('p3Loader');
   $('btnRefreshP3').disabled = true;
+  // 清掉上一轮渲染（含「核心数据不足」警告），避免查数期间脏缓存残留
+  setHTML('p3AcosColumn', PANEL_LOADING_HTML);
+  setHTML('p3BudgetColumn', PANEL_LOADING_HTML);
+  hide('p3Reasoning'); hide('p3Warnings'); hide('p3CacheBadge'); hide('dataStatusTab3');
   try {
     const data = await callAPI('/execution/recommend', { asin, refresh: true, days }, API_TIMEOUT.fetch);
     window._p3data = data;

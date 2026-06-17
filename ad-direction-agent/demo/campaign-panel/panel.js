@@ -140,6 +140,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <span class="sep"></span>
             <button class="primary" data-action="camp-batch-approve">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
+            <button class="exec" data-action="camp-batch-execute" title="把所有已同意(CONFIRMED)的调整通过 MCP 真实下发到亚马逊广告">执行已同意</button>
             <button data-action="camp-view-records">调整记录</button>
           </div>
 

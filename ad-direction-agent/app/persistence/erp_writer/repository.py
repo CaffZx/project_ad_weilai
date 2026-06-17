@@ -371,6 +371,20 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
+    def get_decision_basic(self, decision_id: str) -> dict | None:
+        """读取批次基础上下文（shop_id/parent_asin/parent_seller_sku 等）。供组合预算执行。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no "
+                    "FROM t_advert_agent_decision WHERE id=%s",
+                    (decision_id,),
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+
     def insert_advert_record(
         self, *, decision_id: str, shop_id: int, parent_asin: str,
         parent_seller_sku: str, current_user_id: str, request_params_json: str,
@@ -473,6 +487,45 @@ class ErpDualWriterRepository:
                              res, err, aud, aud, aud, aud, now, now),
                         )
                         n += 1
+            conn.commit()
+            return n
+        finally:
+            conn.close()
+
+    def insert_portfolio_records(
+        self, record_id: str, ops: list[dict], operator: str, *,
+        shop_id: int = 0, parent_asin: str = "", parent_seller_sku: str = "",
+    ) -> int:
+        """把组合(portfolio)预算调整逐项 ops 写入 t_advert_agent_modify_portfolio_record。
+
+        op: {portfolio_id, portfolio_name, old_budget, new_budget,
+             modify_result, error_msg, risk_check_pass, risk_reject_reason}
+        """
+        conn = self._connect()
+        now = datetime.now()
+        aud = _audit_int(operator)
+        n = 0
+        try:
+            with conn.cursor() as cur:
+                for op in ops:
+                    res = op.get("modify_result") or "PENDING"
+                    err = op.get("error_msg") or None
+                    rc = 1 if op.get("risk_check_pass", True) else 0
+                    cur.execute(
+                        """INSERT INTO t_advert_agent_modify_portfolio_record (
+                            id, record_id, portfolio_id, risk_check_pass, risk_reject_reason,
+                            old_budget, new_budget, modify_result, error_msg,
+                            create_by, editor_by, creator_id, editor_id,
+                            create_time, update_time, shop_id, parent_asin, parent_seller_sku
+                        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (stable_id("ptr", record_id, str(op.get("portfolio_name") or ""),
+                                   str(op.get("portfolio_id") or "")),
+                         record_id, op.get("portfolio_id"), rc, op.get("risk_reject_reason"),
+                         op.get("old_budget"), op.get("new_budget"), res, err,
+                         aud, aud, aud, aud, now, now,
+                         shop_id or None, parent_asin or None, parent_seller_sku or None),
+                    )
+                    n += 1
             conn.commit()
             return n
         finally:
@@ -728,8 +781,12 @@ class ErpDualWriterRepository:
         *,
         wizard_payload: dict[str, Any] | None = None,
         decision_meta: dict[str, Any] | None = None,
+        operator: str = "tab5",
     ) -> WriteReport:
         meta = {**(run.decision_meta or {}), **(decision_meta or {})}
+        # 暂存 operator，供各 _upsert_* 写 audit 列（create_by/editor_by/creator_id/editor_id）
+        self._operator = operator
+        self._audit_int_val = _audit_int(operator)
         report = WriteReport(decision_id=run.decision_id)
         conn = self._connect()
         now = datetime.now()
@@ -796,6 +853,8 @@ class ErpDualWriterRepository:
             total_count_to_write = declared_total
 
         bg = run.budget_groups or {}
+        op = getattr(self, "_operator", "tab5")
+        aud_int = getattr(self, "_audit_int_val", None)
         sql = """
         INSERT INTO t_advert_agent_modify_suggest_summary (
             id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no,
@@ -805,6 +864,7 @@ class ErpDualWriterRepository:
             main_push_count, main_push_budget, broad_auto_count, broad_auto_budget,
             test_new_count, test_new_budget, eliminate_bubble_count, eliminate_bubble_budget,
             analysis_overview, create_count,
+            create_by, editor_by, creator_id, editor_id,
             create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
@@ -812,6 +872,7 @@ class ErpDualWriterRepository:
             %s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,
+            %s,%s,%s,%s,
             %s,%s
         )
         ON DUPLICATE KEY UPDATE
@@ -841,6 +902,8 @@ class ErpDualWriterRepository:
             eliminate_bubble_budget=VALUES(eliminate_bubble_budget),
             analysis_overview=VALUES(analysis_overview),
             create_count=VALUES(create_count),
+            editor_by=VALUES(editor_by),
+            editor_id=VALUES(editor_id),
             update_time=VALUES(update_time)
         """
         cur.execute(
@@ -874,6 +937,7 @@ class ErpDualWriterRepository:
                 bg.get("eliminate_bubble_budget"),
                 run.overview_text,
                 run.create_count,
+                op, op, str(aud_int) if aud_int is not None else None, str(aud_int) if aud_int is not None else None,
                 now,
                 now,
             ),
@@ -1315,15 +1379,19 @@ class ErpDualWriterRepository:
         p3 = meta.get("p3") or {}
         target_acos = p3.get("target_acos") or {}
         budget_bid = p3.get("budget_bid") or {}
+        aud = getattr(self, "_audit_int_val", None)
+        # product_name 来自 listing.product_cn_name（Doris），varchar(200) 上限
+        product_name = (meta.get("product_name") or "").strip()[:200] or None
         sql = """
         INSERT INTO t_advert_agent_decision (
             id, parent_asin, parent_seller_sku, shop_id, site_code, day_range,
             product_position, product_stage, season_type,
             advert_purposes, target_keyword_types,
             target_acos_suggest, daily_budget_suggest, advert_direction_types,
-            batch_no, create_time, update_time
+            batch_no, product_name,
+            create_by, editor_by, creator_id, editor_id, create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             parent_asin=VALUES(parent_asin),
@@ -1340,6 +1408,9 @@ class ErpDualWriterRepository:
             daily_budget_suggest=VALUES(daily_budget_suggest),
             advert_direction_types=VALUES(advert_direction_types),
             batch_no=VALUES(batch_no),
+            product_name=VALUES(product_name),
+            editor_by=VALUES(editor_by),
+            editor_id=VALUES(editor_id),
             update_time=VALUES(update_time)
         """
         cur.execute(
@@ -1360,6 +1431,8 @@ class ErpDualWriterRepository:
                 (str(_b) if (_b := budget_bid.get("suggested")) not in (None, "") else None),
                 map_direction_types_json(meta.get("advert_direction_types") or []),
                 run.batch_no,
+                product_name,
+                aud, aud, aud, aud,
                 now,
                 now,
             ),
@@ -1521,6 +1594,7 @@ class ErpDualWriterRepository:
             budget_bid.get("reason")
         )
         overall = p3.get("overall_reasoning") or ""
+        aud = getattr(self, "_audit_int_val", None)
         sql = """
         INSERT INTO t_advert_agent_ai_suggest (
             id, decision_id,
@@ -1530,9 +1604,10 @@ class ErpDualWriterRepository:
             suggest_budget_suggest, suggest_budget_future_attention,
             suggest_keyword_adjust_list_json,
             comprehensive_judgment, execution_pace, risk_warning, tip_msg,
+            create_by, editor_by, creator_id, editor_id,
             create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             suggest_acos=VALUES(suggest_acos),
@@ -1550,6 +1625,8 @@ class ErpDualWriterRepository:
             execution_pace=VALUES(execution_pace),
             risk_warning=VALUES(risk_warning),
             tip_msg=VALUES(tip_msg),
+            editor_by=VALUES(editor_by),
+            editor_id=VALUES(editor_id),
             update_time=VALUES(update_time)
         """
         cur.execute(
@@ -1572,6 +1649,7 @@ class ErpDualWriterRepository:
                 None,
                 "\n".join(p3.get("risk_warnings") or [])[:2000] or None,
                 p3.get("message"),
+                aud, aud, aud, aud,
                 now,
                 now,
             ),

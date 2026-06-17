@@ -48,6 +48,7 @@ async def _maybe_push_erp(
     analysis_mode: str = "REALTIME",
     resolved_target_acos: int | None = None,
     resolved_daily_budget: float | None = None,
+    operator: str = "tab5",
 ) -> dict:
     """分析成功后可选写入 ERP；失败不抛异常。"""
     enabled = write_erp or settings.erp_auto_write
@@ -69,6 +70,7 @@ async def _maybe_push_erp(
             push_full_to_erp,
             kb_payload,
             wizard_payload,
+            operator=operator,
         )
         out = {
             "attempted": True,
@@ -121,6 +123,7 @@ async def campaign_analyze(req: dict):
             analysis_mode=extra["analysis_mode"],
             resolved_target_acos=extra.get("resolved_target_acos"),
             resolved_daily_budget=extra.get("resolved_daily_budget"),
+            operator=extra.get("operator", "tab5"),
         )
     return body
 
@@ -148,6 +151,7 @@ async def campaign_viewmodel(req: dict):
         analysis_mode=extra["analysis_mode"],
         resolved_target_acos=extra.get("resolved_target_acos"),
         resolved_daily_budget=extra.get("resolved_daily_budget"),
+        operator=extra.get("operator", "tab5"),
     )
     decision_id = erp.get("decision_id")
     if not erp.get("ok") or not decision_id:
@@ -353,6 +357,9 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             timeout=settings.campaign_total_timeout,
         )
 
+        # 操作人 ID：前端 _userId（ERP 用户）或 operator 字段；写库时填 audit 列。
+        operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
+
         extra = {
             "state": state,
             "asin": asin,
@@ -364,6 +371,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             # 避免 wizard_payload_from_state 只读被 new-event 清空的 p3_recommendation → 空 ACOS。
             "resolved_target_acos": strat_ctx.target_acos,
             "resolved_daily_budget": strat_ctx.daily_budget,
+            "operator": operator,
         }
         return (result, extra)
 
@@ -460,6 +468,35 @@ async def campaign_execute_status(decision_id: str = "", record_id: str = ""):
         return await poll_execution(decision_id=decision_id, record_id=record_id)
     except Exception as e:  # noqa: BLE001
         logger.exception("Campaign execute status 失败 [%s]: %s", decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@router.post("/campaign/execute-portfolio-budget")
+async def campaign_execute_portfolio_budget(req: dict):
+    """组合(portfolio)预算调整执行 → 实时查 portfolioId → 调广告调整 MCP（dry-run 默认空跑）。
+
+    入参: {decision_id|run_id, asin, portfolio_overrides:{组名:预算}, operator|_userId}
+    门禁与 execute 一致：批次必须无进行中分析事件（state 库）。
+    """
+    decision_id = str(req.get("decision_id") or req.get("run_id") or "").strip()
+    asin = str(req.get("asin") or "").strip()
+    operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
+    overrides = req.get("portfolio_overrides") or {}
+    if not decision_id:
+        return {"ok": False, "error": "decision_id 必填"}
+    if not isinstance(overrides, dict) or not overrides:
+        return {"ok": False, "error": "portfolio_overrides 必填"}
+    try:
+        sess = get_state_manager().get_analysis_session(asin) if asin else None
+        if sess and sess.get("run_id"):
+            return {"ok": False, "error": "存在进行中分析事件，执行权已冻结"}
+        from app.workflow.steps.portfolio_execution import execute_portfolio_budget
+        return await execute_portfolio_budget(
+            decision_id, asin=asin, portfolio_overrides=overrides, operator=operator,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Portfolio budget execute 失败 [%s] decision_id=%s: %s",
+                         asin, decision_id, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 

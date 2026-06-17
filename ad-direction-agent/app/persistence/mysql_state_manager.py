@@ -537,6 +537,11 @@ class MySQLStateManager:
             if not row or not row.get("run_id"):
                 return None
             st = row.get("started_at")
+            # MySQL datetime 列读出来是 naive；self._now() 是 aware UTC
+            # （set_analysis_session 写入时也是 _now() 的 UTC 值），
+            # 比较时显式补 tzinfo，避免 "can't subtract offset-naive and offset-aware datetimes"。
+            if st and st.tzinfo is None:
+                st = st.replace(tzinfo=timezone.utc)
             # TTL 12h：超期自动清，防止运营执行权永久冻结
             if st and (self._now() - st).total_seconds() > 12 * 3600:
                 self.clear_analysis_session(asin)

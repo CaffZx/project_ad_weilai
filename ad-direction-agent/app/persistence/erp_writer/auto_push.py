@@ -106,12 +106,28 @@ def wizard_payload_from_state(
     p3["budget_bid"] = _bb
 
     target_scores = _unwrap_by_days(wf.get("target_scores"), days)
+    # 兼容老格式：dict 形式 {target: {level, reason}} → list of {target, level, reason}
+    # 避免 list(dict) 退化为 key 字符串列表，导致下游 _upsert_purpose_scores 调 .get() 抛 AttributeError。
+    if isinstance(target_scores, dict):
+        target_scores = [
+            {"target": k, **(v if isinstance(v, dict) else {})}
+            for k, v in target_scores.items()
+        ]
     if not isinstance(target_scores, list):
         target_scores = list(target_scores) if target_scores else []
+    # 防御性过滤：只保留 dict 元素（兜底任何奇怪格式）
+    target_scores = [x for x in target_scores if isinstance(x, dict)]
 
     keyword_analysis = _unwrap_by_days(wf.get("keyword_analysis"), days)
+    if isinstance(keyword_analysis, dict):
+        # 同样兼容 dict 形式（即使当前未发现，但同源风险）
+        keyword_analysis = [
+            {"keyword": k, **(v if isinstance(v, dict) else {})}
+            for k, v in keyword_analysis.items()
+        ]
     if not isinstance(keyword_analysis, list):
         keyword_analysis = list(keyword_analysis) if keyword_analysis else []
+    keyword_analysis = [x for x in keyword_analysis if isinstance(x, dict)]
 
     execution = wf.get("execution") or {}
     selected = execution.get("selected_directions") or []
@@ -221,6 +237,7 @@ def push_full_to_erp(
     wizard_payload: dict[str, Any] | None = None,
     *,
     conn_kwargs: dict[str, Any] | None = None,
+    operator: str = "tab5",
 ) -> WriteReport:
     """resolve listing → canonicalize → write_full（同步，供 asyncio.to_thread 调用）。"""
     asin = (kb_payload.get("parent_asin") or "").strip()
@@ -232,6 +249,8 @@ def push_full_to_erp(
     decision_meta = _merge_decision_meta(kb_payload, wizard_payload)
     kb_payload["decision_meta"] = decision_meta
     decision_meta["site_code"] = listing.site_code
+    # 透传产品名（来自 Doris listing.product_cn_name），写 decision.product_name 列
+    decision_meta["product_name"] = getattr(listing, "product_name", "") or ""
 
     run = canonicalize_payload(
         kb_payload,
@@ -252,4 +271,5 @@ def push_full_to_erp(
         run,
         wizard_payload=wizard_payload or None,
         decision_meta=decision_meta,
+        operator=operator,
     )

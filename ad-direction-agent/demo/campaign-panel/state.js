@@ -178,8 +178,14 @@ export function createCampaignState() {
     } else if (kind === 'exec') {
       state._confirm = {
         kind,
-        title: '确认回算执行',
-        msg: '将对 3 个活动组的回算预算执行调整（执行流待接入，当前为占位）。',
+        title: '确认组合预算调整执行',
+        msg: '将通过 MCP 真实下发 3 个活动组的预算调整到亚马逊广告，并写入调整记录。',
+      };
+    } else if (kind === 'execApproved') {
+      state._confirm = {
+        kind,
+        title: '确认执行已同意的调整',
+        msg: '将把本批次所有已同意(CONFIRMED)的调整通过 MCP 真实下发到亚马逊广告，并写入调整记录。该动作不可撤销。',
       };
     } else { return; }
     _reRender();
@@ -195,6 +201,7 @@ export function createCampaignState() {
     if (c.kind === 'approve') state.batchConfirm('approve');
     else if (c.kind === 'reject') state.batchConfirm('reject');
     else if (c.kind === 'exec') state.execConstraints();
+    else if (c.kind === 'execApproved') state.execApproved();
   };
 
   // ── 批量确认 / 导出 ──
@@ -323,13 +330,51 @@ export function createCampaignState() {
     });
     state._reallocOpen = false;
     _reRender();
-    _toast(`已修改 ${n} 组广告组合预算（占位，未持久化）`);
+    _toast(`已暂存 ${n} 组预算，点「执行」下发到 MCP`);
   };
 
-  // 「执行」：3 组一起；后端 override 执行流未接，仅占位提示。
-  state.execConstraints = function () {
+  // 「执行」（组合预算调整）：把暂存的 _portfolioOverride 通过 MCP 真实下发组合预算。
+  // 后端走 /campaign/execute-portfolio-budget → 实时查 portfolioId → advert_mcp_client
+  // dry-run 由后端 advert_exec_dry_run 开关控制（.env）。两步模型：先「组合预算调整」暂存，再「执行」下发。
+  state.execConstraints = async function () {
     if (!state.executable) return;
-    _toast('回算执行：占位，执行流待接入');
+    const ov = state._portfolioOverride || {};
+    if (!Object.keys(ov).length) {
+      _toast('请先用「组合预算调整」设置各组预算再执行');
+      return;
+    }
+    const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
+    try {
+      _toast('正在下发组合预算调整到 MCP...');
+      const resp = await fetch(_API + '/campaign/execute-portfolio-budget', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asin: state.asin,
+          decision_id: state._currentRunId,
+          operator: ((window._erpParams || {}).userId) || 'tab5',
+          portfolio_overrides: ov,
+        }),
+      });
+      let body = null;
+      try { body = await resp.json(); } catch (_) {}
+      if (!resp.ok || !body || body.ok === false) {
+        throw new Error((body && body.error) || `HTTP ${resp.status}`);
+      }
+      const isDryRun = body.dry_run === true;
+      const applied = body.applied ?? 0;
+      const recordId = (body.record_id || '').slice(0, 8);
+      const warn = (body.warnings && body.warnings.length) ? `（${body.warnings.length} 项提示）` : '';
+      _toast(
+        isDryRun
+          ? `已 DRY-RUN 落库 ${applied} 组预算调整（未真改广告）record=${recordId}${warn}`
+          : `已下发 ${applied} 组预算调整到 MCP record=${recordId}${warn}`
+      );
+      try { await state.loadExecutionRecords(); } catch (_) {}
+    } catch (e) {
+      console.warn('[campaign-panel] /campaign/execute-portfolio-budget 失败:', e.message);
+      _toast(`组合预算执行失败：${e.message || '未知错误'}`);
+    }
   };
 
   state.resetConstraints = function () {
@@ -337,6 +382,44 @@ export function createCampaignState() {
     state._reallocOpen = false;
     _reRender();
     _toast('已恢复 AI 回算推荐');
+  };
+
+  // ── 「执行已同意」: 把本批次所有 CONFIRMED 的调整通过 MCP 真实下发 ──
+  // 后端走 /campaign/execute → submit_execution → build_exec_plan → advert_mcp_client
+  // dry-run 由后端 advert_exec_dry_run 开关控制（.env）；真跑时通过轮询 /campaign/execute/status 查终态
+  state.execApproved = async function () {
+    if (!state.executable) return;
+    const _API = (window.location.origin || '') + '/api/v1/agent/ad-direction';
+    try {
+      _toast('正在下发已同意的调整到 MCP...');
+      const resp = await fetch(_API + '/campaign/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asin: state.asin,
+          decision_id: state._currentRunId,
+          operator: ((window._erpParams || {}).userId) || 'tab5',
+        }),
+      });
+      let body = null;
+      try { body = await resp.json(); } catch (_) {}
+      if (!resp.ok || !body || body.ok === false) {
+        throw new Error((body && body.error) || `HTTP ${resp.status}`);
+      }
+      const isDryRun = body.dry_run === true;
+      const ops = body.ops ?? 0;
+      const recordId = (body.record_id || '').slice(0, 8);
+      _toast(
+        isDryRun
+          ? `已 DRY-RUN 落库 ${ops} 项调整（未真改广告）record=${recordId}…`
+          : `已下发 ${ops} 项调整到 MCP（异步执行中）record=${recordId}…`
+      );
+      // 真跑模式下后端返回 task_ids，可后续轮询 /campaign/execute/status 查终态
+      try { await state.loadExecutionRecords(); } catch (_) {}
+    } catch (e) {
+      console.warn('[campaign-panel] /campaign/execute 失败:', e.message);
+      _toast(`执行失败：${e.message || '未知错误'}`);
+    }
   };
 
   // ── 调整记录读取（「调整记录」按钮）──

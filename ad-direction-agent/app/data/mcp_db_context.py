@@ -18,7 +18,9 @@ _LOOKUP_SQL = """
            a.parent_seller_sku,
            a.shop_id,
            s.account AS shop_account,
-           a.site_code
+           a.site_code,
+           a.product_cn_name,
+           a.product_name
     FROM dwd_whp_amazon_listing_general a
     JOIN dwd_shop s ON a.shop_id = s.id
     WHERE (a.parent_asin = %s OR a.asin = %s)
@@ -40,6 +42,8 @@ class McpDbContext:
     shop_account: str
     shop_id: int | None = None
     site_code: str = "Amazon_US"
+    # 产品名（优先中文名 product_cn_name，否则英文 product_name；写 ERP decision.product_name）
+    product_name: str = ""
 
 
 class McpDbContextError(Exception):
@@ -158,12 +162,17 @@ async def resolve_mcp_context_from_db(
         return None
 
     site_code = str(row.get("site_code") or settings.mcp_default_site_code or "")
+    # product_name 优先用中文名（更短、更人性化），否则回落到亚马逊原 listing 标题。
+    # decision.product_name 是 varchar(200)，超长会被 MySQL 截断；这里预先截到 200。
+    raw_pn = (row.get("product_cn_name") or row.get("product_name") or "")
+    product_name = str(raw_pn).strip()[:200]
     ctx = McpDbContext(
         parent_asin=str(row.get("parent_asin") or asin),
         parent_seller_sku=str(row.get("parent_seller_sku") or ""),
         shop_account=str(row.get("shop_account") or shop_hint),
         shop_id=row.get("shop_id"),
         site_code=site_code,
+        product_name=product_name,
     )
     logger.info(
         "MCP 上下文(DB) [%s] parent_asin=%s sku=%s shop=%s",

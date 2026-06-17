@@ -45,6 +45,9 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-batch-reject':
         st.askConfirm('reject');
         return;
+      case 'camp-batch-execute':
+        st.askConfirm('execApproved');
+        return;
       case 'camp-confirm-ok':
         st.runConfirm();
         return;

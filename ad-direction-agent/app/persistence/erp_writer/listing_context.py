@@ -15,6 +15,8 @@ class ListingContext:
     shop_id: int | None
     shop_account: str
     site_code: str
+    # 产品名（来自 Doris listing.product_cn_name 或 product_name；写 ERP decision.product_name）
+    product_name: str = ""
 
 
 def _normalize_site(site: str | None) -> str:
@@ -73,6 +75,7 @@ async def resolve_listing_context_async(parent_asin: str) -> ListingContext:
             shop_id=int(ctx.shop_id) if ctx.shop_id is not None else None,
             shop_account=ctx.shop_account or "",
             site_code=_normalize_site(ctx.site_code),
+            product_name=getattr(ctx, "product_name", "") or "",
         )
     erp_ctx = _lookup_from_erp_summary(parent_asin)
     if erp_ctx:
@@ -85,6 +88,7 @@ async def resolve_listing_context_async(parent_asin: str) -> ListingContext:
         shop_id=int(ctx.shop_id) if ctx.shop_id is not None else None,
         shop_account=ctx.shop_account or "",
         site_code=_normalize_site(ctx.site_code),
+        product_name=getattr(ctx, "product_name", "") or "",
     )
 
 

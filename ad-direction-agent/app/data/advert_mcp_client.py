@@ -83,12 +83,15 @@ class AdvertMcpClient:
     # ── 读工具（安全，不改广告）────────────────────────────────────────
     async def query_portfolio_list(
         self, shop_id: int, parent_asin: str, parent_seller_sku: str,
-        portfolio_name_like: str = "",
+        portfolio_name_like: str = "", current_user_id: str = "",
     ) -> Any:
+        # 该 MCP 工具按 currentUserId 用户隔离（不传可能查不全），故透传操作人 ID。
         args: dict[str, Any] = {
             "shopId": shop_id, "parentAsin": parent_asin,
             "parentSellerSku": parent_seller_sku,
         }
+        if current_user_id:
+            args["currentUserId"] = current_user_id
         if portfolio_name_like:
             args["portfolioNameLike"] = portfolio_name_like
         return await self.call("agent_query_portfolio_list", args)
