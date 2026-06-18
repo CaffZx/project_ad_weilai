@@ -140,7 +140,6 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
                 "direction": "maintain",
                 "magnitude_pct": 0.0,
                 "reason": bb_rec.budget_recommendation.reason if bb_rec else "",
-                "bid_adjustments": [],
                 "manual_override": True if bb_rec else False,
             },
             "overall_reasoning": "当前使用运营手动设定值，点击「AI 重新推荐」可覆盖",
@@ -186,7 +185,6 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
                 "direction": "maintain",
                 "magnitude_pct": 0.0,
                 "reason": msg,
-                "bid_adjustments": [],
                 "manual_override": False,
             },
             "overall_reasoning": msg,
@@ -287,7 +285,6 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
                 "direction": bb_raw.get("direction", "maintain"),
                 "magnitude_pct": bb_raw.get("magnitude_pct", 0),
                 "reason": bb_raw.get("reason", ""),
-                "bid_adjustments": bb_raw.get("bid_adjustments", []),
             },
             "overall_reasoning": llm_result.get("overall_reasoning", ""),
             "risk_warnings": llm_result.get("risk_warnings", []),
@@ -324,12 +321,6 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
                 "direction": bb_rec.budget_recommendation.direction,
                 "magnitude_pct": bb_rec.budget_recommendation.magnitude_pct,
                 "reason": "(算法降级) " + bb_rec.budget_recommendation.reason,
-                "bid_adjustments": [
-                    {"keyword": a.keyword, "current_bid": a.current_bid,
-                     "suggested_bid": a.suggested_bid, "direction": a.direction,
-                     "magnitude_pct": a.magnitude_pct, "reason": a.reason}
-                    for a in bb_rec.bid_adjustments
-                ],
             },
             "overall_reasoning": "LLM 调用失败，使用算法降级推荐。建议稍后点击「AI 重新推荐」。",
             "risk_warnings": ["LLM 调用失败，当前为算法降级结果"],

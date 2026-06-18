@@ -334,21 +334,10 @@ class BudgetRecommendationDetail(BaseModel):
     manual_override: bool = False  # 运营手动设定值时返回 True
 
 
-class BidAdjustment(BaseModel):
-    """单关键词 Bid 调整"""
-    keyword: str = ""
-    current_bid: float = 0.0
-    suggested_bid: float = 0.0
-    direction: str = "maintain"  # increase / decrease / maintain
-    magnitude_pct: float = 0.0
-    reason: str = ""
-
-
 class BudgetBidRecommendation(BaseModel):
     """预算 & Bid 推荐结果"""
     asin: str
     budget_recommendation: BudgetRecommendationDetail = Field(default_factory=BudgetRecommendationDetail)
-    bid_adjustments: list[BidAdjustment] = Field(default_factory=list)
     summary: str = ""
     confidence: str = "medium"  # high / medium / low
 
@@ -384,7 +373,6 @@ class BudgetBidResult(BaseModel):
     direction: str = "maintain"  # increase / decrease / maintain
     magnitude_pct: float = 0.0
     reason: str = ""
-    bid_adjustments: list[BidAdjustment] = Field(default_factory=list)
     manual_override: bool = False  # 运营手动设定时为 True
 
 

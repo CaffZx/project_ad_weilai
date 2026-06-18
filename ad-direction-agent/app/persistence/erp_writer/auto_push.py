@@ -104,12 +104,16 @@ def wizard_payload_from_state(
         long_term = {**long_term, **cfg_override["long_term"]}
         _cfg_dirs = cfg_override.get("ad_directions")
     p3 = dict(state.get_p3_recommendation(asin) or {})
-    # 兜底填充 ACOS/预算（p3 自身有值则不覆盖；否则用分析解析值）
+    # 数值取分析阶段解析的权威值（override→p3缓存→recommender，见 api/campaign.py _do_analyze）：
+    # resolved_* 提供时优先，不让 P3 AI 缓存盖过人工覆盖——new-event 清空缓存后，在飞的
+    # /execution/recommend 可能异步回填 AI 值，否则快照会写 AI 值而非执行实际所用的人工值。
+    # 注：推理文案(decision_basis/suggest/future_attention)仍保留 p3 缓存原文，
+    #     运营据此可见原始 AI 分析记录；人工覆盖时为有意保留的「人工数值 + AI 理由」态。
     _ta = dict(p3.get("target_acos") or {})
     _bb = dict(p3.get("budget_bid") or {})
-    if not _ta.get("recommended_target") and resolved_target_acos is not None:
+    if resolved_target_acos is not None:
         _ta["recommended_target"] = resolved_target_acos
-    if not _bb.get("suggested") and resolved_daily_budget is not None:
+    if resolved_daily_budget is not None:
         _bb["suggested"] = resolved_daily_budget
     p3["target_acos"] = _ta
     p3["budget_bid"] = _bb

@@ -180,17 +180,7 @@ _P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于�
     "suggested": 80.0,
     "direction": "increase",
     "magnitude_pct": 21.5,
-    "reason": "【决策依据】\\n- 当前日均花费$65.8，日预算$100，花费率65.8%，预算未吃紧。\\n- 花费最高的词：triangle bikini($36.2/天, ACOS 48%)，string bikini($20.0/天, ACOS 41%)。\\n- 趋势：近7天花费从$87逐步降至$65，不是因为预算不足而是因为部分词ACOS过高被系统自然压低。\\n- 当前推进期+旺季准备，适度加预算抢流量是合理的。\\n\\n【建议】\\n建议日预算调整为$80(+21.5%)。增量集中分配给black bikini set(ACOS 28%, CVR 12.5%)和black string bikini(ACOS 18%, CVR 15%)等高效率词，不分配给triangle bikini等高ACOS词。\\n\\n【后续关注】\\n- 加预算后监控整体ACOS是否上升，若超过40%则停止增量\\n- 监控black bikini set的ACOS和CVR，若效率下降则重新分配预算",
-    "bid_adjustments": [
-      {
-        "keyword": "triangle bikini",
-        "current_bid": 0.85,
-        "suggested_bid": 0.65,
-        "direction": "decrease",
-        "magnitude_pct": 23.5,
-        "reason": "Bid $0.85远超实际CPC $0.42，ACOS 48%偏高，有$0.20以上下调空间"
-      }
-    ]
+    "reason": "【决策依据】\\n- 当前日均花费$65.8，日预算$100，花费率65.8%，预算未吃紧。\\n- 花费最高的词：triangle bikini($36.2/天, ACOS 48%)，string bikini($20.0/天, ACOS 41%)。\\n- 趋势：近7天花费从$87逐步降至$65，不是因为预算不足而是因为部分词ACOS过高被系统自然压低。\\n- 当前推进期+旺季准备，适度加预算抢流量是合理的。\\n\\n【建议】\\n建议日预算调整为$80(+21.5%)。增量集中分配给black bikini set(ACOS 28%, CVR 12.5%)和black string bikini(ACOS 18%, CVR 15%)等高效率词，不分配给triangle bikini等高ACOS词。\\n\\n【后续关注】\\n- 加预算后监控整体ACOS是否上升，若超过40%则停止增量\\n- 监控black bikini set的ACOS和CVR，若效率下降则重新分配预算"
   },
   "overall_reasoning": "【综合判断】\\nACOS目标和预算建议需联动：收紧ACOS降低低效花费，加预算把释放出的花费转移到高效率词上，在效率不崩的前提下抢旺季排名。\\n\\n【执行节奏】\\n建议先降triangle bikini的Bid（立即可做），观察3天整体ACOS变化后，再决定是否加预算。加预算和收紧ACOS不建议同一天操作，避免数据波动难以归因。\\n\\n【风险提示】\\n- 精准ACOS 42%偏高，若精准位持续低效建议减少TOS投放比例\\n- 旺季CPC可能上涨，需预留预算弹性空间",
   "risk_warnings": ["精准ACOS 42%偏高，需重点优化精准投放", "旺季CPC可能上涨，预留预算弹性"]

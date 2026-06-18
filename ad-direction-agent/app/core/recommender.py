@@ -9,7 +9,6 @@ from app.models.layers import (
     TargetAcosStep,
     BudgetBidRecommendation,
     BudgetRecommendationDetail,
-    BidAdjustment,
 )
 
 
@@ -881,10 +880,7 @@ class BudgetBidRecommender:
             reasons.append(f"建议预算 ${suggested_budget:.0f} 高于阶段上限 ${budget_range['max']}，维持上限")
             suggested_budget = budget_range["max"]
 
-        # Step 5: Bid vs CPC adjustments per keyword
-        bid_adjustments = self._compute_bid_adjustments(data)
-
-        # Step 6: Last adjustment linkage
+        # Step 5: Last adjustment linkage
         if last_adjustment:
             latest_ts = last_adjustment[0].get("operated_at", "")
             hours_ago = self._hours_since(latest_ts)
@@ -915,57 +911,9 @@ class BudgetBidRecommender:
                 magnitude_pct=magnitude_pct,
                 reason="；".join(reasons),
             ),
-            bid_adjustments=bid_adjustments,
             summary="；".join(reasons),
             confidence="medium",
         )
-
-    def _compute_bid_adjustments(self, data: ASINData) -> list[BidAdjustment]:
-        """逐词 Bid 调整建议"""
-        adjustments = []
-        bid_cpc_reduce = self.cfg.get("bid_cpc_reduction_ratio", 1.5)
-        bid_cpc_incr = self.cfg.get("bid_cpc_increase_ratio", 1.1)
-
-        for kw in data.keywords:
-            if not kw.bid or kw.clicks <= 0:
-                continue
-            effective_cpc = kw.spend / kw.clicks
-            if kw.bid > effective_cpc * bid_cpc_reduce:
-                suggested = round(effective_cpc * 1.3, 2)
-                adjustments.append(BidAdjustment(
-                    keyword=kw.keyword,
-                    current_bid=kw.bid,
-                    suggested_bid=suggested,
-                    direction="decrease",
-                    magnitude_pct=round(
-                        (kw.bid - suggested) / kw.bid * 100, 1
-                    ),
-                    reason=(
-                        f"Bid (${kw.bid:.2f}) >> 实际CPC "
-                        f"(${effective_cpc:.2f}) × {bid_cpc_reduce}"
-                    ),
-                ))
-            elif (
-                kw.bid < effective_cpc * bid_cpc_incr
-                and kw.acos is not None
-                and kw.acos < 25
-            ):
-                suggested = round(effective_cpc * 1.2, 2)
-                adjustments.append(BidAdjustment(
-                    keyword=kw.keyword,
-                    current_bid=kw.bid,
-                    suggested_bid=suggested,
-                    direction="increase",
-                    magnitude_pct=round(
-                        (suggested - kw.bid) / kw.bid * 100, 1
-                    ),
-                    reason=(
-                        f"Bid (${kw.bid:.2f}) < 实际CPC "
-                        f"(${effective_cpc:.2f})，ACOS健康 ({kw.acos:.0f}%)"
-                    ),
-                ))
-
-        return adjustments[:10]
 
     @staticmethod
     def _hours_since(timestamp: str) -> float | None:

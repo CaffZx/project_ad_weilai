@@ -2398,16 +2398,6 @@ function renderP3(data) {
   if (bb.reason) {
     budgetHtml += `<div style="font-size:11px;color:${bbManual?'var(--muted-fg)':'#7C3AED'};margin-top:8px;line-height:1.5;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}">${(bb.reason||'').replace(/\n/g,'<br>')}</div>`;
   }
-  if (bb.bid_adjustments && bb.bid_adjustments.length > 0) {
-    budgetHtml += `<details style="font-size:11px;margin-top:8px;padding-top:8px;border-top:1px solid ${bbManual?'var(--border)':'#DDD6FE'}"><summary>关键词 Bid 调整 (${bb.bid_adjustments.length}条)</summary>
-      <div style="max-height:120px;overflow-y:auto;margin-top:4px">` +
-      bb.bid_adjustments.slice(0,5).map(a =>
-        `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--surface);font-size:10px">
-          <span style="word-break:break-all;max-width:130px">${a.keyword}</span>
-          <span>&dollar;${a.current_bid.toFixed(2)} &rarr; <b style="color:${a.direction==='decrease'?'var(--danger)':'var(--success)'}">&dollar;${a.suggested_bid.toFixed(2)}</b></span>
-        </div>`).join('') +
-      `</div></details>`;
-  }
   budgetHtml += '</div>';
   setHTML('p3BudgetColumn', budgetHtml);
 

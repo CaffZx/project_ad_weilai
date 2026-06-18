@@ -288,7 +288,6 @@ def _translate_p3_recommend(ai: dict | None) -> dict | None:
             "reason": _join_reason(ai.get("suggest_budget_decision_basis"),
                                    ai.get("suggest_budget_suggest"),
                                    ai.get("suggest_budget_future_attention")),
-            "bid_adjustments": [],
             "manual_override": False,
         },
         "overall_reasoning": ai.get("comprehensive_judgment") or "",
