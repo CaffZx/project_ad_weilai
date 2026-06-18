@@ -576,16 +576,7 @@ body {
       <div id="strategyContent">
         <p class="card-desc">加载 ASIN 后显示选项</p>
       </div>
-      <!-- 分析天数（战略层末行；实时可选，快照态由 renderReadonlyPreset 隐藏，改战略层只读行显示） -->
-      <div id="daysControl" style="margin-top:10px">
-        <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">分析天数</label>
-        <select id="daysSelect" onchange="onDaysChange(this.value)"
-                style="border:1.5px solid var(--border);border-radius:var(--radius-ctl);padding:8px 10px;font-size:13px;background:var(--card-bg);color:var(--foreground);cursor:pointer;width:100%">
-          <option value="7">7天</option>
-          <option value="14">14天</option>
-          <option value="30">30天</option>
-        </select>
-      </div>
+      <!-- 分析天数下拉已移除（2026-06-18 F3）：前端锁定 7 天，days 常量恒 7 传后端 -->
       <div id="sec1Loader" class="hidden loading-text" style="margin-top:6px"><span class="spinner"></span>加载中...</div>
       <button onclick="confirmStrategy()" id="btnStrategy" class="btn btn-primary btn-sm hidden" style="margin-top:8px">保存</button>
       <p id="errSec1" class="hidden" style="font-size:11px;color:var(--danger);margin-top:6px"></p>
@@ -682,7 +673,7 @@ body {
 
       <!-- 决策批次栏 -->
       <div id="batchBar" class="hidden" style="display:flex;gap:10px;align-items:center;padding:8px 14px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;">
-        <span style="font-size:12px;font-weight:600;">历史决策批次</span>
+        <span id="batchSelectLabel" style="font-size:12px;font-weight:600;">历史决策批次</span>
         <select id="batchSelect" style="width:auto;flex:1;max-width:320px;"></select>
         <span id="batchBadge" class="badge" style="font-size:10px;"></span>
         <button id="btnNewEvent" class="btn btn-primary btn-sm" style="margin-left:8px;" onclick="onNewEventClick()">新建分析事件</button>
@@ -956,6 +947,11 @@ function renderBatchBar(mode, ctx) {
     btn.classList.remove('hidden');
     if (btnCancel) btnCancel.classList.add('hidden');
   }
+  // ★F2（2026-06-18）：进行中(C 态)隐藏历史批次下拉（标签 + select），仅留徽标 + 放弃按钮；
+  // A/B 态显示。分析完成后转 B 态经 applyBatchBarFromCtx 自动重渲并刷新批次（新批次入列为「最新」）。
+  const lbl = document.getElementById('batchSelectLabel');
+  if (mode === 'C') { if (lbl) lbl.classList.add('hidden'); sel.classList.add('hidden'); }
+  else { if (lbl) lbl.classList.remove('hidden'); sel.classList.remove('hidden'); }
   // 下拉变化 → 切批次
   sel.onchange = function() {
     const id = sel.value;
@@ -1054,13 +1050,11 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
   const dirs = data.directions || [];
 
   setHTML('strategyContent',
-    _snapshotRow('分析天数', (data.days ? data.days + '天' : '—')) +
     _snapshotRow('产品定位', _badgeHtml(s.product_level)) +
     _snapshotRow('产品阶段', _badgeHtml(s.product_stage)) +
     _snapshotRow('季节阶段', _badgeHtml(s.season_stage)) +
     '<div style="font-size:11px;color:var(--muted-fg);margin-top:8px">读取自所选历史批次，当前为只读快照。</div>'
   );
-  hide('daysControl');   // 快照态：天数冻结，隐藏选择器（已在战略层只读行显示「分析天数 X天」）
   setHTML('strategyContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
   show('strategyContext');
 
@@ -1452,7 +1446,7 @@ function clearTrendChart() {
   dom.innerHTML = '';
 }
 
-function onDaysChange(v) { days = parseInt(v); }
+// onDaysChange 已移除（2026-06-18 F3）：分析天数固定 7 天，days 常量不再改写
 
 function isLlmBlocked(data) {
   return !!(data && (data.llm_status === 'blocked' || data.status === 'blocked'));
@@ -1763,7 +1757,6 @@ async function loadStrategy() {
   html += '</div>';
   setHTML('strategyContent', html);
   show('btnStrategy');
-  show('daysControl');   // 实时态：战略层末行天数选择器可选
   hide('sec1Loader');
   if (!prefilled) _applyUrlStrategyPrefill();  // 首访(无既存配置)时用 ERP URL 标签预填
   return { ok: true, data };
@@ -3254,6 +3247,9 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
           // 以真实 ctx 派生三态/执行权：finalize_batch 或清 session 失败时
           // ctx.in_progress 仍为真 → 不误显 B/可执行（否则 confirm 会被后端拒）。
           applyBatchBarFromCtx(ctx);
+          // ★F1（2026-06-18）：分析完成后左栏前置配置切只读快照（复用 loadAll B 态同一函数）。
+          // switchDefault:false → 不跳 tab，停留 tab5 看刚出的结果。
+          await renderReadonlyDecisionPreset(write.decision_id || ctx.latest_completed_id, { switchDefault: false });
           // 执行权 = 最新批次 且 无进行中事件（与前置配置 has_config 无关，按决策批次定稿）。
           // 刚 finalize 的 write.decision_id 即最新批次。
           const exec = !ctx.in_progress;

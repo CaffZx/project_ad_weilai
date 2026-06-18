@@ -98,29 +98,33 @@ parent_asin
 
 ### 3.1 核心文件总览
 
+> 行数为 2026-06-18 实测（`wc -l`）。
+
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | ~1450 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度 |
-| `app/llm/reasoner.py` | ~1640 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` |
-| `app/models/campaign.py` | ~183 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
-| `app/data/campaign_fetcher.py` | ~507 | 数据编排器：Doris上下文→预筛选→MCP→回落 |
-| `app/data/campaign_prefilter.py` | ~80 | 硬过滤纯函数 |
-| `app/api/campaign.py` | ~148 | API 端点：`POST /campaign/analyze`(meta_filter="META_AD_PRODUCT") + `/confirm`(stub) |
-| `app/llm/client.py` | ~200 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
-| `app/config/settings.py` | ~210 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier) |
+| `app/workflow/steps/campaign.py` | 2098 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度 |
+| `app/llm/reasoner.py` | 2031 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt） |
+| `app/models/campaign.py` | 262 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
+| `app/data/campaign_fetcher.py` | 738 | 数据编排器：Doris上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks`） |
+| `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
+| `app/api/campaign.py` | 556 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
+| `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
+| `app/config/settings.py` | 282 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier) |
 | `demo/campaign_test.html` | ~950 | 调试前端 (含组合筛选气泡 + 预算约束卡) |
-| `app/llm/kb_loader.py` | ~155 | KB 加载器，`campaign_adjustment` preset (KB 18/19/21/22) |
-| `app/workflow/steps/campaign_portfolio.py` | ~105 | ★组合分类器：4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
-| `app/workflow/steps/campaign_budget_summary.py` | ~90 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
-| `app/workflow/steps/campaign_new.py` | ~340 | ★新增活动分析线 (KB 16)：候选词发现→硬过滤→trigger标注→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9) |
-| `app/data/campaign_prefilter.py` | ~85 | 硬过滤纯函数 (v1.7 加多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示) |
+| `app/llm/kb_loader.py` | 183 | KB 加载器，`campaign_adjustment` preset 现为 KB **18/17/15/19/22/21**（早期文档写的 18/19/21/22 已过时） |
+| `app/workflow/steps/campaign_portfolio.py` | 119 | ★组合分类器：4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
+| `app/workflow/steps/campaign_budget_summary.py` | 95 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
+| `app/workflow/steps/campaign_new.py` | 425 | ★新增活动分析线 (KB 16)：候选词发现→硬过滤→trigger标注→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9) |
+| `app/workflow/steps/campaign_budget_reallocation.py` | 283 | ★组合预算回算（KB23）：闸控读 `parent_allowed_net_increase`（值仍占位，§17 ③） |
+| `app/workflow/steps/portfolio_execution.py` | 206 | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
+| `app/workflow/steps/advert_execution.py` | 256 | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表） |
 | `demo/campaign-panel/` | ~1700 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
 
 ### 3.2 关键配置项（settings.py）
 
 ```python
 # Campaign LLM
-campaign_llm_concurrency: int = 8   # 单 ASIN 批次并发数（10 key 容量）
+campaign_llm_concurrency: int = 50  # 单 ASIN 批次并发数（per-stream sem；2026-06-18 实测值）
 campaign_batch_size: int = 6        # 每批活动数
 campaign_llm_temperature: float = 0.3
 
@@ -140,10 +144,10 @@ campaign_portfolio_share_broad: int = 20   # 广泛/自动约束占比
 
 # LLM
 llm_timeout: int = 75               # httpx read 超时（秒）
-deepseek_model: str = "deepseek-v4-pro"
-llm_global_concurrency: int = 420   # 服务级 LLM 总并发（client 层信号量；46 key 场景,6 worker→每 worker 70）
+deepseek_model: str = "deepseek-v4-flash"   # 快档(默认/非思考)；强档(总览/汇总)= flash + 思考模式（见主交接文档 2026-06-09 LLM 分级）
+llm_global_concurrency: int = 420   # 服务级 LLM 总并发（client 层信号量；多 worker 时 ÷num_workers）
 num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 worker（须 = 启动 --workers）
-# client.py 连接池 max_connections=600
+mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=120 须 ≥ 此值）
 # campaign_global_llm_concurrency: 已 DEPRECATED，全局闸收口到 client 层
 ```
 
@@ -174,7 +178,13 @@ num_workers: int = 1                 # 读 NUM_WORKERS,把全局闸切给各 wor
 | 方法 | 路径 | 用途 | 状态 |
 |------|------|------|------|
 | POST | `/campaign/analyze` | 运行 Campaign LLM 分析 | ✅ 生产可用 |
-| POST | `/campaign/confirm` | 运营批量审核 | ⚠️ stub（仅日志） |
+| POST | `/campaign/viewmodel` | 实时操作台：分析→强制落库→回读快照（方向 A 收敛） | ✅ 生产可用 |
+| GET | `/campaign/snapshot` | 读某决策批次执行层快照（mode=readonly） | ✅ 生产可用 |
+| POST | `/campaign/confirm` | 双路审核（写 card + 3×pending `confirm_status`） | ✅ 已落地（非 stub，§11.3） |
+| POST | `/campaign/execute` | 执行已确认调整 → 调广告调整 MCP（dry-run 默认空跑） | ✅ 链路通（§15.4） |
+| POST | `/campaign/execute-portfolio-budget` | 组合预算调整执行 → 实时查 portfolioId → MCP | ✅ 链路通（06-17 新增） |
+
+> 决策批次相关端点在 `api/decision.py`：`GET /decision/context`、`POST /decision/new-event`、`POST /decision/cancel-event`、`GET /decision/{id}/preset`（详见 §11）。
 
 ### 3.4 关键改动记录
 
@@ -784,8 +794,8 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 | A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成（`ecc207e`） |
 | `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成（`53fa5b3`） |
 | 建议竞价（suggestedBid）MCP 接入 | ✅ 已完成（§12.1） |
-| **`is_core` 真实数据源** | ❌ **仍硬编码 `False`**（campaign.py:956），P1 未动 |
-| **P4 定时调度器**（decision_config 已备，APScheduler 扫表） | ❌ 未做（全项目无 APScheduler） |
+| **`is_core` 真实数据源** | ❌ **仍硬编码 `False`**（campaign.py:1106，行号自 956 漂移），P1 未动 |
+| **P4 定时调度器**（decision_config 已备） | 🟡 **换方式做了**（无 APScheduler，但 **cron 已上线**：`crontab_schedule.sh` 每天 0 点 → `batch_via_api.py`，定时目标达成。详见 §17） |
 | **新增活动预算接入组合回算**（KB23 §5.1） | ❌ 未做（`campaign_budget_reallocation` 不含 new_campaigns） |
 | 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | ❌ 未做（需搜索词聚合/KB08/词池表，仅展示标签） |
 | **组合按 proposed（执行后预算）分类** | ✅ **已实现（A 派：显示+回算统一按 proposed）**。`campaign_portfolio.classify` 加 `effective_budget`：预分类(campaign.py:322)按 `current` 喂 LLM 现状上下文，**终分类(campaign.py:533)传 `eff=proposed`** 做主力↔测试升降组（KB23 §3.1B/§3.5/§3.7）；淘汰判定仍读 current。回算 `bra._group_of` 读同一 `ai_portfolio_class`（即 proposed 分组）+ 兜底也按 proposed。 |
@@ -821,22 +831,64 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 - **总览缺数据过度阻断（已修 prompt）**：库存 N/A → 总览硬断「禁一切增长」冻结健康活动。`reasoner.py:507` 改「数据缺失既不当正常也不当风险、不得据此阻断；只有数值确认越线（库存<7天）才阻断」（只改 507）。
 - **广告方向英文 id 未翻译（已修，一处堵三处）**：`saveDirectionsLeft` 存英文 id（`expand_keywords`），`build_campaign_strategy_context` 原样透传；而总览/逐活动 prompt/KB23（查 `"推进自然位" in ad_directions`）全按中文匹配 → 认不出选中方向（"选了新增扩词、总览却禁新增扩词"）。`campaign.py` 加 `_zh_ad_direction`（id→中文，幂等），翻译后进 `strat_ctx.ad_directions`，一处修好总览+逐活动+KB23。
 - **KB23 父目标未接进回算（诊断，未修）**：`campaign_parent_allowed_net_increase=0.0`（占位无源）→ `available=只有释放预算`，父目标只作 LLM 文字 context、不入 `aggregate()`；`validate()` 无「proposed 合计 vs 父目标」绝对护栏；GROUP-009 超目标压缩/「建议提父预算」未实现。澄清 §4.2：caps 允许超父目标（caps≠花费），proposed_group_budget 是自底向上回算值。**修法待办**：算 `expected_total_spend=Σ(perf_7d.cost/7)` 与 headroom，<0 触发 GROUP-009 或建议提预算（perf_7d.cost 现成）。
-- **库存 MCP 透传 bug（已修解包）**：`mcp_adapter` 库存解析原用裸 `isinstance(list)` 判**原始 payload**，MCP 返回是 envelope（`{"rows"}`/单行 dict）→ 恒 False → 库存丢 None（数据查到却没透传）。改经 `_as_rows` 解包 + `_int`，保持 `can_sale_num`（FBA可售=可售天数指标，**不混** `in_stock_num`/`stock`，口径不同）。**待办**：① 真库 live 调 `listing_inventory` 确认 envelope/列名（当日分类器故障未调成）；② Doris 回落用 `in_stock_num`（不同指标）→ 两路径口径不一致，需确认数仓有 `can_sale_num` 后统一。
+- **库存 MCP 透传 bug（已修解包）**：`mcp_adapter` 库存解析原用裸 `isinstance(list)` 判**原始 payload**，MCP 返回是 envelope（`{"rows"}`/单行 dict）→ 恒 False → 库存丢 None（数据查到却没透传）。改经 `_as_rows` 解包 + `_int`，保持 `can_sale_num`（FBA可售=可售天数指标，**不混** `in_stock_num`/`stock`，口径不同）。**~~待办~~**（06-18 已闭环）：Doris 路径口径已统一成 `can_sale_num`（`db_adapter.py:409` `inventory_qty=_int(listing.get("can_sale_num"))`），两路径不再口径不一致。（真库 live 调 `listing_inventory` 确认 envelope/列名仍建议补一次端到端验证。）
 
 ### 16.5 `summary total_count mismatch` 告警（仅解释）
 `_upsert_modern_summary`（repository.py:786）落库前校验：`declared=total_campaigns` vs `categorized=淘汰+调整+保持` 不等则告警，按 categorized 写 `total_count`。差值正常 = 新增+预过滤+丢失（三桶不含）；若差值 > 这三类合计 → 有活动真丢（多为 LLM 分批解析异常未记 lost），查 `warnings`。
 
 ### 16.6 待办（本期新增/锐化）
-- [ ] **Tab4 写入轨修复**（16.1）—— 阻塞 Tab4 富卡见数。
-- [ ] **KB23 父目标接进回算 + GROUP-009 压缩**（16.4）。
-- [ ] **库存 live 确认 + Doris 口径统一**（16.4）。
+> ⚠ 部分条目已被 06-17/18 后续工作覆盖，最新核实状态见 §17。
+- [ ] **Tab4 写入轨修复**（16.1）—— 阻塞 Tab4 富卡见数。**（06-18 核实仍未实现）**
+- [x] ~~**KB23 父目标接进回算**~~（16.4）—— 06-18 核实：闸控已接线（`campaign_budget_reallocation.py:108` 读 `parent_allowed_net_increase`），但值仍 `=0.0` 占位无源（settings.py:160）；**GROUP-009 超目标压缩护栏仍缺**。
+- [x] ~~**库存口径统一**~~（16.4）—— 06-18 核实：已统一成 `can_sale_num`（`db_adapter.py:409`），本条已完成。
 - [ ] 重启 uvicorn + 真库回归（Tab1关键词/Tab3/Tab4 还原；总览不误禁增长+认得方向；库存 N/A 消失）。
 - [ ] Tab2 诊断/趋势双轨（ECharts 隐藏容器懒渲染 + 列名核 + nor 缺线）。
 - [ ] sticky 控制区 iframe live 验证（不生效则改 JS 实测高度兜底）。
 
 ---
 
-*最后更新：2026-06-16（v2.4: 双轨读回补全 Tab1关键词/Tab3接线/Tab4 + campaign-panel 前端重构（广告组合预算/回算弹窗/确认弹窗/处理状态筛选/sticky）+ 总览缺数据阻断·广告方向中文化·库存MCP解包 修复 + KB23父目标/Tab4写入 诊断 §16）*
+---
+
+## 17. 2026-06-18：待办逐条对代码核实（状态校准，无代码改动）
+
+> 对照 §4.2 / §9.1 / §12.5 / §15.5 / §16.6 的历史待办，逐条对**当前服务器代码**（含 06-17/18 改动）核实。结论：大部分待办仍未实现，但 **3 条状态已变**（⑦已做、④换方式做了、③⑧是半成品），文档相应条目已就地更新，本节存证。
+
+| # | 待办 | 实际状态 | 证据 |
+|---|------|----------|------|
+| ① | `is_core` 硬编码 False | ❌ **仍未实现** | `workflow/steps/campaign.py:1106` `is_core=False`（行号从文档的 956 漂到 1106） |
+| ② | Tab4 方向对象未落 state | ❌ **仍未实现** | `run_get_execution_options`（GET，生成富对象）**不存 state**；只有 `run_confirm_execution:181 save_execution` 存，且存的是选择 req（选中 ID）非富对象 → Tab4 读回只有 ID，富卡不亮 |
+| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 **半成品** | `parent_allowed_net_increase` **已接进回算闸控**（`campaign_budget_reallocation.py:108`），但 `settings.py:160` 值 `=0.0` 占位无源；**GROUP-009 超目标压缩护栏未找到 = 未做** |
+| ④ | P4 定时调度（APScheduler） | 🟡 **换方式做了** | 无 APScheduler；但 **cron 已上线**（`crontab_schedule.sh` 每天 0 点 → `batch_via_api.py`），定时目标达成（另一窗口做的） |
+| ⑤ | 新增活动预算接入组合回算 | ❌ **仍未实现** | 回算代码里没找到新增活动预算的接线 |
+| ⑥ | 5 类触发场景仅展示标签 | ❌ **确认就是标签** | `campaign_new.py:6` 明确「trigger_scene 仅作展示标签，不作筛选门禁」——与待办描述一致 |
+| ⑦ | 库存口径 Doris 用 in_stock_num | ✅ **已统一** | `db_adapter.py:409` `inventory_qty=_int(listing.get("can_sale_num"))`，两路径口径统一，文档原条已过时 |
+| ⑧ | 核心关键词 nature_rank 源头改造 | 🟡 **代码在，数据源没改** | `db_adapter` 有 natural_rankings 拉取（:194/:314 读 `craw_nature_rank`），但真库 99% 空 → 「源头改造」（让数据有值）是**数据/ETL 侧**的事，代码没动数据源 |
+
+**结论**：
+- **确实未实现（4 条属实）**：① is_core、② Tab4 富卡落 state、⑤ 新增活动预算回算、⑥ 触发场景门禁。
+- **状态已变（文档已更新）**：⑦ 库存口径已统一（06-18 改）；④ 定时已用 cron 实现（非 APScheduler）；③ 父目标闸控已接线但值=0占位、GROUP-009 压缩仍缺；⑧ 拉取代码在、缺的是数据源（非代码待办）。
+
+---
+
+## 18. 2026-06-18：前端三项优化（已实现，主看板 `ad-asisitant-agent.html`）
+
+> 三项前端渲染/批次状态优化，均已落地（后端零改动）。下列为改动记录 + 关键代码锚点。
+
+| # | 待办 | 现状（代码锚点） | 目标 |
+|---|------|------------------|------|
+| F1 | **分析完成后左栏切快照** | `onComplete`（:3249）原仅刷新批次栏 + 挂 tab5 快照，未切左侧前置配置栏 | ✅ **已实现（2026-06-18）**：`onComplete` 成功分支插入 `renderReadonlyDecisionPreset(write.decision_id||ctx.latest_completed_id, {switchDefault:false})`，复用 loadAll B 态同一函数完整切快照、停留 tab5。**未加失败兜底/loading 态**（评估为低 UX 价值，见会话决策） |
+| F2 | **进行中隐藏历史批次下拉** | `renderBatchBar` C 态原只隐藏「新建分析事件」按钮，`batchSelect` 仍可见 | ✅ **已实现（2026-06-18）**：标签加 `id="batchSelectLabel"`；`renderBatchBar` 中 C 态隐藏标签 + `batchSelect`（仅留徽标 + 放弃按钮），A/B 态显示。完成后转 B 态经 `applyBatchBarFromCtx` + `refreshDecisionContext` 自动重渲并刷新批次 |
+| F3 | **去掉战略层分析天数下拉** | `daysControl`/`daysSelect`（:580-588）+ `onDaysChange`（:1455）；`days` 传入 11 处 API（strategy/tactics/recommend/diagnosis/execution/wizard/campaign）。**⚠ 后端确实在用 `days`**——`campaign.py:_do_analyze` 实打实 `days=int(req.get("days",7))` 并下传 `aggregator.fetch(days=)`/`analyze_campaigns(days=)`；零改动能成立是因为**前端永远传 7 → 后端就跑 7 天**，不是因为后端忽略 days | ✅ **已实现（2026-06-18）**：删前端天数下拉 UI + `onDaysChange` + 快照天数行 + 两处 `show/hide('daysControl')`；**保留 `let days=7` 常量**（11 处调用全锁 7）；后端零改动 |
+
+> **F3 ⚠ 切勿据"后端忽略 days"去清理后端 `days` 参数**——会搞坏定时跑批（SCHEDULED 链可能传非 7 的 days）。后端 `days` 是活参数，本次只是前端锁 7。
+>
+> F3 注：主交接文档「days 时间窗口参数化」节称"前端无下拉框"已**过时**——本次移除后该节描述方与代码一致。
+
+---
+
+*最后更新：2026-06-18（v2.6: 新增前端待办 §18 —— F1 完成后左栏切快照 / F2 进行中隐藏批次下拉 / F3 去战略层天数下拉(后端硬编码7天)）*
+*v2.5: 待办逐条对代码核实 §17 —— ⑦库存口径已统一 / ④定时改 cron 实现 / ③父目标闸控已接线（值仍占位）；① is_core / ② Tab4 落 state / ⑤ 新增活动预算回算 / ⑥ 触发场景门禁 确认仍未实现）*
+*v2.4: 双轨读回补全 Tab1关键词/Tab3接线/Tab4 + campaign-panel 前端重构（广告组合预算/回算弹窗/确认弹窗/处理状态筛选/sticky）+ 总览缺数据阻断·广告方向中文化·库存MCP解包 修复 + KB23父目标/Tab4写入 诊断 §16*
 *v2.3: 双轨读回 Tab3/4 + tab5 action粗类化/placement判据/预算约束backend化 + 低价捡漏0.21·1.01重做 + Part 6 真实执行 §15*
 *v2.2: 执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复 §14*
 *v2.1: 自然排名（周排名）接入精准活动分析 §13*
