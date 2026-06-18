@@ -247,6 +247,12 @@ class McpAdapter(DataSourceAdapter):
         if margin_val is not None:
             data.margin = margin_val
 
+        # 日均销量(MCP 口径)：全部销量(件) ÷ 窗口天数；无件数回落全部单量。
+        # 供库存天数 = inventory_qty ÷ avg_daily_sales_30d（与 Doris 路径同义，不混用）。
+        _units = product_sales.get("total_units") or product_sales.get("total_orders")
+        if _units and days and days > 0:
+            data.avg_daily_sales_30d = round(_units / days, 2)
+
         if ad_summary:
             ad_kwargs = {
                 "acos": ad_summary.get("acos"),

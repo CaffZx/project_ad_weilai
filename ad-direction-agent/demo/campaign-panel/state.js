@@ -232,15 +232,41 @@ export function createCampaignState() {
       if (!resp.ok) {
         throw new Error((body && body.error) || `HTTP ${resp.status}`);
       }
-      if (!body || body.ok === false) {
-        throw new Error((body && body.error) || '审核写回失败');
+      if (!body) {
+        throw new Error('响应为空');
       }
-      selectedKeys.forEach(key => { state._reviewState[key] = decision; });
-      _saveReviewState();
-      _reRender();
-      const applied = body.applied ?? selectedKeys.length;
+      // 后端返回结构：
+      //   approve 路径：{ ok, ops, task_ids[], errors[] }  — ok=true 全成功；ok=false 但 ops>0/task_ids 非空 = 部分成功
+      //   reject 路径： { ok, applied, skipped }
+      const ops = body.ops || 0;
+      const taskIds = body.task_ids || [];
+      const errs = body.errors || [];
+      const applied = body.applied ?? 0;
       const skipped = body.skipped ?? 0;
-      _toast(`已写回 ${applied} 项${skipped ? `，跳过 ${skipped} 项` : ''}`);
+
+      if (decision === 'approve') {
+        // approve：调 MCP，不写本地审核态（已不写库），只提示
+        if (body.ok === true) {
+          selectedKeys.forEach(key => { state._reviewState[key] = decision; });
+          _saveReviewState(); _reRender();
+          _toast(`已下发 ${ops} 个调整到 MCP${taskIds.length ? `（task=${(taskIds[0]||'').slice(0,8)}…）` : ''}`);
+        } else if (ops > 0 || taskIds.length > 0) {
+          // 部分成功
+          selectedKeys.forEach(key => { state._reviewState[key] = decision; });
+          _saveReviewState(); _reRender();
+          _toast(`部分下发成功：${ops} 个调用 / ${errs.length} 个失败 — ${(errs[0]||'').slice(0,80)}`);
+        } else {
+          throw new Error((errs[0]) || body.error || '全部下发失败');
+        }
+      } else {
+        // reject：原写库链路
+        if (body.ok === false) {
+          throw new Error(body.error || '审核写回失败');
+        }
+        selectedKeys.forEach(key => { state._reviewState[key] = decision; });
+        _saveReviewState(); _reRender();
+        _toast(`已写回 ${applied} 项${skipped ? `，跳过 ${skipped} 项` : ''}`);
+      }
     } catch (e) {
       console.warn('[campaign-panel] /campaign/confirm 失败:', e.message);
       _toast(`审核写回失败：${e.message || '未知错误'}`);

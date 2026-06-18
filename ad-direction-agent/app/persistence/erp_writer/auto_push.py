@@ -85,15 +85,24 @@ def wizard_payload_from_state(
     *,
     resolved_target_acos: int | None = None,
     resolved_daily_budget: float | None = None,
+    cfg_override: dict | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """从工作流状态组装 wizard JSON（不重跑向导 LLM）。返回 (payload, wizard_partial).
 
     resolved_* = 分析已解析的最终 ACOS/预算（override→p3缓存→recommender 三级兜底，
     见 api/campaign.py _do_analyze）。用于兜底 p3 的 recommended_target/suggested，
     避免 new-event 清空 p3_recommendation 后落库写空值 → 数值列 1366 报错。
+
+    cfg_override = 批量定时（cfg_source=config）时分析所用的 config 1-4（内部中文格式 +
+    ad_directions ERP 码）。提供时 1-4 用 config 值落库，与分析一致、回写 config 幂等不踩踏。
     """
     long_term = state.get_long_term_config(asin) or {}
     wf = state.get_workflow_state(asin) or {}
+    # 批量定时：1-4 用 config 覆盖 state（方向单列出来，下面统一映射）
+    _cfg_dirs = None
+    if cfg_override and cfg_override.get("long_term"):
+        long_term = {**long_term, **cfg_override["long_term"]}
+        _cfg_dirs = cfg_override.get("ad_directions")
     p3 = dict(state.get_p3_recommendation(asin) or {})
     # 兜底填充 ACOS/预算（p3 自身有值则不覆盖；否则用分析解析值）
     _ta = dict(p3.get("target_acos") or {})
@@ -130,7 +139,8 @@ def wizard_payload_from_state(
     keyword_analysis = [x for x in keyword_analysis if isinstance(x, dict)]
 
     execution = wf.get("execution") or {}
-    selected = execution.get("selected_directions") or []
+    # 批量定时用 config 的方向（ERP 码，map_direction_type 幂等）；否则用 state 的 selected
+    selected = (_cfg_dirs if _cfg_dirs else execution.get("selected_directions")) or []
     erp_directions = [map_direction_type(d) for d in selected if d]
 
     ad_purposes = long_term.get("ad_purposes") or []

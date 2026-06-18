@@ -189,6 +189,86 @@ def map_purpose_target(value: str | None) -> str | None:
     return map_ad_purpose(value)
 
 
+# ── 反向 mapper：ERP enum code → 内部(prompt)格式。从 decision_config 读回 1-4 用。──
+# 目标格式与 state 库/LLM prompt 一致（中文值）。与 decision.py:_translate_preset 同口径。
+_PRODUCT_POSITION_REVERSE = {
+    "P0_PRODUCT": "战略级产品 (P0)", "P1_PRODUCT": "重点产品 (P1)",
+    "P2_PRODUCT": "常规产品 (P2)", "P3_PRODUCT": "长尾产品 (P3)",
+}
+_PRODUCT_STAGE_REVERSE = {
+    "HARVEST_PROFIT": "收割利润期", "TESTING": "测试期",
+    "PROMOTING": "推进期", "MAINTAINING": "维持期",
+}
+_SEASON_TYPE_REVERSE = {
+    "OFF_SEASON": "淡季", "PEAK_SEASON_PREPARE": "旺季准备",
+    "BIG_PEAK_SEASON": "大旺季", "LATE_PEAK_SEASON": "旺季末期",
+}
+_AD_PURPOSE_REVERSE = {
+    "TRAFFIC": "引流型", "CONVERSION": "转化型", "RANKING": "排名型", "PROFIT": "盈利型",
+}
+_TARGET_KEYWORD_TYPE_REVERSE = {
+    "GENERIC": "大词", "LONG_TAIL": "长尾词", "COMPETITOR": "竞品词",
+    "BRAND": "品牌词", "CUSTOM": "自定义",
+}
+
+
+def _unmap_single(value: str | None, table: dict) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    return table.get(raw, raw)
+
+
+def unmap_product_position(value: str | None) -> str | None:
+    return _unmap_single(value, _PRODUCT_POSITION_REVERSE)
+
+
+def unmap_product_stage(value: str | None) -> str | None:
+    return _unmap_single(value, _PRODUCT_STAGE_REVERSE)
+
+
+def unmap_season_type(value: str | None) -> str | None:
+    return _unmap_single(value, _SEASON_TYPE_REVERSE)
+
+
+def unmap_ad_purpose(value: str | None) -> str | None:
+    return _unmap_single(value, _AD_PURPOSE_REVERSE)
+
+
+def unmap_target_keyword_type(value: str | None) -> str | None:
+    return _unmap_single(value, _TARGET_KEYWORD_TYPE_REVERSE)
+
+
+def from_enum_list(raw: Any, mapper: Callable[[str | None], str | None] | None = None) -> list[str]:
+    """JSON 数组字符串(枚举码) → 内部值列表。decision_config 多值字段读回用。"""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        items = raw
+    else:
+        s = str(raw).strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                items = parsed if isinstance(parsed, list) else [s]
+            except json.JSONDecodeError:
+                items = [p.strip() for p in s.replace("，", ",").split(",") if p.strip()]
+        else:
+            items = [p.strip() for p in s.replace("，", ",").split(",") if p.strip()]
+    out: list[str] = []
+    for v in items:
+        if v is None:
+            continue
+        m = mapper(str(v).strip()) if mapper else str(v).strip()
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
 def map_campaign_group_type(value: str | None) -> str | None:
     """Campaign portfolio → ERP campaign_group_type (campaignGroupType)."""
     return _map_single(value, _CAMPAIGN_GROUP_TYPE_MAP)

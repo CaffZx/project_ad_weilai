@@ -2,7 +2,6 @@
 
 submit_execution: load CONFIRMED pending → mapper → 插主记录 → 调 MCP(或 dry-run)
                   → 插子记录 + 回写 pending execute_status。
-poll_execution:   对仍 IN_PROGRESS 的异步任务查 batch_update_result → 终态回写。
 
 安全：advert_mcp_enabled 总开关；advert_exec_dry_run 默认空跑（不动真实广告）。
 幂等：load_confirmed_pending 只取 execute_status=PENDING，已执行行不再取。
@@ -20,6 +19,7 @@ from app.persistence.erp_writer.advert_exec_mapper import (
     parse_result_envelope,
 )
 from app.persistence.erp_writer.repository import _get_repository
+from app.data.mcp_db_context import lookup_top_child_attrs
 from app.persistence.erp_writer.text_utils import json_dumps
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,23 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     if not pending:
         return {"ok": False, "error": f"批次 {decision_id} 不存在"}
 
-    plan = build_exec_plan(pending, operator=operator)
+    # 拉"花费最多的子 ASIN"的 size/color，用于 create_portfolio_campaign 顶层 productSize/productColor
+    parent_asin_for_attrs = str((pending.get("decision") or {}).get("parent_asin") or "")
+    attrs = None
+    if parent_asin_for_attrs:
+        import asyncio as _aio
+        attrs = await _aio.to_thread(lookup_top_child_attrs, parent_asin_for_attrs)
+        if attrs:
+            logger.info("Advert exec top-child attrs [%s] child=%s size=%s color=%s",
+                        parent_asin_for_attrs, attrs.get("asin"),
+                        attrs.get("product_size"), attrs.get("product_color"))
+        else:
+            logger.warning("Advert exec top-child attrs [%s] 查不到", parent_asin_for_attrs)
+    plan = build_exec_plan(
+        pending, operator=operator,
+        product_size=(attrs or {}).get("product_size"),
+        product_color=(attrs or {}).get("product_color"),
+    )
     if plan.is_empty():
         return {"ok": True, "applied": 0, "skipped": 0, "msg": "无待执行项（可能已执行或无确认）"}
 
@@ -143,32 +159,6 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
             "ops": len(plan.ops), "warnings": plan.warnings}
 
 
-async def poll_execution(decision_id: str = "", record_id: str = "") -> dict:
-    """查询异步任务最终结果并回写终态。返回 {ok, finalized, records}。"""
-    if not settings.advert_mcp_enabled:
-        return {"ok": False, "error": "执行通道未启用"}
-    repo = _get_repository()
-    records = repo.list_execution_records(decision_id=decision_id)
-    task_ids = [r["task_id"] for r in records if r.get("task_id")]
-    if not task_ids:
-        return {"ok": True, "finalized": 0, "msg": "无进行中异步任务"}
-    client = AdvertMcpClient()
-    try:
-        res = await client.batch_update_result(task_ids)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("batch_update_result 失败 [%s]: %s", decision_id, e)
-        await client.aclose()
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    await client.aclose()
-    ok, msg = parse_result_envelope(res)
-    # 终态结构待真跑细化：此处按信封 ok 粗粒度回写（全量结果存 advert_record）。
-    for r in records:
-        if r.get("task_id"):
-            repo.update_advert_record_result(
-                r["id"], response_params_json=json_dumps(res))
-    return {"ok": True, "finalized": len(task_ids), "state_ok": ok, "msg": msg}
-
-
 async def submit_execution_direct(
     decision_id: str, card_ids: list[str], *, operator: str
 ) -> dict:
@@ -186,7 +176,22 @@ async def submit_execution_direct(
     if not pending:
         return {"ok": False, "error": f"批次 {decision_id} 不存在或 card_ids 无匹配"}
 
-    plan = build_exec_plan(pending, operator=operator)
+    parent_asin_for_attrs = str((pending.get("decision") or {}).get("parent_asin") or "")
+    attrs = None
+    if parent_asin_for_attrs:
+        import asyncio as _aio
+        attrs = await _aio.to_thread(lookup_top_child_attrs, parent_asin_for_attrs)
+        if attrs:
+            logger.info("Advert exec(direct) top-child attrs [%s] child=%s size=%s color=%s",
+                        parent_asin_for_attrs, attrs.get("asin"),
+                        attrs.get("product_size"), attrs.get("product_color"))
+        else:
+            logger.warning("Advert exec(direct) top-child attrs [%s] 查不到", parent_asin_for_attrs)
+    plan = build_exec_plan(
+        pending, operator=operator,
+        product_size=(attrs or {}).get("product_size"),
+        product_color=(attrs or {}).get("product_color"),
+    )
     if plan.is_empty():
         return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}
 
@@ -242,6 +247,10 @@ async def submit_execution_direct(
 
     logger.info("Advert exec direct [%s] ops=%d task_ids=%s errs=%d",
                 decision_id, len(plan.ops), task_ids, len(errors))
+    if errors:
+        for i, e in enumerate(errors, 1):
+            logger.warning("Advert exec direct [%s] error %d/%d: %s",
+                           decision_id, i, len(errors), str(e)[:500])
     return {"ok": not errors, "ops": len(plan.ops), "task_ids": task_ids,
             "errors": errors, "warnings": plan.warnings}
 

@@ -486,46 +486,6 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
-    def list_execution_records(
-        self, *, asin: str = "", decision_id: str = "",
-    ) -> list[dict]:
-        """调整记录视图：主记录 + 子记录（按 ASIN 或批次）。供前端「调整记录」表。"""
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                where, params = [], []
-                if decision_id:
-                    where.append("decision_id=%s"); params.append(decision_id)
-                if asin:
-                    where.append("parent_asin=%s"); params.append(asin)
-                wc = (" WHERE " + " AND ".join(where)) if where else ""
-                cur.execute(
-                    "SELECT id, task_id, decision_id, shop_id, parent_asin, parent_seller_sku, "
-                    "current_user_id, response_params_json, create_time "
-                    f"FROM t_advert_agent_modify_advert_record{wc} ORDER BY create_time DESC LIMIT 200",
-                    tuple(params),
-                )
-                records = cur.fetchall() or []
-                if not records:
-                    return []
-                rec_ids = [r["id"] for r in records]
-                ph = ",".join(["%s"] * len(rec_ids))
-                subs: dict[str, list] = {r["id"]: [] for r in records}
-                for table, kind in (
-                    ("t_advert_agent_modify_campaign_record", "campaign"),
-                    ("t_advert_agent_modify_keyword_record", "keyword"),
-                    ("t_advert_agent_modify_placement_record", "placement"),
-                ):
-                    cur.execute(f"SELECT * FROM {table} WHERE record_id IN ({ph})", tuple(rec_ids))
-                    for row in cur.fetchall() or []:
-                        row["_kind"] = kind
-                        subs.get(row.get("record_id"), []).append(row)
-                for r in records:
-                    r["items"] = subs.get(r["id"], [])
-            return records
-        finally:
-            conn.close()
-
     def get_decision_preset(self, decision_id: str) -> dict | None:
         """读取某批次冻结的前置 1-4 配置（decision 行的策略/策略/P3/方向列）。"""
         conn = self._connect()
@@ -1374,10 +1334,10 @@ class ErpDualWriterRepository:
             id, shop_id, parent_asin, parent_seller_sku, site_code, day_range,
             product_position, product_stage, season_type,
             advert_purposes, target_keyword_types,
-            target_acos_suggest, daily_budget_suggest, advert_direction_types,
+            advert_direction_types,
             create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -1390,11 +1350,11 @@ class ErpDualWriterRepository:
             season_type=VALUES(season_type),
             advert_purposes=VALUES(advert_purposes),
             target_keyword_types=VALUES(target_keyword_types),
-            target_acos_suggest=VALUES(target_acos_suggest),
-            daily_budget_suggest=VALUES(daily_budget_suggest),
             advert_direction_types=VALUES(advert_direction_types),
             update_time=VALUES(update_time)
         """
+        # 注：target_acos_suggest / daily_budget_suggest 不在此写入——config 只存运营手动
+        # 确认值，AI 推荐值不进 config（这两列留给前端「保存」手动写入；分析/落库不触碰）。
         cur.execute(
             sql,
             (
@@ -1409,8 +1369,6 @@ class ErpDualWriterRepository:
                 map_season_type(meta.get("season_type")),
                 to_enum_list(meta.get("ad_purposes"), map_purpose_target),
                 to_enum_list(meta.get("target_keyword_types"), map_target_keyword_type),
-                (str(_a) if (_a := target_acos.get("recommended_target")) not in (None, "") else None),
-                (str(_b) if (_b := budget_bid.get("suggested")) not in (None, "") else None),
                 map_direction_types_json(meta.get("advert_direction_types") or []),
                 now,
                 now,

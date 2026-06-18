@@ -4,8 +4,8 @@
 - 不走 ctx 路径（因 run_campaign_analysis 内 ensure_data 解包问题 A1 本期未修）
 - 在 handler 内手动组装 strat_ctx + 三级 target_acos 回落
 - 用 get_state_manager() 单例，与左侧卡片读写后端一致
-- fetch 时硬限 meta_filter=["META_AD_PRODUCT"] 砍掉 Campaign 用不到的 6 个 META
-  (详见 fetch 调用点的 TODO(A1) 注释)
+- fetch 时 meta_filter=["META_AD_PRODUCT","META_TREND"]：广告指标 + product_sales
+  (后者供 avg_daily_sales_30d → 库存天数)，砍掉其余 Campaign 用不到的 META
 """
 
 import asyncio
@@ -49,6 +49,7 @@ async def _maybe_push_erp(
     resolved_target_acos: int | None = None,
     resolved_daily_budget: float | None = None,
     operator: str = "tab5",
+    cfg_override: dict | None = None,
 ) -> dict:
     """分析成功后可选写入 ERP；失败不抛异常。"""
     enabled = write_erp or settings.erp_auto_write
@@ -63,6 +64,7 @@ async def _maybe_push_erp(
         asin, days, state,
         resolved_target_acos=resolved_target_acos,
         resolved_daily_budget=resolved_daily_budget,
+        cfg_override=cfg_override,
     )
     kb_payload = analysis_to_kb_payload(result, temperature=temperature)
     try:
@@ -124,6 +126,7 @@ async def campaign_analyze(req: dict):
             resolved_target_acos=extra.get("resolved_target_acos"),
             resolved_daily_budget=extra.get("resolved_daily_budget"),
             operator=extra.get("operator", "tab5"),
+            cfg_override=extra.get("cfg_override"),
         )
     return body
 
@@ -299,9 +302,26 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         keyword_analysis = wf.get("keyword_analysis", {})
         ad_directions = (wf.get("execution") or {}).get("selected_directions") or []
 
+        # ── 批量定时分析统一走 config（cfg_source=config）：1-4 改读 decision_config；
+        #    实时分析不带该开关，仍读 state 缓存（未落库），完成后照常落 config。
+        #    _cfg14 一并透传给落库，保证决策记录/回写 config 与分析一致、幂等不踩踏。──
+        _cfg14 = None
+        if str(req.get("cfg_source") or "").lower() == "config":
+            try:
+                from app.data.decision_config_reader import load_layer14
+                _cfg14 = load_layer14(
+                    asin, parent_seller_sku=(erp_override or {}).get("parent_seller_sku"))
+            except Exception:  # noqa: BLE001
+                _cfg14 = None
+            if _cfg14 and _cfg14.get("long_term"):
+                long_term = _cfg14["long_term"]
+                if _cfg14.get("ad_directions"):
+                    ad_directions = _cfg14["ad_directions"]
+
         aggregator = DataAggregator()
+        # META_TREND(product_sales) 用于 avg_daily_sales_30d → 库存天数；META_AD_PRODUCT 为广告指标。
         asin_data = await asyncio.wait_for(
-            aggregator.fetch(asin, days=days, meta_filter=["META_AD_PRODUCT"]),
+            aggregator.fetch(asin, days=days, meta_filter=["META_AD_PRODUCT", "META_TREND"]),
             timeout=120,
         )
 
@@ -372,6 +392,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             "resolved_target_acos": strat_ctx.target_acos,
             "resolved_daily_budget": strat_ctx.daily_budget,
             "operator": operator,
+            "cfg_override": _cfg14,
         }
         return (result, extra)
 
@@ -506,19 +527,6 @@ async def campaign_execute(req: dict):
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-@router.get("/campaign/execute/status")
-async def campaign_execute_status(decision_id: str = "", record_id: str = ""):
-    """轮询异步执行结果并回写终态。"""
-    if not decision_id and not record_id:
-        return {"ok": False, "error": "decision_id 或 record_id 必填"}
-    try:
-        from app.workflow.steps.advert_execution import poll_execution
-        return await poll_execution(decision_id=decision_id, record_id=record_id)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Campaign execute status 失败 [%s]: %s", decision_id, e)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
 @router.post("/campaign/execute-portfolio-budget")
 async def campaign_execute_portfolio_budget(req: dict):
     """组合(portfolio)预算调整执行 → 实时查 portfolioId → 调广告调整 MCP（dry-run 默认空跑）。
@@ -546,18 +554,3 @@ async def campaign_execute_portfolio_budget(req: dict):
         logger.exception("Portfolio budget execute 失败 [%s] decision_id=%s: %s",
                          asin, decision_id, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
-@router.get("/campaign/execution-records")
-async def campaign_execution_records(asin: str = "", decision_id: str = ""):
-    """调整记录视图：主记录 + 子记录（按 ASIN 或批次）。"""
-    if not asin and not decision_id:
-        return {"ok": False, "error": "asin 或 decision_id 必填", "records": []}
-    try:
-        records = await asyncio.to_thread(
-            _get_repository().list_execution_records, asin=asin, decision_id=decision_id
-        )
-        return {"ok": True, "records": records}
-    except Exception as e:  # noqa: BLE001
-        logger.exception("execution-records 失败 [%s/%s]: %s", asin, decision_id, e)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "records": []}

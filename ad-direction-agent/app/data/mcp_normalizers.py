@@ -192,12 +192,15 @@ def normalize_product_sales(payload: Any) -> dict:
     # Aggregate for parent-level usage.
     total_sales = 0.0
     total_orders = 0.0
+    total_units = 0.0
     ad_orders = 0.0
     total_ad_cost = 0.0
     margin = None
     for row in rows:
         total_sales += _float(_pick(row, "sales", "sale", "sales_rmb", "全部销售额")) or 0
         total_orders += _float(_pick(row, "orders", "order_num", "全部单量", "总单量", "全部订单")) or 0
+        # 全部销量(件数)：库存天数口径用件数最准；无则上层回落 total_orders。
+        total_units += _float(_pick(row, "units", "sale_num", "全部销量", "销量")) or 0
         ad_orders += _float(_pick(row, "ad_orders", "ad_sale_num", "广告单量", "广告订单量")) or 0
         total_ad_cost += _float(_pick(row, "ad_cost", "cost", "spend", "广告花费")) or 0
         m = _float(_pick(row, "margin", "gross_margin"))
@@ -206,6 +209,7 @@ def normalize_product_sales(payload: Any) -> dict:
     return {
         "total_sales": total_sales,
         "total_orders": total_orders,
+        "total_units": total_units,
         "ad_orders": ad_orders,
         "total_ad_cost": total_ad_cost,
         "margin": margin,
