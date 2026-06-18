@@ -1902,7 +1902,7 @@ def _resolve_budget_conflicts(
         # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
         # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
         if adj.action != "eliminate_to_low_bid_pool" and (
-            (adj.current_bid is not None and adj.current_bid <= LOW_BID_MAX)
+            (adj.current_bid is not None and adj.current_bid <= 0.1)
             or (adj.current_budget is not None and adj.current_budget <= LOW_BUDGET_MAX)
         ):
             adj.action = "eliminate_to_low_bid_pool"

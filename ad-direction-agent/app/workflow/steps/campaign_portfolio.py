@@ -60,7 +60,7 @@ _BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
 def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
     """低价捡漏判定：当前 bid ≤ $0.21 或 预算 ≤ $1.01（满足其一即归低价捡漏组，KB 21 §6）。"""
     b, bg = unit.current_bid, unit.current_budget
-    return (b is not None and b <= LOW_BID_MAX) or (bg is not None and bg <= LOW_BUDGET_MAX)
+    return (b is not None and b <= 0.1) or (bg is not None and bg <= LOW_BUDGET_MAX)
 
 
 def is_strictly_in_low_bid_pool(bid: float | None, budget: float | None) -> bool:
