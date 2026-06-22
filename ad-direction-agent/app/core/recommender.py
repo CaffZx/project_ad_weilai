@@ -592,11 +592,33 @@ recommender = Recommender()
 # ── P3 上游推荐器 ─────────────────────────────────────────────
 
 
+def compute_target_acos_band(
+    cfg: dict, stage: str | None, level: str | None, ad_purposes: list[str] | None
+) -> tuple[int, int]:
+    """目标ACOS 取值区间 (下限, 上限)。AI/算法须在此区间内给出单值（修复4，2026-06-18）。
+
+    - 上限 = min(阶段上限, 层级上限)，镜像自知识库 KB03（KB 只读）。
+      层级：仅长尾 P3 = 30，其余 40（按子串匹配，避免枚举键漂移）。
+    - 下限 = max(全局 min_acos, 各广告目的下限的最大值)，且不超过上限（上限以 KB 为准）。
+    """
+    global_min = int(cfg.get("min_acos", 25))
+    global_max = int(cfg.get("max_acos", 100))
+    stage_ceiling = int(cfg.get("stage_ceilings", {}).get((stage or "").strip(), 40))
+    lvl = str(level or "")
+    level_ceiling = 30 if ("P3" in lvl or "长尾" in lvl) else 40
+    acos_ceiling = min(stage_ceiling, level_ceiling, global_max)
+    purpose_floors = cfg.get("purpose_floors", {})
+    floors = [int(purpose_floors[p]) for p in (ad_purposes or []) if p in purpose_floors]
+    acos_floor = max([global_min] + floors)
+    acos_floor = min(acos_floor, acos_ceiling)  # 下限不得越过上限（KB 上限优先）
+    return acos_floor, acos_ceiling
+
+
 class TargetAcosRecommender:
     """目标 ACOS 推荐器 — 7 步规则链，纯算法
 
     输入: ASINData + ad_purposes
-    输出: TargetAcosRecommendation (5% 粒度 ACOS 目标值, ≥5% 且 ≤100%)
+    输出: TargetAcosRecommendation (5% 粒度，落在 compute_target_acos_band 给出的[下限,上限]内)
     """
 
     def __init__(self):
@@ -621,14 +643,15 @@ class TargetAcosRecommender:
         steps = []
         violations = []
 
-        # Step 1: Strategy scope — product_stage → ACOS 基准范围
+        # Step 1: 目标ACOS 取值区间（阶段×层级上限 + 目的下限）→ 基准取区间中点
         stage = data.product_stage or "推进期"
-        stage_scopes = self.cfg.get("stage_scopes", {})
-        scope = stage_scopes.get(stage, {"min": 5, "max": 25})
-        target = (scope["min"] + scope["max"]) / 2
+        acos_floor, acos_ceiling = compute_target_acos_band(
+            self.cfg, stage, data.product_level, ad_purposes)
+        target = (acos_floor + acos_ceiling) / 2
         steps.append(TargetAcosStep(
             step=1, rule="strategy_scope",
-            description=f"产品阶段={stage}，目标ACOS范围 {scope['min']}%-{scope['max']}%",
+            description=f"阶段={stage}/定位={data.product_level or '?'}/目的={ad_purposes or []}，"
+                        f"目标ACOS区间 {acos_floor}%-{acos_ceiling}%",
             result=f"初始基准 {target:.0f}%",
         ))
 
@@ -749,16 +772,13 @@ class TargetAcosRecommender:
                 ))
                 target = capped
 
-        # Step 7: Hard cap + snap to 5% increment
-        min_acos = self.cfg.get("min_acos", 5)
-        max_acos = self.cfg.get("max_acos", 100)
+        # Step 7: 钳到目标ACOS区间 [下限, 上限] + 5% 取整（先取整再钳，保证落在区间内）
         increment = self.cfg.get("increment", 5)
-        target = max(min_acos, min(max_acos, target))
         target = round(target / increment) * increment
+        target = max(acos_floor, min(acos_ceiling, target))
         steps.append(TargetAcosStep(
             step=7, rule="hard_cap",
-            description=f"最终范围约束 [{min_acos}%, {max_acos}%]，"
-                        f"取整到{increment}%增量",
+            description=f"约束至目标ACOS区间 [{acos_floor}%, {acos_ceiling}%]，{increment}% 取整",
             result=f"最终推荐: {target}%",
         ))
 

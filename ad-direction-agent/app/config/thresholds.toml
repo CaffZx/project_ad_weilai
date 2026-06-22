@@ -122,18 +122,32 @@ allowed_directions = ["balance_maintain", "optimize_acos"]
 # ── 目标 ACOS 推荐 (P3 Feature 1) ──
 
 [target_acos]
-min_acos = 5
+min_acos = 25
 max_acos = 100
 increment = 5
 max_single_adjustment = 20
 high_natural_ratio_threshold = 50
 low_natural_ratio_threshold = 20
 
-[target_acos.stage_scopes]
-"测试期" = { min = 10, max = 60 }
-"推进期" = { min = 5, max = 50 }
-"收割利润期" = { min = 5, max = 40 }
-"维持期" = { min = 5, max = 35 }
+# ── 目标ACOS 取值区间（2026-06-18 修复4：AI/算法在 [下限,上限] 内出单值，5%取整）──
+# 上限镜像自知识库 03-阈值参数.md（KB 只读，此处同步）。下限按广告目的、且不低于全局 min_acos=25。
+# 取代旧 stage_scopes（其 min=5/10 与全局最低25矛盾，已删）。
+[target_acos.stage_ceilings]   # 阶段上限（KB03 §2「ACOS上限」）
+"测试期" = 50
+"推进期" = 40
+"收割利润期" = 40
+"维持期" = 40
+"清货期" = 60
+
+[target_acos.level_ceilings]   # 层级上限（KB03 §1）：仅长尾P3=30，其余40
+"长尾产品 (P3)" = 30
+# 代码按子串匹配（"P3"/"长尾"→30，其余→40），此键仅作文档说明
+
+[target_acos.purpose_floors]   # 目标ACOS 下限（按广告目的；needs_review 初值，多目的取最大值）
+"盈利型" = 25
+"转化型" = 25
+"排名型" = 35
+"引流型" = 40
 
 [target_acos.purpose_corrections]
 "排名型" = { direction = "raise", magnitude = 5 }

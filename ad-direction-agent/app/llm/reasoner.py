@@ -158,9 +158,15 @@ def _build_execution_system_prompt() -> str:
     return _EXECUTION_TASK_PROMPT.replace("{kb_content}", kb.build("execution_direction"))
 
 
-_P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和诊断数据，同时给出目标ACOS和预算/Bid推荐。
+_P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于知识库规则和诊断数据，同时给出目标ACOS和每日预算推荐。
 
 重要：所有输出内容必须使用中文，禁止出现英文单词。数值字段使用英文key是内部格式需要。
+
+## 概念澄清（重要，避免混淆）
+- **目标ACOS**：运营设定的单一基准值，用于衡量实测 ACOS 偏离目标的程度，是本任务要输出的值。
+- **实测ACOS / 当前ACOS**：广告实际跑出的 ACOS，是输入、不是目标。
+- 知识库里的「ACOS上限 / 有效容忍上限 / ACOS容忍度加成」是对**实测ACOS**的天花板与触发判据，**不是**你要输出的目标ACOS——禁止把某个「ACOS上限」直接当作目标ACOS输出。
+- 目标ACOS 必须落在用户消息给出的「目标ACOS取值区间 [最低, 最高]」之内（上限来自知识库，不得超出）。
 
 ## 业务知识（必须严格遵循）
 {kb_content}
@@ -182,7 +188,7 @@ _P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于�
     "magnitude_pct": 21.5,
     "reason": "【决策依据】\\n- 当前日均花费$65.8，日预算$100，花费率65.8%，预算未吃紧。\\n- 花费最高的词：triangle bikini($36.2/天, ACOS 48%)，string bikini($20.0/天, ACOS 41%)。\\n- 趋势：近7天花费从$87逐步降至$65，不是因为预算不足而是因为部分词ACOS过高被系统自然压低。\\n- 当前推进期+旺季准备，适度加预算抢流量是合理的。\\n\\n【建议】\\n建议日预算调整为$80(+21.5%)。增量集中分配给black bikini set(ACOS 28%, CVR 12.5%)和black string bikini(ACOS 18%, CVR 15%)等高效率词，不分配给triangle bikini等高ACOS词。\\n\\n【后续关注】\\n- 加预算后监控整体ACOS是否上升，若超过40%则停止增量\\n- 监控black bikini set的ACOS和CVR，若效率下降则重新分配预算"
   },
-  "overall_reasoning": "【综合判断】\\nACOS目标和预算建议需联动：收紧ACOS降低低效花费，加预算把释放出的花费转移到高效率词上，在效率不崩的前提下抢旺季排名。\\n\\n【执行节奏】\\n建议先降triangle bikini的Bid（立即可做），观察3天整体ACOS变化后，再决定是否加预算。加预算和收紧ACOS不建议同一天操作，避免数据波动难以归因。\\n\\n【风险提示】\\n- 精准ACOS 42%偏高，若精准位持续低效建议减少TOS投放比例\\n- 旺季CPC可能上涨，需预留预算弹性空间",
+  "overall_reasoning": "【综合判断】\\nACOS目标和预算建议需联动：收紧ACOS降低低效花费，加预算把释放出的花费转移到高效率词上，在效率不崩的前提下抢旺季排名。\\n\\n【执行节奏】\\n建议先小幅收紧目标ACOS、观察3天整体ACOS变化，再决定是否加预算。加预算和收紧ACOS不建议同一天操作，避免数据波动难以归因。\\n\\n【风险提示】\\n- 精准ACOS 42%偏高，若精准位持续低效建议减少TOS投放比例\\n- 旺季CPC可能上涨，需预留预算弹性空间",
   "risk_warnings": ["精准ACOS 42%偏高，需重点优化精准投放", "旺季CPC可能上涨，预留预算弹性"]
 }
 
@@ -191,17 +197,14 @@ _P3_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家。基于�
 ## 字段语义说明
 - budget_bid.current: **日均实际花费**（≈总花费÷天数）。从诊断数据中的"日均花费"字段取值。
 - budget_bid.suggested: 建议的日均花费目标值。基于"日均花费"的当前水平 + 趋势 + 阶段策略给出。
-- target_acos.recommended_target: 建议的ACOS目标百分比（精度到1%，如23%而非25%）
+- target_acos.recommended_target: 建议的目标ACOS百分比（**5% 取整**，如 25%/30%/35%），必须落在用户消息「目标ACOS取值区间」内
 - 关键词数据中 spend 字段: 该词在 {days} 天窗口内的总计花费，除以天数才是日均花费。
 
-## 硬性数值约束（P3 专用，TODO 待 KB 补充后迁移）
-- 目标ACOS必须 ≥ 5% 且 ≤ 100%，精度到 1%
-- 硬约束：除非产品阶段为"测试期"，目标ACOS相对于当前ACOS的相对变化幅度不超过 ±40%（TODO: 待 KB 补充 ACOS 目标变化约束后迁移）
-- 预算建议幅度单次不超过 ±30%
-- Bid调整建议不超过 ±25%
+## 硬性数值约束（P3 专用）
+- 目标ACOS：必须落在用户消息「目标ACOS取值区间 [最低, 最高]」之内，5% 取整；上限来自知识库，不得超出。
+- 每日预算的调整幅度遵循上述业务知识（知识库）中的数值规则，不另设硬编码上限。
 - 如果数据不足以支撑判断，confidence设为"low"并在reasoning中说明
-- 最多推荐5个关键词的Bid调整
-- ⚠️ 你推荐的高效词、低效词、Bid调整词必须全部来自"关键词级数据"列表中的实际关键词，禁止编造不存在于列表中的词名
+- ⚠️ reasoning/reason/overall_reasoning 中引用的关键词，必须来自"关键词级数据"列表中的实际关键词，禁止编造不存在于列表中的词名（P3 仅产出目标ACOS与每日预算，不输出关键词级 Bid 调整）
 
 ## reasoning / reason / overall_reasoning 文案要求（面向运营人员）
 - 禁止提及任何内部约束规则词汇（如"硬约束""相对变化""合规""违规"等），用自然语言表达
@@ -1309,6 +1312,22 @@ class LLMReasoner:
             "## 策略层",
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
             f"  - 关键词类型: {tactics.get('target_keyword_strategy', [])}",
+            "",
+        ]
+
+        # 目标ACOS 取值区间（修复4）：代码按 阶段×层级×目的 算出 [下限,上限]，注入供 LLM 在区间内出单值
+        from app.core.recommender import compute_target_acos_band
+        from app.config.settings import settings as _settings
+        _acos_floor, _acos_ceiling = compute_target_acos_band(
+            _settings.thresholds_config.get("target_acos", {}),
+            strategy.get("product_stage"), strategy.get("product_level"),
+            tactics.get("ad_purposes") or [],
+        )
+        parts += [
+            "## 目标ACOS 取值区间（必须在此区间内给出一个值）",
+            f"  - 最低目标ACOS: {_acos_floor}%（按广告目的，且不低于全局最低）",
+            f"  - 最高目标ACOS: {_acos_ceiling}%（来自知识库 阶段×层级 ACOS上限）",
+            f"  → 在 [{_acos_floor}%, {_acos_ceiling}%] 内输出一个目标ACOS（5% 取整）。区间是工作边界，输出是其中的单一值。",
             "",
         ]
 

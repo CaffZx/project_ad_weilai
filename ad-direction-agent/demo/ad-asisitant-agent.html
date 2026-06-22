@@ -607,7 +607,7 @@ body {
         <div>
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">目标 ACOS 推荐</label>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="number" id="p3AcosLeftInput" min="5" max="100" step="5"
+            <input type="number" id="p3AcosLeftInput" min="5" max="100" step="5" oninput="recomputeNumDirty('acos')"
                    class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
             <span style="font-size:13px;color:var(--muted-fg);flex:0 0 auto">%</span>
             <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
@@ -618,7 +618,7 @@ body {
         <div>
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">每日预算推荐</label>
           <div style="display:flex;gap:8px;align-items:center">
-            <input type="number" id="p3BudgetLeftInput" min="1" step="1"
+            <input type="number" id="p3BudgetLeftInput" min="1" step="1" oninput="recomputeNumDirty('budget')"
                    class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
             <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
           </div>
@@ -637,7 +637,8 @@ body {
           </div>
         </div>
         <!-- 广告方向（config 项；快照轨只读 badges，实时态下拉操作台；面板向上展开避免最底部溢出） -->
-        <div id="leftDirectionsBlock" class="hidden">
+        <!-- 可见性绑定父容器 cardP3Override（与 ACOS/预算同进同出，不再单独 hidden）-->
+        <div id="leftDirectionsBlock">
           <label style="font-size:11px;font-weight:600;display:block;margin-bottom:3px">广告方向</label>
           <!-- 快照只读 -->
           <div id="leftDirections" style="display:flex;flex-wrap:wrap;gap:4px"></div>
@@ -1637,6 +1638,7 @@ async function loadAll(skipContextRefresh = false) {
   // 重置状态
   sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
   _strategyLayerSaved.tactics = _strategyLayerSaved.acos = _strategyLayerSaved.budget = _strategyLayerSaved.directions = false;
+  resetSaveTags();
   ['tab1','tab2','tab3','tab4','tab5'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
   // 换 ASIN 时卸载旧的 campaign panel
   if (window._campaignPanelAPI) {
@@ -1651,6 +1653,10 @@ async function loadAll(skipContextRefresh = false) {
   $('p3AcosLeftInput').disabled = false;
   $('p3BudgetLeftInput').disabled = false;
   show('p3EditRows'); hide('p3ReadonlyView');   // 实时态：恢复可编辑输入行
+  // 广告方向与 ACOS/预算同一开关进入可编辑态（统一切换，不再单独挂 loadExecution）；
+  // 先用固定 4 方向预填下拉，loadExecution 拿到评分后再替换为带分数选项。
+  hide('leftDirections'); show('leftDirectionsEdit');
+  { const _ldo = $('leftDirectionsOptions'); if (_ldo) { _ldo.innerHTML = _dirFallbackOptsHtml(); updateMultiTags('directions'); } }
   $('sec1Done').textContent = '已保存';
   $('sec2Done').textContent = '已保存';
   activeTab = null;
@@ -1661,6 +1667,7 @@ async function loadAll(skipContextRefresh = false) {
   hide('btnStrategy'); hide('btnTactics'); hide('btnRefreshRec');
   hide('reportArea');
   setHTML('execDirections', '');
+  setHTML('leftDirections', '');   // 清快照只读"—"残留，防 loadExecution 未跑到时漂移
   setHTML('diagMetrics', '');
   setHTML('alertSignals', '');
   clearTrendChart();
@@ -1815,6 +1822,62 @@ function _setP3SavedFlags(data) {
   refreshStrategyLayerBadge();
 }
 
+// ═══════════════ 防呆：保存状态(脏/已存)统一常驻标签 + 消费前拦截 (2026-06-18) ═══════════════
+const _saved = { purpose:null, keyword:null, acos:null, budget:null, directions:null }; // 上次已存值=脏检测基准
+const _dirty = { purpose:false, keyword:false, acos:false, budget:false, directions:false };
+let _prevCfg = { acos:null, budget:null };   // 前次配置值（ACOS/预算 输入框空时灰显 placeholder）
+const _FIELD_CN = { purpose:'广告目的', keyword:'目标关键词', acos:'目标ACOS', budget:'每日预算', directions:'广告方向' };
+const _TAG_EL = { purpose:'stPurpose', keyword:'stKeyword', acos:'p3AcosLeftStatus', budget:'p3BudgetLeftStatus', directions:'leftDirectionsStatus' };
+
+function setSaveTag(field, state) { // 'dirty' | 'saved' | 'hidden'
+  const el = $(_TAG_EL[field]); if (!el) return;
+  el.style.fontSize = '10px';
+  if (state === 'dirty') {
+    el.textContent = '● 未保存';
+    el.style.color = '#92400E'; el.style.background = '#FEF3C7'; el.style.borderRadius = '4px'; el.style.padding = '1px 6px';
+    el.classList.remove('hidden');
+  } else if (state === 'saved') {
+    el.textContent = '✓ 已保存';
+    el.style.color = 'var(--success)'; el.style.background = 'transparent'; el.style.padding = '0';
+    el.classList.remove('hidden');
+  } else { el.classList.add('hidden'); }
+}
+function _curMulti(dim) { return Array.from(qsa(`input[data-dim="${dim}"]:checked`)).map(cb => cb.value).sort().join(','); }
+
+// 广告目的+关键词共用一次保存，状态联动（任一与已存不等 → 两标签同置未保存）
+function recomputeTacticsDirty() {
+  const curP = _curMulti('ad_purposes'), curK = _curMulti('target_keyword_strategy');
+  let st;
+  if (_saved.purpose == null) st = (curP || curK) ? 'dirty' : 'hidden';
+  else st = (curP === _saved.purpose && curK === _saved.keyword) ? 'saved' : 'dirty';
+  _dirty.purpose = _dirty.keyword = (st === 'dirty');
+  setSaveTag('purpose', st); setSaveTag('keyword', st);
+}
+function recomputeDirectionsDirty() {
+  const cur = _curMulti('directions');
+  const st = _saved.directions == null ? (cur ? 'dirty' : 'hidden') : (cur === _saved.directions ? 'saved' : 'dirty');
+  _dirty.directions = (st === 'dirty');
+  setSaveTag('directions', st);
+}
+// ACOS/预算：输入框空 = 沿用前次配置/AI，不算未保存；填了且 ≠ 已存 = 未保存
+function recomputeNumDirty(field) { // 'acos' | 'budget'
+  const raw = $(field === 'acos' ? 'p3AcosLeftInput' : 'p3BudgetLeftInput').value.trim();
+  let st;
+  if (raw === '') { st = _saved[field] != null ? 'saved' : 'hidden'; _dirty[field] = false; }
+  else { const cur = Number(raw); st = (cur === _saved[field]) ? 'saved' : 'dirty'; _dirty[field] = (st === 'dirty'); }
+  setSaveTag(field, st);
+}
+// 消费前拦截：运行执行层分析前，有未保存字段则拦下
+function guardUnsavedBeforeRun() {
+  const d = Object.keys(_dirty).filter(k => _dirty[k]).map(k => _FIELD_CN[k]);
+  if (d.length) { alert('有未保存的修改：' + d.join('、') + '\n请先保存或放弃后，再运行执行层分析。'); return false; }
+  return true;
+}
+function resetSaveTags() {
+  ['purpose','keyword','acos','budget','directions'].forEach(k => { _saved[k] = null; _dirty[k] = false; setSaveTag(k, 'hidden'); });
+  _prevCfg = { acos:null, budget:null };
+}
+
 async function confirmStrategy() {
   const btn = $('btnStrategy');
   const g = dim => {
@@ -1932,7 +1995,8 @@ async function loadTactics() {
     const recs = dim.recommendations || [];
     const selVals = prefilled ? (data.current_selection[dim.id]||[]) : [];
     const rowBtn = _ROW_BTN[dim.id] || '';
-    html += `<div class="tactics-dropdown" style="min-width:0"><label class="dd-label">${dim.label} <span style="font-weight:400;color:var(--muted-fg)">多选</span></label>
+    const _tagId = dim.id === 'ad_purposes' ? 'stPurpose' : (dim.id === 'target_keyword_strategy' ? 'stKeyword' : '');
+    html += `<div class="tactics-dropdown" style="min-width:0"><label class="dd-label">${dim.label} <span style="font-weight:400;color:var(--muted-fg)">多选</span> <span id="${_tagId}" class="hidden"></span></label>
       <div style="display:flex;gap:8px;align-items:center">
         <div style="position:relative;flex:1;min-width:0"><button type="button" class="md-btn" data-dim="${dim.id}" onclick="toggleMultiDropdown(this)">
           <span class="md-tags" id="mtags_${dim.id}"><span class="md-placeholder">请选择</span></span><span class="dd-arrow">▾</span>
@@ -1949,6 +2013,11 @@ async function loadTactics() {
   html += '</div>';
   setHTML('tacticsContent', html);
   data.dimensions.forEach(dim => updateMultiTags(dim.id));
+  // 回访(prefilled)：已存配置作为基准 → 显示「已保存」而非误报「未保存」
+  if (prefilled) {
+    _saved.purpose = _curMulti('ad_purposes'); _saved.keyword = _curMulti('target_keyword_strategy');
+    recomputeTacticsDirty();
+  }
   show('btnTactics'); show('btnRefreshRec');
 
   // 关键词监控表 — 首次加载用 renderKeywordTable
@@ -1987,6 +2056,8 @@ async function confirmTactics() {
     const res = await callAPI('/tactics/confirm', { asin, ad_purposes:ap, target_keyword_strategy:kt });
     if (!res.accepted) { err('errSec2', '保存失败'); btn.disabled = false; btn.textContent = '保存'; return; }
     sec2Confirmed = true; _strategyLayerSaved.tactics = true; refreshStrategyLayerBadge();
+    _saved.purpose = _curMulti('ad_purposes'); _saved.keyword = _curMulti('target_keyword_strategy');
+    _dirty.purpose = _dirty.keyword = false; setSaveTag('purpose', 'saved'); setSaveTag('keyword', 'saved');
     btn.disabled = false; btn.textContent = '保存';
   } catch (e) {
     err('errSec2', e.message);
@@ -2330,6 +2401,7 @@ async function refreshP3() {
 }
 
 function renderP3(data) {
+  if (!data) return;   // 防御：_p3data 未就绪(AI推荐未加载)时保存/取消会传 null，避免读 data.target_acos 崩溃
   renderDataStatusBanner(data, 'dataStatusTab3');
   if (isLlmBlocked(data)) {
     const msg = data.message || '核心数据不足，无法生成 AI 推荐';
@@ -2410,19 +2482,17 @@ function renderP3(data) {
   else hide('p3Warnings');
 }
 
-// ── 左侧输入自动填充（仅在初始加载和 AI 重新推荐时调用） ──
+// ── 左侧输入：不再预填 AI 值；input 默认留空，placeholder 灰显「前次配置值」(仅手动覆盖过才有，否则空) ──
 function autoFillLeftInputs(data) {
   const ta = data.target_acos, bb = data.budget_bid;
-  if (ta && ta.recommended_target != null && !ta.manual_override) {
-    $('p3AcosLeftInput').value = ta.recommended_target;
-    $('p3AcosLeftInput').placeholder = ta.recommended_target;
-    hide('p3AcosLeftStatus');
-  }
-  if (bb && !bb.manual_override) {
-    $('p3BudgetLeftInput').value = bb.suggested != null ? Math.round(bb.suggested) : '';
-    $('p3BudgetLeftInput').placeholder = bb.suggested != null ? Math.round(bb.suggested) : '';
-    hide('p3BudgetLeftStatus');
-  }
+  _prevCfg.acos = (ta && ta.manual_override && ta.recommended_target != null) ? Number(ta.recommended_target) : null;
+  _prevCfg.budget = (bb && bb.manual_override && bb.suggested != null) ? Math.round(bb.suggested) : null;
+  const aIn = $('p3AcosLeftInput'), bIn = $('p3BudgetLeftInput');
+  aIn.value = ''; aIn.placeholder = _prevCfg.acos != null ? String(_prevCfg.acos) : '';
+  bIn.value = ''; bIn.placeholder = _prevCfg.budget != null ? String(_prevCfg.budget) : '';
+  // 已手动保存过 → 以前次值为已存基准(空输入=沿用，不算未保存)；否则标签隐藏
+  _saved.acos = _prevCfg.acos; _dirty.acos = false; setSaveTag('acos', _prevCfg.acos != null ? 'saved' : 'hidden');
+  _saved.budget = _prevCfg.budget; _dirty.budget = false; setSaveTag('budget', _prevCfg.budget != null ? 'saved' : 'hidden');
 }
 
 // ═══════════════ P3 手动覆盖（左侧） ═══════════════
@@ -2447,8 +2517,7 @@ async function saveP3AcosLeft() {
     fbCaptureP3Acos(aiVal != null ? aiVal : null, val);
     renderP3(window._p3data);
     _strategyLayerSaved.acos = true; refreshStrategyLayerBadge();
-    $('p3AcosLeftStatus').textContent = '✓ 已保存手动值'; $('p3AcosLeftStatus').style.color = 'var(--success)'; show('p3AcosLeftStatus');
-    setTimeout(() => hide('p3AcosLeftStatus'), 2000);
+    _saved.acos = val; _prevCfg.acos = val; _dirty.acos = false; setSaveTag('acos', 'saved');
   } catch (e) {
     $('p3AcosLeftStatus').textContent = '✗ 保存失败: ' + e.message;
     $('p3AcosLeftStatus').style.color = 'var(--danger)'; show('p3AcosLeftStatus');
@@ -2470,8 +2539,7 @@ async function saveP3BudgetLeft() {
     fbCaptureP3Budget(aiVal != null ? aiVal : null, val);
     renderP3(window._p3data);
     _strategyLayerSaved.budget = true; refreshStrategyLayerBadge();
-    $('p3BudgetLeftStatus').textContent = '✓ 已保存手动值'; $('p3BudgetLeftStatus').style.color = 'var(--success)'; show('p3BudgetLeftStatus');
-    setTimeout(() => hide('p3BudgetLeftStatus'), 2000);
+    _saved.budget = val; _prevCfg.budget = val; _dirty.budget = false; setSaveTag('budget', 'saved');
   } catch (e) {
     $('p3BudgetLeftStatus').textContent = '✗ 保存失败: ' + e.message;
     $('p3BudgetLeftStatus').style.color = 'var(--danger)'; show('p3BudgetLeftStatus');
@@ -2482,40 +2550,24 @@ async function saveP3BudgetLeft() {
 
 async function clearP3Acos() {
   await callAPI('/execution/target-acos/override', { asin }, API_TIMEOUT.quick, 'DELETE');
-  if (window._p3data && window._p3data.target_acos) {
-    window._p3data.target_acos.manual_override = false;
-    const aiVal = window._p3data.target_acos.recommended_target;
-    if (aiVal != null) {
-      $('p3AcosLeftInput').value = aiVal;
-      $('p3AcosLeftInput').placeholder = aiVal;
-    }
-  }
+  if (window._p3data && window._p3data.target_acos) window._p3data.target_acos.manual_override = false;
   const aiVal = window._p3data?.target_acos?.recommended_target;
   fbCaptureP3Acos(aiVal != null ? aiVal : null, null);
   renderP3(window._p3data);
-  $('p3AcosLeftStatus').textContent = '✓ 已恢复 AI 推荐值';
-  $('p3AcosLeftStatus').style.color = 'var(--success)';
-  show('p3AcosLeftStatus');
-  setTimeout(() => hide('p3AcosLeftStatus'), 2000);
+  // 已取消手动覆盖 → 回到 AI 现算：input 清空、无前次配置值、标签隐藏
+  $('p3AcosLeftInput').value = ''; $('p3AcosLeftInput').placeholder = '';
+  _prevCfg.acos = null; _saved.acos = null; _dirty.acos = false; setSaveTag('acos', 'hidden');
 }
 
 async function clearP3Budget() {
   await callAPI('/execution/budget-bid/override', { asin }, API_TIMEOUT.quick, 'DELETE');
-  if (window._p3data && window._p3data.budget_bid) {
-    window._p3data.budget_bid.manual_override = false;
-    const aiVal = window._p3data.budget_bid.suggested;
-    if (aiVal != null) {
-      $('p3BudgetLeftInput').value = Math.round(aiVal);
-      $('p3BudgetLeftInput').placeholder = Math.round(aiVal);
-    }
-  }
+  if (window._p3data && window._p3data.budget_bid) window._p3data.budget_bid.manual_override = false;
   const aiVal = window._p3data?.budget_bid?.suggested;
   fbCaptureP3Budget(aiVal != null ? aiVal : null, null);
   renderP3(window._p3data);
-  $('p3BudgetLeftStatus').textContent = '✓ 已恢复 AI 推荐值';
-  $('p3BudgetLeftStatus').style.color = 'var(--success)';
-  show('p3BudgetLeftStatus');
-  setTimeout(() => hide('p3BudgetLeftStatus'), 2000);
+  // 已取消手动覆盖 → 回到 AI 现算：input 清空、无前次配置值、标签隐藏
+  $('p3BudgetLeftInput').value = ''; $('p3BudgetLeftInput').placeholder = '';
+  _prevCfg.budget = null; _saved.budget = null; _dirty.budget = false; setSaveTag('budget', 'hidden');
 }
 
 // ═══════════════ 英文→中文翻译映射 ═══════════════
@@ -2525,6 +2577,14 @@ const LEVEL_CN = { force_correct:'需立即处理', suggest_optimize:'需关注'
 const PRI_CN = { high:'高', medium:'中', low:'低' };
 
 function cnDir(dirId) { return DIR_CN[dirId] || dirId; }
+
+// 广告方向固定 4 项的下拉选项 HTML（无评分）。loadAll 预填 + loadExecution 无评分时兜底复用，
+// 保证配置态下广告方向永远可人工选（与 ACOS/预算同框可编辑）。
+function _dirFallbackOptsHtml() {
+  return Object.entries(DIR_CN).map(([id, name]) =>
+    `<label class="md-option"><input type="checkbox" value="${id}" data-label="${name}" data-dim="directions" onchange="updateMultiTags('directions')">
+      <div class="md-opt-text"><div class="md-opt-label">${name}</div></div></label>`).join('');
+}
 function cnSuit(s) { return SUIT_CN[s] || s; }
 function cnLevel(l) { return LEVEL_CN[l] || l; }
 function cnPri(p) { return PRI_CN[p] || p; }
@@ -2722,33 +2782,37 @@ async function loadExecution() {
   }
   const data = await callAPI('/execution/options', { asin, days }, API_TIMEOUT.fetch);
   renderDataStatusBanner(data, 'dataStatusTab4');
-  if (!data || !Array.isArray(data.directions)) {
-    setHTML('execDirections', '<div style="padding:16px;color:var(--muted-fg);font-size:12px">暂无方向推荐数据</div>');
-    return;
-  }
 
-  // 缓存 AI 推荐方向供反馈使用
-  _lastExecAiDirs = data.recommended_directions || [];
-
+  // 广告方向左栏须与其它配置栏(ACOS/预算)同步进入可编辑态——不再因后端无方向数据而提前 return、
+  // 把开关留在上一次快照的只读"—"残留态(漂移根因)。无评分数据时用固定 4 方向兜底，保证人工始终可调。
+  const dirs = (data && Array.isArray(data.directions)) ? data.directions : [];
   let html = '';
   let optsHtml = '';
-  data.directions.forEach(d => {
-    const defaultSel = d.recommended && d.suitability_score >= 40;
-    const title = d.label || cnDir(d.id);
-    html += renderDirCard(d);
-    // 左栏下拉选项（多选，默认勾选 AI 推荐项；value=英文 id 供保存，data-label=中文供展示）
-    optsHtml += `<label class="md-option"><input type="checkbox" value="${d.id}" data-label="${title}" data-dim="directions" ${defaultSel?'checked':''} onchange="updateMultiTags('directions')">
-      <div class="md-opt-text"><div class="md-opt-label">${title}${d.recommended?' <span class="md-check-rec">AI推荐</span>':''}</div>
-      <div class="md-opt-desc">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</div></div></label>`;
-  });
+  if (dirs.length) {
+    _lastExecAiDirs = data.recommended_directions || [];
+    dirs.forEach(d => {
+      const defaultSel = d.recommended && d.suitability_score >= 40;
+      const title = d.label || cnDir(d.id);
+      html += renderDirCard(d);
+      // 左栏下拉选项（多选，默认勾选 AI 推荐项；value=英文 id 供保存，data-label=中文供展示）
+      optsHtml += `<label class="md-option"><input type="checkbox" value="${d.id}" data-label="${title}" data-dim="directions" ${defaultSel?'checked':''} onchange="updateMultiTags('directions')">
+        <div class="md-opt-text"><div class="md-opt-label">${title}${d.recommended?' <span class="md-check-rec">AI推荐</span>':''}</div>
+        <div class="md-opt-desc">${Math.round(d.suitability_score)}分 · ${cnSuit(d.suitability)}</div></div></label>`;
+    });
+  } else {
+    // 兜底：后端无方向评分(数据不足/降级/出错) → 用固定 4 方向，无评分，人工仍可选
+    _lastExecAiDirs = [];
+    html = '<div style="padding:16px;color:var(--muted-fg);font-size:12px">暂无方向评分数据，可在左侧手动选择广告方向</div>';
+    optsHtml = _dirFallbackOptsHtml();
+  }
   setHTML('execDirections', html);
 
-  // 左栏广告方向操作台（实时态）：灌下拉选项 + 显示下拉、隐藏只读 badges
+  // 左栏广告方向：仅负责灌选项（有评分→带分数；无评分→4方向兜底）。
+  // 显示/编辑态开关已由 loadAll + cardP3Override 统一控制，此处不再翻开关（避免与其它配置栏脱钩）。
   const _optsEl = $('leftDirectionsOptions');
   if (_optsEl) { _optsEl.innerHTML = optsHtml; updateMultiTags('directions'); }
-  show('leftDirectionsBlock'); hide('leftDirections'); show('leftDirectionsEdit');
 
-  if (data.recommendation_summary) {
+  if (data && data.recommendation_summary) {
     show('aiReasoningExec');
     setHTML('aiReasoningExec', formatAiSections(sanitizeOpsDisplayText(data.recommendation_summary)));
     $('aiReasoningExec').className = 'ai-reasoning';
@@ -2769,7 +2833,7 @@ async function saveDirectionsLeft() {
     await callAPI('/execution/select', { asin, selected_directions: selected, sub_options: {} });
     fbCaptureExecution(_lastExecAiDirs, selected);
     _strategyLayerSaved.directions = true; refreshStrategyLayerBadge();
-    if (st) { st.textContent = '✓ 已保存'; st.style.color = 'var(--success)'; show('leftDirectionsStatus'); }
+    _saved.directions = _curMulti('directions'); _dirty.directions = false; setSaveTag('directions', 'saved');
   } catch (e) {
     if (st) { st.textContent = '保存失败: ' + e.message; st.style.color = 'var(--danger)'; show('leftDirectionsStatus'); }
   }
@@ -2917,6 +2981,9 @@ function updateMultiTags(dim) {
       `<span class="md-tag">${cb.dataset.label || cb.value}<span class="md-tag-remove" onclick="event.stopPropagation();uncheckTag('${dim}','${cb.value}')">&times;</span></span>`
     ).join('');
   }
+  // 防呆脏检测（值变即翻黄）
+  if (dim === 'directions') recomputeDirectionsDirty();
+  else if (dim === 'ad_purposes' || dim === 'target_keyword_strategy') recomputeTacticsDirty();
 }
 
 function uncheckTag(dim, val) {
@@ -3211,6 +3278,7 @@ window._mountCampaignBatch = async function({ decision_id = '', executable = fal
 window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
   const root = document.getElementById('campPanelRoot');
   if (!root || !asin) return;
+  if (!guardUnsavedBeforeRun()) return;   // 消费前拦截：有未保存修改先拦下
   if (window._campaignPanelAPI) {
     try { window._campaignPanelAPI.unmount(); } catch (_) {}
     window._campaignPanelAPI = null;

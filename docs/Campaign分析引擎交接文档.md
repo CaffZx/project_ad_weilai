@@ -886,7 +886,63 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-18（v2.6: 新增前端待办 §18 —— F1 完成后左栏切快照 / F2 进行中隐藏批次下拉 / F3 去战略层天数下拉(后端硬编码7天)）*
+## 19. 2026-06-18：已知逻辑缺陷（待修，暂无时间）
+
+> ⚠ **定时分析不采信 config 的 acos/预算配置 —— 这是错的逻辑，已确认，暂无时间改。** 记此备忘，未来修复。
+
+**现象**：config 表 `target_acos_suggest`/`daily_budget_suggest` 满屏 NULL（520 ASIN 中 482 个最新行 acos 为 NULL）；定时跑批的目标 ACOS 全靠 AI 现算，数据差的产品被钳到下限 5%，与"运营在 config 配的目标"完全脱节。
+
+**根因（代码已核实）**：
+- 定时分析（`cfg_source=config`）只从 config 读 1-4 类目——`decision_config_reader.load_layer14` 的 SELECT **只取 7 列**（product_position/stage/season_type/advert_purposes/target_keyword_types/advert_direction_types/day_range），**不含 acos/预算**。
+- `api/campaign.py:_do_analyze` 的 acos 解析链 = `get_target_acos_override`(state) → p3 缓存(state) → `TargetAcosRecommender` AI 现算（floor 5%，recommender.py:754），**全程不读 config 的 acos**。
+- `repository._upsert_decision_config` 又**故意不写**这两列（注释"AI 不进 config"）。
+- 且 config 的这两列**无任何代码读取**（load_layer14 不读；前端 Tab3 快照读的是 **decision 表** `get_decision_preset`，非 config）→ 这两列当前是"只写历史值、现已不写、谁也不读"的死列。
+
+**正确逻辑应为**：定时分析的 acos/预算应**优先采信 config 中运营确认的 `target_acos_suggest`/`daily_budget_suggest`**，无配置才回落 AI 现算——否则"运营在 config 配的目标"永远不生效。
+
+**未来修复点（三处）**：
+1. `load_layer14`：SELECT 增加 `target_acos_suggest`/`daily_budget_suggest`，返回给 `_cfg14`。
+2. `_do_analyze`：acos/预算解析链在 override 之后、AI 现算之前，插入"读 config 配置值"一级（`cfg_source=config` 时）。
+3. `_upsert_decision_config`：确认回写策略（运营手动值 vs AI 值是否回 config），与上面读取口径一致。
+
+**附带（本次未做）**：曾计划把 config 历史 NULL 的 acos/预算回填（A 队列 acos=35%、B 队列采信最近非空），dry-run 完成（483 行待写）但**未执行**——因为发现"这两列没人读"，回填当前无收益，且根因是上面的逻辑缺陷，应先修逻辑而非补数据。**prod 未做任何写入。**
+
+---
+
+## 20. 2026-06-18：修复4 — 目标ACOS 区间化（AI 在 KB 锚定区间内出单值）
+
+> 仅本地（`AD_assistant_agent-v3.2`），**未上服务器 chenv31**。背景见 §19 + 主交接文档「目标ACOS/预算 prompt↔KB 出入核查」。
+
+### 20.1 设计
+目标ACOS = **单值**（运营衡量偏离度的基准）；区间是**给 AI/算法看的工作边界**，在其中选一个值。
+- **上限 acos_ceiling = min(阶段上限, 层级上限)**，镜像 KB03（KB 只读）：阶段 测试50/推进40/收割40/维持40/清货60；层级 长尾P3=30、其余40。**冲突以 KB 为准**。
+- **下限 acos_floor = max(全局 min_acos=25, 各广告目的下限的最大值)**，且不超过上限（上限优先）。目的下限（needs_review 初值）：盈利25/转化25/排名35/引流40；多目的取最大。
+- 精度 **5% 取整**。
+- 同一区间函数同时进**算法**（定时跑批主力 + 实时降级）与 **prompt**（实时 LLM 主路）→ 四处口径一致。
+
+### 20.2 改动（4 文件）
+| 文件 | 改动 |
+|---|---|
+| `app/config/thresholds.toml` | `[target_acos]` 保留 `min_acos=25`、`increment=5`；**删** `stage_scopes`（min=5/10 与 25 矛盾）；**新增** `stage_ceilings`/`level_ceilings`(KB03同步)/`purpose_floors`(目的下限) |
+| `app/core/recommender.py` | 新增模块函数 `compute_target_acos_band(cfg, stage, level, ad_purposes)`；`TargetAcosRecommender` Step1 基准取区间中点、Step7 钳到 `[floor,ceiling]`+5%取整（先取整再钳）|
+| `app/llm/reasoner.py` | `_P3_TASK_PROMPT` 加「概念澄清」段（目标ACOS↔实测ACOS↔KB上限/容忍上限 三者区分，治幻觉）；删硬编码矛盾（5%下限/±40%/预算30/Bid25）；精度1%→5%；`recommend_p3` 用户消息注入「目标ACOS取值区间」；**删 P3 的关键词级 Bid 调整表述**（P3 仅产出目标ACOS+每日预算，schema 本无该字段）|
+| `app/llm/kb_loader.py` | `p3_recommend` 移除 `"19"`（活动级数值矩阵，对 ASIN 级误导/易引发 ACOS-目标 幻觉）|
+
+### 20.3 自检结论
+- ✅ 编译/TOML/运行时 `recommend()` 端到端跑通；区间边界用例全对（含 floor>ceiling 上限优先、多目的取大、兜底 25–40）。
+- ✅ 删 `stage_scopes` 全仓无残留读取者；`test_recommender_scoring.py` 用的是 `Recommender`（方向评分器）非 `TargetAcosRecommender`，无测试断言 target_acos 具体值 → **零回归**；签名未变；无循环依赖。
+- ⚠️ **行为注意**：① 当前 ACOS 离区间中点远时 Step3/6 易触发 violation → 置信度偏 medium/low（语义合理）；② prompt 示例值（25%）未跟区间联动，靠"示例不照搬"免责声明 + 区间硬约束兜底；③ 阶段值须已归一化（旧值→默认上限40）。
+
+### 20.4 遗留（未引入新问题）
+- **预算线未对齐**：prompt 已改"预算幅度遵循 KB"（KB03=50%），但 `BudgetBidRecommender`/`[budget_bid] max_budget_adjustment_pct=30` 仍 30 —— **改前即存在的不一致**，本轮只做 ACOS，预算另起一轮。
+- **`purpose_floors` 是 needs_review 初值**（运营给的 25/25/35/40），隔离在 toml 一张表便于改。
+- **服务器未同步**：上线前需对本地↔chenv31 的 `thresholds.toml`/`recommender.py` 差异。
+
+---
+
+*最后更新：2026-06-18（v2.8: 修复4 目标ACOS区间化 §20 —— KB锚定区间[下限,上限]内出单值；算法+prompt 双口对齐；删关键词Bid表述/移KB19；自检零回归，遗留预算线对齐）*
+*v2.7: 新增已知逻辑缺陷 §19 —— 定时分析不采信 config 的 acos/预算配置，acos 恒走 AI 现算/floor 5%，config 这两列死写死读；附回填计划已弃、prod 未写入）*
+*v2.6: 新增前端待办 §18 —— F1 完成后左栏切快照 / F2 进行中隐藏批次下拉 / F3 去战略层天数下拉(后端硬编码7天)）*
 *v2.5: 待办逐条对代码核实 §17 —— ⑦库存口径已统一 / ④定时改 cron 实现 / ③父目标闸控已接线（值仍占位）；① is_core / ② Tab4 落 state / ⑤ 新增活动预算回算 / ⑥ 触发场景门禁 确认仍未实现）*
 *v2.4: 双轨读回补全 Tab1关键词/Tab3接线/Tab4 + campaign-panel 前端重构（广告组合预算/回算弹窗/确认弹窗/处理状态筛选/sticky）+ 总览缺数据阻断·广告方向中文化·库存MCP解包 修复 + KB23父目标/Tab4写入 诊断 §16*
 *v2.3: 双轨读回 Tab3/4 + tab5 action粗类化/placement判据/预算约束backend化 + 低价捡漏0.21·1.01重做 + Part 6 真实执行 §15*
