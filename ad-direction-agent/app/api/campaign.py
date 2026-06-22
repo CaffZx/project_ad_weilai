@@ -314,7 +314,13 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             except Exception:  # noqa: BLE001
                 _cfg14 = None
             if _cfg14 and _cfg14.get("long_term"):
-                long_term = _cfg14["long_term"]
+                # 修复②(2026-06-18 最小改法)：cfg14 只承载 1-4，整体替换会丢掉 state 的
+                # daily_budget_override → 定时轨预算 override 因此一直读不到。替换后灌回它，
+                # 让运营设的预算在定时分析里生效（目标 ACOS 走 get_target_acos_override 不受此影响）。
+                _state_budget_override = (long_term or {}).get("daily_budget_override")
+                long_term = dict(_cfg14["long_term"])
+                if _state_budget_override is not None:
+                    long_term["daily_budget_override"] = _state_budget_override
                 if _cfg14.get("ad_directions"):
                     ad_directions = _cfg14["ad_directions"]
 

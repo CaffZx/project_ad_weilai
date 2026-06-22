@@ -21,7 +21,7 @@
 
 数据来源:
   - current_budget : MCP basic_info → Doris 回落 (主推/测试分界 $5)
-  - current_bid    : Doris 上下文 (MCP 不返回, 淘汰池判定用)
+  - current_bid    : MCP ad_campaign_basic_info「关键词BID」(淘汰池判定用)
   - match_type     : Doris 上下文
   - llm_action     : 本批 LLM 输出 (合并后才有)
   注: days_online 不再参与分类 (改前用 14 天判"新建", 现按 KB23 §3.1 纯预算阈值 $5)

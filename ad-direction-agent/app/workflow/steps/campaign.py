@@ -610,8 +610,8 @@ async def _analyze_campaigns_impl(
         item.campaign_id = cu.campaign_id
         item.keyword_id = cu.keyword_id
         item.seller_sku = cu.seller_sku
-        # current_* 以代码可信源（CampaignUnit）为准：current_budget 来自 MCP
-        # ad_campaign_basic_info、current_bid 来自 Doris 上下文，均为后台真值。
+        # current_* 以代码可信源（CampaignUnit）为准：current_budget 与 current_bid
+        # 均来自 MCP ad_campaign_basic_info（关键词BID），均为后台真值。
         # LLM 在 JSON 回填的 current_* 可能抄错，不予采信（proposed_* 仍用 LLM 产出）。
         # 修正后，_resolve_budget_conflicts 末尾的终态 _normalize_action 会据真值重派生 action。
         item.current_budget = cu.current_budget

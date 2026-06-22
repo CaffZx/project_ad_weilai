@@ -245,6 +245,8 @@ class CampaignFetcher:
                     row = payload[0]
                     return campaign_name, _CallResult(ok=True, value={
                         "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                        # 关键词当前出价（MCP 实时值，关键词级；普通小数用 _to_float）
+                        "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
                         "campaign_status": str(row.get("状态") or ""),
                         # 字段缺失 → -1（未知），勿伪装成 0 天触发"新活动保护"
                         "days_online": _to_days_online(row.get("活动上线天数")),
@@ -643,7 +645,8 @@ class CampaignFetcher:
             seller_sku=str(ctx.get("seller_sku") or ""),
             keyword_text=keyword_text,
             match_type=match_type,
-            current_bid=float(ctx.get("keyword_bid") or 0),
+            # current_bid 只取 MCP basic_info 的实时出价；MCP 缺失 → 0（不回落 Doris）
+            current_bid=float(basic.get("keyword_bid") or 0),
             current_budget=float(basic.get("campaign_budget") or ctx.get("campaign_budget") or 0),
             # status 优先 Doris 英文值（ENABLED）；MCP basic_info 返回中文"启用"，机读不一致
             campaign_status=str(ctx.get("campaign_status") or basic.get("campaign_status") or ""),

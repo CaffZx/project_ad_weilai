@@ -1,0 +1,43 @@
+-- 取某父 ASIN 在 t_advert_agent_decision_config 里的「最新配置」
+-- 逐字段取最近一次非空值（可跨不同 decision_id）。空判定：NULL / '' / '[]'。
+-- 只读；MySQL 5.7 / 8.0 通用。输出：两列竖表（字段 | 最新非空值），9 行。
+-- 输入参数：父 ASIN —— 改下面这一行：
+
+SET @parent_asin := 'B0B7S3PWWB';
+
+SELECT 'product_position' AS `字段`,
+  (SELECT product_position FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND product_position IS NOT NULL AND TRIM(product_position) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1) AS `最新非空值`
+UNION ALL SELECT 'product_stage',
+  (SELECT product_stage FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND product_stage IS NOT NULL AND TRIM(product_stage) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'season_type',
+  (SELECT season_type FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND season_type IS NOT NULL AND TRIM(season_type) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'advert_purposes',
+  (SELECT advert_purposes FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND advert_purposes IS NOT NULL AND TRIM(advert_purposes) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'target_keyword_types',
+  (SELECT target_keyword_types FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND target_keyword_types IS NOT NULL AND TRIM(target_keyword_types) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'advert_direction_types',
+  (SELECT advert_direction_types FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND advert_direction_types IS NOT NULL AND TRIM(advert_direction_types) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'day_range',
+  (SELECT day_range FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND day_range IS NOT NULL AND TRIM(day_range) NOT IN ('','[]')
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'target_acos_suggest',
+  (SELECT target_acos_suggest FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND target_acos_suggest IS NOT NULL
+    ORDER BY update_time DESC, id DESC LIMIT 1)
+UNION ALL SELECT 'daily_budget_suggest',
+  (SELECT daily_budget_suggest FROM t_advert_agent_decision_config
+    WHERE parent_asin=@parent_asin AND daily_budget_suggest IS NOT NULL
+    ORDER BY update_time DESC, id DESC LIMIT 1);

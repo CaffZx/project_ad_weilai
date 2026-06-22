@@ -51,7 +51,7 @@ class CampaignUnit(BaseModel):
     seller_sku: str = ""
     keyword_text: str
     match_type: str = ""                     # EXACT / BROAD / PHRASE (Doris 上下文)
-    current_bid: float = 0.0                 # Doris 上下文 (MCP 不返回)
+    current_bid: float = 0.0                 # MCP ad_campaign_basic_info「关键词BID」(缺失则 0)
     current_budget: float = 0.0              # MCP basic_info -> Doris 回落
     campaign_status: str = ""                # MCP basic_info -> Doris 回落
     days_online: int = -1                    # MCP basic_info；-1=未知(拿不到)，勿当"新活动"

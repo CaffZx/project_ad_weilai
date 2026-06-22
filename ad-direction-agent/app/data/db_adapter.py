@@ -757,7 +757,11 @@ class DbAdapter(DataSourceAdapter):
                    SUM(COALESCE(daak.impressions,0)) AS impressions,
                    SUM(COALESCE(daak.sale,0)) AS sale,
                    SUM(COALESCE(daak.units_order,0)) AS units_order,
-                   AVG(daak.keyword_bid) AS keyword_bid
+                   MAX_BY(daak.keyword_bid,
+                          CASE WHEN daak.keyword_bid IS NOT NULL
+                               THEN CONCAT(CAST(daak.local_report_time AS CHAR), '|',
+                                           CAST(COALESCE(daak.create_time, daak.local_report_time) AS CHAR))
+                          END) AS keyword_bid
             FROM dwd_amazon_ad_keyword_report daak
             INNER JOIN dwd_amazon_ad_product daap
                 ON daap.campaign_id = daak.campaign_id
@@ -792,8 +796,10 @@ class DbAdapter(DataSourceAdapter):
     async def _fetch_campaign_context(self, listing_ctx: ListingContext) -> list[dict]:
         """① Doris 轻量上下文查询 — 仅维度字段，不取指标。
 
-        返回: [{campaign_name, campaign_id, campaign_budget, campaign_status,
-                child_asin, seller_sku, keyword_text, match_type, keyword_bid}, ...]
+        返回: [{campaign_name, campaign_id, keyword_id, child_asin, seller_sku,
+                keyword_text, match_type, campaign_status, keyword_status}, ...]
+        注: keyword_bid 不再从此处取 —— current_bid 改由 MCP ad_campaign_basic_info
+            的「关键词BID」提供（campaign_fetcher._assemble），Doris 不再作 bid 来源。
         """
         if not listing_ctx.child_asins:
             return []
@@ -804,8 +810,7 @@ class DbAdapter(DataSourceAdapter):
             SELECT daak.campaign_name, daak.campaign_id, daak.keyword_id,
                    daap.asin AS child_asin, daap.seller_sku,
                    daak.keyword_text, daak.match_type,
-                   'ENABLED' AS campaign_status, 'ENABLED' AS keyword_status,
-                   AVG(daak.keyword_bid) AS keyword_bid
+                   'ENABLED' AS campaign_status, 'ENABLED' AS keyword_status
             FROM dwd_amazon_ad_keyword_report daak
             INNER JOIN dwd_amazon_ad_product daap
                 ON daap.campaign_id = daak.campaign_id

@@ -155,11 +155,9 @@ class MySQLStateManager:
                 data["ad_purposes"] = ap or []
                 data["target_keyword_strategy"] = kt or []
             if bud:
-                exp = bud.get("expires_at")
-                if isinstance(exp, str):
-                    exp = datetime.fromisoformat(exp)
-                if exp and datetime.now(timezone.utc) <= exp.replace(tzinfo=timezone.utc) if exp.tzinfo is None else exp:
-                    data["daily_budget_override"] = bud.get("value")
+                # 人工预算 override 不再按时间过期（2026-06-18 最小改法①）：
+                # 仅由 new-event 失效；expires_at 列保留但读时忽略。与 acos override 对称。
+                data["daily_budget_override"] = bud.get("value")
             if "product_stage" in data:
                 from app.models.layers import STAGE_OLD_TO_NEW
                 data["product_stage"] = STAGE_OLD_TO_NEW.get(
@@ -477,14 +475,9 @@ class MySQLStateManager:
                 )
                 if not row:
                     return None
-                exp = row["expires_at"]
-                if isinstance(exp, str):
-                    exp = datetime.fromisoformat(exp)
-                if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) > exp:
-                    self._execute("DELETE FROM acos_override WHERE asin=%s", (asin,))
-                    return None
+                # 人工 ACOS override 不再按时间过期（2026-06-18 最小改法①）：
+                # 仅由 new-event(clear_target_acos_override) 失效；expires_at 列保留但读时忽略。
+                # 目的：运营设的目标 ACOS 在定时分析里持久生效，直到新建分析事件清除。
                 return int(row["value"])
             except Exception as e:  # noqa: BLE001
                 logger.warning("读取目标ACOS覆盖失败 [%s]: %s", asin, e)
