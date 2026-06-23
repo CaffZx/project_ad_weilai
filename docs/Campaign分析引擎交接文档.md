@@ -936,11 +936,51 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 ### 20.4 遗留（未引入新问题）
 - **预算线未对齐**：prompt 已改"预算幅度遵循 KB"（KB03=50%），但 `BudgetBidRecommender`/`[budget_bid] max_budget_adjustment_pct=30` 仍 30 —— **改前即存在的不一致**，本轮只做 ACOS，预算另起一轮。
 - **`purpose_floors` 是 needs_review 初值**（运营给的 25/25/35/40），隔离在 toml 一张表便于改。
-- **服务器未同步**：上线前需对本地↔chenv31 的 `thresholds.toml`/`recommender.py` 差异。
+- ~~**服务器未同步**~~ → **已于 2026-06-22 上线**（见 §21）。
 
 ---
 
-*最后更新：2026-06-18（v2.8: 修复4 目标ACOS区间化 §20 —— KB锚定区间[下限,上限]内出单值；算法+prompt 双口对齐；删关键词Bid表述/移KB19；自检零回归，遗留预算线对齐）*
+## 21. 2026-06-22：override 持久化上线 + 前端广告方向统一 + 卡C态/MCP慢 诊断 + state库回填
+
+> 本会话改动**已全部同步到服务器 chenv31** 并重启生效（systemd `ad-direction-agent`）。每次同步走：本地改 → diff(无漂移) → 备份(`_bak_*`) → 转LF上传 → py_compile/import 预检 → 重启 → /health 200。
+
+### 21.1 override 持久化（acos/预算 override 跨日/跨事件持久）— 已上线
+运营设的目标 ACOS / 预算 override 此前**每日 5:00 过期** + new-event 清除，导致定时分析读不到。4 处最小改法：
+| # | 文件 | 改动 |
+|---|---|---|
+| ①a | `mysql_state_manager.py` `get_target_acos_override` | 删过期 DELETE 分支 → 持久 `return int(row["value"])` |
+| ①b | 同文件 `get_long_term_config`（budget） | 删过期门控 → 无条件 `data["daily_budget_override"]=bud["value"]` |
+| ② | `api/campaign.py:316` | cfg14 替换 long_term 前**先存 `daily_budget_override`、替换后灌回**（定时轨预算 override 才读得到）|
+| ③ | `api/decision.py` new-event | 去掉 `clear_target_acos_override` → acos override 跨新建事件保留（仅"取消覆盖"删，与预算对齐）|
+- **效果**：定时分析现在**采信 state库 override**（acos 走 `get_target_acos_override`；预算走 cfg14 灌回 + `build_campaign_strategy_context`）。**前提：运营设过**——没设则 acos 落 AI 推荐器、预算落数仓兜底（§21.4 实测 542 个配置 ASIN 里仅 34 有 acos override、508 空）。
+- ⚠ `①a` 注释残留"仅由 new-event 失效"与 `③` 矛盾（实际仅"取消覆盖"删），待清理。
+
+### 21.2 前端：广告方向开关统一 + renderP3 守卫 — 已上线
+- **广告方向配置栏与 ACOS/预算同框同切**（根治"偶现只读'—'无法调"漂移）：`leftDirectionsBlock` 去自身 `hidden`(绑父 cardP3Override 可见性) + 开关绑到 `loadAll` 同一处 + `_dirFallbackOptsHtml()` 4方向兜底 + `loadExecution` 降级为只灌选项。快照态 `renderReadonlyPreset` 仍原子只读。
+- **`renderP3` 加 `if(!data)return`**：修保存目标ACOS时 `cannot read properties of null (reading 'target_acos')` 崩溃（`_p3data` 未就绪时保存/取消传 null）。
+
+### 21.3 已知问题/待办（本会话诊断，未修）
+| 问题 | 根因 | 修法方向 |
+|---|---|---|
+| **实时分析结束后卡 C 态**（下拉不渲快照 + 显"放弃本次分析"）| `analysis_session` 表行没清 → `/decision/context` 恒判 in_progress。`clear_analysis_session` **只在 write_full OK 时清**；失败/超时/中途放弃不清；12h TTL 只在该 ASIN 被查时才触发。实测残留 14 行(含 06-17/18 死行) | ① 失败也清 session ② 全局 TTL 清理(`DELETE WHERE started_at<now-12h`) ③ 前端超时对齐后端 |
+| **每次新建分析"先快照后配置"闪烁** | `onNewEventClick` 里**阻塞 `alert`** 把旧 B 态快照晾在背后，点掉才 `loadAll` 渲配置。每次必现 | 确认后立即切加载态 + 把 alert 移到 loadAll 之后 |
+| **新建分析进来慢（60-95s/MCP工具）** | MCP 网关慢（avg 11s/max 258s/工具），一次分析 90-465s。叠加多 ASIN 并发 + 个别店铺(am_jinglilai_US)数仓慢查 + ad_keyword_report 工具名失效回落 | 治 MCP 网关/数仓，非 app |
+| **超长 SKU 名写不进 state库** | `asin` 列宽不够（`US-运动文胸短细常规V领+宽肩带低星清货` 撑爆）| 跳过 或 加宽列 |
+
+### 21.4 一次性数据操作：state库 override 回填（315 个）
+- 从 `t_advert_agent_decision`（06-17/18，acos>5%）逐 ASIN 选值（优先手动REALTIME、取预算最高），剔除已有 override 的，回填 `acos_override`+`budget_override`。
+- **315/316 成功**（1 个超长 SKU 名失败，§21.3）。写前已备份 `acos_override_bak_20260622`(34)/`budget_override_bak_20260622`(132)，回滚就绪。
+
+### 21.5 容量结论（定时批量 500+ ASIN）
+- **state库扛得住、非瓶颈**：`max_connections=151`，25天历史峰值 `Max_used_connections=5`，容器闲（CPU<1%）。
+- 批次并发 = **5**（`batch_via_api.py:41 DEFAULT_CONCURRENCY`，cron 不传参→用默认；asyncio.Semaphore 节流）。可调 `--concurrency` 但**真瓶颈是 MCP**，调高并发可能不提速反增超时/卡C态。
+- ⚠ `mysql_state_manager._execute` 每次新建连接、无连接池——并发5无碍，并发调到几十才需加池。
+- ⚠ `batch_via_api.py:34` 硬编码 prod ERP 明文账密，建议挪 `.env`。
+
+---
+
+*最后更新：2026-06-22（v2.9: override 持久化上线 + 前端广告方向统一/renderP3守卫 + 卡C态·MCP慢·新建闪烁 诊断待办 + state库回填315 §21）*
+*v2.8: 修复4 目标ACOS区间化 §20 —— KB锚定区间[下限,上限]内出单值；算法+prompt 双口对齐；删关键词Bid表述/移KB19；自检零回归，遗留预算线对齐）*
 *v2.7: 新增已知逻辑缺陷 §19 —— 定时分析不采信 config 的 acos/预算配置，acos 恒走 AI 现算/floor 5%，config 这两列死写死读；附回填计划已弃、prod 未写入）*
 *v2.6: 新增前端待办 §18 —— F1 完成后左栏切快照 / F2 进行中隐藏批次下拉 / F3 去战略层天数下拉(后端硬编码7天)）*
 *v2.5: 待办逐条对代码核实 §17 —— ⑦库存口径已统一 / ④定时改 cron 实现 / ③父目标闸控已接线（值仍占位）；① is_core / ② Tab4 落 state / ⑤ 新增活动预算回算 / ⑥ 触发场景门禁 确认仍未实现）*

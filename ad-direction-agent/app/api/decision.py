@@ -107,7 +107,8 @@ async def new_decision_event(req: dict):
     """新建分析事件 → 在 state 库标记进行中（run_id 作批次句柄）。
 
     不在 ERP 库预建 decision 行——decision_id 由执行层 write_full 落库时生成。
-    清空 3-4（target_acos_override + p3 缓存 + execution），保留 1-2 继承。
+    清空 p3 缓存 + 广告方向(execution)；acos/预算 override 保留继承（仅"保存"覆盖、
+    "取消覆盖"删除，与预算行为对齐，2026-06-18 ③），保留 1-2 继承。
     返回: { run_id, analysis_mode }
     """
     asin = str(req.get("asin", "")).strip()
@@ -128,9 +129,8 @@ async def new_decision_event(req: dict):
     if not state.set_analysis_session(asin, run_id):
         return {"ok": False, "error": "标记进行中事件失败"}
 
-    # 清 3-4，保留 1-2 继承
+    # 清 p3 缓存 + 广告方向；acos/预算 override 保留继承（保存覆盖/取消覆盖删除），保留 1-2
     try:
-        state.clear_target_acos_override(asin)
         if hasattr(state, "clear_p3_recommendation"):
             state.clear_p3_recommendation(asin)
         wf = state.get_workflow_state(asin) or {}

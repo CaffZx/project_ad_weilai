@@ -35,22 +35,20 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     if not pending:
         return {"ok": False, "error": f"批次 {decision_id} 不存在"}
 
-    # 拉"花费最多的子 ASIN"的 size/color，用于 create_portfolio_campaign 顶层 productSize/productColor
+    # 拉"花费最多的子 ASIN"，用于 create_portfolio_campaign 顶层 asin 字段（MCP schema 必填）
     parent_asin_for_attrs = str((pending.get("decision") or {}).get("parent_asin") or "")
     attrs = None
     if parent_asin_for_attrs:
         import asyncio as _aio
         attrs = await _aio.to_thread(lookup_top_child_attrs, parent_asin_for_attrs)
         if attrs:
-            logger.info("Advert exec top-child attrs [%s] child=%s size=%s color=%s",
-                        parent_asin_for_attrs, attrs.get("asin"),
-                        attrs.get("product_size"), attrs.get("product_color"))
+            logger.info("Advert exec top-child [%s] child=%s",
+                        parent_asin_for_attrs, attrs.get("asin"))
         else:
-            logger.warning("Advert exec top-child attrs [%s] 查不到", parent_asin_for_attrs)
+            logger.warning("Advert exec top-child [%s] 查不到", parent_asin_for_attrs)
     plan = build_exec_plan(
         pending, operator=operator,
-        product_size=(attrs or {}).get("product_size"),
-        product_color=(attrs or {}).get("product_color"),
+        child_asin=(attrs or {}).get("asin"),
     )
     if plan.is_empty():
         return {"ok": True, "applied": 0, "skipped": 0, "msg": "无待执行项（可能已执行或无确认）"}
@@ -182,15 +180,13 @@ async def submit_execution_direct(
         import asyncio as _aio
         attrs = await _aio.to_thread(lookup_top_child_attrs, parent_asin_for_attrs)
         if attrs:
-            logger.info("Advert exec(direct) top-child attrs [%s] child=%s size=%s color=%s",
-                        parent_asin_for_attrs, attrs.get("asin"),
-                        attrs.get("product_size"), attrs.get("product_color"))
+            logger.info("Advert exec(direct) top-child [%s] child=%s",
+                        parent_asin_for_attrs, attrs.get("asin"))
         else:
-            logger.warning("Advert exec(direct) top-child attrs [%s] 查不到", parent_asin_for_attrs)
+            logger.warning("Advert exec(direct) top-child [%s] 查不到", parent_asin_for_attrs)
     plan = build_exec_plan(
         pending, operator=operator,
-        product_size=(attrs or {}).get("product_size"),
-        product_color=(attrs or {}).get("product_color"),
+        child_asin=(attrs or {}).get("asin"),
     )
     if plan.is_empty():
         return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}

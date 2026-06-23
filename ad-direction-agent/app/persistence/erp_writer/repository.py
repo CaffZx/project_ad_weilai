@@ -1335,9 +1335,10 @@ class ErpDualWriterRepository:
             product_position, product_stage, season_type,
             advert_purposes, target_keyword_types,
             advert_direction_types,
+            target_acos_suggest, daily_budget_suggest,
             create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -1351,10 +1352,12 @@ class ErpDualWriterRepository:
             advert_purposes=VALUES(advert_purposes),
             target_keyword_types=VALUES(target_keyword_types),
             advert_direction_types=VALUES(advert_direction_types),
+            target_acos_suggest=VALUES(target_acos_suggest),
+            daily_budget_suggest=VALUES(daily_budget_suggest),
             update_time=VALUES(update_time)
         """
-        # 注：target_acos_suggest / daily_budget_suggest 不在此写入——config 只存运营手动
-        # 确认值，AI 推荐值不进 config（这两列留给前端「保存」手动写入；分析/落库不触碰）。
+        # target_acos_suggest / daily_budget_suggest：记录「本次分析事件所用的」ACOS/预算
+        # （resolved 值，与决策表 _upsert_decision 同源同口径）；分析完成时随 1-4 一并落库。
         cur.execute(
             sql,
             (
@@ -1370,6 +1373,8 @@ class ErpDualWriterRepository:
                 to_enum_list(meta.get("ad_purposes"), map_purpose_target),
                 to_enum_list(meta.get("target_keyword_types"), map_target_keyword_type),
                 map_direction_types_json(meta.get("advert_direction_types") or []),
+                (str(_a) if (_a := target_acos.get("recommended_target")) not in (None, "") else None),
+                (str(_b) if (_b := budget_bid.get("suggested")) not in (None, "") else None),
                 now,
                 now,
             ),

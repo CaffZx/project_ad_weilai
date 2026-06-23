@@ -78,7 +78,7 @@ class ExecPlan:
         return not (self.params_vo_list or self.create_calls or self.negative_calls)
 
 
-def build_exec_plan(pending: dict, *, operator: str) -> ExecPlan:
+def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = None) -> ExecPlan:
     """把一个 decision 的 CONFIRMED pending 行编译成 MCP 调用计划 + record ops。"""
     plan = ExecPlan()
     dec = pending.get("decision") or {}
@@ -101,7 +101,8 @@ def build_exec_plan(pending: dict, *, operator: str) -> ExecPlan:
     for cid in create_card_ids:
         card = cards[cid]
         _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
-                           shop_id, parent_asin, parent_sku, user)
+                           shop_id, parent_asin, parent_sku, user,
+                           child_asin=child_asin)
 
     # ── 2. 否定词：keyword_pending 中 NEGATIVE 行 → agent_create_negative_keywords ──
     neg_by_campaign: dict[str, list[dict]] = defaultdict(list)
@@ -206,7 +207,8 @@ def build_exec_plan(pending: dict, *, operator: str) -> ExecPlan:
 
 
 def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
-                       shop_id, parent_asin, parent_sku, user):
+                       shop_id, parent_asin, parent_sku, user,
+                       *, child_asin: str | None = None):
     budget_row = next((r for r in camp_rows if str(r.get("suggest_card_id")) == cid), None)
     kws = [r for r in kw_rows if str(r.get("suggest_card_id")) == cid]
     plcs = [r for r in plc_rows if str(r.get("suggest_card_id")) == cid]
@@ -230,7 +232,7 @@ def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
                 str(r.get("placement_type") or "").upper(), "TOP"),
             "percentage": _num(r.get("new_percent")) or 0,
         } for r in plcs if _num(r.get("new_percent")) is not None]
-    plan.create_calls.append({
+    create_call_args: dict[str, Any] = {
         "_card_id": cid,                       # 内部追踪（调用前剔除）
         "shopId": shop_id,
         "parentAsin": parent_asin,
@@ -238,7 +240,11 @@ def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
         "currentUserId": user,
         "adjustReason": f"AI 新建活动：{card.get('campaign_name')}",
         "createCampaignVo": {k: v for k, v in create_vo.items() if v is not None},
-    })
+    }
+    # MCP 端 schema 必填：顶层传子 ASIN（不在 createCampaignVo 内）
+    if child_asin:
+        create_call_args["asin"] = child_asin
+    plan.create_calls.append(create_call_args)
     plan.ops.append({
         "record_kind": "campaign", "suggest_card_id": cid, "campaign_id": None,
         "campaign_name": card.get("campaign_name"), "is_create": True,

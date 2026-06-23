@@ -121,17 +121,17 @@ description = "精准长尾搜索词，CPC低转化率高，适合转化和ACOS�
 [[tactics.target_keyword_strategy.options]]
 id = "竞品词"
 label = "竞品词"
-description = "竞品品牌/ASIN词，适合截流和竞品防守"
+description = "直接竞品反查得出的关键词，初始中低 Bid 测试"
 
 [[tactics.target_keyword_strategy.options]]
 id = "品牌词"
 label = "品牌词"
-description = "自身品牌词，防守流量防止竞品截流"
+description = "借品牌流量做平替转化，小比例补充策略"
 
 [[tactics.target_keyword_strategy.options]]
 id = "自定义"
 label = "自定义"
-description = "运营手动指定的关键词列表"
+description = "运营经验词/节日词/趋势词"
 
 # ── Layer 1.4 执行层 ─────────────────────────────────────
 
