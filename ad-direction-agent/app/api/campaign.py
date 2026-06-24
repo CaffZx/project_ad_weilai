@@ -58,7 +58,11 @@ async def _maybe_push_erp(
 
     ok, reason = should_push_to_erp(result)
     if not ok:
-        return {"attempted": False, "ok": False, "skipped": reason}
+        out = {"attempted": False, "ok": False, "skipped": reason}
+        if reason == "data_unavailable":
+            # 上游数据拉取失败：显式标记，供批量/前端区分于良性"无调整"跳过
+            out["data_unavailable"] = True
+        return out
 
     wizard_payload, wizard_partial = wizard_payload_from_state(
         asin, days, state,

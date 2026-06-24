@@ -202,6 +202,11 @@ def should_push_to_erp(result: CampaignAnalysisResult | dict[str, Any]) -> tuple
     else:
         data = dict(result)
 
+    # 上游数据(数仓/MCP)拉取失败/超时 → 本次未真正分析，明确区别于"无调整"业务态。
+    # 既不写 ERP，也不能被下游当作良性跳过（否则上游故障会被批量统计伪装成正常 no-adjustments）。
+    if data.get("data_unavailable"):
+        return False, "data_unavailable"
+
     # 注意：sanity_check_passed 不作落库门槛。它衡量的是「sanity 旁路 LLM
     # 步骤是否成功跑完」（禁用/无低置信项也可能为 True，LLM 抖动则为 False），
     # 并非主分析结果（adjustments/cards）的质量。sanity 结论照常落 summary

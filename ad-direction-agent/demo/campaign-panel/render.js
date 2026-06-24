@@ -61,9 +61,6 @@ function _fullRender(state) {
   const vm = state;
   const { mode } = vm;
 
-  // 告警
-  _renderWarnings(vm);
-
   // sanity 校验未通过警示（sanity 失败照常落库，仅警示不阻断执行）
   _renderSanityNotice(vm);
 
@@ -79,12 +76,22 @@ function _fullRender(state) {
     _hide('camp-portfolio-pills-row');
     _hide('camp-batch-toolbar');
     _hide('camp-list');
+    _hide('camp-warnings-panel');
     _show('camp-synthesis');
     _renderSynthesis(vm);
+  } else if (state._activeTab === 'warnings') {
+    _hide('camp-filters');
+    _hide('camp-portfolio-pills-row');
+    _hide('camp-batch-toolbar');
+    _hide('camp-list');
+    _hide('camp-synthesis');
+    _show('camp-warnings-panel');
+    _renderWarningsPanel(vm);
   } else {
     _show('camp-filters');
     _show('camp-list');
     _hide('camp-synthesis');
+    _hide('camp-warnings-panel');
     _renderPortfolioFilterPills(state);
     _renderBatchToolbar(state);
     _renderCards(state);
@@ -133,16 +140,18 @@ function _renderSanityNotice(vm) {
   }
 }
 
-// ── 告警 ──
-function _renderWarnings(vm) {
+// ── 告警（「告警」tab 内容，常驻；空态显示「暂无告警」）──
+function _renderWarningsPanel(vm) {
   const warnings = vm.warnings || [];
-  const el = _$('camp-warnings');
+  const el = _$('camp-warnings-panel');
   if (!el) return;
-  if (!warnings.length) { _hide('camp-warnings'); return; }
-  el.textContent = `⚠ ${warnings.length} 条告警`;
-  el.title = warnings.join('\n');
-  el.classList.remove('hidden');
-  el.onclick = () => { alert(warnings.join('\n\n')); };
+  if (!warnings.length) {
+    el.innerHTML = '<div class="camp-card text-sm muted" style="text-align:center;padding:20px;">暂无告警</div>';
+    return;
+  }
+  el.innerHTML = warnings.map(w =>
+    `<div class="camp-card text-sm" style="padding:8px 12px;margin-bottom:6px;background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;">⚠ ${_esc(w)}</div>`
+  ).join('');
 }
 
 // ── 概览统计 ──
@@ -170,9 +179,11 @@ function _renderSummaryStats(vm) {
 function _renderTabButtons(state) {
   const tabs = _$('camp-tabs');
   if (!tabs) return;
+  const warnN = (state.warnings || []).length;
   tabs.innerHTML = `
     <button class="camp-ctab-btn ${state._activeTab === 'detail' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="detail">明细</button>
     <button class="camp-ctab-btn ${state._activeTab === 'summary' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="summary">汇总</button>
+    <button class="camp-ctab-btn ${state._activeTab === 'warnings' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="warnings">告警${warnN ? ` (${warnN})` : ''}</button>
   `;
 }
 

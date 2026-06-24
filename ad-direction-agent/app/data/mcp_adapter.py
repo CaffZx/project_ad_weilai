@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -133,7 +134,7 @@ class McpAdapter(DataSourceAdapter):
                     json.dumps(arguments, ensure_ascii=False)[:220],
                 )
                 if attempt < retries:
-                    await asyncio.sleep(min(0.5 * (attempt + 1), 1.5))
+                    await asyncio.sleep(min(0.5 * (attempt + 1), 1.5) + random.uniform(0.05, 0.2))
         return _CallResult(ok=False, error=last_err)
 
     async def _resolve_context(self, asin: str, days: int) -> McpContext:

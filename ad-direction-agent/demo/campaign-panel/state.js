@@ -214,6 +214,11 @@ export function createCampaignState() {
     }
 
     const selectedKeys = Array.from(state._selection);
+    // 即时反馈：MCP 下发慢（§21.3），点确认后先弹轻量提示，避免"点了没反应"；
+    // 2400ms 自动消失，结果回来的常驻 toast 会覆盖它。
+    _toast(decision === 'approve'
+      ? `正在下发 ${selectedKeys.length} 个调整到 MCP，请稍候…`
+      : `正在提交 ${selectedKeys.length} 项审核…`);
     try {
       const decisions = selectedKeys.map(key => ({ campaign_key: key, decision }));
       const resp = await fetch((window.location.origin || '') + '/api/v1/agent/ad-direction/campaign/confirm', {
@@ -249,12 +254,12 @@ export function createCampaignState() {
         if (body.ok === true) {
           selectedKeys.forEach(key => { state._reviewState[key] = decision; });
           _saveReviewState(); _reRender();
-          _toast(`已下发 ${ops} 个调整到 MCP${taskIds.length ? `（task=${(taskIds[0]||'').slice(0,8)}…）` : ''}`);
+          _toast(`已下发 ${ops} 个调整到 MCP${taskIds.length ? `（task=${(taskIds[0]||'').slice(0,8)}…）` : ''}`, {sticky:true});
         } else if (ops > 0 || taskIds.length > 0) {
           // 部分成功
           selectedKeys.forEach(key => { state._reviewState[key] = decision; });
           _saveReviewState(); _reRender();
-          _toast(`部分下发成功：${ops} 个调用 / ${errs.length} 个失败 — ${(errs[0]||'').slice(0,80)}`);
+          _toast(`部分下发成功：${ops} 个调用 / ${errs.length} 个失败 — ${(errs[0]||'').slice(0,80)}`, {sticky:true});
         } else {
           throw new Error((errs[0]) || body.error || '全部下发失败');
         }
@@ -265,11 +270,11 @@ export function createCampaignState() {
         }
         selectedKeys.forEach(key => { state._reviewState[key] = decision; });
         _saveReviewState(); _reRender();
-        _toast(`已写回 ${applied} 项${skipped ? `，跳过 ${skipped} 项` : ''}`);
+        _toast(`已写回 ${applied} 项${skipped ? `，跳过 ${skipped} 项` : ''}`, {sticky:true});
       }
     } catch (e) {
       console.warn('[campaign-panel] /campaign/confirm 失败:', e.message);
-      _toast(`审核写回失败：${e.message || '未知错误'}`);
+      _toast(`审核写回失败：${e.message || '未知错误'}`, {sticky:true});
     }
   };
 
@@ -395,11 +400,12 @@ export function createCampaignState() {
       _toast(
         isDryRun
           ? `已 DRY-RUN 落库 ${applied} 组预算调整（未真改广告）record=${recordId}${warn}`
-          : `已下发 ${applied} 组预算调整到 MCP record=${recordId}${warn}`
+          : `已下发 ${applied} 组预算调整到 MCP record=${recordId}${warn}`,
+        {sticky:true}
       );
     } catch (e) {
       console.warn('[campaign-panel] /campaign/execute-portfolio-budget 失败:', e.message);
-      _toast(`组合预算执行失败：${e.message || '未知错误'}`);
+      _toast(`组合预算执行失败：${e.message || '未知错误'}`, {sticky:true});
     }
   };
 
@@ -439,7 +445,8 @@ export function createCampaignState() {
   };
 
   // ── toast ──
-  function _toast(msg) {
+  // 轻量提示（默认）：2400ms 自动消失；执行结果（opts.sticky）：常驻 + 右上角「×」可关闭。
+  function _toast(msg, opts = {}) {
     let el = document.getElementById('camp-toast');
     if (!el) {
       el = document.createElement('div');
@@ -447,10 +454,27 @@ export function createCampaignState() {
       el.className = 'camp-toast';
       document.body.appendChild(el);
     }
-    el.textContent = msg;
-    el.classList.add('show');
     clearTimeout(el._tid);
-    el._tid = setTimeout(() => el.classList.remove('show'), 1800);
+    if (opts.sticky === true) {
+      el.classList.add('sticky');
+      el.innerHTML = '';
+      const span = document.createElement('span');
+      span.textContent = msg;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'camp-toast-close';
+      btn.textContent = '×';
+      btn.setAttribute('aria-label', '关闭');
+      btn.onclick = () => el.classList.remove('show');
+      el.appendChild(span);
+      el.appendChild(btn);
+      el.classList.add('show');           // 常驻：不设自动消失 timer
+    } else {
+      el.classList.remove('sticky');
+      el.textContent = msg;               // 清掉上一条 sticky 残留的子节点
+      el.classList.add('show');
+      el._tid = setTimeout(() => el.classList.remove('show'), 2400);
+    }
   }
 
   return state;

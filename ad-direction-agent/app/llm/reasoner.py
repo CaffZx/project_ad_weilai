@@ -374,9 +374,10 @@ _CAMPAIGN_BROAD_PROMPT = (
 
 
 def _build_campaign_system_prompt(task_type: str = "exact") -> str:
-    kb_content = kb.build("campaign_adjustment")
+    # 精准/广泛各取切片化 preset（2026-06-24）：精准带广告位节、广泛带否词节，互不注入对方噪声
+    preset = "campaign_adjustment_exact" if task_type == "exact" else "campaign_adjustment_broad"
     template = _CAMPAIGN_EXACT_PROMPT if task_type == "exact" else _CAMPAIGN_BROAD_PROMPT
-    return template.replace("{kb_content}", kb_content)
+    return template.replace("{kb_content}", kb.build(preset))
 
 
 # ── Campaign 新增活动 Prompt (KB 16 + 06) ────────────────────────────────────
@@ -398,13 +399,17 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 
 ## 输入
 - 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循）
-- **本产品标识**（标题 / 品牌 / 品类）+ **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
+- **本产品标题** + **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
 - 候选词列表：每个含 keyword_text / search_volume / natural_rank / trigger_scene / source（来源）
 
 ## 相关性判断（首要，KB 06 §3 相关性精神）
-- **相关性是 create 的第一道关**：候选词须与"本产品标识 + 已投放关键词"语义相关（同品类/同款式/同用途）才考虑 create；**与产品明显无关的词一律 skip**，reason 说明"与本产品无关"。
+- **属性级精准，不是品类级**：候选词须匹配**标题里的具体属性**（款式/长度/版型/用途/人群），仅"同品类"不够。例：标题是"短裙 mini skirt"→"中长裙 midi/maxi""连衣裙 dress"虽同属裙类但**长度/款式不符 → skip**；"运动文胸 sports bra"→"普通文胸/内衣"属性不符 → skip。**与标题具体属性不符的词一律 skip**，reason 点明属性是否吻合。
 - **`natural_rank` 有值 = 事实相关**（亚马逊确实让本产品排该词）→ 默认视为相关，可信。
-- **锚点稀薄保护**：当"已投放关键词"为空、品牌/品类缺失（新品/小 ASIN）时，**不要因为参照少就过度 skip**——以标题为主判相关性；有 `natural_rank` 或与标题强重叠的词应保留。这些产品恰最需要新增词，勿误杀。
+- **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，**不要因为参照少就过度 skip**——以标题为主判相关性；有 `natural_rank` 或与标题强重叠的词应保留。这些产品恰最需要新增词，勿误杀。
+
+## 词型偏好（KB 06：长尾精准 优先于 大词/泛词）
+- **优先精准长尾词**（多词、含产品具体属性 → 相关性高、竞争低、ACOS 可控），这是运营偏好。
+- **审慎对待大词/泛词**（单词或品类大词，如 "skirt"/"dress"/"bra"）：相关性弱、流量泛、ACOS 难控。**除非**策略上下文显示产品处于**测试期**或**引流型**（明确需测词/拿量），否则**倾向 skip**；收割/盈利/维持期尤其不应新建大词活动。
 
 ## 输出 JSON（严格 schema，禁 markdown 围栏）
 {
@@ -422,7 +427,7 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 
 ## 判断与文案规则
 - 不值得建的词（**与产品无关** / 相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因
-- **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与标题/品类/已投词关联）；说不出相关性的不得 create
+- **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与**标题具体属性**/已投词关联）；说不出相关性的不得 create
 - action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则
 - reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议
 - 禁用规则编号 / 内部术语；evidence 引用具体数值
@@ -1756,8 +1761,6 @@ class LLMReasoner:
         timeout_override: float | None = None,
         *,
         product_title: str = "",
-        product_brand: str = "",
-        product_category: str = "",
         existing_keywords: list[str] | None = None,   # 已投放关键词（相关性参照锚点）
     ) -> dict:
         """KB 16+06 新增活动批量分析（单批）。LLM 只判 action + keyword_class + 文本，数值代码定。
@@ -1783,14 +1786,11 @@ class LLMReasoner:
         if _adirs:
             ctx_parts.append(f"  - 广告方向(运营已选): {_adirs}")
 
-        # 相关性锚点：产品标识 + 已投放关键词（H1/H12：brand/category 可能空 → 判空不输出，主力靠 title+已投词）
-        anchor_parts = ["## 本产品标识 + 已投放关键词（相关性参照）"]
+        # 相关性锚点：产品标题 + 已投放关键词（去 brand/category：品类太粗、会把 LLM 引向品类级误匹配，
+        # 判别"短裙≠中长裙"靠标题的具体属性；brand 仅 KB06 品牌词识别用，不作相关性锚点）
+        anchor_parts = ["## 本产品标题 + 已投放关键词（相关性参照）"]
         if (product_title or "").strip():
             anchor_parts.append(f"  - 产品标题: {product_title.strip()[:300]}")
-        if (product_brand or "").strip():
-            anchor_parts.append(f"  - 品牌: {product_brand.strip()}")
-        if (product_category or "").strip():
-            anchor_parts.append(f"  - 品类: {product_category.strip()}")
         _exist = [k for k in (existing_keywords or []) if str(k).strip()][:60]
         if _exist:
             anchor_parts.append(f"  - 已投放关键词({len(_exist)}个，相关性参照): {', '.join(_exist)}")

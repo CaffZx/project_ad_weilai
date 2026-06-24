@@ -54,9 +54,6 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             ⚠ AI 建议仅供参考，请结合运营经验判断。执行操作前请二次确认。
           </div>
 
-          <!-- 告警 -->
-          <div id="camp-warnings" class="hidden" style="margin-bottom:8px;padding:6px 12px;background:#FEF2F2;border:1px solid #FECACA;border-radius:6px;font-size:12px;color:#991B1B;cursor:pointer;" title="点击查看详情"></div>
-
           <!-- 策略总览 -->
           <div id="camp-overview" class="camp-card hidden" style="margin-bottom:12px;">
             <div class="camp-card-title">策略总览（执行总纲）</div>
@@ -88,7 +85,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           </div>
 
           <!-- 多维筛选下拉 -->
-          <div id="camp-filters" class="hidden" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:8px 12px;margin-bottom:8px;">
+          <div id="camp-filters" class="hidden" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:6px 12px;margin-bottom:8px;">
             <div class="filter-group">
               <span class="filter-label">动作</span>
               <select id="camp-filter-action">
@@ -149,6 +146,9 @@ export async function mountCampaignPanel(containerEl, options = {}) {
 
           <!-- 汇总区 -->
           <div id="camp-synthesis" class="hidden"></div>
+
+          <!-- 告警区（与明细/汇总同级的 tab 内容，常驻；空态显示「暂无告警」） -->
+          <div id="camp-warnings-panel" class="hidden"></div>
 
           <!-- 回算修改弹窗挂载点（_renderReallocModal 渲染于此；在 camp-root 内以保事件委托） -->
           <div id="camp-modal-mount"></div>

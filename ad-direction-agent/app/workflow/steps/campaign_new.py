@@ -63,6 +63,17 @@ def _is_noise_keyword(kw: str) -> bool:
     return not kw or len(kw) < 3 or bool(_NOISE_RE.match(kw.strip()))
 
 
+def _longtail_sort_key(c: "NewCampaignCandidate"):
+    """候选排序键 —— **长尾优先**（运营偏好精准长尾，非大词/泛词）：
+    ① 有自然位优先（产品已在排 = 事实相关）；
+    ② **词数多者优先**（词越多越精准的长尾；单/双词多为大词/泛词）—— **不设上限**；
+    ③ 搜索量仅作同级 tiebreak（不再当主排序——否则高流量大词霸榜、长尾在进 LLM 前就被 Top-N
+       截掉，正是"总扩大词/泛词"的代码层根因。KB06：long_tail 精准 优先于 generic 大词测词）。
+    MIN_SEARCH_VOLUME 已兜底防零流量垃圾长串。
+    """
+    return (c.natural_rank is None, -len((c.keyword_text or "").split()), -(c.search_volume or 0))
+
+
 def _select_by_quota(
     candidates: list["NewCampaignCandidate"],
     max_n: int,
@@ -80,7 +91,7 @@ def _select_by_quota(
     for c in candidates:
         buckets.setdefault(c.source, []).append(c)
     for s in buckets:
-        buckets[s].sort(key=lambda c: (c.natural_rank is None, -(c.search_volume or 0)))
+        buckets[s].sort(key=_longtail_sort_key)   # 桶内长尾优先（词数多优先，非搜索量降序）
     selected: list = []
     taken: dict[str, int] = {}
     for s in priority:                       # ② 各源取至配额
@@ -238,9 +249,7 @@ async def analyze_new_campaigns(
     days: int = 7,
     sem: asyncio.Semaphore | None = None,
     overview_gate: "asyncio.Task | None" = None,
-    product_title: str = "",          # 相关性锚点（来自 asin_data.title）
-    product_brand: str = "",          # 相关性锚点（asin_data.brand，可能空）
-    product_category: str = "",       # 相关性锚点（asin_data.category_name，可能空）
+    product_title: str = "",          # 相关性锚点（来自 asin_data.title；brand/category 已去除：太粗易引品类级误匹配）
 ) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
     """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings, search_volume_map)。
 
@@ -392,7 +401,7 @@ async def analyze_new_campaigns(
             priority=["competitor", "ranking_opportunity", "flow"],
         )
     else:
-        candidates.sort(key=lambda c: (c.natural_rank is None, -c.search_volume))
+        candidates.sort(key=_longtail_sort_key)   # 长尾优先（词数多优先），与配额桶内一致
         candidates = candidates[:max_n]
 
     # 2b. ★建议竞价（KB 16 §3）：填 cand.suggested_bid，供 LLM 之后的 _calc_initial_bid 用。
@@ -441,8 +450,6 @@ async def analyze_new_campaigns(
                     strategy_context=ctx_dict,           # 含 posture_brief
                     temperature=temperature, timeout_override=55,
                     product_title=product_title,
-                    product_brand=product_brand,
-                    product_category=product_category,
                     existing_keywords=sorted(existing_keywords),  # 相关性参照锚点
                 )
 

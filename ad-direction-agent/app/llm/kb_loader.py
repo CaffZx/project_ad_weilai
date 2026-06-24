@@ -13,6 +13,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# 一级标题切块：匹配 "## 1. 标题" / "## 7A. 标题"，捕获节号(1 / 7A)
+_H2_NUM = re.compile(r"^##\s+(\d+[A-Za-z]?)\.", re.M)
+
+
+def _split_sections(text: str) -> dict[str, str]:
+    """按 ## 一级编号标题把 KB 文件切成 {节号: 含标题全文(到下一节前)}。
+
+    仅切「## N.」编号标题(KB18/17/15/19/22/16 等)；无编号标题的文件
+    (如 KB08) 切不出节号 → 返回空 dict,build 退回整文件。
+    """
+    marks = [(m.group(1), m.start()) for m in _H2_NUM.finditer(text)]
+    out: dict[str, str] = {}
+    for i, (num, start) in enumerate(marks):
+        end = marks[i + 1][1] if i + 1 < len(marks) else len(text)
+        out[num] = text[start:end].strip()
+    return out
+
 
 class KnowledgeBase:
     VERSION = "v3.2.0"
@@ -34,20 +51,32 @@ class KnowledgeBase:
         "analyze_report":      ["02", "05", "09", "12", "14"],
         # AI 聊天（demo）
         "chat":                ["02", "14"],
-        # Campaign 活动调整
-        # 顺序对齐 KB 自身决策链：18(流程框架) → 17(问题诊断+动作矩阵+冲突裁决)
-        # → 15(Bid/预算/广告位/ACOS 容忍度的硬约束值) → 19(数值规则)
-        # → 22(调整规则) → 21(淘汰规则)。
-        # 15/17 是 19/22 的唯一数值/优先级来源,缺失则 LLM 无法算 ACOS 容忍上限/调整幅度。
-        "campaign_adjustment":  ["18", "17", "15", "19", "22", "21"],
+        # Campaign 活动调整 —— 2026-06-24 切片化 + 精准/广泛分流(治注意力稀释)。
+        # 语法 "fid:节号" = 只注入该文件指定一级节;无冒号 = 整文件。
+        # 共同剔除的稀释节(对单活动调整是噪声/越界/与 prompt 输出格式冲突):
+        #   KB18 §2(13步开发流程,含Ontology校验/组合回算/ERP输出) §4(与KB17§1/KB19§1重复)
+        #        §5(新增活动,属 new_campaign) §6/§7(ERP输出schema)
+        #   KB17 §0(输入schema) §6(记忆修正,campaign 未接记忆信号) §7A(Ontology校验)
+        #        §8(组合预算回算,属 budget_reallocation agent) §9(输出格式,与 prompt 冲突)
+        #   KB15 §0(示例) §5(速查卡输出schema)；KB19 §10(汇总,与各节重复)
+        #   KB22 §1(类型判定,与KB18§1重复) §4(输出字段) §5(90行YAML示例,与 prompt 冲突)
+        # 精准/广泛差异:精准要广告位(KB15§3/KB19§5§9/KB22§2),广泛要否词(KB19§7§8/KB22§3)。
+        "campaign_adjustment_exact": [
+            "18:1,3", "17:1,2,3,4,5,7", "15:1,2,3,4", "19:1,2,3,4,5,6,9", "22:0,2", "21",
+        ],
+        "campaign_adjustment_broad": [
+            "18:1,3", "17:1,2,3,4,5,7", "15:1,2,4", "19:1,2,3,4,6,7,8", "22:0,3", "21",
+        ],
         # Campaign 策略总览(执行总纲)：维度/广告目的→方向倾向 + 目的触发 + 取舍优先级
         # 仅做定性指挥(不写数值),故不引入 15(数值规则);保持小切片。
         "campaign_overview":    ["02", "04", "09"],
-        # Campaign 新增活动: LLM 只判"选哪些词 + keyword_class",不算数值,故只需:
-        #   16(新增活动规则:触发场景/阻断/输出要求) + 06(关键词类型规则:判 keyword_class 依据)
-        #   + 02(标签维度语境) + 08(竞品规则:判竞品词姿态/相关性,配合竞品词源)。
-        #   明确不含 15/19(数值矩阵,代码层按 KB16§3 定) / 23(组合预算回算,本期不接入)。
-        "new_campaign":         ["16", "06", "02", "08"],
+        # Campaign 新增活动: LLM 只判"选哪些词 + keyword_class + 文本",不算任何数值。
+        #   2026-06-24 切片:KB16 只留 §1(触发场景) §6(阻断);剔除 §2(预算)§3(bid)§4(广告位)
+        #   §5(输出schema)——这些是【代码】按 KB16 定的数值,prompt 明令 LLM 禁止输出 budget/
+        #   bid/campaign_name/placement,§5 还与 prompt 的 JSON 输出格式直接冲突(诱导越界)。
+        #   KB02 只留 §1-6(策略语境),剔除 §7-10(特殊场景/广告位/预算组合/竞品态势,与建词无关)。
+        #   KB06 全留(keyword_class 判定核心);KB08 全留(竞品词姿态,无编号标题不切片)。
+        "new_campaign":         ["16:1,6", "06", "02:1,2,3,4,5,6", "08"],
         # Campaign 预算回算 agent: KB23 自包含三层回算算法(§5 增量/§6 二次分配/§7 分配方式
         #   /§3.1A 组内优先级/§9 输出/§10 护栏)。算术由代码预聚合,LLM 只判分配方式+组内排序+解释。
         "budget_reallocation":  ["23"],
@@ -127,6 +156,7 @@ class KnowledgeBase:
 
     def __init__(self):
         self._cache: dict[str, str] = {}
+        self._sections: dict[str, dict[str, str]] = {}   # fid → {节号: 节全文}
         self._enum_patterns = self._compile_enum_patterns()
         self._preload()
 
@@ -144,10 +174,11 @@ class KnowledgeBase:
         return text
 
     def _preload(self) -> None:
-        # 只加载 PRESETS 实际引用的文件，减少 IO
+        # 只加载 PRESETS 实际引用的文件，减少 IO。spec 形如 "18" 或 "18:1,3"，取冒号前为 fid
         needed: set[str] = set()
         for ids in self.PRESETS.values():
-            needed.update(ids)
+            for spec in ids:
+                needed.add(spec.split(":", 1)[0])
 
         for fid in sorted(needed):
             rel = self._FILE_PATHS.get(fid)
@@ -163,23 +194,35 @@ class KnowledgeBase:
                 continue
             translated = self._translate_enums(raw)
             self._cache[fid] = translated
-            logger.info("KB loaded %s (%s): %d chars", fid, rel, len(translated))
+            self._sections[fid] = _split_sections(translated)   # 预切节，build 按需取
+            logger.info("KB loaded %s (%s): %d chars, %d 节", fid, rel,
+                        len(translated), len(self._sections[fid]))
 
         # 打印每个 preset 拼接后字符数（便于上线观察 token 体量）
         for name in self.PRESETS:
             logger.info("KB preset %s: %d chars", name, len(self.build(name)))
 
     def build(self, preset: str) -> str:
-        """按 preset 拼接对应文件内容，用 '---' 分隔。"""
+        """按 preset 拼接 KB 内容。spec 支持 "fid"(整文件) 或 "fid:节号,节号"(切片注入)。"""
         ids = self.PRESETS.get(preset)
         if ids is None:
             raise KeyError(f"未知的 KB preset: {preset}")
-        sections: list[str] = []
-        for fid in ids:
-            content = self._cache.get(fid, "")
+        out: list[str] = []
+        for spec in ids:
+            fid, _, sel = spec.partition(":")
+            if not sel:                                    # 整文件
+                content = self._cache.get(fid, "")
+            else:                                          # 切片：只取指定一级节
+                secs = self._sections.get(fid, {})
+                wanted = [s.strip() for s in sel.split(",") if s.strip()]
+                missing = [w for w in wanted if w not in secs]
+                if missing:   # 节号失配(KB 改版重编号/写错)→ 告警暴露，绝不静默丢规则
+                    logger.warning("KB preset %s: KB%s 缺节 %s (现有节 %s)",
+                                   preset, fid, missing, sorted(secs))
+                content = "\n\n".join(secs[w] for w in wanted if w in secs)
             if content:
-                sections.append(content)
-        return "\n\n---\n\n".join(sections)
+                out.append(content)
+        return "\n\n---\n\n".join(out)
 
 
 # 模块级单例 — 进程启动一次性预热

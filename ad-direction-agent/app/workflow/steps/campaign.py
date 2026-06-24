@@ -3,7 +3,7 @@
 复用资产:
 - CampaignFetcher.fetch_campaigns() → CampaignData
 - LLMReasoner.recommend_campaign_batch() → 单批 LLM 分析
-- kb.build("campaign_adjustment") → KB 18/19/21/22
+- kb.build("campaign_adjustment_exact"/"_broad") → KB 18:1,3 / 17:1,2,3,4,5,7 / 15 / 19 / 22:0,2(或0,3) / 21 切片(精准/广泛分流)
 """
 
 from __future__ import annotations
@@ -348,6 +348,7 @@ async def _analyze_campaigns_impl(
                     total_campaigns=0,
                     warnings=[f"获取活动数据超时 (>300s)，请重试"],
                     sanity_check_passed=False,
+                    data_unavailable=True,
                 )
             except Exception as e:
                 logger.exception("fetch_campaigns 异常 [%s]: %s", parent_asin, e)
@@ -356,6 +357,7 @@ async def _analyze_campaigns_impl(
                     total_campaigns=0,
                     warnings=[f"获取活动数据失败: {type(e).__name__}: {e}"],
                     sanity_check_passed=False,
+                    data_unavailable=True,
                 )
 
     if campaign_data.total_campaigns == 0:
@@ -522,10 +524,9 @@ async def _analyze_campaigns_impl(
             days=days,
             sem=new_sem,
             overview_gate=overview_gate,
-            # 相关性锚点（H1/H12：brand/category 可能空，judge-null 在 reasoner 侧）
+            # 相关性锚点仅传标题（brand/category 已去除：品类太粗、会把 LLM 引向品类级误匹配，
+            # 判别"短裙≠中长裙"靠标题具体属性）
             product_title=(asin_data.title or "") if asin_data else "",
-            product_brand=(asin_data.brand or "") if asin_data else "",
-            product_category=(asin_data.category_name or "") if asin_data else "",
         ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )

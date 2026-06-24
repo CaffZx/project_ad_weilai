@@ -1057,7 +1057,59 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-24（v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。⚠ 仅本地未上 chenv31）*
+## 24. 2026-06-24：新增词总扩大词/泛词 → 长尾优先选词 + 属性级相关性（已修，本地）
+
+> 仅本地，未上 chenv31。**影响每次新增分析**（非默认关的竞品路径）。改 `campaign_new.py` + `reasoner.py` + `campaign.py`（调用点）。承 §22 的相关性锚点改造，进一步治"总扩大词"。
+
+**现象**：新增词 agent 总选大词/泛词（产品是短裙却扩中长裙/连衣裙），相关性只到品类级。
+
+**根因（已核实，两层）**：
+1. **代码层放大（主因）**：选词两处（`_select_by_quota` 桶内 + 无竞品全局路径）都按 **`-search_volume` 降序**排再截 Top-40 → 高流量大词霸榜，**长尾在进 LLM 前就被截掉**（garbage-in，LLM 只能在大词里挑）。不只是"MCP 源偏大词"那么简单。
+2. **品类锚点误导**：§22 注入的 `category_name` 把 LLM 引向**品类级**匹配（"同属裙类→相关"），恰是"短裙误扩中长裙"的来源——这些 MCP 源本就大致同品类，品类无区分力、还常空（伪 ASIN）。
+
+**修复**：
+| # | 改动 | 文件 |
+|---|---|---|
+| ① 长尾优先选词 | 新增 `_longtail_sort_key`：排序键 `(有自然位 → 词数多 → 搜索量 tiebreak)`，**词数无上限**（词越多越精准越靠前），搜索量不再主排。两处选词统一用 | `campaign_new.py` |
+| ② 属性级相关性 | prompt 相关性判据从"同品类"→**匹配标题具体属性**（短裙≠中长裙≠连衣裙→skip，reason 须点明属性吻合）| `reasoner._NEW_CAMPAIGN_PROMPT` |
+| ③ 词型偏好 | prompt 新增：优先精准长尾；审慎大词/泛词，除非测试期/引流型否则倾向 skip（按阶段/目的）| `reasoner._NEW_CAMPAIGN_PROMPT` |
+| ④ 去品类/品牌锚点 | 相关性锚点只留**标题 + 已投词**；`product_brand`/`product_category` 从 reasoner 签名+prompt、campaign_new 签名+pass-through、campaign.py 调用点**全部移除**（非死代码）。⚠ **推翻 §22.2-A 与 §22.4-H12 的 brand/category 注入** | 3 文件 |
+
+**KB 依据**：KB06 long_tail 精准优先于 generic 大词测词；阶段感知（KB02/03：收割/盈利/维持期不宜建大词活动）。
+
+**验证**：3 文件 compile OK；brand/category 残留=0；workflow 全套 passed（含 H2 竞品 natural_rank=None 不被挤掉——排序改长尾优先后配额分桶不受影响）。
+
+**待办/上线前**：真机拿"短裙类"产品验——确认不再扩中长裙/大词、长尾能进候选并被 LLM 选中。`MIN_SEARCH_VOLUME=50` 保留兜底。按纪律 diff→备份→上传→预检→重启。
+
+---
+
+## 25. 2026-06-24（续）：前端三项优化（A态空壳引导 / 执行结果toast常驻 / 告警tab化+筛选瘦身）
+
+> 均为**纯前端**（主看板 `demo/ad-asisitant-agent.html` + `demo/campaign-panel/**`），刷新浏览器即生效，后端零改动，**未上 chenv31**。
+
+### 25.1 A 态空壳引导（新 ASIN 未配置·无批次）
+**背景**：全新 ASIN（state 库无配置）透传进来时，旧设计左侧配置栏可编辑 + 顶部「新建分析事件」按钮并列，用户不知点哪个；且 A 态 tab5 实际跑不了执行层（`_mountCampaignRealtime` 仅 C 态触发），左侧配了也没用 → 反常识。另注：叠加触发过「标记进行中事件失败」，根因是超长 SKU 名撑爆 state 库 `asin VARCHAR(20)`（§21.3，列宽已另行修复）。
+**改**（`ad-asisitant-agent.html`）：`bootstrapFromContext` 的 A 分支由 `renderBatchBar('A')+loadAll(true)` 改为新函数 **`renderEmptyStateA()`**——左侧仅基础信息卡（隐藏 `#cardStrategy`/`#cardTactics`），右侧仅批次栏 +「新建分析事件」+ 中心灰色引导 `#emptyGuide`（隐藏 `#tabBar` + 所有 `.tab-panel`）；`loadAll` 开头加还原（进 B/C 态恢复 `cardStrategy`/`cardTactics`/`tabBar`、隐藏 `emptyGuide`）。使「新建分析事件」成为「配置→执行层」完整流程的**唯一入口**。点新建 → `onNewEventClick` → `loadAll(true)` 还原配置栏 → 进 C 态展开。
+
+### 25.2 执行结果 toast 常驻可关闭 + 即时提示
+**背景**：点「同意所选」确认后，结果 toast 必须等 `/campaign/confirm` 同步等 MCP 真实下发完成（§21.3，MCP avg 11s/max 258s/工具）才弹，1800ms 一闪即逝看不清；且点确认到结果之间**零反馈**，用户以为"点了没反应"。
+**改**（`campaign-panel/state.js` + `panel.css`）：
+- `_toast(msg, opts)` 加 `opts.sticky` 模式：**常驻不消失 + 右上角「×」可关闭**；非 sticky 自动消失 **1800→2400ms**。沿用原深色样式，无新增配色。
+- 6 个执行结果调用点（同意下发成功/部分成功/reject 写回/审核失败/组合预算成功/失败）改 `{sticky:true}`。
+- `batchConfirm` 发请求**前**加轻量即时提示「正在下发 N 个调整到 MCP，请稍候…」/「正在提交 N 项审核…」（2400ms，随后结果常驻 toast 覆盖同一 `#camp-toast`）。
+
+### 25.3 告警 tab 化 + 筛选器瘦身（给卡片列表腾纵向空间）
+**背景**：右下「调整活动」区太小，扩大空间来源。
+**改**（`campaign-panel/render.js` + `panel.js`）：
+- 告警从顶部红气泡 `#camp-warnings`（点击 `alert` 弹全部）→ 改为与「明细/汇总」**同级的常驻 tab**「告警 (N)」：新增 `#camp-warnings-panel` 容器；`_renderWarnings`(气泡)→`_renderWarningsPanel`(列表，空态「暂无告警」)；`_fullRender` 加 `warnings` 切换分支（与 detail/summary 同机制，走统一 `applyFilters` 重渲）。**数据契约不变**——仍读 `vm.warnings`（viewmodel.js 三处兜底为字符串数组），`_esc` 容错更稳；grep 确认无悬空引用。
+- `#camp-filters` 上下 padding **8→6px**。
+- **（未做，高风险待评）batchBar 进 topbar**：涉及 `.app-layout { height: calc(100vh - 46px) }` 硬编码高度链 + topbar 横向拥挤 + iframe 内滚动，需 ERP 真嵌入下验三态+滚动，留待单独做。
+
+---
+
+*最后更新：2026-06-24（v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端未上 chenv31，batchBar进topbar高风险未做）*
+*v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；本地未上 chenv31）*
+*v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。⚠ 仅本地未上 chenv31）*
 *v3.2: 补 §20/§21 回归测试 —— `tests/test_target_acos_band.py` 锁目标ACOS区间边界+真实toml同步+Step7钳制契约；`tests/persistence/test_override_persistence.py`(6) 锁 override"过期仍透出"语义，纯离线mock不连库。全套 151→174 passed 零回归；测试+文档+一处 bug 修复）*
 *v3.1: 淘汰多环节阈值差别防误判备忘 §23 —— 预过滤(AND,0.21) vs 归组/强制修正(OR,0.10) 有意不同，LOW_BID_MAX 只供 AND 路径勿统一；仅补注释零逻辑改）*
 *v3.0: 新增活动选词改造 §22 —— LLM相关性锚点(已投词+产品标识)/放宽40+输出20/竞品reverse源(默认关)/多源配额20·15·5/reverse解析修复(data.data.list+searches+bid)/来源合并去重/三处串行优化(竞品∥发现·bid∥LLM·bid去重查)；竞品源 live 验证后再开）*

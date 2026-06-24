@@ -111,6 +111,60 @@ def test_should_push_to_erp_gates():
     assert ok is True
 
 
+def test_should_push_to_erp_data_unavailable_distinct():
+    """上游数据拉取失败必须区别于"无调整"业务态，给出 data_unavailable 原因。"""
+    # 数据不可用 → 明确 data_unavailable（不是 "no adjustments"）
+    ok, reason = should_push_to_erp(
+        CampaignAnalysisResult(parent_asin="X", data_unavailable=True)
+    )
+    assert ok is False
+    assert reason == "data_unavailable"
+
+    # 回归：真正无调整仍返回 "no adjustments"，且不带 data_unavailable 信号
+    ok, reason = should_push_to_erp(CampaignAnalysisResult(parent_asin="X"))
+    assert ok is False
+    assert reason == "no adjustments"
+
+    # data_unavailable 优先于 adjustments 判断（即便残留 adjustments 也按数据失败处理，不误落库）
+    ok, reason = should_push_to_erp(
+        CampaignAnalysisResult(
+            parent_asin="X",
+            data_unavailable=True,
+            adjustments=[CampaignAdjustmentItem(campaign_name="c", campaign_id="1")],
+        )
+    )
+    assert ok is False
+    assert reason == "data_unavailable"
+
+
+def test_maybe_push_erp_surfaces_data_unavailable():
+    """_maybe_push_erp 的 erp_write 字典必须带 data_unavailable=True，供批量区分。"""
+    import asyncio
+
+    from app.api.campaign import _maybe_push_erp
+
+    out = asyncio.run(
+        _maybe_push_erp(
+            CampaignAnalysisResult(parent_asin="X", data_unavailable=True),
+            asin="X", days=7, temperature=0.3, write_erp=True, state=None,
+        )
+    )
+    assert out["attempted"] is False
+    assert out["ok"] is False
+    assert out["data_unavailable"] is True
+
+    # 回归：普通"无调整"不带 data_unavailable，仍是良性跳过
+    out2 = asyncio.run(
+        _maybe_push_erp(
+            CampaignAnalysisResult(parent_asin="X"),
+            asin="X", days=7, temperature=0.3, write_erp=True, state=None,
+        )
+    )
+    assert out2["attempted"] is False
+    assert out2.get("data_unavailable") is not True
+    assert out2["skipped"] == "no adjustments"
+
+
 @patch("app.persistence.erp_writer.auto_push.resolve_listing_context")
 @patch("app.persistence.erp_writer.auto_push.ErpDualWriterRepository")
 def test_push_full_to_erp(mock_repo_cls, mock_resolve):

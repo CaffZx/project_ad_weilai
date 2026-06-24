@@ -681,6 +681,12 @@ body {
         <button id="btnCancelEvent" class="btn btn-sm hidden" style="margin-left:8px;" onclick="onCancelEventClick()">放弃本次分析</button>
       </div>
 
+      <!-- A 态（全新 ASIN·未配置·无批次）空壳引导：左侧仅基础信息，此处引导点「新建分析事件」开启完整流程 -->
+      <div id="emptyGuide" class="hidden" style="text-align:center;padding:60px 20px;color:var(--muted-fg);line-height:1.8;">
+        <div style="font-weight:600;color:var(--fg);font-size:14px;margin-bottom:6px;">该商品尚无分析记录</div>
+        <div>点击上方「新建分析事件」开始首次完整分析<br>（配置广告策略 → 运行执行层分析）。</div>
+      </div>
+
       <!-- 药丸标签栏 -->
       <div class="tab-bar" id="tabBar">
         <button class="tab-btn tab-disabled" data-tab="tab1" onclick="switchTab('tab1')">广告目的与目标关键词推荐</button>
@@ -901,9 +907,9 @@ async function bootstrapFromContext() {
   // A/B/C 判定
   const ctx = _decisionContext;
   if (!ctx.has_config) {
-    // A: 首访/未配置 → 实时分析
-    renderBatchBar('A');
-    loadAll(true);
+    // A: 全新 ASIN·未配置·无批次 → 空壳引导（左侧仅基础信息，右侧仅批次栏 + 中心引导）。
+    // 强制以「新建分析事件」为完整流程（配置→执行层）的唯一入口，消除"左侧可配但执行层跑不了"的并列困惑。
+    renderEmptyStateA();
   } else if (ctx.in_progress) {
     // C: 有进行中事件 → 前置可编辑，tab5 可运行执行层分析
     renderBatchBar('C', ctx);
@@ -913,6 +919,18 @@ async function bootstrapFromContext() {
     renderBatchBar('B', ctx);
     loadAll(true);
   }
+}
+
+// A 态空壳引导：左侧只留基础信息卡（隐藏战略/策略层），右侧只留批次栏 + 中心引导，
+// 隐藏 tab 栏与所有面板。用户必须点「新建分析事件」进 C 态才展开完整流程（配置→执行层）。
+function renderEmptyStateA() {
+  hide('cardStrategy');
+  hide('cardTactics');
+  showMainContent();
+  renderBatchBar('A');
+  hide('tabBar');
+  qsa('.tab-panel').forEach(p => p.classList.remove('active'));
+  show('emptyGuide');
 }
 
 function renderBatchBar(mode, ctx) {
@@ -1627,6 +1645,8 @@ async function loadAll(skipContextRefresh = false) {
   asin = $('asinInput').value.trim();
   if (!asin) { err('errGlobal', '请输入 ASIN'); return; }
   hide('errGlobal');
+  // 还原 A 态空壳引导隐藏的元素（进入 B/C 态正常渲染左侧配置 + tab 栏）
+  show('cardStrategy'); show('cardTactics'); show('tabBar'); hide('emptyGuide');
   if (!skipContextRefresh) {
     const ctx = await refreshDecisionContext();
     applyBatchBarFromCtx(ctx);
