@@ -1,14 +1,20 @@
-"""Default ERP MySQL connection (override via CLI where supported)."""
+"""Default ERP MySQL connection (override via CLI where supported).
+
+凭据从环境变量读取（ERP_HOST/ERP_PORT/ERP_USER/ERP_PASSWORD/ERP_DATABASE），
+勿在源码硬编码密码。运行前先 `export ERP_PASSWORD=...` 或经 .env 注入。
+"""
 from __future__ import annotations
+
+import os
 
 from pymysql.cursors import DictCursor
 
 ERP_DEFAULT = {
-    "host": "192.168.2.51",
-    "port": 3306,
-    "user": "erp_agentadvert",
-    "password": "erp_agentadvert#weilai123",
-    "database": "erp_agentadvert",
+    "host": os.getenv("ERP_HOST", "192.168.2.51"),
+    "port": int(os.getenv("ERP_PORT", "3306")),
+    "user": os.getenv("ERP_USER", "erp_agentadvert"),
+    "password": os.getenv("ERP_PASSWORD", ""),
+    "database": os.getenv("ERP_DATABASE", "erp_agentadvert"),
 }
 
 

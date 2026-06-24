@@ -915,7 +915,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ### 20.1 设计
 目标ACOS = **单值**（运营衡量偏离度的基准）；区间是**给 AI/算法看的工作边界**，在其中选一个值。
-- **上限 acos_ceiling = min(阶段上限, 层级上限)**，镜像 KB03（KB 只读）：阶段 测试50/推进40/收割40/维持40/清货60；层级 长尾P3=30、其余40。**冲突以 KB 为准**。
+- **上限 acos_ceiling = 阶段上限**（KB03 §2，优先生效）：测试50/推进40/收割40/维持40/清货60；阶段未定义/未归一化时回落层级**默认**上限（KB03 §1：长尾P3=30、其余40）。⚠ 2026-06-24 修正：原为 `min(阶段, 层级)`，因非长尾层级恒40 把清货期60/测试期50 永久封顶（详见 20.4）；运营确认阶段优先、层级仅作 fallback（长尾 P3 清货期亦随阶段到 60%）。
 - **下限 acos_floor = max(全局 min_acos=25, 各广告目的下限的最大值)**，且不超过上限（上限优先）。目的下限（needs_review 初值）：盈利25/转化25/排名35/引流40；多目的取最大。
 - 精度 **5% 取整**。
 - 同一区间函数同时进**算法**（定时跑批主力 + 实时降级）与 **prompt**（实时 LLM 主路）→ 四处口径一致。
@@ -937,6 +937,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 - **预算线未对齐**：prompt 已改"预算幅度遵循 KB"（KB03=50%），但 `BudgetBidRecommender`/`[budget_bid] max_budget_adjustment_pct=30` 仍 30 —— **改前即存在的不一致**，本轮只做 ACOS，预算另起一轮。
 - **`purpose_floors` 是 needs_review 初值**（运营给的 25/25/35/40），隔离在 toml 一张表便于改。
 - ~~**服务器未同步**~~ → **已于 2026-06-22 上线**（见 §21）。
+- ✅ **阶段上限 >40 永不生效 —— 已修复（2026-06-24，补测试时发现，运营确认）**：原 `compute_target_acos_band` 取 `ceiling = min(阶段上限, 层级上限)`，而层级上限对非长尾产品恒为 40 → `stage_ceilings` 里测试期=50、清货期=60 对任何非长尾产品被层级 40 永久封顶、永不生效（清货期 ACOS 给不到 40% 以上）。**根因**：KB03 §1 层级栏措辞为「**默认**ACOS上限」=仅作 fallback，应被 §2 阶段具体值覆盖；旧实现误当硬约束 min。**修法**：改为阶段上限优先，层级仅在阶段未定义/未归一化时兜底（含长尾 P3 清货期亦随阶段到 60%——运营拍板长尾清货也要能清掉库存）。改 `recommender.py:compute_target_acos_band` + `thresholds.toml` 注释；由 `tests/test_target_acos_band.py` 18 例钉死（含 `test_band_stage_ceiling_takes_effect`/`test_band_longtail_follows_stage_when_defined`）。⚠ **仅本地，未上服务器 chenv31**。
 
 ---
 
@@ -1056,7 +1057,9 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-24（v3.1: 淘汰多环节阈值差别防误判备忘 §23 —— 预过滤(AND,0.21) vs 归组/强制修正(OR,0.10) 有意不同，LOW_BID_MAX 只供 AND 路径勿统一；仅补注释零逻辑改）*
+*最后更新：2026-06-24（v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。⚠ 仅本地未上 chenv31）*
+*v3.2: 补 §20/§21 回归测试 —— `tests/test_target_acos_band.py` 锁目标ACOS区间边界+真实toml同步+Step7钳制契约；`tests/persistence/test_override_persistence.py`(6) 锁 override"过期仍透出"语义，纯离线mock不连库。全套 151→174 passed 零回归；测试+文档+一处 bug 修复）*
+*v3.1: 淘汰多环节阈值差别防误判备忘 §23 —— 预过滤(AND,0.21) vs 归组/强制修正(OR,0.10) 有意不同，LOW_BID_MAX 只供 AND 路径勿统一；仅补注释零逻辑改）*
 *v3.0: 新增活动选词改造 §22 —— LLM相关性锚点(已投词+产品标识)/放宽40+输出20/竞品reverse源(默认关)/多源配额20·15·5/reverse解析修复(data.data.list+searches+bid)/来源合并去重/三处串行优化(竞品∥发现·bid∥LLM·bid去重查)；竞品源 live 验证后再开）*
 *v2.9: override 持久化上线 + 前端广告方向统一/renderP3守卫 + 卡C态·MCP慢·新建闪烁 诊断待办 + state库回填315 §21）*
 *v2.8: 修复4 目标ACOS区间化 §20 —— KB锚定区间[下限,上限]内出单值；算法+prompt 双口对齐；删关键词Bid表述/移KB19；自检零回归，遗留预算线对齐）*

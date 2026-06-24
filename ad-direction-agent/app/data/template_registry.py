@@ -70,7 +70,7 @@ register(MetaScriptDef(
     related_method="_fetch_ad_keywords",
     parameters=[
         ParamDef("shopAccount", "string", "店铺账号", "user_input", ""),
-        ParamDef("parentAsin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parentAsin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parentSellerSku", "string", "父SKU", "system"),
         ParamDef("matchType", "string", "匹配类型(EXACT/BROAD/PHRASE)", "ai_decides", "EXACT"),
     ],
@@ -84,7 +84,7 @@ register(MetaScriptDef(
     related_method="_fetch_competitors",
     parameters=[
         ParamDef("shopAccount", "string", "店铺账号", "user_input", ""),
-        ParamDef("parentAsin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parentAsin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parentSellerSku", "string", "父SKU", "system"),
     ],
 ))
@@ -96,7 +96,7 @@ register(MetaScriptDef(
     source_file="DWD关键词竞品和子ASIN的SQL.sql",
     related_method="_fetch_natural_rankings",
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
         ParamDef("keyword", "string", "目标关键词", "ai_decides", "fishnet stockings for women"),
@@ -111,7 +111,7 @@ register(MetaScriptDef(
     source_file="DWD关键词竞品和子ASIN的SQL.sql",
     related_method="_fetch_natural_rankings",
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
         ParamDef("keyword", "string", "目标关键词", "ai_decides", "fishnet stockings for women"),
@@ -126,7 +126,7 @@ register(MetaScriptDef(
     source_file="DWD在线列表流量关键词.sql",
     related_method="_fetch_flow_keywords",
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
     ],
@@ -139,7 +139,7 @@ register(MetaScriptDef(
     source_file="dwd广告报告查询sql.sql",
     related_method="_fetch_ad_summary",
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
         ParamDef("startDate", "datetime", "开始时间", "system"),
@@ -154,7 +154,7 @@ register(MetaScriptDef(
     source_file="dwd广告报告查询sql.sql",
     related_method="_fetch_placement_summary",
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
         ParamDef("startDate", "datetime", "开始时间", "system"),
@@ -169,7 +169,7 @@ register(MetaScriptDef(
     source_file="dwd广告报告查询sql.sql",
     related_method="",  # DbAdapter 暂无对应方法
     parameters=[
-        ParamDef("parent_asin", "string", "父ASIN", "user_input", "B0B7S3PWWB"),
+        ParamDef("parent_asin", "string", "父ASIN", "user_input", "<parent_asin>"),
         ParamDef("parent_seller_sku", "string", "父SKU", "system"),
         ParamDef("shop_account", "string", "店铺账号", "user_input", ""),
         ParamDef("startDate", "datetime", "开始时间", "system"),

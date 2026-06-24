@@ -597,16 +597,24 @@ def compute_target_acos_band(
 ) -> tuple[int, int]:
     """目标ACOS 取值区间 (下限, 上限)。AI/算法须在此区间内给出单值（修复4，2026-06-18）。
 
-    - 上限 = min(阶段上限, 层级上限)，镜像自知识库 KB03（KB 只读）。
-      层级：仅长尾 P3 = 30，其余 40（按子串匹配，避免枚举键漂移）。
+    - 上限 = 阶段上限（KB03 §2「ACOS上限」，具体值，优先生效）。
+      阶段未定义/未归一化时回落层级**默认**上限（KB03 §1「默认ACOS上限」：长尾 P3=30、
+      其余 40，按子串匹配避免枚举键漂移）。
+      ⚠ 2026-06-24 修正（运营确认）：原实现取 `min(阶段, 层级)`，使非长尾层级 40 永久封顶
+      清货期60/测试期50，阶段上限永不生效。KB 层级栏措辞为「**默认**ACOS上限」=仅作 fallback，
+      应被阶段具体值覆盖；故改为阶段优先、层级仅在阶段缺失时兜底（长尾 P3 清货期亦随阶段到 60%）。
     - 下限 = max(全局 min_acos, 各广告目的下限的最大值)，且不超过上限（上限以 KB 为准）。
     """
     global_min = int(cfg.get("min_acos", 25))
     global_max = int(cfg.get("max_acos", 100))
-    stage_ceiling = int(cfg.get("stage_ceilings", {}).get((stage or "").strip(), 40))
-    lvl = str(level or "")
-    level_ceiling = 30 if ("P3" in lvl or "长尾" in lvl) else 40
-    acos_ceiling = min(stage_ceiling, level_ceiling, global_max)
+    stage_ceilings = cfg.get("stage_ceilings", {})
+    stage_key = (stage or "").strip()
+    if stage_key in stage_ceilings:
+        acos_ceiling = min(int(stage_ceilings[stage_key]), global_max)
+    else:
+        lvl = str(level or "")
+        level_default = 30 if ("P3" in lvl or "长尾" in lvl) else 40
+        acos_ceiling = min(level_default, global_max)
     purpose_floors = cfg.get("purpose_floors", {})
     floors = [int(purpose_floors[p]) for p in (ad_purposes or []) if p in purpose_floors]
     acos_floor = max([global_min] + floors)

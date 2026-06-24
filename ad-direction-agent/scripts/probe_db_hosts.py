@@ -1,18 +1,24 @@
+import os
+
 import pymysql
 from pymysql.cursors import DictCursor
 
+# Doris 凭据从环境变量读取，勿硬编码（export DB_USER / DB_PASS 后运行）。
 HOSTS = ["36.133.119.99", "172.17.0.16", "127.0.0.1", "localhost"]
-ASIN = "B0GCZHVBWN"
-SHOP = "am_vivibeautyus"
+DB_USER = os.getenv("DB_USER", "cbr")
+DB_PASS = os.getenv("DB_PASS", "")
+DB_DATABASE = os.getenv("DB_DATABASE", "x_dwd")
+ASIN = os.getenv("PROBE_ASIN", "B0GCZHVBWN")
+SHOP = os.getenv("PROBE_SHOP", "am_vivibeautyus")
 
 for h in HOSTS:
     try:
         c = pymysql.connect(
             host=h,
             port=9030,
-            user="cbr",
-            password="cbr123",
-            database="x_dwd",
+            user=DB_USER,
+            password=DB_PASS,
+            database=DB_DATABASE,
             connect_timeout=5,
             cursorclass=DictCursor,
         )

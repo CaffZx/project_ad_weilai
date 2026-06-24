@@ -221,18 +221,20 @@ class Settings(BaseSettings):
     num_workers: int = 1
 
     # ERP 测试库（Campaign 分析完成后可选自动 write_full）
+    # 凭据从 .env 注入，此处仅占位；勿把真实密码写成默认值（与 db_* 一致的留空约定）。
     erp_auto_write: bool = False
-    erp_host: str = "192.168.2.51"
+    erp_host: str = ""
     erp_port: int = 3306
-    erp_user: str = "erp_agentadvert"
-    erp_password: str = "erp_agentadvert#weilai123"
-    erp_database: str = "erp_agentadvert"
+    erp_user: str = ""
+    erp_password: str = ""
+    erp_database: str = ""
     erp_write_timeout: int = 30
     # ERP 走 TLS：服务器同内网可不开；本机/VPN 经 caching_sha2_password 必须 TLS 才能握手。
     erp_use_tls: bool = False
 
     # 广告调整 MCP（whp-advert-agent，真实执行广告调整）— Part 6
-    advert_mcp_url: str = "http://192.168.2.31:5678/mcp"
+    # 内网 endpoint 从 .env 注入（ADVERT_MCP_URL），勿硬编码 IP；留空则 client 初始化即报错。
+    advert_mcp_url: str = ""
     advert_mcp_token: str = ""                 # Bearer token（sk-…），生产经 .env 注入，勿硬编码
     advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝

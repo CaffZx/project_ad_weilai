@@ -29,12 +29,14 @@ def _lookup_from_erp_summary(parent_asin: str) -> ListingContext | None:
         import pymysql
         from pymysql.cursors import DictCursor
 
+        from app.config.settings import settings
+
         conn = pymysql.connect(
-            host="192.168.2.51",
-            port=3306,
-            user="erp_agentadvert",
-            password="erp_agentadvert#weilai123",
-            database="erp_agentadvert",
+            host=settings.erp_host,
+            port=settings.erp_port,
+            user=settings.erp_user,
+            password=settings.erp_password,
+            database=settings.erp_database,
             charset="utf8mb4",
             cursorclass=DictCursor,
             connect_timeout=8,
