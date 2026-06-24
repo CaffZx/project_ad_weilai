@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import time
 from datetime import datetime, timezone
 
@@ -20,6 +21,26 @@ logger = logging.getLogger(__name__)
 def _fetch_timeout() -> float:
     return max(30.0, float(getattr(settings, "db_fetch_timeout", 75.0)))
 SLOW_QUERY_THRESHOLD = 5  # 慢查询告警阈值（秒）
+
+# StarRocks 共享存储 BE 故障的重试参数（仅针对 starlet/BE 存储错误，不含 SQL 语法错）
+STARROCKS_BE_RETRIES = 2            # 额外重试 2 次（共 3 次尝试）
+STARROCKS_BE_BACKOFF = (0.5, 1.0)  # 指数退避基值(秒)：第1次重试0.5s、第2次1.0s，另叠加 50–200ms 抖动
+
+
+def _is_starrocks_be_storage_error(e: BaseException) -> bool:
+    """是否为 StarRocks 共享存储 BE 故障（只读文件系统 / cache 目录分配失败等）。
+
+    这类错误回来是 errno 1064 的 ProgrammingError，但带 starlet/BE: 签名；
+    与真正的 SQL 语法错误（同为 1064）区分——后者不应重试。
+    """
+    if not isinstance(e, pymysql.err.ProgrammingError):
+        return False
+    args = getattr(e, "args", ())
+    if not args or args[0] != 1064:
+        return False
+    msg = str(e)
+    return "starlet err" in msg or "BE:1006" in msg
+
 
 # ── 元脚本 → DbAdapter 方法映射 ──────────────────────
 META_TO_METHOD: dict[str, str] = {
@@ -114,21 +135,32 @@ class DbAdapter(DataSourceAdapter):
 
         timeout_s = timeout if timeout is not None else _fetch_timeout()
         t0 = time.monotonic()
+        tag = f"[{label}] " if label else ""
         async with self._query_sem:
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_do_query),
-                    timeout=timeout_s,
-                )
-                elapsed = time.monotonic() - t0
-                if elapsed > SLOW_QUERY_THRESHOLD:
-                    tag = f"[{label}] " if label else ""
-                    logger.warning("%s慢查询 %.2fs rows=%s: %s", tag, elapsed, len(result), sql[:200])
-                return result
-            except asyncio.TimeoutError:
-                tag = f"[{label}] " if label else ""
-                logger.error("%sDB 查询超时 (%.0fs): %s...", tag, timeout_s, sql[:120])
-                raise
+            for attempt in range(STARROCKS_BE_RETRIES + 1):   # 0,1,2 → 共 3 次
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(_do_query),
+                        timeout=timeout_s,
+                    )
+                    elapsed = time.monotonic() - t0
+                    if elapsed > SLOW_QUERY_THRESHOLD:
+                        logger.warning("%s慢查询 %.2fs rows=%s: %s", tag, elapsed, len(result), sql[:200])
+                    return result
+                except asyncio.TimeoutError:
+                    logger.error("%sDB 查询超时 (%.0fs): %s...", tag, timeout_s, sql[:120])
+                    raise                                      # 超时不在本次需求内，保持直接抛
+                except Exception as e:
+                    if attempt < STARROCKS_BE_RETRIES and _is_starrocks_be_storage_error(e):
+                        base = STARROCKS_BE_BACKOFF[min(attempt, len(STARROCKS_BE_BACKOFF) - 1)]
+                        delay = base + random.uniform(0.05, 0.20)
+                        logger.warning(
+                            "%sStarRocks BE 存储错误，%.0fms 后重试 (第 %d/%d 次): %s",
+                            tag, delay * 1000, attempt + 1, STARROCKS_BE_RETRIES, str(e)[:160],
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise                                      # 非 BE 存储错 / 重试用尽 → 抛
 
     async def _query_one(
         self,

@@ -20,9 +20,52 @@ from app.persistence.erp_writer.advert_exec_mapper import (
 )
 from app.persistence.erp_writer.repository import _get_repository
 from app.data.mcp_db_context import lookup_top_child_attrs
-from app.persistence.erp_writer.text_utils import json_dumps
+from app.persistence.erp_writer.text_utils import json_dumps, unmap_campaign_group_type
+from app.workflow.steps.portfolio_execution import (
+    _match_portfolio,
+    _normalize_portfolio_list,
+    _pf_field,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_create_portfolios(
+    client, plan, *, shop_id: int, parent_asin: str, parent_sku: str, operator: str,
+) -> set[str]:
+    """为每张 CREATE 卡解析归属组合（模糊匹配现有 portfolio）。
+
+    - 命中  → 注入 call["portfolioId"]，正常建活动到该组合下。
+    - 未命中 / 组合列表查询失败（严格模式）→ 跳过该卡，不建活动、不新建组合。
+    返回需跳过的 card_id 集合。
+    """
+    skip: set[str] = set()
+    if not plan.create_calls:
+        return skip
+    try:
+        res = await client.query_portfolio_list(
+            shop_id, parent_asin, parent_sku, current_user_id=operator)
+        portfolios = _normalize_portfolio_list(res)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "query_portfolio_list 失败 [%s/%s]，严格模式：新建活动全部跳过: %s",
+            parent_asin, parent_sku, e)
+        plan.warnings.append(
+            f"组合列表查询失败，新建活动全部跳过：{type(e).__name__}: {e}")
+        return {str(c.get("_card_id") or "") for c in plan.create_calls}
+    for call in plan.create_calls:
+        cid = str(call.get("_card_id") or "")
+        zh = unmap_campaign_group_type(call.get("_group_type"))
+        pf = _match_portfolio(zh, portfolios) if zh else None
+        pid = _pf_field(pf, "portfolioId", "id", "portfolio_id") if pf else None
+        if pid:
+            call["portfolioId"] = str(pid)
+        else:
+            skip.add(cid)
+            cname = (call.get("createCampaignVo") or {}).get("campaignName")
+            plan.warnings.append(
+                f"新建活动「{cname}」未匹配到「{zh or call.get('_group_type')}」组合，已跳过")
+    return skip
 
 
 async def submit_execution(decision_id: str, *, operator: str) -> dict:
@@ -56,7 +99,7 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     dec = pending["decision"]
     request_json = json_dumps({
         "params_vo_list": plan.params_vo_list,
-        "create_calls": [{k: v for k, v in c.items() if k != "_card_id"} for c in plan.create_calls],
+        "create_calls": [{k: v for k, v in c.items() if k not in ("_card_id", "_group_type")} for c in plan.create_calls],
         "negative_calls": plan.negative_calls,
     })
     record_id = repo.insert_advert_record(
@@ -106,8 +149,24 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
                         op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
                         op["error_msg"] = f"{type(e).__name__}: {e}"
 
+        skip_create = await _resolve_create_portfolios(
+            client, plan,
+            shop_id=int(dec.get("shop_id") or 0),
+            parent_asin=str(dec.get("parent_asin") or ""),
+            parent_sku=str(dec.get("parent_seller_sku") or ""),
+            operator=operator,
+        )
+
         for call in plan.create_calls:
             card_id = call.pop("_card_id", "")
+            call.pop("_group_type", None)
+            if card_id in skip_create:
+                for op in plan.ops:
+                    if op.get("is_create") and str(op.get("suggest_card_id")) == card_id:
+                        op["modify_result"] = "SKIP"
+                        op["execute_status"] = "SKIP"
+                        op["error_msg"] = "未匹配到对应组合，已跳过"
+                continue
             try:
                 res = await client.create_portfolio_campaign(call)
                 results["create"].append(res)
@@ -216,8 +275,20 @@ async def submit_execution_direct(
                 logger.exception("async_batch_update 失败(direct) [%s]: %s", decision_id, e)
                 errors.append(f"async: {type(e).__name__}: {e}")
 
+        _dec_d = pending.get("decision") or {}
+        skip_create = await _resolve_create_portfolios(
+            client, plan,
+            shop_id=int(_dec_d.get("shop_id") or 0),
+            parent_asin=str(_dec_d.get("parent_asin") or ""),
+            parent_sku=str(_dec_d.get("parent_seller_sku") or ""),
+            operator=operator,
+        )
+
         for call in plan.create_calls:
-            call.pop("_card_id", "")
+            cid = call.pop("_card_id", "")
+            call.pop("_group_type", None)
+            if cid in skip_create:
+                continue
             try:
                 res = await client.create_portfolio_campaign(call)
                 results["create"].append(res)

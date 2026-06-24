@@ -234,6 +234,8 @@ def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
         } for r in plcs if _num(r.get("new_percent")) is not None]
     create_call_args: dict[str, Any] = {
         "_card_id": cid,                       # 内部追踪（调用前剔除）
+        "_group_type": card.get("campaign_group_type"),  # 内部：组别码，执行层解析 portfolioId 后剔除
+
         "shopId": shop_id,
         "parentAsin": parent_asin,
         "parentSellerSku": parent_sku,

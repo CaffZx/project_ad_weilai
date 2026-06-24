@@ -241,6 +241,19 @@ def unmap_target_keyword_type(value: str | None) -> str | None:
     return _unmap_single(value, _TARGET_KEYWORD_TYPE_REVERSE)
 
 
+_CAMPAIGN_GROUP_TYPE_REVERSE = {
+    "exact_core_group": "精准主力组",
+    "exact_testing_group": "精准测试组",
+    "auto_broad_group": "自动广泛组",
+    "low_bid_retention_group": "低价捡漏组",
+}
+
+
+def unmap_campaign_group_type(value: str | None) -> str | None:
+    """ERP campaign_group_type 码 → 中文组名（精准主力组/精准测试组/自动广泛组/低价捡漏组）。"""
+    return _unmap_single(value, _CAMPAIGN_GROUP_TYPE_REVERSE)
+
+
 def from_enum_list(raw: Any, mapper: Callable[[str | None], str | None] | None = None) -> list[str]:
     """JSON 数组字符串(枚举码) → 内部值列表。decision_config 多值字段读回用。"""
     if not raw:
