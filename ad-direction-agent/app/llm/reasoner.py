@@ -398,7 +398,13 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 
 ## 输入
 - 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循）
-- 候选词列表：每个含 keyword_text / search_volume / natural_rank / trigger_scene
+- **本产品标识**（标题 / 品牌 / 品类）+ **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
+- 候选词列表：每个含 keyword_text / search_volume / natural_rank / trigger_scene / source（来源）
+
+## 相关性判断（首要，KB 06 §3 相关性精神）
+- **相关性是 create 的第一道关**：候选词须与"本产品标识 + 已投放关键词"语义相关（同品类/同款式/同用途）才考虑 create；**与产品明显无关的词一律 skip**，reason 说明"与本产品无关"。
+- **`natural_rank` 有值 = 事实相关**（亚马逊确实让本产品排该词）→ 默认视为相关，可信。
+- **锚点稀薄保护**：当"已投放关键词"为空、品牌/品类缺失（新品/小 ASIN）时，**不要因为参照少就过度 skip**——以标题为主判相关性；有 `natural_rank` 或与标题强重叠的词应保留。这些产品恰最需要新增词，勿误杀。
 
 ## 输出 JSON（严格 schema，禁 markdown 围栏）
 {
@@ -415,7 +421,8 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 }
 
 ## 判断与文案规则
-- 不值得建的词（相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因
+- 不值得建的词（**与产品无关** / 相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因
+- **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与标题/品类/已投词关联）；说不出相关性的不得 create
 - action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则
 - reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议
 - 禁用规则编号 / 内部术语；evidence 引用具体数值
@@ -1747,6 +1754,11 @@ class LLMReasoner:
         strategy_context: dict,          # ctx_dict, 含 _strategic_overview_text(posture_brief)
         temperature: float = 0.3,
         timeout_override: float | None = None,
+        *,
+        product_title: str = "",
+        product_brand: str = "",
+        product_category: str = "",
+        existing_keywords: list[str] | None = None,   # 已投放关键词（相关性参照锚点）
     ) -> dict:
         """KB 16+06 新增活动批量分析（单批）。LLM 只判 action + keyword_class + 文本，数值代码定。
 
@@ -1771,6 +1783,20 @@ class LLMReasoner:
         if _adirs:
             ctx_parts.append(f"  - 广告方向(运营已选): {_adirs}")
 
+        # 相关性锚点：产品标识 + 已投放关键词（H1/H12：brand/category 可能空 → 判空不输出，主力靠 title+已投词）
+        anchor_parts = ["## 本产品标识 + 已投放关键词（相关性参照）"]
+        if (product_title or "").strip():
+            anchor_parts.append(f"  - 产品标题: {product_title.strip()[:300]}")
+        if (product_brand or "").strip():
+            anchor_parts.append(f"  - 品牌: {product_brand.strip()}")
+        if (product_category or "").strip():
+            anchor_parts.append(f"  - 品类: {product_category.strip()}")
+        _exist = [k for k in (existing_keywords or []) if str(k).strip()][:60]
+        if _exist:
+            anchor_parts.append(f"  - 已投放关键词({len(_exist)}个，相关性参照): {', '.join(_exist)}")
+        else:
+            anchor_parts.append("  - 已投放关键词: 无（新品/小 ASIN，锚点稀薄 → 以标题为主判相关性，勿过度 skip）")
+
         # 今日执行总纲 preamble（与 batch 流一致，注入 posture_brief）
         overview_text = (strategy_context.get("_strategic_overview_text") or "").strip()
         preamble = (
@@ -1781,13 +1807,21 @@ class LLMReasoner:
         cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class)"]
         for i, c in enumerate(candidates):
             rank = c.get("natural_rank")
-            cand_parts.append(
+            line = (
                 f"\n### 候选 {i + 1}: {c.get('keyword_text', '')}"
                 f"\n  - 搜索量: {c.get('search_volume', 0)}"
                 f"\n  - 自然排名: {rank if rank is not None else 'N/A(无自然位)'}"
                 f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
             )
-        user_message = preamble + "\n".join(ctx_parts) + "\n" + "\n".join(cand_parts)
+            if c.get("source"):
+                line += f"\n  - 来源: {c.get('source')}"
+            if c.get("source_reason"):
+                line += f"\n  - 来源说明: {c.get('source_reason')}"
+            cand_parts.append(line)
+        user_message = (
+            preamble + "\n".join(ctx_parts) + "\n" + "\n".join(anchor_parts)
+            + "\n" + "\n".join(cand_parts)
+        )
 
         messages = [
             {"role": "system", "content": _build_new_campaign_prompt()},

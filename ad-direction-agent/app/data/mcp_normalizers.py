@@ -160,11 +160,13 @@ def normalize_competitors(payload: Any) -> list[dict]:
     for row in rows:
         out.append(
             {
-                "asin": _pick(row, "asin", "ASIN", "竞品asin", "竞品ASIN"),
+                # 竞品 ASIN 真实字段 = "竞品"（live 核实 2026-06-24；direct_competitors 出参）。
+                # 原别名 asin/ASIN/竞品asin/竞品ASIN 全不匹配 → 此前 670 行竞品 asin 恒 null。
+                "asin": _pick(row, "asin", "ASIN", "竞品asin", "竞品ASIN", "竞品"),
                 "price": _float(_pick(row, "price", "product_price", "售价", "价格")),
                 "asin_star": _float(_pick(row, "asin_star", "rating", "star_level", "星级", "评分")),
-                "reviews_num": _int(_pick(row, "reviews_num", "review_count", "comment_num", "评论数")),
-                "top_category_rank": _int(_pick(row, "top_category_rank", "大类目排名", "类目排名", "BSR")),
+                "reviews_num": _int(_pick(row, "reviews_num", "review_count", "comment_num", "评论数", "ratings数")),
+                "top_category_rank": _int(_pick(row, "top_category_rank", "大类目排名", "类目排名", "BSR", "末级类目排名", "一级类目排名")),
             }
         )
     return out

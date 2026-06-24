@@ -522,6 +522,10 @@ async def _analyze_campaigns_impl(
             days=days,
             sem=new_sem,
             overview_gate=overview_gate,
+            # 相关性锚点（H1/H12：brand/category 可能空，judge-null 在 reasoner 侧）
+            product_title=(asin_data.title or "") if asin_data else "",
+            product_brand=(asin_data.brand or "") if asin_data else "",
+            product_category=(asin_data.category_name or "") if asin_data else "",
         ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )
@@ -1898,7 +1902,8 @@ def _resolve_budget_conflicts(
     warnings: list[str] = []
 
     for adj in adjustments:
-        # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.21 或 预算 ≤ $1.01 → 强制 eliminate。
+        # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 强制 eliminate。
+        # （归组/强制修正用 OR + bid 0.10，独立于预过滤 AND 的 LOW_BID_MAX 0.21；见 campaign_portfolio 阈值注释）
         # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
         # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
         if adj.action != "eliminate_to_low_bid_pool" and (

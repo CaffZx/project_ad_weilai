@@ -444,7 +444,7 @@ class CampaignFetcher:
 
         返回 (flow_rows, own_rows)，任一失败/无数据返回空 list（上游记 warning 继续）。
         flow_rows 字段（实测中文）: 关键词 / 搜索量 / 搜索人数
-        own_rows 字段: 关键词 / 自然排名 等
+        own_rows 字段（live 核实）: 关键词 / 周搜索量 / 自然排位排名 / 自然位排位 / 词的周排名
         """
         from app.data.mcp_mapping import McpContext, build_tool_args, make_date_window
 
@@ -467,18 +467,124 @@ class CampaignFetcher:
             return_exceptions=True,
         )
 
-        def _rows(res) -> list[dict]:
-            if isinstance(res, BaseException) or not getattr(res, "ok", False):
+        def _rows(res, label: str) -> list[dict]:
+            # 不静默吞错：MCP 异常/返回 not-ok 时打 warning（否则只剩 count=0，查不出原因）
+            if isinstance(res, BaseException):
+                logger.warning("discover_new_keywords [%s]: %s MCP 异常: %s", parent_asin, label, res)
                 return []
-            return _as_rows(res.value)
+            if not getattr(res, "ok", False):
+                logger.warning("discover_new_keywords [%s]: %s MCP 返回 not-ok（无数据）", parent_asin, label)
+                return []
+            # ★payload 级错误：HTTP 200 但工具返回 {success:False, error:...}（如数仓 SQL 报错）。
+            #   .ok 只反映 HTTP 层 → 此处必须显式拦，否则错误 dict 被当成一行数据静默吞掉。
+            val = res.value
+            if isinstance(val, dict) and (val.get("success") is False or val.get("error")):
+                logger.warning("discover_new_keywords [%s]: %s 工具返回错误（非数据）: %s",
+                               parent_asin, label, str(val.get("error"))[:300])
+                return []
+            return _as_rows(val)
 
-        flow_rows = _rows(flow_res)
-        own_rows = _rows(own_res)
+        flow_rows = _rows(flow_res, "flow_keywords")
+        own_rows = _rows(own_res, "own_keyword_flow")
         logger.info(
             "discover_new_keywords [%s]: flow=%d own=%d",
             parent_asin, len(flow_rows), len(own_rows),
         )
         return flow_rows, own_rows
+
+    async def discover_competitor_keywords(
+        self,
+        parent_asin: str,
+        shop_account: str,
+        parent_seller_sku: str = "",
+        site_code: str = "Amazon_US",
+        timeout: float | None = None,
+    ) -> list[dict]:
+        """竞品词源（KB 16 COMPETITOR_INTERCEPT_WINDOW，reverse-only）。
+
+        direct_competitors → 取前 N 个竞品 ASIN → 并行 seller_sprite_keyword_reverse 反查流量词。
+        返回 [{"keyword": str, "search_volume": int|None, "suggested_bid": float|None,
+              "competitor_asin": str}, ...]（suggested_bid 来自反查自带 bid，可省 fetch_suggested_bids）。
+        硬扇出上限：竞品数 ≤ campaign_new_competitor_max（默认 3），每竞品 1 页 → 总 MCP ≤ ~N+1 次。
+        ⚠ 本版**不做** keyword_competitor_flow 逐词打分（那才是数十次扇出炸弹）。
+        fail-open：缺 parent_seller_sku / 任一步失败 / 无数据 → 返回空 list（上游记 warning 继续）。
+        """
+        from app.data.mcp_normalizers import normalize_competitors
+
+        if not (parent_seller_sku or "").strip():
+            logger.warning("discover_competitor_keywords [%s]: parent_seller_sku 为空，跳过竞品源", parent_asin)
+            return []
+
+        t = timeout if timeout is not None else getattr(settings, "campaign_new_competitor_timeout", 60.0)
+        max_comp = getattr(settings, "campaign_new_competitor_max", 3)
+        kw_per = getattr(settings, "campaign_new_competitor_kw_per", 100)
+
+        # 1. 取竞品 ASIN（手工构参，对齐 direct_competitors arg builder 的 snake_case 键）
+        try:
+            comp_res = await self._mcp().call_tool_timed_with_args(
+                "direct_competitors",
+                {"parent_asin": parent_asin, "parent_seller_sku": parent_seller_sku,
+                 "shop_account": shop_account},
+                t,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("discover_competitor_keywords [%s]: direct_competitors 失败 %s", parent_asin, e)
+            return []
+        if isinstance(comp_res, BaseException) or not getattr(comp_res, "ok", False):
+            logger.warning("discover_competitor_keywords [%s]: direct_competitors 返回 not-ok（无竞品数据）", parent_asin)
+            return []
+        comp_asins: list[str] = []
+        for r in (normalize_competitors(comp_res.value) or []):
+            a = str((r or {}).get("asin") or "").strip()
+            if a and a not in comp_asins:
+                comp_asins.append(a)
+            if len(comp_asins) >= max_comp:
+                break
+        if not comp_asins:
+            logger.info("discover_competitor_keywords [%s]: 无竞品 ASIN", parent_asin)
+            return []
+
+        # 2. 并行 reverse 反查（每竞品 1 页；site_code 已是 Amazon_US 全称，两工具直接接受）
+        async def _reverse_one(comp_asin: str):
+            args = {"asin": comp_asin, "market": site_code, "page": 1, "page_size": kw_per}
+            return comp_asin, await self._mcp().call_tool_timed_with_args(
+                "seller_sprite_keyword_reverse", args, t,
+            )
+
+        results = await asyncio.gather(
+            *[_reverse_one(a) for a in comp_asins], return_exceptions=True,
+        )
+        out: list[dict] = []
+        for res in results:
+            if isinstance(res, BaseException):
+                logger.warning("discover_competitor_keywords [%s]: reverse 任务异常: %s", parent_asin, res)
+                continue
+            comp_asin, rev = res
+            if isinstance(rev, BaseException) or not getattr(rev, "ok", False):
+                logger.warning("discover_competitor_keywords [%s]: 竞品 %s reverse 失败/无收录数据", parent_asin, comp_asin)
+                continue
+            # 真实层级 data.data.list + 真实字段 keyword/searches/bid（live 核实 2026-06-18）
+            for row in _reverse_keyword_rows(rev.value):
+                kw = str(row.get("keyword") or "").strip()
+                if not kw:
+                    continue
+                sv_raw = row.get("searches")          # 搜索量真实字段名 = searches
+                try:
+                    sv = int(float(sv_raw)) if sv_raw is not None else None
+                except (TypeError, ValueError):
+                    sv = None
+                bid_raw = row.get("bid")              # bonus：反查自带建议竞价，省 fetch_suggested_bids
+                try:
+                    bid = float(bid_raw) if bid_raw is not None else None
+                except (TypeError, ValueError):
+                    bid = None
+                out.append({"keyword": kw, "search_volume": sv,
+                            "suggested_bid": bid, "competitor_asin": comp_asin})
+        logger.info(
+            "discover_competitor_keywords [%s]: %d 竞品 → %d 词",
+            parent_asin, len(comp_asins), len(out),
+        )
+        return out
 
     async def fetch_suggested_bids(
         self,
@@ -588,7 +694,9 @@ class CampaignFetcher:
                 kw = str(row.get("关键词") or row.get("keyword") or "").strip().lower()
                 if not kw or kw in rank_map:
                     continue
-                cur = _to_float(row.get("自然排名") or row.get("natural_rank"))
+                # own_keyword_flow 真实字段=自然排位排名/自然位排位（live 核实 2026-06-24）
+                cur = _to_float(row.get("自然排位排名") or row.get("自然位排位")
+                                or row.get("自然排名") or row.get("natural_rank"))
                 if cur is None or cur <= 0:
                     continue
                 rank_map[kw] = {"natural_rank": int(cur), "near_natural_rank": None, "rank_change": None}
@@ -724,6 +832,24 @@ def _to_days_online(value: Any) -> int:
 def _make_date_window(days: int) -> tuple[str, str]:
     """生成 MCP 日期参数。"""
     return make_date_window(days)
+
+
+def _reverse_keyword_rows(payload: Any) -> list[dict]:
+    """seller_sprite_keyword_reverse 反查词列表解析（live 核实 2026-06-18）。
+
+    真实层级：value["data"]["data"]["list"]（嵌套 dict→dict→list，_as_rows 只解一层够不着）。
+    容错：从 payload 起逐层下钻 "data"，命中含 "list" 的节点即返回；niche ASIN 无收录→list 空。
+    词条真实字段：keyword / searches(搜索量) / bid,bid_max,bid_min(建议竞价)。
+    """
+    node = payload
+    for _ in range(4):  # 容错：上游若已部分解包，少钻几层也能命中
+        if isinstance(node, dict) and isinstance(node.get("list"), list):
+            return [x for x in node["list"] if isinstance(x, dict)]
+        if isinstance(node, dict) and node.get("data") is not None:
+            node = node["data"]
+        else:
+            break
+    return []
 
 
 def _as_rows(payload: Any) -> list[dict]:

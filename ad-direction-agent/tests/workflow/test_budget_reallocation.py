@@ -179,4 +179,3 @@ def test_classify_eliminate_and_broad_unaffected_by_proposed():
 def test_classify_elimination_pool_stays_by_current_no_revival_gate():
     # 本期不加复活闸：在淘汰池($1/$0.20)即归淘汰组，即使 proposed=$6
     assert classify(_unit(1.0, cur_bid=0.20), llm_action="adjust_budget", effective_budget=6.0) == PORTFOLIO_ELIMINATE
-    assert bs["portfolio_budget_summary"]["budget_pool"] == 140.0

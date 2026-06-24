@@ -162,7 +162,18 @@ class Settings(BaseSettings):
     # Campaign 新增活动分析 (KB 16, 独立并行分析线)
     campaign_new_enabled: bool = True         # 总开关 (关闭退化到无新增建议)
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
-    campaign_new_max_count: int = 20          # 单次分析最大候选词数 (排序后截断 Top-N)
+    campaign_new_max_count: int = 40          # 单次分析最大候选词数 (排序后截断 Top-N；2026-06-18 20→40)
+    campaign_new_max_creates: int = 20        # 输出硬截断 (双轮交集后 Top-N，EXACT 优先)
+    #   ⚠ 与 KB03 §7「每日最大新词数=15」冲突，暂用 20 待 KB/运营定夺
+    # ── 竞品词源 (Step3，reverse-only，默认关；live 验证返回结构后再开) ──
+    campaign_new_competitor_enabled: bool = False     # 竞品词源总开关 (默认关)
+    campaign_new_competitor_max: int = 3              # 取前 N 个竞品 ASIN 反查 (硬扇出上限)
+    campaign_new_competitor_kw_per: int = 100         # 每竞品 reverse 取词数 (page_size)
+    campaign_new_competitor_timeout: float = 60.0     # 竞品 MCP 总超时 (fail-open)
+    # ── 多源配额 (Step4，仅 competitor 开启时分桶；注释待 KB 最终核) ──
+    campaign_new_quota_competitor: int = 20   # 竞品桶
+    campaign_new_quota_ranking: int = 15      # 自然位机会桶 (H10：10→15 防回归，事实相关不该砍)
+    campaign_new_quota_flow: int = 5          # 流量词库桶 (最低价值通用词，让额)
 
     # 淘汰活动复评（重启）— KB 21 §7，确定性规则引擎，无 LLM
     campaign_restart_enabled: bool = True             # 总开关

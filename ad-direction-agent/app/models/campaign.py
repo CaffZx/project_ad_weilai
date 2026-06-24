@@ -179,6 +179,8 @@ class NewCampaignCandidate(BaseModel):
     #   命中→_calc_initial_bid 按公式 min(0.5, bid×0.5) 计算；未命中→降级占位 $0.30。
     suggested_bid: float | None = None
     trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签，非筛选门禁）
+    source: str = "flow"                    # 候选来源: flow / ranking_opportunity / competitor (多源配额分桶用)
+    source_reason: str = ""                 # 来源说明 (如 "竞品B0XXX反查·搜索量1200")，喂 LLM 作参考
 
 
 class NewCampaignItem(BaseModel):
@@ -197,6 +199,7 @@ class NewCampaignItem(BaseModel):
     placement_adjustment: str = "N/A"       # 首轮统一不输出 (KB 16 §5)
     negative_strategy: str = ""             # 仅 BROAD/PHRASE 必填 (KB 16 §5, LLM 产出)
     trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签）
+    source: str = ""                        # 候选来源 flow/ranking_opportunity/competitor（输出排序 H5 用）
     reason: str = ""                        # LLM 文本
     evidence: list[str] = Field(default_factory=list)
     ai_portfolio_class: str = ""            # 归组: 精准测试组 / 自动广泛组

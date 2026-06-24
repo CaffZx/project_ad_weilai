@@ -979,7 +979,86 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-22（v2.9: override 持久化上线 + 前端广告方向统一/renderP3守卫 + 卡C态·MCP慢·新建闪烁 诊断待办 + state库回填315 §21）*
+## 22. 2026-06-24：新增活动选词改造（相关性把关 + 多源词池 + 竞品源接入 + 串行优化）
+
+> 仅本地（`AD_assistant_agent-v3.2`），**竞品源默认关、未上服务器 chenv31**。改动落在 `campaign_new.py` / `campaign_fetcher.py` / `reasoner.py` / `models/campaign.py` / `settings.py` / `kb_loader.py`。方案+隐患核实见 `~/.claude/plans/40-mcp-keyword-competitor-flow-...md`。
+
+### 22.1 背景
+新增活动候选词原仅 2 源（`flow_keywords` + `own_keyword_flow`），三个问题：① 无相关性把关 → 出现与产品**毫无相关**的词（代码只滤去重/噪声/搜索量<50，LLM 又拿不到产品标识）；② 候选硬截断 20、单源全局排序 → 一源占满轮不到其他源；③ KB16 §1 多路词源（尤其**竞品** `COMPETITOR_INTERCEPT_WINDOW`）未接。
+
+### 22.2 已实现改动（分模块）
+
+**A. LLM 相关性把关（影响每次运行）** — `campaign_new.py` + `reasoner._NEW_CAMPAIGN_PROMPT`
+- 注入锚点：`existing_keywords`（已投词，原仅去重用）+ 产品 `title/brand/category_name`（asin_data，campaign.py 透传）→ 进 prompt 作"本产品相关性参照"。
+- prompt 硬规则：相关性为 create **首要 skip 判据**；create 须写相关性依据，说不出 → skip；`natural_rank` 有值 = **事实相关**可信；**锚点稀薄保护**（新品/伪 ASIN 参照少时以标题为主，勿过度 skip 误杀）。
+
+**B. 放宽 + 输出截断（影响每次运行）** — `settings.py` + `campaign_new.py`
+- `campaign_new_max_count` 20→**40**；新增输出硬顶 `campaign_new_max_creates=20`（双轮交集后 EXACT 优先截 20）。⚠ 20 与 **KB03 §7「每日最大新词数 15」冲突**，代码注释标"暂用 20，待 KB/运营定夺"。
+
+**C. 竞品词源接入（默认关）** — `campaign_fetcher.py` + `kb_loader.py`
+- `discover_competitor_keywords`：`direct_competitors`→KB06 §3 弱势排序取 Top-K 竞品→并行 `seller_sprite_keyword_reverse` 反查流量词。mirror `discover_new_keywords`，fail-open。
+- `new_campaign` preset 加 `"08"`（竞品姿态）。KB08 姿态门禁本期**简化**（标注待全量字段）。
+- 配置：`campaign_new_competitor_enabled=false`(默认关) / `_competitor_max` / `_competitor_kw_per` / `_competitor_timeout`。
+
+**D. 多源词池 + 配额** — `campaign_new.py` + `models/campaign.py`
+- `NewCampaignCandidate` 加 `source` / `source_reason` 字段。
+- `_select_by_quota`：**竞品20 / 自然位15 / 流量5**（暂定，注释待 KB），欠额按优先级回补（竞品>自然位>流量）。competitor 关时退回单一全局排序（现状）。
+- H2 防护：配额在**打 source 标签后分桶选取**，不复用全局 sort+截断（否则竞品 natural_rank=None 被挤掉）。
+
+**E. Live 解析修复（关键，避免踩坑）** — `campaign_fetcher.py`
+- `seller_sprite_keyword_reverse` 真实结构 **`value.data.data.list`**（嵌套 dict→dict→list，`_as_rows` 只解一层够不着）；真实字段 **`keyword` / `searches`（不是 `搜索量`）/ `bid`,`bid_max`,`bid_min`**。新增 `_reverse_keyword_rows` 容错下钻。原代码层级错+字段名错 → 即便开源也必得 0 词。
+- **SellerSprite 收录依赖**：niche/跟卖伪 ASIN 无反查数据（`total_keywords:0`）；主流竞品有（实测 `B0DQLB8WWC`→2095 词）；`direct_competitors` 对部分 niche `found:false`。→ 竞品源对**本账号伪 ASIN（跟卖/中文名）系统性偏弱**。
+- **bonus**：reverse 自带 `bid` → 竞品词直接用作 `suggested_bid`。
+
+**F. 去重合并来源（Q1）** — `campaign_new.py`
+- `_merge_candidate` + `_SOURCE_PRIORITY`：同词多源 → 留一条、`source_reason` 合并、bucket 归**最高优先级源**、补 natural_rank/suggested_bid/取大 search_volume。替换原 `seen`-skip（原只留首个源、丢弃后源）。
+
+**G. 三处串行优化（核实 LLM 不依赖 bid 后）** — `campaign_new.py`
+- **①** 竞品发现 ∥ flow/own（competitor 开时 `create_task` 并行，竞品块 await 同一 task）；顺带修"flow/own 空→直接 return 跳过竞品"→改"competitor 关才 return"。
+- **②** 建议竞价 ∥ 双轮 LLM（LLM prompt 禁用 bid，reasoner.py:397/402）：bid 作 task 与 LLM `gather` 并行，组装前 await。**每次净省 ~3s**。
+- **③** `fetch_suggested_bids` 只查 `suggested_bid is None` 的词（竞品 reverse 自带 bid 不再重查）。
+
+### 22.3 验证
+- 离线单测 `tests/workflow/test_campaign_new_quota.py` **7 个全过**（配额分配/欠额回补、**H2 竞品 natural_rank=None 不被挤掉**、reverse 真实层级解析、空/envelope、来源合并）。workflow 全套 **39 passed**。
+- ⚠ 预存坏测试 `test_budget_reallocation.py::test_classify_elimination_pool_stays_by_current_no_revival_gate`（`NameError: bs`，与本改动无关）。
+
+### 22.4 上线前必做 / 待办
+- **competitor 源 live 验证后再开** `campaign_new_competitor_enabled`：验 reverse 对主流品出词、niche 品 fail-open、`direct_competitors` 拿到竞品 ASIN、并行后双轮成功率不降。
+- 输出 20 vs KB15、配额 20/15/5：均**暂定待 KB/运营定夺**（代码已注释）。
+- 首版最小闭环：竞品词源 + LLM 相关性。**延后（标 TODO）**：`keyword_competitor_flow` 逐词打分、KB06 弱势精排、KB08 完整姿态。
+- 锚点对伪 ASIN 系统性偏弱（H12）：live 打印 `brand/category` 须**专挑伪 ASIN** 验，别拿真 B0 ASIN 验完了事。
+- KB16 其余未接源（CUSTOM_KEYWORD_POOL 运营词池 / KEYWORD_PROMOTED_FROM_BROAD 搜索词报告）仍 TODO。
+
+---
+
+## 23. 2026-06-24：淘汰判定是【多环节】——各环节阈值/口径有意不同（防误判备忘）
+
+> 本节**不改逻辑**，只记录设计意图 + 一次真实误判，防后人（或 AI）把"看着不一致"当 bug 去推平。配套已就地补/改注释（仅注释）。
+
+**起因**：有人（含本轮一个 AI）看到 `_is_in_elimination_pool` 用 `bid ≤ 0.10`，而常量 `LOW_BID_MAX = 0.21`、旧注释/docstring 又写"0.21"，**误判为 bug**，去"对齐"成 0.21。**错**。运营确认：**bid∈(0.10, 0.21] 且预算正常的活动，不应单凭 bid 强制归低价捡漏组**。
+
+**真相：淘汰命中分多个环节，各环节问的问题不同，判据本就不同，勿统一。**
+
+| 环节 | 在哪 | 判据 | 干什么 |
+|---|---|---|---|
+| **预过滤** | `campaign.py` / `is_strictly_in_low_bid_pool` | **AND**：bid ≤ `LOW_BID_MAX`(0.21) **且** 预算 ≤ 1.01 | 判"确实已淘汰执行"(两维都触底) → 剔除不分析(灰卡) |
+| **预分类** | `campaign_portfolio.classify`(读 current) | **OR**：`_is_in_elimination_pool` = bid ≤ **0.10** 或 预算 ≤ 1.01 | 喂 LLM 前按现状归组 |
+| **终分类** | `classify`(effective_budget=proposed) | 淘汰判据仍读 current；`effective_budget` 只影响主力↔测试 | 合并后按本轮建议归组 |
+| **强制修正** | `campaign.py` `_resolve_budget_conflicts` | **OR**：bid ≤ **0.10** 或 预算 ≤ 1.01 | LLM 不听话时翻成 eliminate + 硬填 $1/$0.20 |
+
+**关键点（勿踩）**：
+- **bid 阈值两套，有意不同**：预过滤(AND) 用 **0.21**（`LOW_BID_MAX`）；归组/强制修正(OR) 用 **0.10**（裸字面量）。AND 路径判"已执行淘汰"，OR 路径判"该不该归组/翻正"，门槛本就不同。
+- 常量 `LOW_BID_MAX=0.21` **只服务预过滤(AND)**；OR 路径的 0.10 是**独立口径**，**勿改成 LOW_BID_MAX、勿抽成"统一常量"**（那等于抹掉环节差别）。
+- 预算阈值 1.01 各环节共用。
+- 已补/改的注释（**逻辑零改**）：`campaign_portfolio.py`（阈值常量块 + `_is_in_elimination_pool` docstring）、`campaign.py`（强制修正 :1905 注释）——原写"0.21"的误导处已改准。
+
+**教训**：看到"看着不一致"的阈值，先确认是不是**多环节的有意差别**，**报告、别擅自推平**（更别在被纠正后继续改）。
+
+---
+
+*最后更新：2026-06-24（v3.1: 淘汰多环节阈值差别防误判备忘 §23 —— 预过滤(AND,0.21) vs 归组/强制修正(OR,0.10) 有意不同，LOW_BID_MAX 只供 AND 路径勿统一；仅补注释零逻辑改）*
+*v3.0: 新增活动选词改造 §22 —— LLM相关性锚点(已投词+产品标识)/放宽40+输出20/竞品reverse源(默认关)/多源配额20·15·5/reverse解析修复(data.data.list+searches+bid)/来源合并去重/三处串行优化(竞品∥发现·bid∥LLM·bid去重查)；竞品源 live 验证后再开）*
+*v2.9: override 持久化上线 + 前端广告方向统一/renderP3守卫 + 卡C态·MCP慢·新建闪烁 诊断待办 + state库回填315 §21）*
 *v2.8: 修复4 目标ACOS区间化 §20 —— KB锚定区间[下限,上限]内出单值；算法+prompt 双口对齐；删关键词Bid表述/移KB19；自检零回归，遗留预算线对齐）*
 *v2.7: 新增已知逻辑缺陷 §19 —— 定时分析不采信 config 的 acos/预算配置，acos 恒走 AI 现算/floor 5%，config 这两列死写死读；附回填计划已弃、prod 未写入）*
 *v2.6: 新增前端待办 §18 —— F1 完成后左栏切快照 / F2 进行中隐藏批次下拉 / F3 去战略层天数下拉(后端硬编码7天)）*

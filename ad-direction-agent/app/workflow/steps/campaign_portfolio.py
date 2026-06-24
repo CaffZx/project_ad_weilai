@@ -44,9 +44,12 @@ PORTFOLIO_ELIMINATE = "低价捡漏组"
 
 ALL_PORTFOLIOS = (PORTFOLIO_MAIN, PORTFOLIO_BROAD, PORTFOLIO_TEST, PORTFOLIO_ELIMINATE)
 
-# 低价捡漏判定阈值 (KB 21 §6)：bid ≤ $0.21 或 预算 ≤ $1.01 → 低价捡漏档。
-# 预过滤 (campaign.py) 用 AND (两者都到底 = 已入池，剔除不分析)；
-# 分类/强制淘汰用 OR (满足其一即归低价捡漏组 / 强制淘汰)。campaign.py 复用这两个常量。
+# 低价捡漏判定阈值 (KB 21 §6)。⚠ 淘汰是【多环节】流程，各环节判据【有意不同】，勿"对齐"成同一阈值：
+#   · 预过滤 (campaign.py / is_strictly_in_low_bid_pool)：AND —— bid ≤ LOW_BID_MAX(0.21) 且 预算 ≤ LOW_BUDGET_MAX(1.01)
+#     判"确实已淘汰执行"(两维都触底)，剔除不分析。
+#   · 归组 / 强制修正 (_is_in_elimination_pool / campaign.py 兜底)：OR —— bid ≤ 0.10 或 预算 ≤ 1.01
+#     单凭出价归组门槛更严($0.10)；bid∈(0.10,0.21] 且预算正常【不】单凭 bid 归组 (运营确认 2026-06-24)。
+#   下列两常量仅供【预过滤(AND)】路径；OR 路径 bid 阈值是 0.10(独立口径)，勿改成 LOW_BID_MAX。
 LOW_BID_MAX = 0.21
 LOW_BUDGET_MAX = 1.01
 
@@ -58,7 +61,11 @@ _BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
 
 
 def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
-    """低价捡漏判定：当前 bid ≤ $0.21 或 预算 ≤ $1.01（满足其一即归低价捡漏组，KB 21 §6）。"""
+    """归组淘汰判定 (OR)：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 归低价捡漏组（KB 21 §6）。
+
+    ⚠ bid 阈值 $0.10 是【归组路径】独立口径，非预过滤(AND)的 LOW_BID_MAX($0.21)；
+      bid∈(0.10,0.21] 且预算正常不单凭 bid 归组（运营确认 2026-06-24）。下方 `b <= 0.1` 勿改成 0.21。
+    """
     b, bg = unit.current_bid, unit.current_budget
     return (b is not None and b <= 0.1) or (bg is not None and bg <= LOW_BUDGET_MAX)
 
