@@ -38,6 +38,7 @@ class CampaignFetcher:
         self._mcp_sem = asyncio.Semaphore(settings.mcp_max_concurrency)
         self._last_shop_id: int = 0  # fetch_campaigns 解析后缓存，供懒加载回落复用
         self._last_shop_account: str = ""  # 同上，供新增活动线 discover_new_keywords 复用
+        self._last_site_code: str = "Amazon_US"  # 同上，供懒加载 placement/search_term 按站点构日期窗口
 
     # ── 主流程 ──
 
@@ -69,6 +70,7 @@ class CampaignFetcher:
             # 缓存供新增活动线 discover_new_keywords 复用 (shop_account 不在 CampaignData 上)
             self._last_shop_id = shop_id
             self._last_shop_account = db_ctx.shop_account or ""
+            self._last_site_code = site_code  # 供懒加载 placement/search_term 按站点构日期窗口
 
         if not db_ctx:
             return CampaignData(
@@ -110,7 +112,7 @@ class CampaignFetcher:
         # ④ MCP 必拉: basic_info (days_online, 交叉验证 budget/status)
         #    + product_report (7d 效果指标)
         #    prefer_db=True 时全部走 Doris
-        start_date, end_date = _make_date_window(days)
+        start_date, end_date = _make_date_window(days, db_ctx.site_code)
         shop_account = db_ctx.shop_account
 
         # listing/shop_id 解析一次（#5 防 MCP 全挂时循环内 N 次冗余查询）
@@ -448,7 +450,7 @@ class CampaignFetcher:
         """
         from app.data.mcp_mapping import McpContext, build_tool_args, make_date_window
 
-        start_date, end_date = make_date_window(days)
+        start_date, end_date = make_date_window(days, site_code)
         ctx = McpContext(
             parent_asin=parent_asin,
             parent_seller_sku=parent_seller_sku,
@@ -650,7 +652,7 @@ class CampaignFetcher:
         from app.data.mcp_mapping import McpContext, build_tool_args, make_date_window
         from app.data.mcp_normalizers import normalize_keyword_rankings
 
-        start_date, end_date = make_date_window(days)
+        start_date, end_date = make_date_window(days, site_code)
         ctx = McpContext(
             parent_asin=parent_asin,
             parent_seller_sku=parent_seller_sku,
@@ -829,9 +831,9 @@ def _to_days_online(value: Any) -> int:
     return int(f)
 
 
-def _make_date_window(days: int) -> tuple[str, str]:
-    """生成 MCP 日期参数。"""
-    return make_date_window(days)
+def _make_date_window(days: int, site_code: str = "") -> tuple[str, str]:
+    """生成 MCP 日期参数（按站点当地时间）。"""
+    return make_date_window(days, site_code)
 
 
 def _reverse_keyword_rows(payload: Any) -> list[dict]:

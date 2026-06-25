@@ -36,7 +36,7 @@ DEFAULT_NEW_BUDGET = 3.00       # KB 16 §2 首次创建默认日预算
 BID_HARD_LOWER = 0.20           # KB 16 §3 出价下限
 BID_HARD_UPPER = 0.50           # KB 16 §3 首次创建出价硬上限
 BID_PLACEHOLDER = 0.30          # 建议竞价字段到位前的占位（区间中位安全值）
-MIN_SEARCH_VOLUME = 50          # 低搜索量噪声词过滤
+MIN_SEARCH_VOLUME = 100         # 低搜索量噪声词过滤（保留 sv ≥ 100；2026-06-24 由 50 上调）
 
 
 # ── 1. 硬过滤 (KB 16 §6) ─────────────────────────────────────────────────
@@ -56,22 +56,30 @@ def _is_blocked_by_asin(ctx: CampaignStrategyContext) -> str | None:
 
 
 _NOISE_RE = re.compile(r"^[\d\W_]+$|^[a-zA-Z]$")
+MAX_KEYWORD_TOKENS = 10  # 词数硬上限：>10 词的超长拼凑长尾直接丢弃（运营反馈，2026-06-24）
 
 
 def _is_noise_keyword(kw: str) -> bool:
-    """纯数字 / 单字母 / 过短 / 乱码过滤。"""
-    return not kw or len(kw) < 3 or bool(_NOISE_RE.match(kw.strip()))
+    """噪声过滤：纯数字 / 单字母 / 过短 / 乱码 / **超长词数(>10 词)**。"""
+    s = (kw or "").strip()
+    return (not kw or len(kw) < 3 or bool(_NOISE_RE.match(s))
+            or len(s.split()) > MAX_KEYWORD_TOKENS)
+
+
+_LONGTAIL_TOKEN_CAP = 5  # 词数计分上限：≥5 词并列，防 10+ 词超长拼凑串霸榜（运营反馈）
 
 
 def _longtail_sort_key(c: "NewCampaignCandidate"):
     """候选排序键 —— **长尾优先**（运营偏好精准长尾，非大词/泛词）：
     ① 有自然位优先（产品已在排 = 事实相关）；
-    ② **词数多者优先**（词越多越精准的长尾；单/双词多为大词/泛词）—— **不设上限**；
-    ③ 搜索量仅作同级 tiebreak（不再当主排序——否则高流量大词霸榜、长尾在进 LLM 前就被 Top-N
-       截掉，正是"总扩大词/泛词"的代码层根因。KB06：long_tail 精准 优先于 generic 大词测词）。
+    ② **词数多者优先，但 cap 在 5**（`min(词数,5)`）：3~5 词的真长尾优先；≥5 词并列、
+       不让 10+ 词的超长拼凑串排到最前（运营反馈"一口气推多个 >10 词的词"）；
+    ③ 搜索量作同级 tiebreak（不当主排序——否则高流量大词霸榜、长尾在进 LLM 前就被 Top-N
+       截掉，是"总扩大词/泛词"的代码层根因。KB06：long_tail 精准 优先于 generic 大词测词）。
     MIN_SEARCH_VOLUME 已兜底防零流量垃圾长串。
     """
-    return (c.natural_rank is None, -len((c.keyword_text or "").split()), -(c.search_volume or 0))
+    tokens = min(len((c.keyword_text or "").split()), _LONGTAIL_TOKEN_CAP)
+    return (c.natural_rank is None, -tokens, -(c.search_volume or 0))
 
 
 def _select_by_quota(

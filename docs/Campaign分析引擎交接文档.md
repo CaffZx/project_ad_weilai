@@ -1059,7 +1059,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ## 24. 2026-06-24：新增词总扩大词/泛词 → 长尾优先选词 + 属性级相关性（已修，本地）
 
-> 仅本地，未上 chenv31。**影响每次新增分析**（非默认关的竞品路径）。改 `campaign_new.py` + `reasoner.py` + `campaign.py`（调用点）。承 §22 的相关性锚点改造，进一步治"总扩大词"。
+> 已上线 chenv31 2026-06-24。**影响每次新增分析**（非默认关的竞品路径）。改 `campaign_new.py` + `reasoner.py` + `campaign.py`（调用点）。承 §22 的相关性锚点改造，进一步治"总扩大词"。
 
 **现象**：新增词 agent 总选大词/泛词（产品是短裙却扩中长裙/连衣裙），相关性只到品类级。
 
@@ -1085,7 +1085,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ## 25. 2026-06-24（续）：前端三项优化（A态空壳引导 / 执行结果toast常驻 / 告警tab化+筛选瘦身）
 
-> 均为**纯前端**（主看板 `demo/ad-asisitant-agent.html` + `demo/campaign-panel/**`），刷新浏览器即生效，后端零改动，**未上 chenv31**。
+> 均为**纯前端**（主看板 `demo/ad-asisitant-agent.html` + `demo/campaign-panel/**`），刷新浏览器即生效，后端零改动，**已上线 chenv31 2026-06-24**。
 
 ### 25.1 A 态空壳引导（新 ASIN 未配置·无批次）
 **背景**：全新 ASIN（state 库无配置）透传进来时，旧设计左侧配置栏可编辑 + 顶部「新建分析事件」按钮并列，用户不知点哪个；且 A 态 tab5 实际跑不了执行层（`_mountCampaignRealtime` 仅 C 态触发），左侧配了也没用 → 反常识。另注：叠加触发过「标记进行中事件失败」，根因是超长 SKU 名撑爆 state 库 `asin VARCHAR(20)`（§21.3，列宽已另行修复）。
@@ -1107,9 +1107,46 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-*最后更新：2026-06-24（v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端未上 chenv31，batchBar进topbar高风险未做）*
-*v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；本地未上 chenv31）*
-*v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。⚠ 仅本地未上 chenv31）*
+## 26. 2026-06-24/25：可靠性与口径修复（数据不可用区分 / 数仓 BE 重试 / MCP 日期窗口按站点）
+
+> 背景：一周的 StarRocks 数仓 BE 故障（只读 FS → 无存活 BE）暴露三类问题；本节修复**均已上线 chenv31（2026-06-24/25）**。
+
+### 26.1 数据拉取失败 vs 业务无调整（`data_unavailable`）
+**问题**：数仓宕机时 `fetch_campaigns` 拉空/报错被压成「no adjustments」良性跳过——一次 529 个 ASIN「真成功 0 / 业务跳过 522」却 0 失败，宕机被伪装成正常。
+**改**：
+- `CampaignAnalysisResult` 加 `data_unavailable: bool`；`campaign.py` 的 fetch 超时/异常两分支置 True。
+- `auto_push.should_push_to_erp` 优先判 `data_unavailable` → 返回独立原因（非「no adjustments」）；`api/campaign._maybe_push_erp` 在 `erp_write` 带 `data_unavailable=True`。
+- `batch_via_api.py`：单列「数据不可用」计数 + 退出码（真失败→1；数据不可用占比 >50%→2）+ 告警。
+- ⚠ 仍未覆盖：真正「无可用广告活动」(`total_campaigns==0` 但拉取成功) 与「数仓返回空行」无法区分，后者仍记业务跳过——留待**批量级空结果护栏**（待办：单批 `total_campaigns==0` 占比过高时告警/非零退出）。
+- 测试 `tests/persistence/test_erp_auto_push.py`(+2)。
+
+### 26.2 StarRocks 共享存储 BE 错重试（`starrocks_retry` 单一真源）
+**问题**：BE 存储错以 `errno 1064` 的 `ProgrammingError` 回来但带 `starlet err`/`BE:1006x` 签名（只读 FS `BE:10064`、cache 目录分配失败 `BE:10062`），瞬时抖动直接失败、无重试。
+**改**：新增 `app/data/starrocks_retry.py`（判定 `is_starrocks_be_storage_error` + `backoff_delay` + 同步 `run_sync_with_be_retry`，**单一真源**）：
+- `db_adapter._query`（异步 asyncio.sleep）复用判定/退避；与内层 `OperationalError/InterfaceError` once-retry 互斥不叠加；超时不重试。
+- `mcp_db_context._lookup_sync`（#1 MCP 入参解析 / #3 ERP listing 上下文）+ `lookup_top_child_attrs`（执行层取 top 子 ASIN）两处同步裸查接入。
+- 退避：第1次重试 0.55–0.70s、第2次 1.05–1.20s（含抖动），共 3 次尝试 ≈ 1.6s；**只兜瞬时抖动**，整体宕机仍需数仓侧修。
+- 只重试带签名的 1064；SQL 语法错（同 1064 无签名）不重试。错误签名是外部契约，**StarRocks 升级后需回归**这个判定。
+- 测试 `tests/test_starrocks_retry.py`(6) + `tests/test_db_adapter_be_retry.py`(3)。
+
+### 26.3 MCP 日期窗口按 ASIN 站点当地时间
+**问题**：`make_date_window` 用服务器本地 `date.today()`、`end=today`（含未完整当天、span 多一天）；且数仓按各站点当地时间存，硬编一个时区对非美站点错。
+**改**：`make_date_window(days, site_code)` **单一真源**——按站点当地时间：`end=当地今天-1`（排未完整当天）、`start=当地今天-days`（[today-days, today-1] 共 days 天）。
+- `_SITE_TZ` 覆盖**实跑 6 站点**（日志核实分布）：US=America/Los_Angeles、UK=Europe/London、DE=Europe/Berlin、IT=Europe/Rome、ES=Europe/Madrid、FR=Europe/Paris；未知站点回落默认站(US) + 告警。
+- **全链路 6 类构参点收口**：`mcp_adapter._resolve_context`、`mcp_query`、`campaign_fetcher`×3（perf/flow/rank）、`campaign.py`×4（restart/CPC/懒加载 placement+search_term），均按 `db_ctx.site_code` / `campaign_data.site_code` / `ctx.site_code`。
+- 修掉 `campaign.py` 里**第二处** `date.today()` 老实现（本地 `_make_date_window` 改委托 mcp_mapping）。
+- ⚠ 数仓 `dwd_whp_amazon_listing_general.site_code` 实存 15 个站点（含 CA/MX/JP/NL 等），但实跑只命中 6 个；新站点上量需在 `_SITE_TZ` 补行（不补则回落 US 并告警，可发现）。
+- 测试 `tests/test_mcp_date_window.py`(7)。
+
+### 26.4 运营 DB 变更
+- `ad_agent_state`（docker `mysql-state-v25`）13 张表 `asin` 列 `VARCHAR(20)→VARCHAR(50)`（含 2 张 `*_bak_20260622` 表）：原 20 对中文 SKU 串（如「US-运动文胸…」）报 `1406 Data too long`。无外键、`ALGORITHM=INPLACE` 在线变更、已全库备份（`/root/db_backup_ad_agent_state_*.sql.gz`）。
+
+---
+
+*最后更新：2026-06-25（v3.6: 可靠性与口径修复 §26（均已上线 chenv31）—— ①campaign 拉取失败/超时标 `data_unavailable` 与「无调整」业务态区分，batch_via_api 单列计数+退出码(真失败=1/数据不可用过半=2)，治「数仓宕机被伪装成全部正常无调整」；②StarRocks BE 存储错(starlet/BE:1006x)重试抽 `starrocks_retry` 单一真源，db_adapter._query(异步)+mcp_db_context 两处同步裸查统一兜底，只兜瞬时抖动；③MCP `make_date_window(days,site_code)` 改按站点当地时间(US/UK/DE/IT/ES/FR)，end=当地今天-1 排未完整当天，修第二处 date.today() 老实现，全链路6类构参点收口；④运营 DB：ad_agent_state.asin VARCHAR(20)→(50)）*
+*v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端已上线 chenv31 2026-06-24，batchBar进topbar高风险未做）*
+*v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；已上线 chenv31 2026-06-24）*
+*v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。已上线 chenv31 2026-06-24）*
 *v3.2: 补 §20/§21 回归测试 —— `tests/test_target_acos_band.py` 锁目标ACOS区间边界+真实toml同步+Step7钳制契约；`tests/persistence/test_override_persistence.py`(6) 锁 override"过期仍透出"语义，纯离线mock不连库。全套 151→174 passed 零回归；测试+文档+一处 bug 修复）*
 *v3.1: 淘汰多环节阈值差别防误判备忘 §23 —— 预过滤(AND,0.21) vs 归组/强制修正(OR,0.10) 有意不同，LOW_BID_MAX 只供 AND 路径勿统一；仅补注释零逻辑改）*
 *v3.0: 新增活动选词改造 §22 —— LLM相关性锚点(已投词+产品标识)/放宽40+输出20/竞品reverse源(默认关)/多源配额20·15·5/reverse解析修复(data.data.list+searches+bid)/来源合并去重/三处串行优化(竞品∥发现·bid∥LLM·bid去重查)；竞品源 live 验证后再开）*

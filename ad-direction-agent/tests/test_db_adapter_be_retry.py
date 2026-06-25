@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, patch
 import pymysql
 import pytest
 
-from app.data.db_adapter import DbAdapter, _is_starrocks_be_storage_error
+from app.data.db_adapter import DbAdapter
+
+# BE 错判定本身的单测见 tests/test_starrocks_retry.py（判定/退避已抽到 app.data.starrocks_retry）。
+# 本文件聚焦 DbAdapter._query 异步路径是否正确接入重试。
 
 
 def _be_err() -> pymysql.err.ProgrammingError:
@@ -19,12 +22,6 @@ def _be_err() -> pymysql.err.ProgrammingError:
         1064,
         "starlet err Create hdfs root dir 'db.../...' error: "
         "Read-only file system: Read-only ... BE:10064",
-    )
-
-
-def _cache_err() -> pymysql.err.ProgrammingError:
-    return pymysql.err.ProgrammingError(
-        1064, "starlet err Can't allocate cache directory for hdfs://...: BE:10062"
     )
 
 
@@ -39,18 +36,6 @@ def _make_adapter() -> DbAdapter:
     a = DbAdapter.__new__(DbAdapter)
     a._query_sem = asyncio.Semaphore(8)
     return a
-
-
-def test_is_starrocks_be_storage_error():
-    assert _is_starrocks_be_storage_error(_be_err()) is True
-    assert _is_starrocks_be_storage_error(_cache_err()) is True
-    # 同为 1064 的 SQL 语法错 → 不算 BE 存储错
-    assert _is_starrocks_be_storage_error(_syntax_err()) is False
-    # 连接级错（不同 errno/类型）→ 不算
-    assert _is_starrocks_be_storage_error(
-        pymysql.err.OperationalError(2013, "Lost connection")
-    ) is False
-    assert _is_starrocks_be_storage_error(ValueError("x")) is False
 
 
 def test_query_retries_on_be_error_then_succeeds():

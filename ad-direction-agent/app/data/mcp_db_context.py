@@ -10,6 +10,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from app.config.settings import settings
+from app.data.starrocks_retry import run_sync_with_be_retry
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +81,20 @@ def _lookup_sync(asin: str, shop_account: str | None) -> dict | None:
         shop_clause = "AND s.account = %s"
         params.append(shop_account)
     sql = _LOOKUP_SQL.format(shop_clause=shop_clause)
-    conn = pymysql.connect(**kwargs)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
-            return cur.fetchone()
-    finally:
-        conn.close()
+
+    def _once() -> dict | None:
+        # 每次重试用全新连接（勿复用可能已坏的连接）
+        conn = pymysql.connect(**kwargs)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                return cur.fetchone()
+        finally:
+            conn.close()
+
+    # 套 StarRocks BE 存储错重试（退避+抖动）——这条裸查询不经过 db_adapter._query，
+    # 是 MCP 入参解析(#1)与 ERP 写入 listing 上下文(#3)的 SQL 地基，必须自带兜底。
+    return run_sync_with_be_retry(_once, label=f"mcp_ctx {asin}")
 
 
 def _coerce_int(v) -> int | None:
@@ -223,69 +231,72 @@ def lookup_top_child_attrs(parent_asin: str, *, days: int = 30) -> dict | None:
     kwargs = _db_connect_kwargs()
     if not kwargs.get("host"):
         return None
-    try:
+    def _once() -> dict | None:
+        # 每次重试用全新连接（勿复用可能已坏的连接）
         conn = pymysql.connect(**kwargs)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("lookup_top_child_attrs Doris 连接失败: %s", e)
-        return None
+        try:
+            with conn.cursor() as cur:
+                # step 1: 子 ASIN 列表
+                cur.execute(
+                    "SELECT DISTINCT asin FROM dwd_whp_amazon_listing_general "
+                    "WHERE parent_asin=%s", (parent_asin,))
+                children = [r["asin"] for r in cur.fetchall() if r.get("asin")]
+                if not children:
+                    return None
+                ph = ",".join(["%s"] * len(children))
+
+                # step 2/3: 按 30d/90d 花费排序找 top 1
+                top_asin: str | None = None
+                for window_days in (days, 90):
+                    cur.execute(
+                        f"SELECT asin, SUM(cost) AS s FROM dwd_amazon_ad_product_report "
+                        f"WHERE asin IN ({ph}) "
+                        f"  AND local_report_time >= CURDATE() - INTERVAL %s DAY "
+                        f"  AND cost > 0 "
+                        f"GROUP BY asin ORDER BY s DESC LIMIT 1",
+                        (*children, window_days),
+                    )
+                    r = cur.fetchone()
+                    if r and r.get("asin"):
+                        top_asin = r["asin"]
+                        break
+
+                # step 4: 仍无 → 第一条 size+color 都非空
+                if not top_asin:
+                    cur.execute(
+                        "SELECT asin, product_size, product_color "
+                        "FROM dwd_whp_amazon_listing_general "
+                        "WHERE parent_asin=%s "
+                        "  AND product_size IS NOT NULL AND product_size != '' "
+                        "  AND product_color IS NOT NULL AND product_color != '' "
+                        "LIMIT 1",
+                        (parent_asin,),
+                    )
+                    r = cur.fetchone()
+                    if r:
+                        return {"asin": r["asin"], "product_size": r["product_size"],
+                                "product_color": r["product_color"]}
+                    return None
+
+                # 拿 top_asin 的 size/color
+                cur.execute(
+                    "SELECT product_size, product_color FROM dwd_whp_amazon_listing_general "
+                    "WHERE asin=%s LIMIT 1", (top_asin,))
+                r = cur.fetchone()
+                size = (r or {}).get("product_size") or None
+                color = (r or {}).get("product_color") or None
+                return {"asin": top_asin, "product_size": size, "product_color": color}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    # 套 StarRocks BE 存储错重试（退避+抖动）——与 _lookup_sync 同模块同库统一兜底；
+    # 重试用尽 / 非 BE 错（连接失败、SQL 错等）仍 fail-soft 返 None，行为对下游不变。
     try:
-        with conn.cursor() as cur:
-            # step 1: 子 ASIN 列表
-            cur.execute(
-                "SELECT DISTINCT asin FROM dwd_whp_amazon_listing_general "
-                "WHERE parent_asin=%s", (parent_asin,))
-            children = [r["asin"] for r in cur.fetchall() if r.get("asin")]
-            if not children:
-                return None
-            ph = ",".join(["%s"] * len(children))
-
-            # step 2/3: 按 30d/90d 花费排序找 top 1
-            top_asin: str | None = None
-            for window_days in (days, 90):
-                cur.execute(
-                    f"SELECT asin, SUM(cost) AS s FROM dwd_amazon_ad_product_report "
-                    f"WHERE asin IN ({ph}) "
-                    f"  AND local_report_time >= CURDATE() - INTERVAL %s DAY "
-                    f"  AND cost > 0 "
-                    f"GROUP BY asin ORDER BY s DESC LIMIT 1",
-                    (*children, window_days),
-                )
-                r = cur.fetchone()
-                if r and r.get("asin"):
-                    top_asin = r["asin"]
-                    break
-
-            # step 4: 仍无 → 第一条 size+color 都非空
-            if not top_asin:
-                cur.execute(
-                    "SELECT asin, product_size, product_color "
-                    "FROM dwd_whp_amazon_listing_general "
-                    "WHERE parent_asin=%s "
-                    "  AND product_size IS NOT NULL AND product_size != '' "
-                    "  AND product_color IS NOT NULL AND product_color != '' "
-                    "LIMIT 1",
-                    (parent_asin,),
-                )
-                r = cur.fetchone()
-                if r:
-                    return {"asin": r["asin"], "product_size": r["product_size"],
-                            "product_color": r["product_color"]}
-                return None
-
-            # 拿 top_asin 的 size/color
-            cur.execute(
-                "SELECT product_size, product_color FROM dwd_whp_amazon_listing_general "
-                "WHERE asin=%s LIMIT 1", (top_asin,))
-            r = cur.fetchone()
-            size = (r or {}).get("product_size") or None
-            color = (r or {}).get("product_color") or None
-            return {"asin": top_asin, "product_size": size, "product_color": color}
+        return run_sync_with_be_retry(_once, label=f"top_child {parent_asin}")
     except Exception as e:  # noqa: BLE001
         logger.warning("lookup_top_child_attrs(%s) 失败: %s", parent_asin, e)
         return None
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 

@@ -196,7 +196,7 @@ async def _run_restart_review(
     # 在池窗口订单（限并发；窗口 = min(入池天数, 上限)，评审 #1）
     orders_inpool: dict[str, int] = {}
     coros = [
-        fetcher._fetch_perf_one(cu.campaign_name, shop_account, *make_date_window(restart_orders_window_days(d)))
+        fetcher._fetch_perf_one(cu.campaign_name, shop_account, *make_date_window(restart_orders_window_days(d), campaign_data.site_code if campaign_data else ""))
         for cu, d, _ in candidates
     ]
     for (cu, _, _), r in zip(candidates, await _sem_gather(coros, fetch_conc)):
@@ -231,7 +231,7 @@ async def _fetch_exact_cpc_30d(
     ]
     if not exacts:
         return None
-    sd, ed = make_date_window(30)
+    sd, ed = make_date_window(30, campaign_data.site_code if campaign_data else "")
     coros = [fetcher._fetch_perf_one(cu.campaign_name, shop_account, sd, ed) for cu in exacts]
     cpc_ordered: list[float] = []
     cpc_all: list[float] = []
@@ -1644,16 +1644,18 @@ async def _prefetch_placement(
     # 优先用主 fetch 已解析并缓存的店铺(含 URL override)，避免二次 dwd_shop 反查
     shop_account = getattr(fetcher, "_last_shop_account", "") or ""
     shop_id = getattr(fetcher, "_last_shop_id", 0) or 0
+    site_code = getattr(fetcher, "_last_site_code", "") or ""  # 主 fetch 已缓存该 ASIN 站点
     if not shop_account:
         from app.data.mcp_db_context import resolve_mcp_context_from_db
         try:
             ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
             shop_account = ctx.shop_account if ctx else ""
             shop_id = ctx.shop_id if ctx else 0
+            site_code = (ctx.site_code if ctx else "") or site_code
         except Exception:
             shop_account = ""; shop_id = 0
 
-    sd, ed = _make_date_window(days)
+    sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
         result = await asyncio.wait_for(
@@ -1693,15 +1695,17 @@ async def _prefetch_search_terms(
 
     # 优先用主 fetch 已解析并缓存的店铺(含 URL override)，避免二次 dwd_shop 反查
     shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    site_code = getattr(fetcher, "_last_site_code", "") or ""  # 主 fetch 已缓存该 ASIN 站点
     if not shop_account:
         from app.data.mcp_db_context import resolve_mcp_context_from_db
         try:
             ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
             shop_account = ctx.shop_account if ctx else ""
+            site_code = (ctx.site_code if ctx else "") or site_code
         except Exception:
             shop_account = ""
 
-    sd, ed = _make_date_window(days)
+    sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
         result = await asyncio.wait_for(
@@ -1721,11 +1725,10 @@ async def _prefetch_search_terms(
     return enriched
 
 
-def _make_date_window(days: int) -> tuple[str, str]:
-    from datetime import date, timedelta
-    end = date.today()
-    start = end - timedelta(days=days)
-    return start.isoformat(), end.isoformat()
+def _make_date_window(days: int, site_code: str = "") -> tuple[str, str]:
+    # 统一走 mcp_mapping（按站点当地时间、end=当地今天-1）；勿再用 date.today() 本地时区老口径
+    from app.data.mcp_mapping import make_date_window
+    return make_date_window(days, site_code)
 
 
 def _build_unit_lookup(campaigns: list[CampaignUnit]) -> dict[str, CampaignUnit]:

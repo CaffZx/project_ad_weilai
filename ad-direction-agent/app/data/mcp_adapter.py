@@ -138,7 +138,6 @@ class McpAdapter(DataSourceAdapter):
         return _CallResult(ok=False, error=last_err)
 
     async def _resolve_context(self, asin: str, days: int) -> McpContext:
-        start_date, end_date = make_date_window(days)
         db_ctx = await resolve_mcp_context_from_db(asin)
         if not db_ctx:
             host = settings.mcp_db_host or settings.db_host or "(未配置)"
@@ -147,6 +146,8 @@ class McpAdapter(DataSourceAdapter):
                 "请确认本机能访问 Doris（可设置 MCP_DB_HOST=127.0.0.1 走隧道），"
                 "或配置 MCP_DEFAULT_PARENT_SELLER_SKU + MCP_DEFAULT_SHOP_ACCOUNT。"
             )
+        # 日期窗口按该 ASIN 站点的当地时间（db_ctx.site_code）构造
+        start_date, end_date = make_date_window(days, db_ctx.site_code)
         base_ctx = McpContext(
             parent_asin=db_ctx.parent_asin,
             parent_seller_sku=db_ctx.parent_seller_sku,

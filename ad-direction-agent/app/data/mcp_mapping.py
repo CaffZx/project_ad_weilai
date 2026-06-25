@@ -5,9 +5,13 @@ Maps QueryRouter META_* scripts to user-starrocks-data-server tools.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable
+from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -23,11 +27,42 @@ class McpContext:
 ArgBuilder = Callable[[McpContext], dict]
 
 
-def make_date_window(days: int) -> tuple[str, str]:
-    """Convert N-day window into MCP start/end date string."""
-    today = date.today()
-    start = today - timedelta(days=max(days, 1))
-    return start.isoformat(), today.isoformat()
+# 各站点广告数据按「当地时间」存储——覆盖实跑出现过的 6 个站点（日志核实），硬编码其时区；
+# ZoneInfo 自动处理夏令时。其余罕见站点回落默认站并告警（出现即可发现，再按需补行）。
+_SITE_TZ: dict[str, ZoneInfo] = {
+    "Amazon_US": ZoneInfo("America/Los_Angeles"),  # PST/PDT
+    "Amazon_UK": ZoneInfo("Europe/London"),        # GMT/BST
+    "Amazon_DE": ZoneInfo("Europe/Berlin"),        # CET/CEST
+    "Amazon_IT": ZoneInfo("Europe/Rome"),          # CET/CEST
+    "Amazon_ES": ZoneInfo("Europe/Madrid"),        # CET/CEST
+    "Amazon_FR": ZoneInfo("Europe/Paris"),         # CET/CEST
+}
+_DEFAULT_SITE = "Amazon_US"
+
+
+def _site_today(site_code: str) -> date:
+    """该站点「当地时间」的今天（数仓按当地时间存）。未知站点回落默认站并告警。"""
+    tz = _SITE_TZ.get(site_code)
+    if tz is None:
+        logger.warning("make_date_window: 未知 site_code=%r，回落 %s 时区", site_code, _DEFAULT_SITE)
+        tz = _SITE_TZ[_DEFAULT_SITE]
+    return datetime.now(tz).date()
+
+
+def make_date_window(days: int, site_code: str = "") -> tuple[str, str]:
+    """N 天窗口 → MCP start/end 日期串（按 site 当地时间口径）。
+
+    数仓按各站点当地时间存、且当天数据不完整，故窗口取「当地最新日的前一天」往前数 N 天：
+      end_date   = 当地今天 - 1     （最后一个完整日，排除未完整的当天）
+      start_date = 当地今天 - days   （[today-days, today-1] 含两端共 days 天）
+    例：days=7、当地今天=06-24 → start=06-17, end=06-23（7 天）。
+    site_code 缺省时按默认站(Amazon_US)。
+    """
+    today = _site_today(site_code or _DEFAULT_SITE)
+    n = max(days, 1)
+    start = today - timedelta(days=n)
+    end = today - timedelta(days=1)
+    return start.isoformat(), end.isoformat()
 
 
 def _ad_common(ctx: McpContext) -> dict:

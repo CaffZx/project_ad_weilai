@@ -152,7 +152,6 @@ class Recommender:
 
     def _explain_push_natural(self, data: ASINData, s: DirectionScore) -> str:
         best = self._best_natural_rank(data)
-        nor = data.natural_order_ratio
         stage = data.product_stage or ""
         trends = self._asin_trend_facts(data)
         acos_trend = trends[0] if trends else None
@@ -162,11 +161,6 @@ class Recommender:
                 parts.append(self._trend_judge(
                     f"核心词自然位稳定在约第{best}名",
                     "判断再加大广告推自然位边际收益有限",
-                ))
-            if nor is not None and nor >= 70:
-                parts.append(self._trend_judge(
-                    f"自然单占比约{nor:.0f}%",
-                    "判断广告对推自然位的拉动价值有限",
                 ))
             if acos_trend and "升" in acos_trend:
                 parts.append(self._trend_judge(acos_trend, "判断宜先控 ACOS 而非继续推自然位"))
@@ -381,10 +375,6 @@ class Recommender:
                     cap = cfg.get("top_rank_score_cap", 35)
                     if score > cap:
                         score = cap
-
-        if data.natural_order_ratio is not None and data.natural_order_ratio >= cfg.get("natural_order_ratio_high", 70):
-            score -= cfg.get("natural_order_ratio_penalty", 15)
-            reasons.append(f"自然单占比 {data.natural_order_ratio:.0f}% 较高，广告推自然位优先级下降")
 
         return self._finalize(
             "push_natural", "推进自然位", score, reasons,

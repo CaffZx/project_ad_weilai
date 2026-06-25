@@ -206,8 +206,6 @@ rank_space_points = 15
 top_rank_strong_penalty_threshold = 5
 top_rank_strong_penalty = 25
 top_rank_score_cap = 35
-natural_order_ratio_high = 70
-natural_order_ratio_penalty = 15
 
 [scoring.expand_keywords]
 avail_points_per = 3

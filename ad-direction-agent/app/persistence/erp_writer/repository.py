@@ -1523,12 +1523,14 @@ class ErpDualWriterRepository:
             (
                 row_id,
                 run.decision_id,
-                str(target_acos.get("recommended_target") or "")[:50],
+                # 空/None → NULL（数值列不接受 ''；与 _upsert_decision:1316/1317 一致）。
+                # suggest_acos=int(11) 对 '' 宽容(转0,脏数据)，suggest_budget=decimal(12,2) 遇 '' 直接 1366。
+                (str(_a) if (_a := target_acos.get("recommended_target")) not in (None, "") else None),
                 target_acos.get("confidence"),
                 acos_basis,
                 acos_suggest,
                 acos_future,
-                str(budget_bid.get("suggested") or "")[:50],
+                (str(_b) if (_b := budget_bid.get("suggested")) not in (None, "") else None),
                 budget_bid.get("direction"),
                 budget_basis,
                 budget_suggest,

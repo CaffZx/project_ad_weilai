@@ -69,7 +69,7 @@ class McpQuerySkillExecutor:
         if not db_ctx:
             return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
 
-        start_date, end_date = make_date_window(days)
+        start_date, end_date = make_date_window(days, db_ctx.site_code)
         ctx = McpContext(
             parent_asin=db_ctx.parent_asin,
             parent_seller_sku=db_ctx.parent_seller_sku,

@@ -92,6 +92,15 @@ def test_reverse_keyword_rows_empty_and_envelope():
 
 # ── 去重合并来源（Q1）──
 
+def test_noise_filter_drops_over_10_words():
+    """硬上限：>10 词的超长拼凑长尾被剔除；≤10 词保留。"""
+    from app.workflow.steps.campaign_new import _is_noise_keyword
+    assert _is_noise_keyword(" ".join(["word"] * 11)) is True    # 11 词 → 丢
+    assert _is_noise_keyword(" ".join(["word"] * 10)) is False   # 10 词 → 留
+    assert _is_noise_keyword("black mini skirt women summer") is False  # 正常长尾
+    assert _is_noise_keyword("a") is True                        # 单字母仍丢
+
+
 def test_merge_keeps_one_merges_source_highest_priority():
     """同词 flow→competitor：留一条，bucket 升为 competitor，source_reason 合并，bid 补入。"""
     by_kw: dict = {}
