@@ -175,6 +175,8 @@ class NewCampaignCandidate(BaseModel):
     keyword_text: str
     search_volume: int = 0                  # flow_keywords 提供
     natural_rank: int | None = None         # own_keyword_flow 提供，无则 None
+    week_rank: int | None = None            # own_keyword_flow「词的周排名」（周排名信号，KB28 §2 相关性判据之一）
+    week_search_volume: int | None = None   # own_keyword_flow「周搜索量」（与 flow 的搜索量互补）
     # ★KB 16 §3「建议竞价(suggestedBid)」：MCP whp_amazon_advert_keyword_suggest_bid 批量查询填入。
     #   命中→_calc_initial_bid 按公式 min(0.5, bid×0.5) 计算；未命中→降级占位 $0.30。
     suggested_bid: float | None = None
@@ -192,6 +194,7 @@ class NewCampaignItem(BaseModel):
     campaign_type: str = ""                 # "精准广告" | "广泛广告"
     match_type: str = ""                    # EXACT | BROAD | PHRASE（代码从 keyword_class 推导）
     keyword_class: str = ""                 # ★LLM 判(KB 06): generic/long_tail/competitor/brand/custom
+    relevance_tier: str = ""                # ★LLM 判(KB28 §2): R1精确/R2扩展/R3试探（相关性档位留痕）
     keywords_or_targets: list[str] = Field(default_factory=list)
     proposed_daily_budget: float = 3.0      # KB 16 §2（代码定）
     proposed_base_bid: float = 0.30         # KB 16 §3（代码定），真实建议竞价到位后重算

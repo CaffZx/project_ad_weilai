@@ -1162,7 +1162,8 @@ async def _analyze_one_stream(
     }
 
     # 4. 投票 + tiebreaker
-    votes, needs_tiebreaker = _vote(r1_results, r2_results)
+    expected_keys = {s.get("campaign_key") for s in summaries if s.get("campaign_key")}
+    votes, needs_tiebreaker = _vote(r1_results, r2_results, expected_keys)
     if needs_tiebreaker:
         tiebreaker_summaries = [s for s in summaries if s.get("campaign_key") in needs_tiebreaker]
         if tiebreaker_summaries:
@@ -1454,8 +1455,15 @@ def _merge_negative_keywords(
 def _vote(
     r1_results: list[CampaignBatchResult],
     r2_results: list[CampaignBatchResult],
+    expected_keys: set[str] | None = None,
 ) -> tuple[dict[str, dict], set[str]]:
-    """比较 R1 与 R2 的 action + direction：全一致 → high (保守幅度)；否则 → tiebreaker。"""
+    """比较 R1 与 R2 的 action + direction：全一致 → high (保守幅度)；否则 → tiebreaker。
+
+    expected_keys: 本流应分析的全部 campaign_key（来自 summaries，代码权威）。
+      - 仅在一轮出现（另一轮 LLM 漏输出）→ 视为分歧，送 R3 复核（Level A）。
+      - 两轮都未出现（both-missing）→ 种占位并送 R3；R3 仍缺则由 _resolve_tiebreaker 删除占位，
+        还原为"未分析"交 _collect_skipped 兜底（Level B），绝不伪造成 keep。
+    """
 
     def _same_direction(a: CampaignAdjustmentItem, b: CampaignAdjustmentItem) -> bool:
         if a.action != b.action:
@@ -1518,11 +1526,27 @@ def _vote(
                 v["_r2"] = r2
                 votes[key] = v
         elif r1:
+            # 仅 R1 出现（R2 漏）→ 暂存 R1 值并送 R3 复核（Level A）
             votes[key] = _item_to_vote(r1, "low")
             votes[key]["round_votes"] = {"round1": r1.action, "round2": "missing"}
+            needs_tiebreaker.add(key)
         else:
+            # 仅 R2 出现（R1 漏）→ 暂存 R2 值并送 R3 复核（Level A）
             votes[key] = _item_to_vote(r2, "low")
             votes[key]["round_votes"] = {"round1": "missing", "round2": r2.action}
+            needs_tiebreaker.add(key)
+
+    # Level B：两轮都漏的活动（不在任一 round map 里）→ 种占位 + 送 R3。
+    # 占位仅用于让 _resolve_tiebreaker 放行并被 R3 结果覆盖；R3 也缺则删除（见该函数）。
+    if expected_keys:
+        for key in expected_keys - all_keys:
+            votes[key] = {
+                "campaign_key": key,
+                "confidence": "low",
+                "_placeholder": True,
+                "round_votes": {"round1": "missing", "round2": "missing"},
+            }
+            needs_tiebreaker.add(key)
 
     return votes, needs_tiebreaker
 
@@ -1587,11 +1611,15 @@ def _resolve_tiebreaker(
             current_round = dict(votes[key].get("round_votes", {}))
             current_round["round3"] = r3.action
             votes[key]["round_votes"] = current_round
-            # 清理内部引用
+            # 占位被真实结果填实 → 清除占位标记 + 内部引用
+            votes[key].pop("_placeholder", None)
             votes[key].pop("_r1", None)
             votes[key].pop("_r2", None)
+        elif votes[key].get("_placeholder"):
+            # 两轮都漏且 R3 也漏 → 删除占位，还原为"未分析"（_collect_skipped 兜底），不伪造 keep
+            del votes[key]
         else:
-            # R3 也缺失 → 降级保持 R1
+            # 单轮缺失且 R3 也缺失 → 降级保持已暂存的那一轮值
             votes[key]["confidence"] = "low"
             votes[key].pop("_r1", None)
             votes[key].pop("_r2", None)
@@ -1604,6 +1632,9 @@ def _merge_to_adjustments(
     """将最终 votes 转为 CampaignAdjustmentItem 列表，排序：淘汰 > 调整 > 保持。"""
     items: list[CampaignAdjustmentItem] = []
     for v in votes.values():
+        if v.get("_placeholder"):
+            # 防御：占位未被 R3 填实也未被删（理论不应到此）→ 不构造假决策
+            continue
         v.pop("_r1", None)
         v.pop("_r2", None)
         try:

@@ -200,6 +200,25 @@ def _derive_match_type(keyword_class: str, cand: NewCampaignCandidate) -> str:
     return "EXACT" if cand.natural_rank is not None else "BROAD"
 
 
+# ── KB28 §2 相关性档位 (R1精确 > R2扩展 > R3试探 > R4风险) ────────────────────
+_TIER_ORDER = {"R1": 1, "R2": 2, "R3": 3, "R4": 4}
+
+
+def _norm_tier(v) -> str:
+    t = str(v or "").strip().upper()
+    return t if t in _TIER_ORDER else ""
+
+
+def _conservative_tier(a, b) -> str:
+    """两轮相关性档取更保守(数字更大=更不相关)的一档；任一缺失则取另一个。"""
+    ta, tb = _norm_tier(a), _norm_tier(b)
+    if not ta:
+        return tb
+    if not tb:
+        return ta
+    return ta if _TIER_ORDER[ta] >= _TIER_ORDER[tb] else tb
+
+
 def pick_target_child_asin(campaigns: list) -> str:
     """新增活动的投放目标子 ASIN。
 
@@ -317,17 +336,28 @@ async def analyze_new_campaigns(
             continue
 
     # 2. 归一化 + 硬过滤
+    def _to_int_or_none(v):
+        try:
+            return int(float(v)) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
     own_rank_map: dict[str, int] = {}
+    own_week_map: dict[str, dict] = {}   # kw -> {"week_rank", "week_search_volume"}（KB28 §2 周排名信号）
     for r in own_rows:
         kw = str(r.get("关键词") or r.get("keyword") or "").strip().lower()
+        if not kw:
+            continue
         # own_keyword_flow 真实字段=自然排位排名/自然位排位（live 核实 2026-06-24，非"自然排名"）
-        rank = (r.get("自然排位排名") or r.get("自然位排位")
-                or r.get("自然排名") or r.get("natural_rank"))
-        if kw and rank is not None:
-            try:
-                own_rank_map[kw] = int(float(rank))
-            except (TypeError, ValueError):
-                continue
+        rank = _to_int_or_none(r.get("自然排位排名") or r.get("自然位排位")
+                               or r.get("自然排名") or r.get("natural_rank"))
+        if rank is not None:
+            own_rank_map[kw] = rank
+        # KB28 §2 周排名信号：own_keyword_flow「词的周排名」+「周搜索量」（缺则 None；语义待 live 终核）
+        wk = _to_int_or_none(r.get("词的周排名") or r.get("week_rank"))
+        wsv = _to_int_or_none(r.get("周搜索量") or r.get("week_search_volume"))
+        if wk is not None or wsv is not None:
+            own_week_map[kw] = {"week_rank": wk, "week_search_volume": wsv}
 
     # 去重合并来源（Q1）：by_kw 同词只留一条，多源命中则合并 source_reason、bucket 归最高优先级源。
     # 注：existing_keywords(已投词) / 噪声 / 搜索量<阈值 仍是「直接过滤」(非跨源去重)。
@@ -344,8 +374,10 @@ async def analyze_new_campaigns(
         if sv < MIN_SEARCH_VOLUME:
             continue
         rank = own_rank_map.get(kw)
+        _wk = own_week_map.get(kw, {})
         cand = NewCampaignCandidate(
             keyword_text=kw, search_volume=sv, natural_rank=rank, suggested_bid=None,
+            week_rank=_wk.get("week_rank"), week_search_volume=_wk.get("week_search_volume"),
         )
         # 按信号分桶（H2/H10）：有自然位机会(28-48)=事实相关→ranking_opportunity，否则 flow
         if rank is not None and 28 <= rank <= 48:
@@ -362,8 +394,10 @@ async def analyze_new_campaigns(
         if kw in existing_keywords or _is_noise_keyword(kw):
             continue
         if 28 <= rank <= 48:
+            _wk = own_week_map.get(kw, {})
             _merge_candidate(by_kw, NewCampaignCandidate(
                 keyword_text=kw, search_volume=0, natural_rank=rank,
+                week_rank=_wk.get("week_rank"), week_search_volume=_wk.get("week_search_volume"),
                 trigger_scene="RANKING_OPPORTUNITY_NO_EXACT",
                 source="ranking_opportunity", source_reason=f"自然位{rank}机会词",
             ))
@@ -522,6 +556,8 @@ async def analyze_new_campaigns(
         return [], warnings, search_volume_map
 
     # 5. 组装（代码补齐 match_type/bid/budget/name/归组）
+    #   相关性/词类型/建不建都是主观语义判断，交 LLM（已注入 KB28 §2：R4不建/R3仅测试期/
+    #   量小≠不相关）；代码不再二次硬判，只把 LLM 的 relevance_tier 记录到输出供前端/审计。
     cand_by_kw = {c.keyword_text: c for c in candidates}
     items: list[NewCampaignItem] = []
     for kw in selected_keys:
@@ -537,11 +573,13 @@ async def analyze_new_campaigns(
                 keyword_class, conf, review = kc1, "high", "AUTO_BATCHABLE"
             else:
                 keyword_class, conf, review = (kc1 or kc2), "low", "MANUAL_REVIEW"
+            relevance_tier = _conservative_tier(o1.get("relevance_tier"), o2.get("relevance_tier"))
         else:
             # 退化单轮：无双轮验证，统一低置信 + 人工复核（o1 供下方组装复用）
             o1 = degraded_round[kw]
             keyword_class = str(o1.get("keyword_class", "")).strip().lower()
             conf, review = "low", "MANUAL_REVIEW"
+            relevance_tier = _norm_tier(o1.get("relevance_tier"))
 
         mt = _derive_match_type(keyword_class, cand)
         is_exact = mt == "EXACT"
@@ -553,6 +591,7 @@ async def analyze_new_campaigns(
             campaign_type="精准广告" if is_exact else "广泛广告",
             match_type=mt,
             keyword_class=keyword_class,
+            relevance_tier=relevance_tier,
             keywords_or_targets=[cand.keyword_text],
             proposed_daily_budget=DEFAULT_NEW_BUDGET,
             proposed_base_bid=bid,

@@ -275,8 +275,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 {
   "campaign_adjustments": [
     {
-      "campaign_name": "广告活动名称",
-      "campaign_key": "活动名 × 子ASIN（唯一标识）",
+      "cid": "C3（原样回填输入中该活动的句柄，用于代码定位活动）",
       "child_asin": "B0XXXXXX",
       "keyword_text": "关键词",
       "match_type": "EXACT",
@@ -284,7 +283,6 @@ _CAMPAIGN_EXACT_PROMPT = (
       "direction": {"bid": "down", "budget": "down"},
       "triggered_rule": "NO_CVR_HIGH_SPEND",
       "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
-      "confidence": "high",
       "current_budget": 15.0, "proposed_budget": 1.0,
       "current_bid": 0.85, "proposed_bid": 0.20,
       "evidence": ["7天花费$18.5", "7天订单0，CVR=0%"],
@@ -299,7 +297,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 
 ## 输出约束
 ### 必填结构字段
-- **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
+- **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
 - 必须输出 placement_adjustments（三个广告位全部列出）。每个只填 `placement`（头部/其他/商品）+ `action`（维持/小涨/大涨/小降/大降）+ `evidence`。**禁止输出 current_pct/proposed_pct 数字**——这些由后端按 KB 19 §3 从当前加价比例 + action 自动计算
 
@@ -334,8 +332,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 {
   "campaign_adjustments": [
     {
-      "campaign_name": "广告活动名称",
-      "campaign_key": "活动名 × 子ASIN（唯一标识）",
+      "cid": "C3（原样回填输入中该活动的句柄，用于代码定位活动）",
       "child_asin": "B0XXXXXX",
       "keyword_text": "关键词",
       "match_type": "BROAD",
@@ -343,7 +340,6 @@ _CAMPAIGN_BROAD_PROMPT = (
       "direction": {"bid": "down", "budget": "down"},
       "triggered_rule": "IRRELEVANT_NO_IMPROVEMENT",
       "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
-      "confidence": "high",
       "current_budget": 10.0, "proposed_budget": 8.0,
       "current_bid": 0.50, "proposed_bid": 0.40,
       "evidence": ["7天花费$12.0", "否词5个后搜索词质量仍差"],
@@ -358,7 +354,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 
 ## 输出约束
 ### 必填结构字段
-- **每个活动都必须填写**: campaign_key, campaign_name, child_asin, keyword_text, match_type, action, direction, triggered_rule, current_budget, proposed_budget, current_bid, proposed_bid, evidence, review_level
+- **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
 - 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
 
@@ -391,26 +387,35 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 {kb_content}
 
 ## 任务范围（重要）
-你只做两类判断 + 文本输出：
-1. **action**：该词是否值得新建活动（create / skip）。参考 KB 16 §1 触发场景与 §6 阻断精神，以及【今日总纲】。
+你只做三类判断 + 文本输出：
+1. **action**：该词是否值得新建活动（create / skip）。参考 KB 16 §1 触发场景与 §6 阻断精神、KB28 §0 场景框架，以及【今日总纲】。
 2. **keyword_class**：按 KB 06 判该词类别（generic / long_tail / competitor / brand / custom）。
-3. **文本**：reason / evidence / negative_strategy。
+3. **relevance_tier**：按 KB28 §2 判该词与本产品的相关性档位（R1 / R2 / R3 / R4）。
+4. **文本**：reason / evidence / negative_strategy。
 
 **禁止**输出 bid / budget / campaign_name / match_type / primary_placement —— 这些由代码按 KB 16 §2/§3/§4/§5 确定。
 
 ## 输入
-- 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循）
+- 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循；含运营配置的「目标关键词类型」）
 - **本产品标题** + **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
-- 候选词列表：每个含 keyword_text / search_volume / natural_rank / trigger_scene / source（来源）
+- 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / week_search_volume(周搜索量) / natural_rank(当前自然位) / week_rank(词的周排名) / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
 
-## 相关性判断（首要，KB 06 §3 相关性精神）
-- **属性级精准，不是品类级**：候选词须匹配**标题里的具体属性**（款式/长度/版型/用途/人群），仅"同品类"不够。例：标题是"短裙 mini skirt"→"中长裙 midi/maxi""连衣裙 dress"虽同属裙类但**长度/款式不符 → skip**；"运动文胸 sports bra"→"普通文胸/内衣"属性不符 → skip。**与标题具体属性不符的词一律 skip**，reason 点明属性是否吻合。
-- **`natural_rank` 有值 = 事实相关**（亚马逊确实让本产品排该词）→ 默认视为相关，可信。
-- **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，**不要因为参照少就过度 skip**——以标题为主判相关性；有 `natural_rank` 或与标题强重叠的词应保留。这些产品恰最需要新增词，勿误杀。
+## 相关性判断与档位（首要，KB28 §2 + KB 06 §3 相关性精神）
+**综合权衡**这四个信号 → 给出 relevance_tier，不要只看其中一个：
+  ① 自然位 natural_rank（靠前=数字小=事实相关强）② 周排名 week_rank（趋势/当周位置）
+  ③ 搜索量 search_volume / week_search_volume ④ 与**标题具体属性**的相关度。
+- **R1 精确相关**：词义=产品本体，或精确匹配标题核心属性（品类+核心属性词），或 natural_rank 有值（亚马逊确实让本产品排该词=事实相关）。
+- **R2 扩展相关**：同类目近义、上位/下位词、强相关使用场景词；有搜索量/排名数据支撑。
+- **R3 试探相关**：可能相关、需验证（跨类目联想词等）；**仅测试期可承接，且 reason 必须写明"为何判定可能相关"**。
+- **R4 风险相关**：词义偏离、易招无效点击 → **一律 action=skip**。
+- **属性级精准，不是品类级**：仅"同品类"不够。例：标题"短裙 mini skirt"→"中长裙 midi/maxi""连衣裙 dress"长度/款式不符 → 判 R4 并 skip；reason 点明属性是否吻合。
+- **信号怎么综合**：自然位/周排名靠前 + 标题属性吻合 → 倾向 R1；**搜索量高但与标题属性不符 → 不因量大就抬档**（量大≠相关）；**搜索量低但属性精确吻合或有自然位 → 仍可 R1**（低量精准长尾是运营偏好，勿因量小误杀）。
+- **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，不要因参照少就过度 skip——以标题为主判相关性。
 
-## 词型偏好（KB 06：长尾精准 优先于 大词/泛词）
-- **优先精准长尾词**（多词、含产品具体属性 → 相关性高、竞争低、ACOS 可控），这是运营偏好。
-- **审慎对待大词/泛词**（单词或品类大词，如 "skirt"/"dress"/"bra"）：相关性弱、流量泛、ACOS 难控。**除非**策略上下文显示产品处于**测试期**或**引流型**（明确需测词/拿量），否则**倾向 skip**；收割/盈利/维持期尤其不应新建大词活动。
+## 词型偏好与运营目标类型（KB 06 + 运营配置）
+- **优先精准长尾词**（多词、含产品具体属性 → 相关性高、竞争低、ACOS 可控）。
+- **审慎对待大词/泛词**（单词或品类大词，如 "skirt"/"dress"）：相关性弱、ACOS 难控；除非测试期/引流型否则倾向 skip；收割/盈利/维持期尤不应新建大词。
+- **运营目标关键词类型（软偏好）**：上文「目标关键词类型」是运营配置的偏好。在相关性达标前提下，**优先选择属于该类型的词**；不属于该类型的词需要更强相关性（R1）才建。这是倾向性引导，不是硬性排除。
 
 ## 输出 JSON（严格 schema，禁 markdown 围栏）
 {
@@ -419,19 +424,20 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
       "keyword_text": "fishnet stockings women plus size",
       "action": "create",
       "keyword_class": "long_tail",
+      "relevance_tier": "R1",
       "negative_strategy": "7天后读搜索词报告，点击>10次且无转化的词进入否词候选",
-      "reason": "(1) 现状：自然位 35 持续上升；(2) 原因：长尾词相关性高且无精准承接；(3) 建议：新建精准活动承接。",
-      "evidence": ["搜索量 156", "自然排名第 35 位"]
+      "reason": "(1) 现状：自然位 35 持续上升；(2) 原因：长尾词精确匹配标题属性 fishnet/plus size，相关性高且无精准承接；(3) 建议：新建精准活动承接。",
+      "evidence": ["搜索量 156", "自然排名第 35 位", "相关性 R1：精确匹配标题属性"]
     }
   ]
 }
 
 ## 判断与文案规则
-- 不值得建的词（**与产品无关** / 相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因
-- **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与**标题具体属性**/已投词关联）；说不出相关性的不得 create
-- action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则
-- reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议
-- 禁用规则编号 / 内部术语；evidence 引用具体数值
+- **每个词必须输出 relevance_tier（R1/R2/R3/R4）**；**R4 一律 action=skip**；R3 仅测试期可 create，且 reason 必须写明"为何判定可能相关"（KB28 §2）。
+- 不值得建的词（**与产品无关** / 相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因。
+- **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与**标题具体属性**/已投词关联）；说不出相关性的不得 create。
+- action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则。
+- reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议；禁用规则编号 / 内部术语；evidence 引用具体数值。
 """
 
 
@@ -1632,9 +1638,14 @@ class LLMReasoner:
 
         # 构建活动列表
         camp_parts = ["## 活动列表 (逐活动分析)"]
+        # cid：批内短句柄（C1..CN）。代码在拼 prompt 时即建立 cid→summary 映射，
+        # LLM 只需把 cid 原样回吐，代码据此回填权威 campaign_key 等字段（根治长串抄错漂移）。
+        cid_map: dict[str, dict] = {}
         for i, s in enumerate(campaign_summaries):
-            camp_parts.append(f"\n### 活动 {i + 1}: {s.get('campaign_name', '?')}")
-            camp_parts.append(f"  - 活动Key (活动名×子ASIN): {s.get('campaign_key', '')}")
+            cid = f"C{i + 1}"
+            cid_map[cid] = s
+            camp_parts.append(f"\n### 活动 {cid}: {s.get('campaign_name', '?')}")
+            camp_parts.append(f"  - 句柄 cid: {cid}（输出 JSON 的 cid 字段须原样回填此值）")
             camp_parts.append(f"  - 子ASIN: {s.get('child_asin', '')}")
             camp_parts.append(f"  - 关键词: {s.get('keyword_text', '')}")
             camp_parts.append(f"  - 匹配类型: {s.get('match_type', '')}")
@@ -1722,7 +1733,29 @@ class LLMReasoner:
                 timeout_override=timeout_override,
             )
             parsed = self._parse_json(raw)
-            adjustments = parsed.get("campaign_adjustments", [])
+            raw_adjustments = parsed.get("campaign_adjustments", [])
+            # cid 回填：用代码持有的 cid_map 把 LLM 回吐的句柄解析回权威结构/现状字段，
+            # 无条件覆盖 LLM 任何值（根治 LLM 抄错 campaign_key / 误报 current_*）。
+            # 命中失败（越界/幻觉/重复 cid）→ 丢弃该条 → 该活动按"缺失"处理，由投票层送 R3 复核。
+            adjustments = []
+            seen_cids: set[str] = set()
+            for adj in raw_adjustments:
+                if not isinstance(adj, dict):
+                    continue
+                cid = str(adj.get("cid", "")).strip()
+                src = cid_map.get(cid)
+                if src is None or cid in seen_cids:
+                    logger.warning("Campaign batch [%s] 丢弃无效 cid=%r (越界/幻觉/重复)", asin, cid)
+                    continue
+                seen_cids.add(cid)
+                adj["campaign_key"] = src.get("campaign_key", "")
+                adj["campaign_name"] = src.get("campaign_name", "")
+                adj["child_asin"] = src.get("child_asin", "")
+                adj["keyword_text"] = src.get("keyword_text", "")
+                adj["match_type"] = src.get("match_type", "")
+                adj["current_bid"] = src.get("current_bid")
+                adj["current_budget"] = src.get("current_budget")
+                adjustments.append(adj)
             # 后处理：规则编号脱敏 + 文风清洗
             for adj in adjustments:
                 adj["reason"] = humanize_ops_text(
@@ -1805,14 +1838,18 @@ class LLMReasoner:
             if overview_text else ""
         )
 
-        cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class)"]
+        cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class + relevance_tier)"]
         for i, c in enumerate(candidates):
             rank = c.get("natural_rank")
+            wk = c.get("week_rank")
+            wsv = c.get("week_search_volume")
             line = (
                 f"\n### 候选 {i + 1}: {c.get('keyword_text', '')}"
                 f"\n  - 搜索量: {c.get('search_volume', 0)}"
-                f"\n  - 自然排名: {rank if rank is not None else 'N/A(无自然位)'}"
-                f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
+                + (f"\n  - 周搜索量: {wsv}" if wsv is not None else "")
+                + f"\n  - 当前自然位: {rank if rank is not None else 'N/A(无自然位)'}"
+                + (f"\n  - 词的周排名: {wk}" if wk is not None else "")
+                + f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
             )
             if c.get("source"):
                 line += f"\n  - 来源: {c.get('source')}"
