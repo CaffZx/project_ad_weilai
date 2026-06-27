@@ -447,7 +447,12 @@ export function createCampaignState() {
   // ── toast ──
   // 轻量提示（默认）：2400ms 自动消失；执行结果（opts.sticky）：常驻 + 右上角「×」可关闭。
   function _toast(msg, opts = {}) {
+    const text = (msg == null ? '' : String(msg)).trim();
     let el = document.getElementById('camp-toast');
+    if (!text) {                         // 无内容不展示（防空壳/残留空框）
+      if (el) el.classList.remove('show');
+      return;
+    }
     if (!el) {
       el = document.createElement('div');
       el.id = 'camp-toast';
@@ -459,7 +464,7 @@ export function createCampaignState() {
       el.classList.add('sticky');
       el.innerHTML = '';
       const span = document.createElement('span');
-      span.textContent = msg;
+      span.textContent = text;
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'camp-toast-close';
@@ -471,7 +476,7 @@ export function createCampaignState() {
       el.classList.add('show');           // 常驻：不设自动消失 timer
     } else {
       el.classList.remove('sticky');
-      el.textContent = msg;               // 清掉上一条 sticky 残留的子节点
+      el.textContent = text;              // 清掉上一条 sticky 残留的子节点
       el.classList.add('show');
       el._tid = setTimeout(() => el.classList.remove('show'), 2400);
     }

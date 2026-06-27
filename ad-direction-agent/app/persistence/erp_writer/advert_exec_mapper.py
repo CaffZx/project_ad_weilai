@@ -243,9 +243,13 @@ def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
         "adjustReason": f"AI 新建活动：{card.get('campaign_name')}",
         "createCampaignVo": {k: v for k, v in create_vo.items() if v is not None},
     }
-    # MCP 端 schema 必填：顶层传子 ASIN（不在 createCampaignVo 内）
-    if child_asin:
-        create_call_args["asin"] = child_asin
+    # MCP 端 schema 必填：顶层传子 ASIN（不在 createCampaignVo 内）。
+    # 优先用卡里已落库的子 ASIN（分析阶段 pick_target_child_asin 选定、写入 card.asin）；
+    # 仅当卡里没存时才用传入的 child_asin 兜底——避免执行期重查数仓（数仓慢会令 child_asin=None →
+    # 「子ASIN不能为空」新建全败），而前端能渲染出卡即说明库里已有该子 ASIN。
+    asin = (str(card.get("asin") or "")).strip() or (child_asin or "")
+    if asin:
+        create_call_args["asin"] = asin
     plan.create_calls.append(create_call_args)
     plan.ops.append({
         "record_kind": "campaign", "suggest_card_id": cid, "campaign_id": None,

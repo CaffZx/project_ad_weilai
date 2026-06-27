@@ -515,19 +515,29 @@ def canonicalize_payload(
             placements=nc_plc, keyword_pending=nc_kw, campaign_pending=nc_camp))
         create_count += 1
 
-    # ── 预过滤活动 → prefiltered 卡（灰卡，不可执行，无 pending；lost 不落库）──
+    # ── 预过滤活动 + LLM 丢失活动 → 灰卡（复用预过滤卡面，不可执行，无 pending）──
+    #   预过滤(__prefiltered): inactive/no_data/multi_keyword 硬过滤；
+    #   丢失(无 __prefiltered): 两轮+R3 均未返回 / 整批失败的活动（_collect_skipped）。
+    #   二者都落库留痕、复用同一灰卡面，靠 reason「未分析：」前缀 + card_id `lost:` 命名空间区分，
+    #   杜绝丢失项静默蒸发（先落库再渲染，定时/手动同一渲染路）。
     for sk in payload.get("skipped_campaigns") or []:
-        if not isinstance(sk, dict) or not sk.get("__prefiltered"):
+        if not isinstance(sk, dict):
             continue
         ckey = sk.get("campaign_key") or sk.get("campaign_name") or ""
         if not ckey:
             continue
-        reason = sk.get("reason") or ""
-        kcount = sk.get("keyword_count")
-        if kcount and "词" not in reason:
-            reason = f"{reason}（{kcount}词）" if reason else f"多关键词活动（{kcount}词）"
+        if sk.get("__prefiltered"):
+            reason = sk.get("reason") or ""
+            kcount = sk.get("keyword_count")
+            if kcount and "词" not in reason:
+                reason = f"{reason}（{kcount}词）" if reason else f"多关键词活动（{kcount}词）"
+            id_ns = "pref"
+        else:
+            # LLM 丢失项：复用灰卡面留痕，reason 标「未分析」提示需人工补救
+            reason = f"未分析：{sk.get('reason') or 'LLM 未返回此活动'}（需人工补救）"
+            id_ns = "lost"
         cards.append(SuggestCardCanonical(
-            card_id=stable_id("car", decision_id, f"pref:{ckey}"),
+            card_id=stable_id("car", decision_id, f"{id_ns}:{ckey}"),
             decision_id=decision_id, campaign_id=None,
             campaign_name=_clip(sk.get("campaign_name") or ckey, 512) or ckey,
             asin=_clip(sk.get("child_asin"), 64),
