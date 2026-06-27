@@ -282,7 +282,7 @@ class CampaignFetcher:
                         val = json.loads(txt)
                         break
             if isinstance(val, dict) and "success" in val:
-                val = val.get("rows") or val
+                val = val.get("rows", [])  # rows 不存在时回退 []（而非 dict），防下游 _as_rows 误判
             raw = _as_rows(val)
             if not raw:
                 return []
@@ -883,6 +883,11 @@ def _normalize_mcp_campaign_keywords(rows: list[dict]) -> list[dict]:
     out: list[dict] = []
     for r in rows:
         mapped = {_MCP_CAMPAIGN_KEY_MAP.get(k, k): v for k, v in r.items()}
+        # match_type 归一为大写：MCP 返小写 "exact"/"broad"/"phrase"，
+        # 下游 filter_campaigns / _assemble / campaign stream 全用 == "EXACT" 作精准判定。
+        mt = str(mapped.get("match_type") or "")
+        if mt:
+            mapped["match_type"] = mt.upper()
         mapped.update(_MCP_CAMPAIGN_DEFAULTS)
         out.append(mapped)
     return out

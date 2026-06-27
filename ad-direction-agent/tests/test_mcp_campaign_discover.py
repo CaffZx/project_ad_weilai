@@ -34,7 +34,7 @@ _EXPECTED_NORMALIZED = {
     "child_asin": "B09SGC3YZB",
     "seller_sku": "FS02721-07-US",
     "keyword_text": "fishnet stockings",
-    "match_type": "exact",
+    "match_type": "EXACT",
     "campaign_status": "ENABLED",
     "keyword_status": "ENABLED",
 }
@@ -44,6 +44,20 @@ def test_normalize_single_row():
     out = _normalize_mcp_campaign_keywords([_SAMPLE_MCP_ROW])
     assert len(out) == 1
     assert out[0] == _EXPECTED_NORMALIZED
+
+
+def test_normalize_uppercases_match_type():
+    """P1 修复：MCP 返回小写 \"exact\"/\"broad\" → normalizer 必须转换大写。"""
+    r = dict(_SAMPLE_MCP_ROW)
+    r["关键词匹配类型"] = "exact"
+    out = _normalize_mcp_campaign_keywords([r])
+    assert out[0]["match_type"] == "EXACT"
+    r["关键词匹配类型"] = "Broad"
+    out = _normalize_mcp_campaign_keywords([r])
+    assert out[0]["match_type"] == "BROAD"
+    r["关键词匹配类型"] = ""
+    out = _normalize_mcp_campaign_keywords([r])
+    assert out[0]["match_type"] == ""  # 空串保持空串
 
 
 def test_normalize_empty_input():

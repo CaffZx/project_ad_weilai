@@ -262,10 +262,19 @@ async def resolve_mcp_context_from_mcp(asin: str, adapter) -> McpDbContext | Non
         # 产品名：优先中文名
         product_name = str(mapped.pop("product_cn_name", "") or mapped.get("product_name", ""))
         site_code = str(mapped.get("site_code") or settings.mcp_default_site_code or "Amazon_US")
+        # 必填字段校验：parent_seller_sku / shop_account 缺失 → 无法调 MCP → 返回 None 让调用方走 DB 回落
+        psku = str(mapped.get("parent_seller_sku") or "")
+        shop = str(mapped.get("shop_account") or "")
+        if not psku or not shop:
+            logger.warning(
+                "resolve_mcp_context_from_mcp [%s] 响应缺少必要字段 (sku=%r shop=%r)，回落 DB",
+                asin, psku or "(空)", shop or "(空)",
+            )
+            return None
         return McpDbContext(
             parent_asin=str(mapped.get("parent_asin") or asin),
-            parent_seller_sku=str(mapped.get("parent_seller_sku") or ""),
-            shop_account=str(mapped.get("shop_account") or ""),
+            parent_seller_sku=psku,
+            shop_account=shop,
             shop_id=_coerce_int(mapped.get("shop_id")),
             site_code=site_code,
             product_name=product_name,

@@ -77,6 +77,15 @@ def test_resolve_from_mcp_raw_flat():
     assert ctx.parent_seller_sku == "SKU001"
 
 
+def test_resolve_from_mcp_missing_required_returns_none():
+    """P3 修复：MCP 返回缺少 parent_seller_sku 或 shop_account → 返回 None（回落 DB）。"""
+    m = _make_mcp(SimpleNamespace(ok=True, value={"content": [
+        {"type": "text", "text": '{"success":true,"rows":[{"父ASIN":"X","店铺ID":1,"站点":"Amazon_US"}]}'}
+    ]}))
+    ctx = asyncio.run(resolve_mcp_context_from_mcp("B0TEST", m))
+    assert ctx is None  # 缺 sku + shop → 不应返回 McpDbContext
+
+
 def test_coerce_int():
     assert _coerce_int("1622") == 1622
     assert _coerce_int(1622) == 1622

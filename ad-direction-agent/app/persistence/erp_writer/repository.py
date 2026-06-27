@@ -392,7 +392,8 @@ class ErpDualWriterRepository:
                 ph = ",".join(["%s"]*len(card_ids))
                 cur.execute(
                     "SELECT id, campaign_id, campaign_name, suggest_category, "
-                    "campaign_group_type, keyword_match_type, asin, keyword "
+                    "campaign_group_type, keyword_match_type, asin, keyword, "
+                    "perf_json, trigger_rule "
                     f"FROM t_advert_agent_modify_suggest_card "
                     f"WHERE decision_id=%s AND id IN ({ph})",
                     (decision_id, *card_ids),
@@ -930,6 +931,12 @@ class ErpDualWriterRepository:
         """
 
         for card in run.cards:
+            if not (card.campaign_id or "").strip():
+                logger.warning(
+                    "write_full [%s] 跳过 campaign_id 为空的卡片: %s / %s",
+                    run.decision_id, card.campaign_name, card.card_id,
+                )
+                continue
             cur.execute(
                 card_sql,
                 (
