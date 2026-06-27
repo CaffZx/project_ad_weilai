@@ -254,6 +254,21 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 06-05 | **KB Clearance 移除** | `docs/knowledge_base/12-输出规范.md` 核心策略标签枚举删 Clearance（是场景/产品阶段，非广告目的；广告目的由 ad-purpose-agent 权威产出仅 4 个）；`kb_loader.py` 注释同步；**Maintain 保留** |
 | 06-05 | **ad_keyword_report 注释** | `mcp_mapping.py` 加注：MCP 拆分→直调返 Unknown tool→按 META_KW_AD 稳定回落 Doris，**非 bug**，暂不动 |
 | 06-05 | **MCP/LLM 并发上调** | `mcp_max_concurrency: 8→80`、`llm_global_concurrency: →420`、连接池 `max_connections: →600`（面向批量并行) |
+| 06-24 | **ACOS 阶段优先** | 上限由 `min(阶段,层级)` 改为阶段优先+层级兜底；清货期上限 60、测试期 50 生效（运营确认） |
+| 06-24 | **KB 切片化** | kb_loader 按 `## N.` 节号切片注入，精准/广泛分流 preset（campaign_adjustment_exact/_broad），消除注意力稀释 |
+| 06-24 | **长尾优先排序** | 候选词排序改为词数多者优先（非搜索量降序），修正"大词泛词霸榜"代码层根因 |
+| 06-24 | **MCP 退避抖动** | mcp_adapter 重试加 50–200ms 随机抖动，防 thundering herd |
+| 06-25 | **data_unavailable 区分** | fetch_campaigns 失败/超时 → `data_unavailable=True`，ERP 门禁返回独立原因，批量统计单列+退出码（>50%→rc=2）；不再伪装成 "no adjustments" |
+| 06-25 | **StarRocks BE 重试** | `starrocks_retry.py` 单一真源：4 条数仓 SQL 地基统一 index-retry+抖动（errno 1064 且 starlet/BE: 签名）；SQL 语法错不重试 |
+| 06-25 | **MCP 多站点日期窗口** | `make_date_window(days, site_code)`：6 站点硬编码时区（US/UK/DE/IT/ES/FR），`end=当地今天-1`、`start=当地今天-days`；消除"服务器本地时间≠数仓当地时间"的窗口错位 |
+| 06-25 | **ctx UnboundLocalError** | `_prefetch_placement/search_terms` 的 `ctx` 只在 `if not shop_account:` 内赋值 → 缓存命中时崩；改走 `_last_site_code` 缓存 |
+| 06-25 | **suggest_budget 空值 NULL** | `_upsert_ai_suggest` 写 `decimal(12,2)` 列时空→`""` → MySQL 1366；改为空→NULL（与同文件 `_upsert_decision` 一致） |
+| 06-25 | **守夜监控常驻** | `batch_night_monitor.sh`：每日 01:00–05:00 每30min 探测批跑成功率；≥80%正常、5–80%定向重试失败/跳过 asin、<5%全量重试（含运行中先 pkill）；常驻 cron `0 1 * * *` |
+| 06-27 | **新 MCP 工具接入** | `parent_listing_detail` 替代 SQL #1（父ASIN→site/sku/shop）、`ad_campaign_product_keyword_list` 替代 SQL #2+3（父ASIN→子ASIN→活跃活动+关键词）；两开关 `mcp_resolve_context`/`mcp_discover_campaigns` 默认开，失败自动回落 DB |
+| 06-27 | **MCP 接入架构文档** | [docs/MCP工具接入架构范式.md](docs/MCP工具接入架构范式.md)：注册→构造→调用→返回字段透传→回落模式 全链路代码审计 |
+| 06-27 | **MCP 字段安全修复** | match_type 大写归一（P1）、MCP 响应信封解包（P2）、resolve 必填字段校验 sku+shop（P3） |
+| 06-27 | **写库隐患修复** | campaign_id 为空跳过（防 UNIQUE KEY 碰撞）、`load_pending_by_card_ids` 补 perf_json+trigger_rule、`_ACTION_TO_CATEGORY` 显式加 reactivate_* 映射 |
+| 06-27 | **前端秒开配置栏** | `onNewEventClick` 改为 `await loadConfigOnly()` + 后台 `loadAll(true)`（不 await）；新增 `loadConfigOnly()` 只调 `loadStrategy()`（state DB + 静态配置），不调 `loadTactics()`（避免触发 `ensure_data_for_llm` 拉 MCP/StarRocks）。[demo/ad-asisitant-agent.html](AD_assistant_agent-v3.2/ad-direction-agent/demo/ad-asisitant-agent.html) |
 
 ---
 
