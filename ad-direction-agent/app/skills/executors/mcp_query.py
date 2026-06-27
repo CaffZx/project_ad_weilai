@@ -11,7 +11,7 @@ from app.data.doris_fallback import apply_doris_fallback
 from app.data.mcp_adapter import McpAdapter, finalize_mcp_asin_data
 from app.data.mcp_fetch_run import run_planned_mcp_tools
 from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, make_date_window
-from app.data.mcp_db_context import resolve_mcp_context_from_db
+from app.data.mcp_db_context import resolve_mcp_context_from_db, resolve_mcp_context_from_mcp
 from app.data.mcp_tool_fallback import BOOTSTRAP_TOOLS
 from app.models.asin_data import ASINData
 from app.skills.models import SkillPlaybook
@@ -53,18 +53,31 @@ class McpQuerySkillExecutor:
         ctx_phase = self.playbook.phase("context")
         ctx_timeout = ctx_phase.timeout_seconds if ctx_phase else settings.mcp_context_timeout
 
-        try:
-            logger.info("%s phase=context asin=%s timeout=%.0fs", LOG_PREFIX, asin, ctx_timeout)
-            db_ctx = await asyncio.wait_for(
-                resolve_mcp_context_from_db(asin),
-                timeout=ctx_timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.error("%s phase=context timeout asin=%s", LOG_PREFIX, asin)
-            return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
-        except Exception as e:  # noqa: BLE001
-            logger.error("%s phase=context fail asin=%s err=%s", LOG_PREFIX, asin, e)
-            return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
+        # MCP 上下文解析：MCP 优先（开关控制），失败回落 DB
+        db_ctx = None
+        if settings.mcp_resolve_context:
+            try:
+                adapter_temp = McpAdapter()
+                db_ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_mcp(asin, adapter_temp),
+                    timeout=ctx_timeout,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass  # 回落 DB
+
+        if not db_ctx:
+            try:
+                logger.info("%s phase=context asin=%s timeout=%.0fs", LOG_PREFIX, asin, ctx_timeout)
+                db_ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_db(asin),
+                    timeout=ctx_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("%s phase=context timeout asin=%s", LOG_PREFIX, asin)
+                return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
+            except Exception as e:  # noqa: BLE001
+                logger.error("%s phase=context fail asin=%s err=%s", LOG_PREFIX, asin, e)
+                return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
 
         if not db_ctx:
             return ASINData(asin=asin, data_missing=True, missing_fields=["context"])

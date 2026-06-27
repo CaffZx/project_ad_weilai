@@ -92,6 +92,10 @@ META_TO_MCP_TOOLS: dict[str, list[str]] = {
 
 
 TOOL_ARG_BUILDERS: dict[str, ArgBuilder] = {
+    # 2026-06-27 新工具：父ASIN→站点/sku/店铺/产品名（替代 mcp_db_context._LOOKUP_SQL）。
+    "parent_listing_detail": lambda ctx: {
+        "parent_asin": ctx.parent_asin,
+    },
     "listing_basic_info": lambda ctx: {
         "shop_account": ctx.shop_account,
         "parent_asin": ctx.parent_asin,
@@ -133,6 +137,13 @@ TOOL_ARG_BUILDERS: dict[str, ArgBuilder] = {
     "keyword_child_asins": lambda ctx: {
         "keyword": "",
         "site_code": ctx.site_code,
+        "parent_asin": ctx.parent_asin,
+        "parent_seller_sku": ctx.parent_seller_sku,
+        "shop_account": ctx.shop_account,
+    },
+    # 2026-06-27 新工具：父ASIN→所有子ASIN的活跃广告活动+关键词（替代
+    # _resolve_and_fetch_listing + _fetch_campaign_context 两条 SQL）。
+    "ad_campaign_product_keyword_list": lambda ctx: {
         "parent_asin": ctx.parent_asin,
         "parent_seller_sku": ctx.parent_seller_sku,
         "shop_account": ctx.shop_account,

@@ -214,6 +214,67 @@ async def resolve_parent_seller_sku(parent_asin: str, shop_account: str) -> str:
     return ""
 
 
+# ── MCP 上下文解析（新工具 parent_listing_detail，替代 _LOOKUP_SQL）─────────
+
+_MCP_PARENT_KEY_MAP: dict[str, str] = {
+    "父ASIN": "parent_asin",
+    "父卖家SKU": "parent_seller_sku",
+    "店铺ID": "shop_id",
+    "店铺账号": "shop_account",
+    "站点": "site_code",
+    "产品中文名": "product_cn_name",
+    "产品名称": "product_name",
+}
+
+
+async def resolve_mcp_context_from_mcp(asin: str, adapter) -> McpDbContext | None:
+    """通过 MCP parent_listing_detail 解析上下文（替代 _lookup_sync 的 SQL）。
+
+    adapter 需要 call_tool_timed_with_args；由调用方（McpAdapter / campaign_fetcher）传入。
+    失败/超时返 None，调用方走 _lookup_sync DB 回落。
+    """
+    import json
+
+    try:
+        res = await adapter.call_tool_timed_with_args(
+            "parent_listing_detail",
+            {"parent_asin": asin},
+            timeout=getattr(settings, "mcp_context_timeout", 30.0),
+        )
+        if not res.ok:
+            logger.warning("resolve_mcp_context_from_mcp [%s] MCP 失败: %s", asin, res.error)
+            return None
+        # MCP 响应可能被多包：{content:[{type:"text", text:"{\"success\":true,...}"}]}
+        raw = res.value
+        if isinstance(raw, dict) and "content" in raw:
+            for item in raw["content"]:
+                txt = item.get("text", "")
+                if isinstance(txt, str):
+                    raw = json.loads(txt)
+                    break
+        if isinstance(raw, dict) and "success" in raw:
+            rows = raw.get("rows") or []
+            raw = rows[0] if rows else {}
+        if not raw or not isinstance(raw, dict):
+            return None
+        # 中文 key → 英文 key 映射
+        mapped = {_MCP_PARENT_KEY_MAP.get(k, k): v for k, v in raw.items()}
+        # 产品名：优先中文名
+        product_name = str(mapped.pop("product_cn_name", "") or mapped.get("product_name", ""))
+        site_code = str(mapped.get("site_code") or settings.mcp_default_site_code or "Amazon_US")
+        return McpDbContext(
+            parent_asin=str(mapped.get("parent_asin") or asin),
+            parent_seller_sku=str(mapped.get("parent_seller_sku") or ""),
+            shop_account=str(mapped.get("shop_account") or ""),
+            shop_id=_coerce_int(mapped.get("shop_id")),
+            site_code=site_code,
+            product_name=product_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("resolve_mcp_context_from_mcp [%s] 异常: %s", asin, e)
+        return None
+
+
 def lookup_top_child_attrs(parent_asin: str, *, days: int = 30) -> dict | None:
     """找 parent_asin 下"近 N 天广告花费最多"的子 ASIN 的 product_size / product_color。
 

@@ -19,7 +19,7 @@ from app.config.settings import settings
 from app.data.base import DataSourceAdapter
 from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
-from app.data.mcp_db_context import resolve_mcp_context_from_db
+from app.data.mcp_db_context import resolve_mcp_context_from_db, resolve_mcp_context_from_mcp
 from app.data.mcp_normalizers import (
     _as_rows,
     _int,
@@ -138,7 +138,12 @@ class McpAdapter(DataSourceAdapter):
         return _CallResult(ok=False, error=last_err)
 
     async def _resolve_context(self, asin: str, days: int) -> McpContext:
-        db_ctx = await resolve_mcp_context_from_db(asin)
+        db_ctx = None
+        # MCP 优先（开关控制），失败回落 _resolve_context_from_db 的 SQL
+        if settings.mcp_resolve_context:
+            db_ctx = await resolve_mcp_context_from_mcp(asin, self)
+        if not db_ctx:
+            db_ctx = await resolve_mcp_context_from_db(asin)
         if not db_ctx:
             host = settings.mcp_db_host or settings.db_host or "(未配置)"
             raise RuntimeError(

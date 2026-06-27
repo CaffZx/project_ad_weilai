@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     campaign_discovery_timeout: float = 90.0
     campaign_mcp_tool_timeout: float = 300.0
     campaign_db_fallback_timeout: float = 60.0
+    # 用 MCP 工具 ad_campaign_product_keyword_list 替代 _resolve_and_fetch_listing
+    # + _fetch_campaign_context 两条数仓 SQL。默认开，失败自动回落 Doris。
+    mcp_discover_campaigns: bool = True
+    # 用 MCP 工具 parent_listing_detail 替代 mcp_db_context._LOOKUP_SQL（父ASIN→站点/sku/店铺）。
+    # 默认开，失败自动回落 DB。
+    mcp_resolve_context: bool = True
     campaign_rank_timeout: float = 45.0          # 自然排名旁路拉取墙钟上限（从 task 启动算）
     campaign_prefilter_enabled: bool = True
     # Campaign LLM 分析

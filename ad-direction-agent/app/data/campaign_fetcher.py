@@ -15,7 +15,7 @@ from app.data.campaign_prefilter import filter_campaigns
 from app.data.db_adapter import DbAdapter
 from app.data.db_sql_helpers import ListingContext
 from app.data.mcp_adapter import McpAdapter
-from app.data.mcp_db_context import resolve_mcp_context_from_db
+from app.data.mcp_db_context import resolve_mcp_context_from_db, resolve_mcp_context_from_mcp
 from app.data.mcp_mapping import make_date_window
 from app.models.campaign import CampaignData, CampaignPerf, CampaignUnit
 
@@ -58,8 +58,13 @@ class CampaignFetcher:
         """
         errors: list[str] = []
 
-        # ① 解析上下文 → child_asins + shop_account（URL override 优先，否则 Doris 反查）
-        db_ctx = await resolve_mcp_context_from_db(parent_asin, override=override)
+        # ① 解析上下文 → child_asins + shop_account（MCP 优先/URL override/DB 回落）
+        db_ctx = None
+        if settings.mcp_resolve_context and not override:
+            # URL override 已自带 shop_account → 不调 MCP；无 override 走 MCP
+            db_ctx = await resolve_mcp_context_from_mcp(parent_asin, self._mcp())
+        if not db_ctx:
+            db_ctx = await resolve_mcp_context_from_db(parent_asin, override=override)
         shop_id = 0
         parent_seller_sku = ""
         site_code = "Amazon_US"
@@ -79,8 +84,22 @@ class CampaignFetcher:
                 fetch_source="mcp",
             )
 
-        # ② Doris 轻量上下文查询 → 仅维度字段
-        raw_campaigns = await self._discover_context_from_doris(parent_asin)
+        # ② 活动+关键词发现：MCP 优先（开关控制），失败/Doris 回落
+        shop_account = db_ctx.shop_account or ""
+        raw_campaigns: list[dict] = []
+        if settings.mcp_discover_campaigns:
+            raw_campaigns = await self._discover_context_from_mcp(parent_asin, shop_account)
+            if raw_campaigns:
+                logger.info(
+                    "_discover_context [%s]: %d rows (MCP)", parent_asin, len(raw_campaigns),
+                )
+            else:
+                logger.warning(
+                    "_discover_context [%s]: MCP 空/失败，回落 Doris", parent_asin,
+                )
+                raw_campaigns = await self._discover_context_from_doris(parent_asin)
+        else:
+            raw_campaigns = await self._discover_context_from_doris(parent_asin)
         if not raw_campaigns:
             return CampaignData(
                 parent_asin=parent_asin,
@@ -232,6 +251,52 @@ class CampaignFetcher:
             return []
         lctx = ListingContext.from_listing_row(listing)
         return await db._fetch_campaign_context(lctx)
+
+    async def _discover_context_from_mcp(self, parent_asin: str, shop_account: str) -> list[dict]:
+        """① MCP 工具 ad_campaign_product_keyword_list → 替代 Doris 两条 SQL
+        (_resolve_and_fetch_listing + _fetch_campaign_context)。
+        失败/返回空时返 []，调用方走 Doris 回落。
+        """
+        try:
+            res = await self._mcp().call_tool_timed_with_args(
+                "ad_campaign_product_keyword_list",
+                {
+                    "parent_asin": parent_asin,
+                    "parent_seller_sku": "",   # 工具自身可从 parent_asin 映射
+                    "shop_account": shop_account or "",
+                },
+                timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
+            )
+            if not res.ok:
+                logger.warning(
+                    "_discover_context_from_mcp [%s] MCP 失败: %s", parent_asin, res.error,
+                )
+                return []
+            # MCP 响应可能多包：{content:[{type:"text", text:"{\"success\":true,...}"}]}
+            val = res.value
+            if isinstance(val, dict) and "content" in val:
+                import json
+                for item in val["content"]:
+                    txt = item.get("text", "")
+                    if isinstance(txt, str):
+                        val = json.loads(txt)
+                        break
+            if isinstance(val, dict) and "success" in val:
+                val = val.get("rows") or val
+            raw = _as_rows(val)
+            if not raw:
+                return []
+            normalized = _normalize_mcp_campaign_keywords(raw)
+            logger.info(
+                "_discover_context_from_mcp [%s]: %d rows (MCP)",
+                parent_asin, len(normalized),
+            )
+            return normalized
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "_discover_context_from_mcp [%s] 异常: %s", parent_asin, e,
+            )
+            return []
 
     async def _fetch_basic_one(
         self, campaign_name: str, shop_account: str,
@@ -788,6 +853,40 @@ class CampaignFetcher:
 
 
 # ── 模块级工具 ──
+
+# ad_campaign_product_keyword_list 中文 key → 英文 key 映射（normalizer）。
+# MCP 工具返回的字段与 _fetch_campaign_context SQL 字段一一对应，
+# 仅名称不同；映射后下游 _assemble / filter_campaigns 零改动。
+_MCP_CAMPAIGN_KEY_MAP: dict[str, str] = {
+    "广告活动D": "campaign_id",
+    "广告活动名称": "campaign_name",
+    "关键词D": "keyword_id",
+    "子SIN": "child_asin",
+    "子卖家KU": "seller_sku",
+    "关键词": "keyword_text",
+    "关键词匹配类型": "match_type",
+}
+_MCP_CAMPAIGN_DEFAULTS = {
+    "campaign_status": "ENABLED",
+    "keyword_status": "ENABLED",
+}
+
+
+def _normalize_mcp_campaign_keywords(rows: list[dict]) -> list[dict]:
+    """将 MCP 工具返回的中文 key 映射为 _assemble 所期望的英文 key。
+
+    入参 shape: [{"广告活动D":..., "广告活动名称":..., ...}, ...]  (MCP 原始)
+    出参 shape: [{"campaign_id":..., "campaign_name":..., ..., "campaign_status":"ENABLED", "keyword_status":"ENABLED"}, ...]
+    """
+    if not rows:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        mapped = {_MCP_CAMPAIGN_KEY_MAP.get(k, k): v for k, v in r.items()}
+        mapped.update(_MCP_CAMPAIGN_DEFAULTS)
+        out.append(mapped)
+    return out
+
 
 def _to_float(value: Any) -> float | None:
     """容错解析数值：处理 None / 空串 / 带 % / 千分位逗号。失败返回 None。"""
