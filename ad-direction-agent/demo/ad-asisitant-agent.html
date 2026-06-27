@@ -1496,7 +1496,7 @@ function renderDataStatusBanner(data, elId) {
     show(elId);
     return;
   }
-  const pf = (data && data.partial_failures) || [];
+  const pf = ((data && data.partial_failures) || []).filter(x => !String(x).includes('ad_keyword_report'));
   const fresh = data && data.data_freshness;
   const incomplete = pf.length > 0 || isPartialDataFreshness(fresh);
   if (!incomplete) {
