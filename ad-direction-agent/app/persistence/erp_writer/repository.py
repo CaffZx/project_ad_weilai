@@ -931,10 +931,11 @@ class ErpDualWriterRepository:
         """
 
         for card in run.cards:
-            # campaign_id 为空：仅新增活动卡(CREATE)合法（活动尚不存在），其余卡跳过防 UNIQUE KEY 碰撞
+            # campaign_id 为空：CREATE（活动尚不存在）和灰卡留痕（预过滤/LLM 丢失）合法；
+            # 旧活动调整卡必须有数仓 campaign_id，否则跳过防 UNIQUE KEY 碰撞。
             if not (card.campaign_id or "").strip():
-                if card.suggest_category == "CREATE":
-                    pass  # CREATE 卡无 campaign_id 是设计如此
+                if card.suggest_category == "CREATE" or card.is_prefiltered:
+                    pass
                 else:
                     logger.warning(
                         "write_full [%s] 跳过 campaign_id 为空的旧卡: %s / %s",
