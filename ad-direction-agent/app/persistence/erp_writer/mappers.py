@@ -57,10 +57,6 @@ _ACTION_TO_CATEGORY = {
     "eliminate_to_low_bid_pool": "ELIMINATE",
     "adjust": "ADJUST",
     "keep": "KEEP",
-    # 淘汰复评卡（campaign_restart 产出）——目前 DDL suggest_category ENUM 只有
-    # ELIMINATE/ADJUST/KEEP，暂落到 ADJUST。将来 DDL 增加 REACTIVATE 枚举后改为此值。
-    "reactivate_budget_only": "ADJUST",
-    "reactivate_with_calibrated_bid": "ADJUST",
 }
 
 _CATEGORY_PRIORITY = {"ELIMINATE": 0, "ADJUST": 1, "KEEP": 2}

@@ -392,8 +392,7 @@ class ErpDualWriterRepository:
                 ph = ",".join(["%s"]*len(card_ids))
                 cur.execute(
                     "SELECT id, campaign_id, campaign_name, suggest_category, "
-                    "campaign_group_type, keyword_match_type, asin, keyword, "
-                    "perf_json, trigger_rule "
+                    "campaign_group_type, keyword_match_type, asin, keyword "
                     f"FROM t_advert_agent_modify_suggest_card "
                     f"WHERE decision_id=%s AND id IN ({ph})",
                     (decision_id, *card_ids),
@@ -931,17 +930,6 @@ class ErpDualWriterRepository:
         """
 
         for card in run.cards:
-            # campaign_id 为空：CREATE（活动尚不存在）和灰卡留痕（预过滤/LLM 丢失）合法；
-            # 旧活动调整卡必须有数仓 campaign_id，否则跳过防 UNIQUE KEY 碰撞。
-            if not (card.campaign_id or "").strip():
-                if card.suggest_category == "CREATE" or card.is_prefiltered:
-                    pass
-                else:
-                    logger.warning(
-                        "write_full [%s] 跳过 campaign_id 为空的旧卡: %s / %s",
-                        run.decision_id, card.campaign_name, card.card_id,
-                    )
-                    continue
             cur.execute(
                 card_sql,
                 (
