@@ -84,8 +84,9 @@ META_TO_MCP_TOOLS: dict[str, list[str]] = {
     # 关键词广告效果数据暂缺，后续用 ad_optimization + ad_campaign_product_keyword_list 恢复。
     # "META_KW_AD": ["ad_keyword_report"],  -- MCP tool unavailable
     "META_COMPETITOR": ["direct_competitors"],
-    "META_KW_COMPETITOR_RANK": ["keyword_competitors", "keyword_child_asins"],
-    "META_KW_SUB_ASIN_RANK": ["keyword_child_asins"],
+    # keyword_child_asins 已由 mcp_adapter Phase 2 逐词并行（正确传参），不再经 META 空跑
+    "META_KW_COMPETITOR_RANK": [],
+    "META_KW_SUB_ASIN_RANK": [],
     "META_FLOW_KEYWORD": ["flow_keywords"],
     "META_AD_PRODUCT": ["ad_product_report"],
     "META_AD_PLACEMENT": ["ad_placement_report"],
