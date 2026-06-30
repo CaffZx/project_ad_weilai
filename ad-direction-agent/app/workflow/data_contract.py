@@ -13,15 +13,18 @@ ModuleId = Literal["tactics", "execution", "p3", "report", "campaign"]
 Status = Literal["ok", "degraded", "blocked"]
 
 # Pragmatic contracts: required missing → block LLM; important → feed with notice
+# 2026-06-30: keywords 从 required 移除 — ad_keyword_report MCP 工具已下线、
+# Doris 回落已切除，关键词级广告效果数据暂缺。目标关键词推荐后续用
+# ad_optimization + ad_campaign_product_keyword_list 独立恢复。
 DEFAULT_MODULE_CONTRACTS: dict[str, dict[str, list[str]]] = {
     "tactics": {
-        "required": ["keywords", "ad_data.acos", "ad_data.cpc"],
-        "important": ["trend", "ad_data.ctr", "natural_order_ratio"],
+        "required": ["ad_data.acos", "ad_data.cpc"],
+        "important": ["trend", "ad_data.ctr", "natural_order_ratio", "keywords"],
         "optional": ["competitor_price", "inventory_qty"],
     },
     "execution": {
-        "required": ["keywords", "ad_data.acos", "ad_data.cvr"],
-        "important": ["margin", "trend", "ad_data.tacos", "natural_order_ratio"],
+        "required": ["ad_data.acos", "ad_data.cvr"],
+        "important": ["margin", "trend", "ad_data.tacos", "natural_order_ratio", "keywords"],
         "optional": ["placement_comparison", "competitor_summary"],
     },
     "p3": {
@@ -30,12 +33,12 @@ DEFAULT_MODULE_CONTRACTS: dict[str, dict[str, list[str]]] = {
         "optional": ["competitor_summary", "history"],
     },
     "report": {
-        "required": ["keywords", "ad_data.acos"],
-        "important": ["margin", "trend", "ad_data.cvr"],
+        "required": ["ad_data.acos"],
+        "important": ["margin", "trend", "ad_data.cvr", "keywords"],
         "optional": ["placement_comparison", "competitor_summary"],
     },
     "campaign": {
-        "required": ["keywords"],
+        "required": [],
         "important": ["margin", "natural_order_ratio", "inventory_qty", "avg_daily_sales_30d"],
         "optional": ["placement_comparison"],
     },

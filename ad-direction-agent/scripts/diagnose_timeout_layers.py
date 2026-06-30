@@ -13,8 +13,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config.settings import settings
-from app.data.mcp_mapping import META_TO_MCP_TOOLS
-from app.data.mcp_tool_fallback import BOOTSTRAP_TOOLS as BT
+from app.data.mcp_mapping import BOOTSTRAP_TOOLS as BT, META_TO_MCP_TOOLS
 from app.skills.loader import load_playbook
 from app.workflow.meta_filters import get_meta_filter
 

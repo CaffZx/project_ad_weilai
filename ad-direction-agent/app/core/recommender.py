@@ -426,12 +426,20 @@ class Recommender:
         cfg = self._cfg("optimize_acos")
         score = 0
         reasons = []
-        over_th = cfg.get("over_keyword_acos_threshold", 40)
-        over = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
-        wasteful = [
-            kw for kw in data.keywords
-            if kw.orders == 0 and kw.spend >= cfg.get("wasteful_min_spend", 15)
-        ]
+        has_keywords = len(data.keywords) > 0
+
+        # 词级信号仅在有关键词数据时评估（ad_keyword_report 已下线，Doris 回落已切除）
+        if has_keywords:
+            over_th = cfg.get("over_keyword_acos_threshold", 40)
+            over = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
+            wasteful = [
+                kw for kw in data.keywords
+                if kw.orders == 0 and kw.spend >= cfg.get("wasteful_min_spend", 15)
+            ]
+        else:
+            over_th = cfg.get("over_keyword_acos_threshold", 40)
+            over = []
+            wasteful = []
 
         account_acos = data.ad_data.acos if data.ad_data and data.ad_data.acos is not None else None
         if account_acos is not None:
@@ -453,15 +461,18 @@ class Recommender:
             score += cfg.get("wasteful_points", 20)
             reasons.append(f"{len(wasteful)} 个高花费零转化词")
 
-        adjustable = [
-            kw for kw in data.keywords
-            if kw.bid and kw.clicks > 0 and kw.bid > (kw.spend / kw.clicks) * 1.5
-        ]
-        if adjustable:
-            score += cfg.get("bid_space_points", 10)
-            reasons.append(f"{len(adjustable)} 个词存在 Bid 下调空间")
+        if has_keywords:
+            adjustable = [
+                kw for kw in data.keywords
+                if kw.bid and kw.clicks > 0 and kw.bid > (kw.spend / kw.clicks) * 1.5
+            ]
+            if adjustable:
+                score += cfg.get("bid_space_points", 10)
+                reasons.append(f"{len(adjustable)} 个词存在 Bid 下调空间")
 
-        if not reasons:
+        if not has_keywords and account_acos is None:
+            reasons.append("缺少关键词广告效果与账户 ACOS 数据，无法评估优化需求")
+        elif not reasons:
             reasons.append("当前 ACOS 在合理范围")
 
         return self._finalize(
@@ -488,15 +499,18 @@ class Recommender:
                 score += 5
                 reasons.append("有库存")
 
-        ranked = [kw for kw in data.keywords if kw.natural_rank is not None]
-        if len(ranked) >= 3:
-            unstable = [
-                kw for kw in data.keywords
-                if kw.rank_change_14d is not None and abs(kw.rank_change_14d) >= 5
-            ]
-            if not unstable:
-                score += cfg.get("rank_stable_points", 5)
-                reasons.append("关键词排名稳定")
+        # 词级信号仅在有关键词数据时评估
+        has_kw = len(data.keywords) > 0
+        if has_kw:
+            ranked = [kw for kw in data.keywords if kw.natural_rank is not None]
+            if len(ranked) >= 3:
+                unstable = [
+                    kw for kw in data.keywords
+                    if kw.rank_change_14d is not None and abs(kw.rank_change_14d) >= 5
+                ]
+                if not unstable:
+                    score += cfg.get("rank_stable_points", 5)
+                    reasons.append("关键词排名稳定")
 
         best = self._best_natural_rank(data)
         stage = data.product_stage or ""
@@ -509,7 +523,10 @@ class Recommender:
             reasons.append("核心排名稳固，收割期以维持效率为主")
 
         avail = data.available_new_keywords or 0
-        high_acos = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
+        if has_kw:
+            high_acos = [kw for kw in data.keywords if kw.acos is not None and kw.acos > over_th]
+        else:
+            high_acos = []
         if avail >= 2 and not harvest_like:
             score -= cfg.get("expand_opportunity_penalty", 10)
             reasons.append("有扩词机会未利用")

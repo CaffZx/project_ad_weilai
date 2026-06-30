@@ -75,10 +75,13 @@ def _ad_common(ctx: McpContext) -> dict:
     }
 
 
+# 每次 ASIN 数据拉取必调的基础工具（上下文解析前提）。
+# 原定义在 mcp_tool_fallback.py（已随 Doris 切除删除），此处为唯一真源。
+BOOTSTRAP_TOOLS: frozenset[str] = frozenset({"listing_basic_info", "listing_inventory"})
+
 META_TO_MCP_TOOLS: dict[str, list[str]] = {
-    # 注意(遗留,非 bug): MCP 服务端已把 ad_keyword_report 拆分,直接调它会返回
-    # "Unknown tool: invalid_tool_name"。此时按 META_KW_AD 稳定回落 Doris
-    # (dwd_amazon_ad_keyword_report)，数据正常。暂不改工具名(能跑就先别动)。
+    # 2026-06-30: ad_keyword_report MCP 工具已下线（服务端拆分），Doris 回落已切除。
+    # 关键词广告效果数据暂缺，后续用 ad_optimization + ad_campaign_product_keyword_list 恢复。
     # "META_KW_AD": ["ad_keyword_report"],  -- MCP tool unavailable
     "META_COMPETITOR": ["direct_competitors"],
     "META_KW_COMPETITOR_RANK": ["keyword_competitors", "keyword_child_asins"],

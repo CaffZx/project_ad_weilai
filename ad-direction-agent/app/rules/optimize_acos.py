@@ -56,6 +56,12 @@ async def check_acos_overage(data: ASINData, thresholds: dict) -> ValidationItem
     description="检查有无高花费零转化的词",
 )
 async def check_high_spend_zero_conversion(data: ASINData, thresholds: dict) -> ValidationItem | None:
+    if not data.keywords:
+        return ValidationItem(
+            rule_id="OA-2", level="force_correct",
+            message="缺少关键词广告效果数据，无法检测高花费零转化词",
+            data_missing=True,
+        )
     threshold = (
         thresholds.get("optimize_acos", {})
         .get("oa_2", {})
@@ -88,6 +94,12 @@ async def check_high_spend_zero_conversion(data: ASINData, thresholds: dict) -> 
     description="检查是否有 Bid 下调空间（Bid 显著高于实际 CPC）",
 )
 async def check_bid_headroom(data: ASINData, thresholds: dict) -> ValidationItem | None:
+    if not data.keywords:
+        return ValidationItem(
+            rule_id="OA-3", level="force_correct",
+            message="缺少关键词广告效果数据，无法评估 Bid 下调空间",
+            data_missing=True,
+        )
     factor = (
         thresholds.get("optimize_acos", {})
         .get("oa_3", {})
@@ -121,6 +133,12 @@ async def check_bid_headroom(data: ASINData, thresholds: dict) -> ValidationItem
     description="检查否定词机会",
 )
 async def check_negative_keyword_opportunities(data: ASINData, thresholds: dict) -> ValidationItem | None:
+    if not data.keywords:
+        return ValidationItem(
+            rule_id="OA-4", level="force_correct",
+            message="缺少关键词广告效果数据，无法识别否定词候选",
+            data_missing=True,
+        )
     min_impressions = (
         thresholds.get("optimize_acos", {})
         .get("oa_4", {})

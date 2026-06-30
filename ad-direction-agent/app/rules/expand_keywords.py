@@ -50,6 +50,12 @@ async def check_keyword_coverage(data: ASINData, thresholds: dict) -> Validation
 
     count = data.keyword_count if data.keyword_count is not None else len(data.keywords)
 
+    if count == 0:
+        return ValidationItem(
+            rule_id="KE-2", level="force_correct",
+            message="缺少关键词数据，无法评估覆盖率",
+            data_missing=True,
+        )
     if count < max_count:
         return ValidationItem(
             rule_id="KE-2",

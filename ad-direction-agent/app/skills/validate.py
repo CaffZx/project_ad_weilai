@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 
-from app.data.mcp_mapping import TOOL_ARG_BUILDERS
+from app.data.mcp_mapping import BOOTSTRAP_TOOLS, TOOL_ARG_BUILDERS
 from app.skills.loader import default_skills_dir, load_playbook
 from app.skills.models import SkillPlaybook
 
-_BOOTSTRAP_TOOLS = ("listing_basic_info", "listing_inventory")
 _MCP_TOOL_TO_META: dict[str, str] = {
     "ad_product_report": "META_AD_PRODUCT",
     "ad_placement_report": "META_AD_PLACEMENT",
@@ -34,7 +33,7 @@ def validate_playbook(playbook: SkillPlaybook) -> list[str]:
     for tool in bootstrap:
         if tool not in known_tools:
             errors.append(f"bootstrap tool '{tool}' not in TOOL_ARG_BUILDERS")
-        if tool not in _BOOTSTRAP_TOOLS:
+        if tool not in BOOTSTRAP_TOOLS:
             logger.warning(
                 "playbook bootstrap tool '%s' not in known bootstrap tools",
                 tool,

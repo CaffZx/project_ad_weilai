@@ -18,7 +18,7 @@ import httpx
 from app.config.settings import settings
 from app.data.base import DataSourceAdapter
 from app.data.mcp_client import StreamableHttpMcpInvoker
-from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
+from app.data.mcp_mapping import BOOTSTRAP_TOOLS, META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
 from app.data.mcp_db_context import resolve_mcp_context_from_mcp
 from app.data.mcp_normalizers import (
     _as_rows,
@@ -184,7 +184,7 @@ class McpAdapter(DataSourceAdapter):
             return ASINData(asin=asin, data_missing=True, missing_fields=["context"])
 
         meta_ids = meta_filter or list(META_TO_MCP_TOOLS.keys())
-        bootstrap_tools = {"listing_basic_info", "listing_inventory"}
+        bootstrap_tools = set(BOOTSTRAP_TOOLS)
         planned_tools: list[str] = list(bootstrap_tools)
         for meta in meta_ids:
             planned_tools.extend(META_TO_MCP_TOOLS.get(meta, []))

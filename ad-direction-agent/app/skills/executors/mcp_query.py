@@ -8,12 +8,10 @@ import logging
 from app.config.settings import settings
 from app.data.mcp_adapter import McpAdapter, finalize_mcp_asin_data
 from app.data.mcp_fetch_run import run_planned_mcp_tools
-from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, make_date_window
+from app.data.mcp_mapping import BOOTSTRAP_TOOLS, META_TO_MCP_TOOLS, McpContext, make_date_window
 from app.data.mcp_db_context import resolve_mcp_context_from_mcp
 from app.models.asin_data import ASINData
 from app.skills.models import SkillPlaybook
-
-_BOOTSTRAP_TOOLS = ("listing_basic_info", "listing_inventory")
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[skill:mcp-query]"
@@ -64,7 +62,7 @@ class McpQuerySkillExecutor:
         bootstrap_phase = self.playbook.phase("mcp_bootstrap")
         reports_phase = self.playbook.phase("mcp_reports")
 
-        planned: list[str] = list(bootstrap_phase.tools if bootstrap_phase else _BOOTSTRAP_TOOLS)
+        planned: list[str] = list(bootstrap_phase.tools if bootstrap_phase else BOOTSTRAP_TOOLS)
         if reports_phase and reports_phase.tools_from_meta:
             for meta in meta_ids:
                 planned.extend(META_TO_MCP_TOOLS.get(meta, []))
@@ -76,7 +74,7 @@ class McpQuerySkillExecutor:
         )
 
         adapter = McpAdapter()
-        bootstrap_set = set(self.playbook.bootstrap_tools or _BOOTSTRAP_TOOLS)
+        bootstrap_set = set(self.playbook.bootstrap_tools or BOOTSTRAP_TOOLS)
         bootstrap_timeout = (
             bootstrap_phase.timeout_seconds if bootstrap_phase else settings.mcp_bootstrap_timeout
         )

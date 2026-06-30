@@ -73,17 +73,21 @@ async def run_validation_and_report(ctx: WorkflowContext, asin: str, days: int =
         selected_dirs = [rec.recommended_direction]
 
     # 并行校验+确认
+    # 2026-06-30: 关键词数据暂缺时跳过决策包生成（空 keywords 会产出
+    # "0词/0排名"的无意义数据，且调用链本身已标记为死代码）。
     validations = {}
     decisions = {}
+    _has_kw = bool(data.keywords)
     for direction in selected_dirs:
         validations[direction] = (
             await ctx.validator.validate(data, direction, sub_options.get(direction, {}))
         ).model_dump()
-        decisions[direction] = {
-            "decision_package": (
-                ctx.decision_gen.generate(data, direction, sub_options.get(direction, {}))
-            ).model_dump()
-        }
+        if _has_kw:
+            decisions[direction] = {
+                "decision_package": (
+                    ctx.decision_gen.generate(data, direction, sub_options.get(direction, {}))
+                ).model_dump()
+            }
 
     # 评分
     rec_response = ctx.recommender.recommend(data)
