@@ -58,6 +58,11 @@ def analysis_to_kb_payload(
         "run_number": 1,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "parent_asin": data.get("parent_asin") or "",
+        # 透传 campaign 分析已拉取的上下文，供 push_full_to_erp 跳过 MCP 重拉
+        "shop_id": data.get("shop_id") or 0,
+        "shop_account": data.get("shop_account") or "",
+        "parent_seller_sku": data.get("parent_seller_sku") or "",
+        "site_code": data.get("site_code") or "Amazon_US",
         "temperature": temperature if temperature is not None else settings.campaign_llm_temperature,
         "total_campaigns": data.get("total_campaigns") or 0,
         "adjustments": adjustments,
