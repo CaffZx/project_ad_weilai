@@ -224,7 +224,9 @@ def pick_target_child_asin(campaigns: list) -> str:
 
     新建活动须挂到一个具体子 ASIN 投放，不能用父 ASIN 占位。
     选「历史活动数最多」的子 ASIN（主力投放变体）；活动数平手时按 7 天总花费最高。
-    campaigns 为空或均无 child_asin 时返回 ""（前端再回退父 ASIN 占位）。
+    campaigns 为空或均无 child_asin 时返回 ""。
+
+    结果落库到 t_advert_agent_modify_suggest_card.asin，执行阶段直接读回，不重复查询。
     """
     from collections import defaultdict
 

@@ -349,7 +349,8 @@ class ErpDualWriterRepository:
                     return None
                 cur.execute(
                     "SELECT id, campaign_id, campaign_name, suggest_category, "
-                    "campaign_group_type, keyword_match_type, asin, keyword "
+                    "campaign_group_type, keyword_match_type, asin, keyword, "
+                    "perf_json, trigger_rule "
                     "FROM t_advert_agent_modify_suggest_card "
                     "WHERE decision_id=%s AND confirm_status='CONFIRMED'",
                     (decision_id,),
@@ -392,7 +393,8 @@ class ErpDualWriterRepository:
                 ph = ",".join(["%s"]*len(card_ids))
                 cur.execute(
                     "SELECT id, campaign_id, campaign_name, suggest_category, "
-                    "campaign_group_type, keyword_match_type, asin, keyword "
+                    "campaign_group_type, keyword_match_type, asin, keyword, "
+                    "perf_json, trigger_rule "
                     f"FROM t_advert_agent_modify_suggest_card "
                     f"WHERE decision_id=%s AND id IN ({ph})",
                     (decision_id, *card_ids),

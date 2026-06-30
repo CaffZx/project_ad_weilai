@@ -19,7 +19,7 @@ from app.config.settings import settings
 from app.data.base import DataSourceAdapter
 from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_mapping import META_TO_MCP_TOOLS, McpContext, build_tool_args, make_date_window
-from app.data.mcp_db_context import resolve_mcp_context_from_db, resolve_mcp_context_from_mcp
+from app.data.mcp_db_context import resolve_mcp_context_from_mcp
 from app.data.mcp_normalizers import (
     _as_rows,
     _int,
@@ -139,17 +139,12 @@ class McpAdapter(DataSourceAdapter):
 
     async def _resolve_context(self, asin: str, days: int) -> McpContext:
         db_ctx = None
-        # MCP 优先（开关控制），失败回落 _resolve_context_from_db 的 SQL
         if settings.mcp_resolve_context:
             db_ctx = await resolve_mcp_context_from_mcp(asin, self)
         if not db_ctx:
-            db_ctx = await resolve_mcp_context_from_db(asin)
-        if not db_ctx:
-            host = settings.mcp_db_host or settings.db_host or "(未配置)"
             raise RuntimeError(
-                f"无法从数据库解析 MCP 上下文（ASIN={asin}，DB={host}:{settings.db_port}）。"
-                "请确认本机能访问 Doris（可设置 MCP_DB_HOST=127.0.0.1 走隧道），"
-                "或配置 MCP_DEFAULT_PARENT_SELLER_SKU + MCP_DEFAULT_SHOP_ACCOUNT。"
+                f"无法解析 MCP 上下文（ASIN={asin}）。"
+                "请确认 MCP 服务可达，或配置 MCP_DEFAULT_PARENT_SELLER_SKU + MCP_DEFAULT_SHOP_ACCOUNT。"
             )
         # 日期窗口按该 ASIN 站点的当地时间（db_ctx.site_code）构造
         start_date, end_date = make_date_window(days, db_ctx.site_code)

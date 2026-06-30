@@ -91,10 +91,10 @@ async def run_confirm_strategy(ctx: WorkflowContext, req: StrategyConfirmRequest
     from app.config.settings import settings
 
     if settings.data_source == "mcp":
-        # MCP 模式：仅用 DB 解析上下文，避免保存战略层时并发拉全量 MCP（易超时）
-        from app.data.mcp_db_context import resolve_mcp_context_from_db
+        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+        from app.data.mcp_adapter import McpAdapter
 
-        db_ctx = await resolve_mcp_context_from_db(req.asin)
+        db_ctx = await resolve_mcp_context_from_mcp(req.asin, McpAdapter())
         if not db_ctx:
             return StrategyConfirmResponse(
                 asin=req.asin,

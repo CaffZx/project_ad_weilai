@@ -79,7 +79,7 @@ META_TO_MCP_TOOLS: dict[str, list[str]] = {
     # 注意(遗留,非 bug): MCP 服务端已把 ad_keyword_report 拆分,直接调它会返回
     # "Unknown tool: invalid_tool_name"。此时按 META_KW_AD 稳定回落 Doris
     # (dwd_amazon_ad_keyword_report)，数据正常。暂不改工具名(能跑就先别动)。
-    "META_KW_AD": ["ad_keyword_report"],
+    # "META_KW_AD": ["ad_keyword_report"],  -- MCP tool unavailable
     "META_COMPETITOR": ["direct_competitors"],
     "META_KW_COMPETITOR_RANK": ["keyword_competitors", "keyword_child_asins"],
     "META_KW_SUB_ASIN_RANK": ["keyword_child_asins"],

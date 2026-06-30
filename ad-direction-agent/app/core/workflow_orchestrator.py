@@ -125,11 +125,10 @@ class WorkflowOrchestrator:
                     asin,
                     meta_filter=meta_filter,
                     days=days,
-                    prefer_db=bool(settings.mcp_refresh_via_db),
                 )
                 await asin_data_cache.set(asin, data, days=days, meta_filter=meta_filter)
             else:
-                data = await self.aggregator.fetch(asin, days=days, prefer_db=True)
+                data = await self.aggregator.fetch(asin, days=days)
                 await asin_data_cache.set(asin, data, days=days)
             return data
 

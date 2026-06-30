@@ -332,7 +332,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         # META_TREND(product_sales) 用于 avg_daily_sales_30d → 库存天数；META_AD_PRODUCT 为广告指标。
         asin_data = await asyncio.wait_for(
             aggregator.fetch(asin, days=days, meta_filter=["META_AD_PRODUCT", "META_TREND"]),
-            timeout=120,
+            timeout=300,  # P0: 对齐 mcp_bootstrap_timeout=180s + 余量
         )
 
         strat_ctx = build_campaign_strategy_context(

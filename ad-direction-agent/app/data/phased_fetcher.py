@@ -9,8 +9,6 @@ async def fetch_phased(
     asin: str,
     meta_filter: list[str] | None = None,
     days: int = 7,
-    *,
-    prefer_db: bool = False,
 ) -> ASINData:
     """Thin wrapper: run mcp-query skill playbook."""
     from app.config.settings import settings
@@ -23,13 +21,7 @@ async def fetch_phased(
             asin=asin,
             meta_filter=meta_filter,
             days=days,
-            prefer_db=prefer_db,
         )
 
-    # Fallback if skills disabled (legacy inline path removed — use DbAdapter only)
-    from app.data.db_adapter import DbAdapter
-
-    data = await DbAdapter().fetch_asin_data(asin, meta_filter=meta_filter, days=days)
-    data.data_freshness = "fresh"
-    data.partial_failures = []
-    return data
+    # Skills disabled — return empty
+    return ASINData(asin=asin, data_missing=True, missing_fields=["skills_disabled"])

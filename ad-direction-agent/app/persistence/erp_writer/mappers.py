@@ -500,7 +500,8 @@ def canonicalize_payload(
         cards.append(SuggestCardCanonical(
             card_id=stable_id("car", decision_id, seed),
             decision_id=decision_id, campaign_id=None,
-            campaign_name=_clip(name, 512) or name, asin=_clip(nc.get("child_asin"), 64),
+            campaign_name=_clip(name, 512) or name,
+            asin=_clip(nc.get("child_asin"), 64),  # pick_target_child_asin 落库 → 执行期读回
             keyword=kw_text, keyword_match_type=mt,
             trigger_rule=_clip(nc.get("trigger_scene"), 128),
             suggest_category="CREATE",

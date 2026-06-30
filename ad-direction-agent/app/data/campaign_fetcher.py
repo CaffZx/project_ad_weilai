@@ -1,7 +1,4 @@
-"""Campaign 数据编排器 — Doris 上下文 → 硬过滤 → MCP 主力 → Doris 回落。
-
-原则: Doris 只做轻量上下文（维度字段），MCP 拉效果数据，MCP 失败时回落 Doris。
-"""
+"""Campaign 数据编排器 — MCP 主力拉取上下文 + 效果数据，不再回退 Doris。"""
 
 from __future__ import annotations
 
@@ -12,10 +9,8 @@ from typing import Any
 
 from app.config.settings import settings
 from app.data.campaign_prefilter import filter_campaigns
-from app.data.db_adapter import DbAdapter
-from app.data.db_sql_helpers import ListingContext
 from app.data.mcp_adapter import McpAdapter
-from app.data.mcp_db_context import resolve_mcp_context_from_db, resolve_mcp_context_from_mcp
+from app.data.mcp_db_context import resolve_mcp_context_from_mcp
 from app.data.mcp_mapping import make_date_window
 from app.models.campaign import CampaignData, CampaignPerf, CampaignUnit
 
@@ -30,11 +25,10 @@ class _CallResult:
 
 
 class CampaignFetcher:
-    """Doris 发现上下文 → 硬过滤 → MCP 主力 → Doris 回落"""
+    """MCP 主力拉取上下文 + 效果数据，不再回退 Doris。"""
 
     def __init__(self):
         self._mcp_adapter: McpAdapter | None = None
-        self._db_adapter: DbAdapter | None = None
         self._mcp_sem = asyncio.Semaphore(settings.mcp_max_concurrency)
         self._last_shop_id: int = 0  # fetch_campaigns 解析后缓存，供懒加载回落复用
         self._last_shop_account: str = ""  # 同上，供新增活动线 discover_new_keywords 复用
@@ -47,44 +41,34 @@ class CampaignFetcher:
         parent_asin: str,
         days: int = 7,
         *,
-        prefer_db: bool = False,
         override: dict | None = None,
     ) -> CampaignData:
         """完整 pipeline 入口。
 
-        prefer_db=True 时跳过 MCP，全走 Doris（用于刷新/调试）。
         override（ERP URL 注入 shop_account/parent_seller_sku/site_code/shop_id）传入则
-        跳过 dwd_shop 反查，直接用 URL 上下文。
+        跳过 MCP 反查，直接用 URL 上下文。
         """
         errors: list[str] = []
 
-        # ① 解析上下文 → child_asins + shop_account（MCP 优先/URL override/DB 回落）
+        # ① 解析上下文 → child_asins + shop_account（MCP）
         db_ctx = None
         if settings.mcp_resolve_context and not override:
-            # URL override 已自带 shop_account → 不调 MCP；无 override 走 MCP
             db_ctx = await resolve_mcp_context_from_mcp(parent_asin, self._mcp())
-        if not db_ctx:
-            db_ctx = await resolve_mcp_context_from_db(parent_asin, override=override)
-        shop_id = 0
-        parent_seller_sku = ""
-        site_code = "Amazon_US"
-        if db_ctx:
-            shop_id = db_ctx.shop_id or 0
-            parent_seller_sku = db_ctx.parent_seller_sku or ""
-            site_code = db_ctx.site_code or "Amazon_US"
-            # 缓存供新增活动线 discover_new_keywords 复用 (shop_account 不在 CampaignData 上)
-            self._last_shop_id = shop_id
-            self._last_shop_account = db_ctx.shop_account or ""
-            self._last_site_code = site_code  # 供懒加载 placement/search_term 按站点构日期窗口
-
         if not db_ctx:
             return CampaignData(
                 parent_asin=parent_asin,
                 errors=["无法解析 MCP 上下文"],
                 fetch_source="mcp",
             )
+        shop_id = db_ctx.shop_id or 0
+        parent_seller_sku = db_ctx.parent_seller_sku or ""
+        site_code = db_ctx.site_code or "Amazon_US"
+        # 缓存供新增活动线 discover_new_keywords 复用 (shop_account 不在 CampaignData 上)
+        self._last_shop_id = shop_id
+        self._last_shop_account = db_ctx.shop_account or ""
+        self._last_site_code = site_code  # 供懒加载 placement/search_term 按站点构日期窗口
 
-        # ② 活动+关键词发现：MCP 优先（开关控制），失败/Doris 回落
+        # ② 活动+关键词发现：MCP
         shop_account = db_ctx.shop_account or ""
         raw_campaigns: list[dict] = []
         if settings.mcp_discover_campaigns:
@@ -95,11 +79,11 @@ class CampaignFetcher:
                 )
             else:
                 logger.warning(
-                    "_discover_context [%s]: MCP 空/失败，回落 Doris", parent_asin,
+                    "_discover_context [%s]: MCP 空/失败，跳过 Doris", parent_asin,
                 )
-                raw_campaigns = await self._discover_context_from_doris(parent_asin)
+                raw_campaigns = []
         else:
-            raw_campaigns = await self._discover_context_from_doris(parent_asin)
+            raw_campaigns = []
         if not raw_campaigns:
             return CampaignData(
                 parent_asin=parent_asin,
@@ -107,7 +91,7 @@ class CampaignFetcher:
                 parent_seller_sku=parent_seller_sku,
                 site_code=site_code,
                 total_campaigns=0,
-                fetch_source="doris",
+                fetch_source="mcp",
             )
 
         # ③ 代码硬过滤
@@ -125,21 +109,17 @@ class CampaignFetcher:
                 site_code=site_code,
                 total_campaigns=len(raw_campaigns),
                 excluded=excluded,
-                fetch_source="doris",
+                fetch_source="mcp",
             )
 
         # ④ MCP 必拉: basic_info (days_online, 交叉验证 budget/status)
         #    + product_report (7d 效果指标)
-        #    prefer_db=True 时全部走 Doris
         start_date, end_date = _make_date_window(days, db_ctx.site_code)
         shop_account = db_ctx.shop_account
 
-        # listing/shop_id 解析一次（#5 防 MCP 全挂时循环内 N 次冗余查询）
-        db = self._get_db()
-        listing = await db._resolve_and_fetch_listing(parent_asin)
-        lctx = ListingContext.from_listing_row(listing) if listing else None
-        shop_id = lctx.shop_id if lctx else 0
-        self._last_shop_id = shop_id  # 供懒加载回落复用
+        # listing/shop_id — 从 db_ctx 取（MCP 已解析）
+        shop_id = db_ctx.shop_id or 0
+        self._last_shop_id = shop_id
 
         # 唯一活动名（去重）
         names = sorted({str(c.get("campaign_name") or "") for c in surviving})
@@ -150,72 +130,53 @@ class CampaignFetcher:
         mcp_ok = 0
         mcp_fail = 0
 
-        if prefer_db:
-            for camp in surviving:
-                name = str(camp.get("campaign_name") or "")
-                basic_results[name] = {
-                    "campaign_budget": float(camp.get("campaign_budget") or 0),
-                    "campaign_status": str(camp.get("campaign_status") or ""),
-                    "days_online": -1,  # Doris 无活动上线天数，标未知（勿用 0 触发新活动保护）
-                    "tos_bid_pct": 0.0,
-                    "pp_bid_pct": 0.0,
-                    "ros_bid_pct": 0.0,
-                    "source": "doris",
-                }
-                perf = await db._fetch_campaign_perf_from_db(name, shop_id, days)
-                perf_results[name] = {**(perf or {}), "source": "doris"}
-            fetch_source = "doris"
-        else:
-            # 旁路并行拉自然排名（周排名，仅 EXACT 需要；与 basic/perf 两波 gather 重叠，零额外串行）
-            has_exact = any(str(c.get("match_type") or "") == "EXACT" for c in surviving)
-            rank_task = (
-                asyncio.create_task(self._fetch_keyword_ranks(
-                    parent_asin, parent_seller_sku, shop_account, site_code, days))
-                if has_exact else None
+        # 旁路并行拉自然排名
+        has_exact = any(str(c.get("match_type") or "") == "EXACT" for c in surviving)
+        rank_task = (
+            asyncio.create_task(self._fetch_keyword_ranks(
+                parent_asin, parent_seller_sku, shop_account, site_code, days))
+            if has_exact else None
+        )
+        # basic_info + product_report 每活动配对并行
+        pair_list = await asyncio.gather(*[
+            asyncio.gather(
+                self._fetch_basic_one(name, shop_account),
+                self._fetch_perf_one(name, shop_account, start_date, end_date),
+                return_exceptions=True,
             )
-            # basic_info + product_report 每活动【配对并行】：两者互不依赖，2N 调用共用
-            # MCP 内部 Semaphore(80) 限流不会超限；省掉"basic 全完成才启 perf"的串行屏障。
-            # 内层 gather return_exceptions=True → 每元素恒为 [basic_raw, perf_raw]，外层不抛。
-            pair_list = await asyncio.gather(*[
-                asyncio.gather(
-                    self._fetch_basic_one(name, shop_account),
-                    self._fetch_perf_one(name, shop_account, start_date, end_date),
-                    return_exceptions=True,
-                )
-                for name in names
-            ])
-            basic_list = [p[0] for p in pair_list]
-            perf_list = [p[1] for p in pair_list]
+            for name in names
+        ])
+        basic_list = [p[0] for p in pair_list]
+        perf_list = [p[1] for p in pair_list]
 
-            for name, res in self._zip_results(names, basic_list):
-                if res.ok and isinstance(res.value, dict):
-                    basic_results[name] = {**res.value, "source": "mcp"}
-                    mcp_ok += 1
-                else:
-                    basic_results[name] = self._doris_fallback_basic_info(name)
-                    mcp_fail += 1
+        for name, res in self._zip_results(names, basic_list):
+            if res.ok and isinstance(res.value, dict):
+                basic_results[name] = {**res.value, "source": "mcp"}
+                mcp_ok += 1
+            else:
+                basic_results[name] = {"campaign_budget": 0.0, "campaign_status": "", "days_online": -1, "tos_bid_pct": 0.0, "pp_bid_pct": 0.0, "ros_bid_pct": 0.0, "source": "mcp_fail"}
+                mcp_fail += 1
 
-            for name, res in self._zip_results(names, perf_list):
-                if res.ok and isinstance(res.value, dict):
-                    perf_results[name] = {**res.value, "source": "mcp"}
-                    mcp_ok += 1
-                else:
-                    fb = await db._fetch_campaign_perf_from_db(name, shop_id, days)
-                    perf_results[name] = {**(fb or {}), "source": "doris"}
-                    mcp_fail += 1
+        for name, res in self._zip_results(names, perf_list):
+            if res.ok and isinstance(res.value, dict):
+                perf_results[name] = {**res.value, "source": "mcp"}
+                mcp_ok += 1
+            else:
+                perf_results[name] = {"cost": 0.0, "sale": 0.0, "clicks": 0, "impressions": 0, "orders": 0, "source": "mcp_fail"}
+                mcp_fail += 1
 
-            if rank_task is not None:
-                try:
-                    rank_map = await rank_task  # 超时已在 _fetch_keyword_ranks 内（从 task 启动算）
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("自然排名等待失败 [%s]: %s (非阻塞)", parent_asin, e)
-                    rank_map = {}
+        if rank_task is not None:
+            try:
+                rank_map = await rank_task
+            except Exception as e:
+                logger.warning("自然排名等待失败 [%s]: %s (非阻塞)", parent_asin, e)
+                rank_map = {}
 
-            fetch_source = "mcp" if mcp_fail == 0 else ("mixed" if mcp_ok > 0 else "doris")
-            logger.info(
-                "Campaign MCP [%s]: %d ok, %d failed, source=%s",
-                parent_asin, mcp_ok, mcp_fail, fetch_source,
-            )
+        fetch_source = "mcp" if mcp_fail == 0 else "partial"
+        logger.info(
+            "Campaign MCP [%s]: %d ok, %d failed, source=%s",
+            parent_asin, mcp_ok, mcp_fail, fetch_source,
+        )
 
         # ⑤ 组装 CampaignUnit
         campaigns: list[CampaignUnit] = []
@@ -242,15 +203,6 @@ class CampaignFetcher:
         )
 
     # ── 内部方法 ──
-
-    async def _discover_context_from_doris(self, parent_asin: str) -> list[dict]:
-        """① Doris 轻量上下文查询 — 仅维度字段。"""
-        db = self._get_db()
-        listing = await db._resolve_and_fetch_listing(parent_asin)
-        if not listing:
-            return []
-        lctx = ListingContext.from_listing_row(listing)
-        return await db._fetch_campaign_context(lctx)
 
     async def _discover_context_from_mcp(self, parent_asin: str, shop_account: str, parent_seller_sku: str = "") -> list[dict]:
         """① MCP 工具 ad_campaign_product_keyword_list → 替代 Doris 两条 SQL
@@ -357,21 +309,6 @@ class CampaignFetcher:
             logger.warning("product_report 解析失败 [%s]: %s", campaign_name, e)
             return campaign_name, _CallResult(ok=False, error=str(e))
 
-    def _doris_fallback_basic_info(self, campaign_name: str) -> dict:
-        """basic_info 回落。Doris 无活动上线天数 → days_online=-1（未知）。
-
-        budget/status 在组装时由上下文行兜底（见 _assemble），此处仅给占位。
-        """
-        return {
-            "campaign_budget": 0.0,
-            "campaign_status": "",
-            "days_online": -1,
-            "tos_bid_pct": 0.0,
-            "pp_bid_pct": 0.0,
-            "ros_bid_pct": 0.0,
-            "source": "doris",
-        }
-
     @staticmethod
     def _zip_results(
         names: list[str], results: list,
@@ -433,13 +370,7 @@ class CampaignFetcher:
                     return name, placements
             except Exception as e:  # noqa: BLE001
                 logger.warning("placement 解析失败 [%s]: %s", name, e)
-            # 回落 Doris（按 campaign_id + shop_id）
-            cid = campaign_ids.get(name, "")
-            if cid and shop_id:
-                placements = await self._get_db()._fetch_campaign_placement_from_db(
-                    cid, shop_id, days,
-                )
-                return name, placements
+            # 回落 Doris 已禁用，返回空
             return name, {}
 
         tasks = [_one(name) for name in campaign_ids]
@@ -802,9 +733,7 @@ class CampaignFetcher:
 
         basic_source = basic.get("source", "mcp")
         perf_source = perf.get("source", "mcp")
-        source = "mcp" if basic_source == "mcp" and perf_source == "mcp" else (
-            "doris" if basic_source == "doris" and perf_source == "doris" else "mixed"
-        )
+        source = "mcp" if basic_source == "mcp" and perf_source == "mcp" else "mixed"
 
         # days_online: -1=未知（保持，勿当 0）；basic 缺键时也按 -1
         days_raw = basic.get("days_online", -1)
@@ -840,11 +769,6 @@ class CampaignFetcher:
         )
 
     # ── 内部辅助 ──
-
-    def _get_db(self) -> DbAdapter:
-        if self._db_adapter is None:
-            self._db_adapter = DbAdapter()
-        return self._db_adapter
 
     def _mcp(self) -> McpAdapter:
         if self._mcp_adapter is None:

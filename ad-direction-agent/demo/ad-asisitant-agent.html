@@ -835,12 +835,12 @@ body {
 const API = window.location.origin + '/api/v1/agent/ad-direction';
 /** 前端 HTTP 超时（秒）。仅改此处即可全局调节 */
 const API_TIMEOUT = {
-  default: 90,    // 战略 options/confirm
-  fetch: 180,     // MCP 多工具 + 策略层 purpose-agent LLM，并行拉数时取最慢一条
-  tactics: 240,   // /tactics/options、/tactics/recommend（最重）
-  refresh: 240,   // 诊断 refresh=true（可能 Doris 全量回落）
-  report: 180,    // 向导评估报告（LLM）
-  quick: 30,      // override、反馈
+  default: 300,   // 战略 options/confirm (原 90; 上游慢/cache miss 时需更久)
+  fetch: 600,     // MCP 多工具 + 策略层 purpose-agent LLM (原 180)
+  tactics: 900,   // /tactics/options、/tactics/recommend (原 240; 含 fetch_campaigns >300s 可能)
+  refresh: 900,   // 诊断 refresh=true (原 240; 数仓全量回落场景)
+  report: 600,    // 向导评估报告 LLM (原 180)
+  quick: 30,      // override、反馈 (不变，写库类应秒级)
 };
 let asin = '';
 let days = 7;

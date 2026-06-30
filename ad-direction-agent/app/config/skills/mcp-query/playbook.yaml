@@ -4,8 +4,6 @@ version: 1
 
 phases:
   - id: context
-    source: doris
-    resolver: mcp_db_context.resolve_mcp_context_from_db
     timeout_seconds: ${MCP_CONTEXT_TIMEOUT}
 
   - id: mcp_bootstrap
@@ -19,13 +17,3 @@ phases:
     tools_from_meta: true
     timeout_seconds: ${MCP_TOOL_TIMEOUT}
     concurrency: ${MCP_MAX_CONCURRENCY}
-
-fallback:
-  on_mcp_failure: doris
-  enabled: ${MCP_FALLBACK_TO_DB}
-  full_scene_meta: ${MCP_FAILOVER_FULL_DB}
-  timeout_seconds: ${DB_FAILOVER_TIMEOUT}
-
-prefer_db_when:
-  - data_source_eq_db
-  - prefer_db_arg

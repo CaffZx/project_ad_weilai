@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
-from app.data.mcp_db_context import McpDbContext, resolve_mcp_context_from_db
+from app.config.settings import settings
+from app.data.mcp_db_context import McpDbContext, resolve_mcp_context_from_mcp
 from .text_utils import normalize_site_code
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -24,12 +28,10 @@ def _normalize_site(site: str | None) -> str:
 
 
 def _lookup_from_erp_summary(parent_asin: str) -> ListingContext | None:
-    """Fallback when Doris is unreachable — reuse latest ERP summary row."""
+    """Fallback when MCP is unreachable — reuse latest ERP summary row."""
     try:
         import pymysql
         from pymysql.cursors import DictCursor
-
-        from app.config.settings import settings
 
         conn = pymysql.connect(
             host=settings.erp_host,
@@ -69,7 +71,22 @@ def _lookup_from_erp_summary(parent_asin: str) -> ListingContext | None:
 
 
 async def resolve_listing_context_async(parent_asin: str) -> ListingContext:
-    ctx: McpDbContext | None = await resolve_mcp_context_from_db(parent_asin)
+    # MCP 优先（parent_listing_detail） → ERP summary 兜底。
+    ctx: McpDbContext | None = None
+    if getattr(settings, "mcp_resolve_context", False):
+        for attempt in range(2):
+            try:
+                from app.data.mcp_adapter import McpAdapter
+                adapter = McpAdapter()
+                ctx = await resolve_mcp_context_from_mcp(parent_asin, adapter)
+                if ctx and ctx.parent_seller_sku:
+                    break
+            except Exception as e:
+                logger.warning(
+                    "resolve_listing_context MCP failed [%s] attempt=%d: %s, fallback to ERP",
+                    parent_asin, attempt + 1, e,
+                )
+                ctx = None
     if ctx and ctx.parent_seller_sku:
         return ListingContext(
             parent_asin=ctx.parent_asin or parent_asin,
@@ -83,7 +100,7 @@ async def resolve_listing_context_async(parent_asin: str) -> ListingContext:
     if erp_ctx:
         return erp_ctx
     if not ctx or not ctx.parent_seller_sku:
-        raise RuntimeError(f"无法从 Doris 解析 listing 上下文: asin={parent_asin}")
+        raise RuntimeError(f"无法解析 listing 上下文: asin={parent_asin}")
     return ListingContext(
         parent_asin=ctx.parent_asin or parent_asin,
         parent_seller_sku=ctx.parent_seller_sku,

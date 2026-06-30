@@ -86,7 +86,7 @@ def _running_key(asin: str) -> str:
 
 
 def _campaign_cache_key(asin: str, days: int) -> str:
-    # 注意：本部署内 parent_asin → 单店铺（resolve_mcp_context_from_db 解析）。
+    # 注意：本部署内 parent_asin → 单店铺。
     # 若未来同一 parent_asin 跨店铺复用，需在 key 中加入 shop_account 前缀防串店。
     return f"campaign:data:{asin}:{days}"
 
@@ -482,15 +482,20 @@ async def _analyze_campaigns_impl(
     pre_eliminated_count = len(skipped_eliminated)
     shop_account = getattr(fetcher, "_last_shop_account", "") or ""
     if not shop_account:
-        # 与 placement/search_term 懒加载（本文件 ~1428/~1477 行）一致的回落：
-        # _last_shop_account 为空时从 DB 解析。candidate 发现的 flow_keywords/
-        # own_keyword_flow 把 shop_account 列为必填，缺则 build_tool_args 丢弃该参数
-        # → MCP 查不到 → new_campaigns 恒空。此处补齐，杜绝"店铺未缓存即无新增活动"。
-        from app.data.mcp_db_context import resolve_mcp_context_from_db
-        try:
-            _shop_ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
-            shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
-        except Exception:
+        # _last_shop_account 为空时走 MCP 解析（与分析主链一致）
+        from app.config.settings import settings as _ss
+        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+        if getattr(_ss, "mcp_resolve_context", False):
+            try:
+                from app.data.mcp_adapter import McpAdapter
+                _shop_ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_mcp(parent_asin, McpAdapter()),
+                    timeout=getattr(_ss, "mcp_context_timeout", 30.0),
+                )
+                shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
+            except Exception:
+                shop_account = ""
+        else:
             shop_account = ""
     # 新增活动投放目标子 ASIN：历史活动数最多/花费最高的子 ASIN（非父 ASIN 占位）
     target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
@@ -1677,14 +1682,20 @@ async def _prefetch_placement(
     shop_id = getattr(fetcher, "_last_shop_id", 0) or 0
     site_code = getattr(fetcher, "_last_site_code", "") or ""  # 主 fetch 已缓存该 ASIN 站点
     if not shop_account:
-        from app.data.mcp_db_context import resolve_mcp_context_from_db
-        try:
-            ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
-            shop_account = ctx.shop_account if ctx else ""
-            shop_id = ctx.shop_id if ctx else 0
-            site_code = (ctx.site_code if ctx else "") or site_code
-        except Exception:
-            shop_account = ""; shop_id = 0
+        from app.config.settings import settings as _ss
+        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+        if getattr(_ss, "mcp_resolve_context", False):
+            try:
+                from app.data.mcp_adapter import McpAdapter
+                ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_mcp(parent_asin, McpAdapter()),
+                    timeout=getattr(_ss, "mcp_context_timeout", 30.0),
+                )
+                shop_account = (ctx.shop_account if ctx else "") or ""
+                shop_id = (ctx.shop_id if ctx else 0) or 0
+                site_code = (ctx.site_code if ctx else "") or site_code
+            except Exception:
+                pass
 
     sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
@@ -1728,13 +1739,19 @@ async def _prefetch_search_terms(
     shop_account = getattr(fetcher, "_last_shop_account", "") or ""
     site_code = getattr(fetcher, "_last_site_code", "") or ""  # 主 fetch 已缓存该 ASIN 站点
     if not shop_account:
-        from app.data.mcp_db_context import resolve_mcp_context_from_db
-        try:
-            ctx = await asyncio.wait_for(resolve_mcp_context_from_db(parent_asin), timeout=15)
-            shop_account = ctx.shop_account if ctx else ""
-            site_code = (ctx.site_code if ctx else "") or site_code
-        except Exception:
-            shop_account = ""
+        from app.config.settings import settings as _ss
+        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+        if getattr(_ss, "mcp_resolve_context", False):
+            try:
+                from app.data.mcp_adapter import McpAdapter
+                ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_mcp(parent_asin, McpAdapter()),
+                    timeout=getattr(_ss, "mcp_context_timeout", 30.0),
+                )
+                shop_account = (ctx.shop_account if ctx else "") or ""
+                site_code = (ctx.site_code if ctx else "") or site_code
+            except Exception:
+                pass
 
     sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度

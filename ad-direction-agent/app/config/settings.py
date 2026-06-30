@@ -40,16 +40,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    data_source: str = "db"
+    data_source: str = "mcp"
     use_langgraph: bool = False  # USE_LANGGRAPH=true 时走 LangGraph bridge（默认关闭）
     # mcp 数据源：none / http(sse, Streamable HTTP JSON-RPC) / rest(旧 REST /tools/{name})
     mcp_transport: str = "none"
-    # DATA_SOURCE=mcp 时，从 Doris 解析 parent_seller_sku / shop_account / 父 ASIN 供 MCP 工具入参
-    mcp_resolve_sku_via_db: bool = True
-    # MCP 工具失败或空表时回落 Doris
-    mcp_fallback_to_db: bool = True
-    # 可选：MCP 上下文专用 DB 地址（如本机隧道 127.0.0.1）；留空则用 db_host
-    mcp_db_host: str = ""
+    # MCP 上下文解析：优先 MCP parent_listing_detail，不回落 DB
     mcp_server_name: str = "user-starrocks-data-server"
     mcp_gateway_url: str = ""
     mcp_gateway_token: str = ""
@@ -64,20 +59,7 @@ class Settings(BaseSettings):
     mcp_default_site_code: str = "Amazon_US"
     mcp_default_parent_seller_sku: str = ""
     mcp_shadow_enabled: bool = False
-    # 用户主动刷新时跳过 MCP，直接 Doris（避免 MCP+DB 双跑导致超时）
-    mcp_refresh_via_db: bool = True
-    # MCP 任一工具失败时，按场景 meta_filter 全量回落 Doris
-    mcp_failover_full_db: bool = True
-    # Doris 回落整包超时（秒）
-    db_failover_timeout: float = 300.0
-    # Doris 并行查询单任务超时（秒）
-    db_fetch_timeout: float = 180.0
-    db_flow_keyword_timeout: float = 90.0
-    db_flow_keyword_prefetch_limit: int = 150
-    db_flow_keyword_expand_limit: int = 100
-    db_use_legacy_flow_sql: bool = False
-    db_child_asin_cap: int = 200               # 子 ASIN 截断上限（0 == 不限）
-    # 单 MCP 工具超时（秒），超时后按维度回落 Doris
+    # 单 MCP 工具超时（秒）
     mcp_tool_timeout: float = 1200.0
     mcp_bootstrap_timeout: float = 180.0
     mcp_context_timeout: float = 30.0
@@ -118,12 +100,9 @@ class Settings(BaseSettings):
     # Campaign 分析
     campaign_discovery_timeout: float = 90.0
     campaign_mcp_tool_timeout: float = 300.0
-    campaign_db_fallback_timeout: float = 60.0
-    # 用 MCP 工具 ad_campaign_product_keyword_list 替代 _resolve_and_fetch_listing
-    # + _fetch_campaign_context 两条数仓 SQL。默认开，失败自动回落 Doris。
+    # 用 MCP 工具 ad_campaign_product_keyword_list 发现活动 + 关键词
     mcp_discover_campaigns: bool = True
     # 用 MCP 工具 parent_listing_detail 替代 mcp_db_context._LOOKUP_SQL（父ASIN→站点/sku/店铺）。
-    # 默认开，失败自动回落 DB。
     mcp_resolve_context: bool = True
     campaign_rank_timeout: float = 45.0          # 自然排名旁路拉取墙钟上限（从 task 启动算）
     campaign_prefilter_enabled: bool = True
@@ -197,12 +176,6 @@ class Settings(BaseSettings):
     csv_key_column: str = "asin"
     request_timeout: float = 5.0
 
-    # 数据库配置（Doris/StarRocks）— 从环境变量读取，此处仅占位，无 .env 不工作
-    db_host: str = ""
-    db_port: int = 0
-    db_user: str = ""
-    db_pass: str = ""
-    db_database: str = ""
 
     # 数据源目录
     data_source_dir: str = "data/source"

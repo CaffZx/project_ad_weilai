@@ -19,7 +19,7 @@ class PlaybookPhase:
 
 @dataclass(frozen=True)
 class PlaybookFallback:
-    on_mcp_failure: str = "doris"
+    on_mcp_failure: str = "none"
     enabled: bool = True
     full_scene_meta: bool = True
     timeout_seconds: float = 300.0
@@ -32,7 +32,6 @@ class SkillPlaybook:
     path: Path
     phases: tuple[PlaybookPhase, ...]
     fallback: PlaybookFallback
-    prefer_db_when: tuple[str, ...] = ()
 
     def phase(self, phase_id: str) -> PlaybookPhase | None:
         for p in self.phases:

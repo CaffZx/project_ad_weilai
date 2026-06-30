@@ -19,7 +19,6 @@ from app.persistence.erp_writer.advert_exec_mapper import (
     parse_result_envelope,
 )
 from app.persistence.erp_writer.repository import _get_repository
-from app.data.mcp_db_context import lookup_top_child_attrs
 from app.persistence.erp_writer.text_utils import json_dumps, unmap_campaign_group_type
 from app.workflow.steps.portfolio_execution import (
     _match_portfolio,
@@ -28,30 +27,6 @@ from app.workflow.steps.portfolio_execution import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-async def _fill_create_asin_fallback(plan, pending) -> None:
-    """create 卡的子 ASIN 已由 build_exec_plan 从库里(card.asin)填好；
-    仅当某卡库里没存时，才回退查数仓 top-child 兜底。
-
-    正常情况（前端能渲染出卡=库里已有子 ASIN）下完全不查数仓——避免数仓慢时
-    重查超时导致 child_asin=None →「子ASIN不能为空」新建活动全败。
-    """
-    missing = [c for c in plan.create_calls if not str(c.get("asin") or "").strip()]
-    if not missing:
-        return
-    parent = str((pending.get("decision") or {}).get("parent_asin") or "")
-    if not parent:
-        return
-    import asyncio as _aio
-    attrs = await _aio.to_thread(lookup_top_child_attrs, parent)
-    fb = str((attrs or {}).get("asin") or "").strip()
-    if fb:
-        for c in missing:
-            c["asin"] = fb
-        logger.info("Advert exec: %d 个 create 卡库里无子ASIN → 回退 top-child=%s", len(missing), fb)
-    else:
-        logger.warning("Advert exec: %d 个 create 卡无子ASIN 且 top-child 查不到", len(missing))
 
 
 async def _resolve_create_portfolios(
@@ -102,9 +77,7 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     if not pending:
         return {"ok": False, "error": f"批次 {decision_id} 不存在"}
 
-    # 子ASIN 优先复用库里(card.asin，分析阶段已选定)；仅卡里缺失才回退查数仓
     plan = build_exec_plan(pending, operator=operator)
-    await _fill_create_asin_fallback(plan, pending)
     if plan.is_empty():
         return {"ok": True, "applied": 0, "skipped": 0, "msg": "无待执行项（可能已执行或无确认）"}
 
@@ -245,9 +218,7 @@ async def submit_execution_direct(
     if not pending:
         return {"ok": False, "error": f"批次 {decision_id} 不存在或 card_ids 无匹配"}
 
-    # 子ASIN 优先复用库里(card.asin，分析阶段已选定)；仅卡里缺失才回退查数仓
     plan = build_exec_plan(pending, operator=operator)
-    await _fill_create_asin_fallback(plan, pending)
     if plan.is_empty():
         return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}
 

@@ -70,7 +70,7 @@ class CampaignUnit(BaseModel):
     #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类
     portfolio: str = ""
     # 元数据
-    source: str = "mcp"                      # "mcp" | "doris" | "mixed"
+    source: str = "mcp"
     flags: list[str] = Field(default_factory=list)
 
 

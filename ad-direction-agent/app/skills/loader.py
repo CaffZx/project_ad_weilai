@@ -22,9 +22,6 @@ _SETTING_ATTR: dict[str, str] = {
     "MCP_BOOTSTRAP_TIMEOUT": "mcp_bootstrap_timeout",
     "MCP_TOOL_TIMEOUT": "mcp_tool_timeout",
     "MCP_MAX_CONCURRENCY": "mcp_max_concurrency",
-    "MCP_FALLBACK_TO_DB": "mcp_fallback_to_db",
-    "MCP_FAILOVER_FULL_DB": "mcp_failover_full_db",
-    "DB_FAILOVER_TIMEOUT": "db_failover_timeout",
 }
 
 
@@ -76,18 +73,15 @@ def load_playbook(skill_name: str, skills_dir: Path | None = None) -> SkillPlayb
     phases = tuple(_parse_phase(p) for p in raw.get("phases", []))
     fb_raw = raw.get("fallback") or {}
     fallback = PlaybookFallback(
-        on_mcp_failure=str(fb_raw.get("on_mcp_failure", "doris")),
+        on_mcp_failure=str(fb_raw.get("on_mcp_failure", "none")),
         enabled=bool(fb_raw.get("enabled", True)),
         full_scene_meta=bool(fb_raw.get("full_scene_meta", True)),
         timeout_seconds=float(fb_raw.get("timeout_seconds", 300)),
     )
-    prefer = tuple(str(x) for x in raw.get("prefer_db_when", []))
-
     return SkillPlaybook(
         name=str(raw.get("name", skill_name)),
         version=int(raw.get("version", 1)),
         path=path,
         phases=phases,
         fallback=fallback,
-        prefer_db_when=prefer,
     )
