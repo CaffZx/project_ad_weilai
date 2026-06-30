@@ -12,7 +12,7 @@
 
 **项目**：广告方向决策子智能体（Ad Direction Agent），面向亚马逊广告运营的 AI 辅助决策系统。
 
-**数据源**：Doris 数仓 + MCP StarRocks 网关（`DATA_SOURCE=mcp` 优先，失败降级 Doris）。
+**数据源**：纯 MCP StarRocks 网关（v3.2 已切除 Doris，`DATA_SOURCE=mcp`，失败返零值不回落）。
 
 **技术栈**：Python 3.13 / FastAPI / PyMySQL / DeepSeek API / Pydantic
 
@@ -20,7 +20,7 @@
 
 自动化分析和调整所有广告活动（Campaign），核心能力：
 
-- **自动发现**：从 Doris 获取 ASIN 下所有广告活动的维度信息
+- **自动发现**：从 MCP 获取 ASIN 下所有广告活动的维度信息
 - **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
 - **分流策略**：精准广告（EXACT）和广泛广告（BROAD/PHRASE/AUTO）使用不同的调整维度
 - **多轮投票**：R1+R2 并行 → 投票比对 → R3 tiebreaker（分歧时触发），保证决策可靠性
@@ -214,7 +214,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 06-02 | 每流并发配置化 | `campaign_llm_concurrency: 10` 接到 exact/broad Semaphore |
 | 06-02 | `db_child_asin_cap`: 80→200 | 子 ASIN 截断放宽 |
 | 06-01 | playbook.yaml 迁移 | `.claude/skills` → `app/config/skills` |
-| 06-01 | `fetch_campaigns` 加 wait_for(300s) | MCP/Doris 子调用挂死防护，超时返回降级 result |
+| 06-01 | `fetch_campaigns` 加 wait_for(300s) | MCP 子调用挂死防护，超时返回降级 result |
 | 06-01 | `api/campaign.py` 顶层 try/except | TimeoutError + Exception 全捕获，500 → 降级 CampaignAnalysisResult |
 | 06-01 | `_run_round` 解析挪进 try | result 非 dict / parsed 非 dict 等异常落到 except，不外抛 |
 | 06-01 | `_run_round` gather `return_exceptions=True` | 二次防御 `_call_one` 未来回归 |
@@ -530,7 +530,7 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 | preset | `new_campaign = ["16:1,6","06","02:1-6","08","28:0,2,3"]` (LLM 不算数值故无 15/19/23；28=相关性R1-R4/场景/配额) | `kb_loader.py` |
 | 默认预算 | $3.00 (KB 16 §2) | `DEFAULT_NEW_BUDGET` |
 | 初始 bid | `min(0.5, 建议竞价×0.5)`，下限 $0.20 (KB 16 §3) | `_calc_initial_bid` |
-| **建议竞价字段** | MCP/Doris **当前无源** | **占位 $0.30**；TODO(suggested-bid) 数据源到位改一处 |
+| **建议竞价字段** | MCP **当前无源** | **占位 $0.30**；TODO(suggested-bid) 数据源到位改一处 |
 | match_type | keyword_class→映射 (KB 06+16§4): brand/custom→EXACT, generic→BROAD 等 | `_derive_match_type` |
 | primary_placement | 仅 EXACT，代码默认"头部" (KB 16 §4 首轮只声明主投位，不加价) | 不交 LLM |
 | 命名 | `匹配类型-关键词-YYYY-MM-DD`（运营拍板，无 ASIN），如 `精准-fishnet stockings-2026-06-11` | `_generate_campaign_name` |
@@ -592,7 +592,7 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 | # | 文件 | 改动 |
 |---|---|---|
 | ① | `models/campaign.py` | `CampaignUnit` 加 `tos_bid_pct` / `pp_bid_pct` / `ros_bid_pct`（默认 0.0） |
-| ② | `campaign_fetcher.py` | 三条 basic_info 生产路径各补 3 个字段：MCP 路径 `_to_float(row.get("头部位置加价比例"))`，Doris-only 和 fallback 路径填 0.0；`_assemble` 透传 |
+| ② | `campaign_fetcher.py` | 三条 basic_info 生产路径各补 3 个字段：MCP 路径 `_to_float(row.get("头部位置加价比例"))`，fallback 路径填 0.0；`_assemble` 透传 |
 | ③ | `reasoner.py` | `_campaign_to_prompt_dict` 注入 `_placement_pcts: {头部:N, 商品:N, 其他:N}`；prompt 加 `当前加价比例` 行；placement schema 改：LLM **只输出 `action`（维持/小涨/大涨/小降/大降）+ `evidence`**，禁止输出 `current_pct/proposed_pct` |
 | ④ | `campaign.py` | 新增 `_backfill_placement_pcts()` 回填函数——`current_pct` 从 `CampaignUnit` 取真实值，`proposed_pct` = `current + action步长` 受 KB 07 边界裁断（头部≤30/商品≤10/其他≤15，≥0）；`_ACTION_STEP` 步长: 小涨+5pp/大涨+10pp/小降-5pp/大降-10pp；`_PLACEMENT_NAME_MAP` 中英文 placement 名归一；两个 return 路径各调一次 |
 
@@ -720,7 +720,7 @@ tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来�
 ### 13.1 缺口
 两条互不相通的排名路径：ASIN 级（wizard tab2，有 natural_rank/near/change）vs campaign 级（tab5，**无**）。且 `campaign.py:_do_analyze` 的 `aggregator.fetch(..., meta_filter=["META_AD_PRODUCT"])` 把排名 META 砍了 → campaign 路径**连排名数据都没拉**。KB 07/19§5/22§2.2 的 Ranking 规则依赖排名，LLM 只能靠 perf 反推——真实信息缺口。
 
-### 13.2 修复（全 MCP 不碰 Doris，纯精准）
+### 13.2 修复（纯 MCP，纯精准）
 旁路拉取 → 挂活动 → 进 prompt：
 | 文件 | 改动 |
 |---|---|
@@ -1181,3 +1181,4 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 *v1.7: 新增广告活动分析线 §9*
 *v1.6: 执行层落地 ERP 架构共识 §8*
 *v1.5: 总览/汇总恢复改造 + 前端双 tab §7*
+> **2026-06-30 (v3.2)**：**切除全部 Doris 数仓依赖，纯 MCP 数据源**。删除 7 个 Doris 模块、手术 mcp_db_context.py（只留 MCP parent_listing_detail）、campaign_fetcher 移除 prefer_db/回落、全链清理透传参数、BOOTSTRAP_TOOLS/MCP_TOOL_TO_META 内联、服务器热修复合并（MCP 优先解析/API 超时上调/perf_json+trigger_rule 补列）。125 个 .py 全编译通过。详见主交接文档 2026-06-30 条目。
