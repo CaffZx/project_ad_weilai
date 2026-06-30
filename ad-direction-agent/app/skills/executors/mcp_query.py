@@ -9,6 +9,7 @@ from app.config.settings import settings
 from app.data.mcp_adapter import McpAdapter, finalize_mcp_asin_data
 from app.data.mcp_fetch_run import run_planned_mcp_tools
 from app.data.mcp_mapping import BOOTSTRAP_TOOLS, META_TO_MCP_TOOLS, McpContext, make_date_window
+from app.data.mcp_normalizers import _as_rows
 from app.data.mcp_db_context import resolve_mcp_context_from_mcp
 from app.models.asin_data import ASINData
 from app.skills.models import SkillPlaybook
@@ -94,6 +95,44 @@ class McpQuerySkillExecutor:
             reports_timeout=reports_timeout,
             max_concurrency=max_concurrency,
         )
+
+        # ── Phase 2: 逐词查自然排名 ──
+        _campaign_rows = _as_rows(payload_map.get("ad_campaign_product_keyword_list"))
+        _seen: set[str] = set()
+        _exact_kws: list[str] = []
+        for r in _campaign_rows:
+            kw = str(r.get("关键词") or r.get("keyword_text") or r.get("keyword") or "").strip().lower()
+            if not kw or kw in _seen:
+                continue
+            mt = str(r.get("关键词匹配类型") or r.get("match_type") or "").strip().upper()
+            if mt != "EXACT":
+                continue
+            _seen.add(kw)
+            _exact_kws.append(kw)
+        _RANK_CAP = 50
+        if len(_exact_kws) > _RANK_CAP:
+            _exact_kws = _exact_kws[:_RANK_CAP]
+        if _exact_kws:
+            _child_tasks = [
+                adapter.call_tool_timed_with_args(
+                    "keyword_child_asins",
+                    {"keyword": kw, "site_code": ctx.site_code, "parent_asin": ctx.parent_asin,
+                     "parent_seller_sku": ctx.parent_seller_sku, "shop_account": ctx.shop_account},
+                    getattr(settings, "mcp_rank_timeout", 45.0),
+                )
+                for kw in _exact_kws
+            ]
+            _child_results = await asyncio.gather(*_child_tasks, return_exceptions=True)
+            _rank_rows: list[dict] = []
+            for kw, res in zip(_exact_kws, _child_results):
+                if isinstance(res, BaseException) or not getattr(res, "ok", False):
+                    continue
+                for row in _as_rows(res.value):
+                    row["keyword"] = kw
+                    _rank_rows.append(row)
+            if _rank_rows:
+                payload_map["keyword_child_asins"] = _rank_rows
+                logger.info("%s Phase2 ranking [%s]: %d rows from %d keywords", LOG_PREFIX, asin, len(_rank_rows), len(_exact_kws))
 
         data = adapter.assemble_from_payloads(
             asin=asin,

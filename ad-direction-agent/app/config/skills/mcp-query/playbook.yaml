@@ -10,6 +10,7 @@ phases:
     tools:
       - listing_basic_info
       - listing_inventory
+      - ad_campaign_product_keyword_list
     timeout_seconds: ${MCP_BOOTSTRAP_TIMEOUT}
     concurrency: ${MCP_MAX_CONCURRENCY}
 
