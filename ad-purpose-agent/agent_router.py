@@ -8,12 +8,12 @@ from pathlib import Path
 from config import DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, SIBLING_PROJECT
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-# Access unified data layer (ad-direction-agent's DbAdapter) — for determine_ad_targets only
+# Access unified data layer (ad-direction-agent's McpAdapter) — for determine_ad_targets only
 _sys_root = Path(__file__).resolve().parent.parent / SIBLING_PROJECT
 if str(_sys_root) not in sys.path:
     sys.path.insert(0, str(_sys_root))
 
-from app.data.db_adapter import DbAdapter           # noqa: E402
+from app.data.mcp_adapter import McpAdapter           # noqa: E402
 from app.data.field_mapping import asin_data_to_metrics  # noqa: E402
 from app.llm.client import get_key_pool             # noqa: E402
 from app.models.layers import product_level_with_code  # noqa: E402
@@ -287,7 +287,7 @@ async def determine_ad_targets(parent_asin: str, shop_account: str, days: int,
                                 position: str, stage: str, season: str) -> dict:
     """AI diagnosis function (DB query wrapper). Delegates to determine_ad_targets_from_metrics."""
     _t_db_start = time.time()
-    adapter = DbAdapter()
+    adapter = McpAdapter()
     data = await adapter.fetch_asin_data(parent_asin, days=days)
     _t_db_cost = time.time() - _t_db_start
 
