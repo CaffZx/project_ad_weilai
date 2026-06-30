@@ -838,7 +838,7 @@ const API_TIMEOUT = {
   default: 300,   // 战略 options/confirm (原 90; 上游慢/cache miss 时需更久)
   fetch: 600,     // MCP 多工具 + 策略层 purpose-agent LLM (原 180)
   tactics: 900,   // /tactics/options、/tactics/recommend (原 240; 含 fetch_campaigns >300s 可能)
-  refresh: 900,   // 诊断 refresh=true (原 240; 数仓全量回落场景)
+  refresh: 900,   // 诊断 refresh=true (原 240; 全量 MCP 拉数场景)
   report: 600,    // 向导评估报告 LLM (原 180)
   quick: 30,      // override、反馈 (不变，写库类应秒级)
 };
@@ -1505,17 +1505,17 @@ function renderDataStatusBanner(data, elId) {
   }
   let hint;
   if (!pf.length && isPartialDataFreshness(fresh)) {
-    hint = '本次部分数据可能未取全（使用了缓存或数仓补数）。';
+    hint = '本次部分数据可能未取全（使用了缓存数据）。';
   } else {
     const hasEmpty = pf.some(x => String(x).includes(':empty'));
     const hasTimeout = pf.some(x => /timeout|fail/i.test(String(x)) && !String(x).includes(':empty'));
     hint = '数据可能不完整。';
     if (hasEmpty && !hasTimeout) {
-      hint = '部分报表 MCP 无数据且数仓补数后仍为空；请核对店铺、日期窗口或 MCP_KEYWORD_MATCH_TYPES。';
+      hint = '部分报表 MCP 无数据；请核对店铺、日期窗口或 match_type 配置。';
     } else if (hasEmpty && hasTimeout) {
-      hint = '部分维度超时或 MCP/数仓均无数据；可调整日期或 match_type 后重试。';
+      hint = '部分维度超时或 MCP 无数据；可调整日期或 match_type 后重试。';
     } else if (isPartialDataFreshness(fresh) || hasTimeout) {
-      hint = '部分数据维度拉取超时或未完成，已尝试数仓补数。';
+      hint = '部分数据维度拉取超时或未完成。';
     }
   }
   let text = `⚠ ${hint}`;
@@ -1549,7 +1549,7 @@ async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST
     return await r.json();
   } catch (e) {
     if (e.name === 'AbortError') {
-      throw new Error(`请求超时（${timeout} 秒）：后端仍在拉 MCP/数仓或 AI 分析，请稍后重试；开发可在 Demo 顶部调大 API_TIMEOUT`);
+      throw new Error(`请求超时（${timeout} 秒）：后端仍在拉 MCP 数据或 AI 分析，请稍后重试；开发可在 Demo 顶部调大 API_TIMEOUT`);
     }
     const msg = (e && e.message) ? String(e.message) : '';
     if (msg === 'Failed to fetch' || e instanceof TypeError) {
@@ -1914,7 +1914,7 @@ async function confirmStrategy() {
       const msg = res.reject_reason === 'asin_not_found'
         ? 'ASIN 不存在于数据源，请检查后重试'
         : res.reject_reason === 'context_error'
-          ? '无法解析商品上下文：请确认本机能连上 Doris（.env 中 DB_HOST 或 MCP_DB_HOST），或配置 MCP_DEFAULT_PARENT_SELLER_SKU'
+          ? '无法解析商品上下文：请确认 MCP 网关可达，或配置 MCP_DEFAULT_PARENT_SELLER_SKU + MCP_DEFAULT_SHOP_ACCOUNT'
           : res.reject_reason === 'data_unavailable'
             ? '数据源暂不可用（MCP 拉数失败），请稍后重试或联系管理员'
             : '保存失败，请稍后重试';

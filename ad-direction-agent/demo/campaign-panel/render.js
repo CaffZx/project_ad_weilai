@@ -650,7 +650,7 @@ function _renderBudgetSummary(state) {
   const src = bs.target_budget_source || '';
   const srcHint =
       src === 'override'   ? '<span style="font-size:11px;color:var(--camp-muted-fg)">来源: 运营 override</span>'
-    : src === 'asin_data'  ? '<span style="font-size:11px;color:var(--camp-muted-fg)">来源: 数仓 asin_data</span>'
+    : src === 'asin_data'  ? '<span style="font-size:11px;color:var(--camp-muted-fg)">来源: ASIN 数据</span>'
     : src === 'fallback_spend_x1.15' ? '<span style="font-size:11px;color:#D97706">⚠ 按日均花费×1.15 兜底</span>'
     : '';
 

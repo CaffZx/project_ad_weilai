@@ -647,9 +647,9 @@ function renderContext(wf) {
   const tgtAcos = wf && wf.target_acos_override;
   const tgtAcosTxt = (tgtAcos != null) ? `${tgtAcos}%` : '未设 (将走 P3/算法兜底)';
 
-  // 每日预算: 只显示运营 override;未设时提示"未设(将走数仓/兜底)"
+  // 每日预算: 只显示运营 override;未设时提示"未设(将走系统默认)"
   const dailyBudget = wf && wf.daily_budget_override;
-  const dailyBudgetTxt = (dailyBudget != null) ? `$${Number(dailyBudget).toFixed(2)}/天` : '未设 (将走数仓/×1.15 花费兜底)';
+  const dailyBudgetTxt = (dailyBudget != null) ? `$${Number(dailyBudget).toFixed(2)}/天` : '未设 (将走系统默认)';
 
   // 广告方向: 运营在主应用 tab4 已选;execution.selected_directions
   const dirs = (e.selected_directions || []).join('、');
@@ -919,7 +919,7 @@ function renderBudgetSummary(bs) {
   const srcHint = (src === 'fallback_spend_x1.15')
     ? `<span class="portfolio-fallback-hint">⚠ 目标预算无法读取,按近 7 天日均花费 ×1.15 兜底</span>`
     : (src === 'override')   ? `<span class="text-xs muted">来源: 运营 override</span>`
-    : (src === 'asin_data')  ? `<span class="text-xs muted">来源: 数仓 asin_data</span>`
+    : (src === 'asin_data')  ? `<span class="text-xs muted">来源: ASIN 数据</span>`
     : (!src && target == null) ? `<span class="text-xs muted">⚠ 无法读取目标预算</span>` : '';
 
   // 超约束高亮 (target 可用时才判)
