@@ -227,6 +227,53 @@ class McpAdapter(DataSourceAdapter):
             max_concurrency=settings.mcp_max_concurrency,
         )
 
+        # ── Phase 2: 逐词查自然排名 ──
+        # keyword_child_asins 需传具体 keyword 参数，无法在 Phase 1 并行（此时才拿到词表）。
+        # 对 ad_campaign_product_keyword_list 发现的 EXACT 词逐条查询，并行发出。
+        _campaign_rows = _as_rows(payload_map.get("ad_campaign_product_keyword_list"))
+        _seen: set[str] = set()
+        _exact_kws: list[str] = []
+        for r in _campaign_rows:
+            kw = str(r.get("关键词") or r.get("keyword_text") or r.get("keyword") or "").strip().lower()
+            if not kw or kw in _seen:
+                continue
+            mt = str(r.get("关键词匹配类型") or r.get("match_type") or "").strip().upper()
+            if mt != "EXACT":
+                continue
+            _seen.add(kw)
+            _exact_kws.append(kw)
+        _RANK_CAP = 50
+        if len(_exact_kws) > _RANK_CAP:
+            logger.info("Phase2 ranking [%s]: %d EXACT keywords, capping at %d", asin, len(_exact_kws), _RANK_CAP)
+            _exact_kws = _exact_kws[:_RANK_CAP]
+
+        if _exact_kws:
+            _child_tasks = [
+                self.call_tool_timed_with_args(
+                    "keyword_child_asins",
+                    {
+                        "keyword": kw,
+                        "site_code": ctx.site_code,
+                        "parent_asin": ctx.parent_asin,
+                        "parent_seller_sku": ctx.parent_seller_sku,
+                        "shop_account": ctx.shop_account,
+                    },
+                    getattr(settings, "mcp_rank_timeout", 45.0),
+                )
+                for kw in _exact_kws
+            ]
+            _child_results = await asyncio.gather(*_child_tasks, return_exceptions=True)
+            _rank_rows: list[dict] = []
+            for kw, res in zip(_exact_kws, _child_results):
+                if isinstance(res, BaseException) or not getattr(res, "ok", False):
+                    continue
+                for row in _as_rows(res.value):
+                    row["keyword"] = kw
+                    _rank_rows.append(row)
+            if _rank_rows:
+                payload_map["keyword_child_asins"] = _rank_rows
+                logger.info("Phase2 ranking [%s]: %d rows from %d keywords", asin, len(_rank_rows), len(_exact_kws))
+
         data = self.assemble_from_payloads(
             asin=asin,
             ctx=ctx,
