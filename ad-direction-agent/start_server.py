@@ -23,6 +23,11 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+# 自动激活项目 venv（如存在），保证 uvicorn 等依赖可用
+_VENV_PYTHON = (PROJECT_ROOT / "venv" / "bin" / "python")
+if _VENV_PYTHON.exists() and not str(Path(sys.executable)).startswith(str(_VENV_PYTHON.parent)):
+    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON), __file__, *sys.argv[1:]])
+
 
 def find_pid_by_port(port: int) -> list[str]:
     """通过 netstat 查找占用指定端口的进程名和 PID（仅 Windows 开发机用）"""
