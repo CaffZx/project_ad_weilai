@@ -39,6 +39,31 @@ from app.models.asin_data import ASINData, AdData, CompetitorData, KeywordData, 
 logger = logging.getLogger(__name__)
 
 
+def _extract_campaign_exact_keywords(payload: Any) -> list[dict]:
+    """从 ad_campaign_product_keyword_list 回包提取精准关键词去重列表。
+    入参 shape: [{关键词:..., 关键词匹配类型:..., ...}, ...]
+    出参: [{keyword_text:..., match_type:"EXACT"}, ...]，去重仅保留 EXACT。
+    """
+    rows = _as_rows(payload)
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in rows:
+        kw_raw = str(r.get("关键词") or r.get("keyword_text") or r.get("keyword") or "").strip()
+        if not kw_raw:
+            continue
+        kw_lower = kw_raw.lower()
+        if kw_lower in seen:
+            continue
+        mt = str(r.get("关键词匹配类型") or r.get("match_type") or "").strip().upper()
+        if mt != "EXACT":
+            continue
+        seen.add(kw_lower)
+        out.append({"keyword_text": kw_raw, "match_type": "EXACT"})
+    if out:
+        logger.info("_extract_campaign_exact_keywords: %d unique EXACT keywords from ad_campaign_product_keyword_list", len(out))
+    return out
+
+
 class McpInvoker(Protocol):
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         ...
@@ -226,6 +251,11 @@ class McpAdapter(DataSourceAdapter):
         ad_summary = normalize_ad_summary(payload_map.get("ad_product_report"))
         placement = normalize_ad_placement(payload_map.get("ad_placement_report"))
         keywords = normalize_keywords(payload_map.get("ad_keyword_report"))
+        # 2026-06-30: ad_keyword_report MCP 工具已下线，Doris 回落已切除。
+        # 回退至 ad_campaign_product_keyword_list 发现精准关键词（campaign→词），
+        # 仅取 EXACT 匹配，去重后作为关键词列表（无广告效果指标，后续接 ad_optimization 补）。
+        if not keywords:
+            keywords = _extract_campaign_exact_keywords(payload_map.get("ad_campaign_product_keyword_list"))
         rankings = normalize_keyword_rankings(
             payload_map.get("keyword_competitors"),
             payload_map.get("keyword_child_asins"),
