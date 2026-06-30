@@ -1191,7 +1191,14 @@ async function onCancelEventClick() {
     return;
   }
   if (res && res.ok) {
-    await bootstrapFromContext();   // 重跑三态判定（含 refreshDecisionContext + 渲染）
+    // 放弃后切 B 态：只刷批次栏 + 加载最近一次已完成快照，不走 loadAll（避免全量 MCP 重拉）
+    await refreshDecisionContext();
+    const ctx = _decisionContext || {};
+    applyBatchBarFromCtx(ctx);
+    const latestId = ctx.latest_completed_id;
+    if (latestId && !ctx.in_progress) {
+      await renderReadonlyDecisionPreset(latestId, { switchDefault: false });
+    }
   } else {
     alert('放弃失败: ' + ((res && res.error) || '未知错误'));
   }
