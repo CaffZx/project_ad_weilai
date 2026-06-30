@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from app.config.settings import settings
 from app.models.campaign import CampaignAnalysisResult
 
-from .listing_context import resolve_listing_context
+from .listing_context import ListingContext, resolve_listing_context
 from .mappers import canonicalize_payload
 from .repository import ErpDualWriterRepository, WriteReport
 from .text_utils import map_direction_type
@@ -260,7 +260,19 @@ def push_full_to_erp(
 ) -> WriteReport:
     """resolve listing → canonicalize → write_full（同步，供 asyncio.to_thread 调用）。"""
     asin = (kb_payload.get("parent_asin") or "").strip()
-    listing = resolve_listing_context(asin)
+    # 优先复用 campaign 分析阶段已拉取的上下文（避免 ERP 写入时重拉 MCP）
+    _ctx_shop_id = kb_payload.get("shop_id")
+    _ctx_sku = kb_payload.get("parent_seller_sku")
+    _ctx_site = kb_payload.get("site_code")
+    _ctx_account = kb_payload.get("shop_account")
+    if _ctx_shop_id and _ctx_sku and _ctx_site and _ctx_account:
+        listing = ListingContext(
+            parent_asin=asin, parent_seller_sku=_ctx_sku,
+            shop_id=int(_ctx_shop_id), shop_account=_ctx_account,
+            site_code=_ctx_site,
+        )
+    else:
+        listing = resolve_listing_context(asin)
     kb_payload = dict(kb_payload)
     kb_payload["shop_id"] = listing.shop_id
 

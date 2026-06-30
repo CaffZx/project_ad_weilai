@@ -804,6 +804,7 @@ async def _analyze_campaigns_impl(
     return CampaignAnalysisResult(
         parent_asin=parent_asin, days=days, run_id=run_id,
         shop_id=campaign_data.shop_id,
+        shop_account=shop_account,
         parent_seller_sku=campaign_data.parent_seller_sku,
         site_code=campaign_data.site_code,
         total_campaigns=len(llm_campaigns),

@@ -228,6 +228,7 @@ class CampaignAnalysisResult(BaseModel):
     """顶层分析返回"""
     parent_asin: str = ""
     shop_id: int = 0
+    shop_account: str = ""
     parent_seller_sku: str = ""
     site_code: str = "Amazon_US"
     days: int = 7
