@@ -88,7 +88,7 @@ class CampaignFetcher:
         shop_account = db_ctx.shop_account or ""
         raw_campaigns: list[dict] = []
         if settings.mcp_discover_campaigns:
-            raw_campaigns = await self._discover_context_from_mcp(parent_asin, shop_account)
+            raw_campaigns = await self._discover_context_from_mcp(parent_asin, shop_account, parent_seller_sku)
             if raw_campaigns:
                 logger.info(
                     "_discover_context [%s]: %d rows (MCP)", parent_asin, len(raw_campaigns),
@@ -252,7 +252,7 @@ class CampaignFetcher:
         lctx = ListingContext.from_listing_row(listing)
         return await db._fetch_campaign_context(lctx)
 
-    async def _discover_context_from_mcp(self, parent_asin: str, shop_account: str) -> list[dict]:
+    async def _discover_context_from_mcp(self, parent_asin: str, shop_account: str, parent_seller_sku: str = "") -> list[dict]:
         """① MCP 工具 ad_campaign_product_keyword_list → 替代 Doris 两条 SQL
         (_resolve_and_fetch_listing + _fetch_campaign_context)。
         失败/返回空时返 []，调用方走 Doris 回落。
@@ -262,7 +262,7 @@ class CampaignFetcher:
                 "ad_campaign_product_keyword_list",
                 {
                     "parent_asin": parent_asin,
-                    "parent_seller_sku": "",   # 工具自身可从 parent_asin 映射
+                    "parent_seller_sku": parent_seller_sku or "",
                     "shop_account": shop_account or "",
                 },
                 timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
