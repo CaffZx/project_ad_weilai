@@ -427,6 +427,7 @@ export function createCampaignState() {
     state._currentRunId = vm.run_id || '';
     state._campaignItems = vm.items || [];
     state._filteredItems = [...state._campaignItems];
+    state.synthesis = vm.synthesis || null;
     if (vm.synthesis) {
       state._synthesisGroups = vm.synthesis.groups || [];
       state._synthesisSpecials = vm.synthesis.special_cases || [];
