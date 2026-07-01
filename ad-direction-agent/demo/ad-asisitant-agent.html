@@ -1547,6 +1547,7 @@ async function callAPI(path, body, timeout = API_TIMEOUT.default, method = 'POST
         if (_erpParams.shopId) body._shopId = _erpParams.shopId;
         if (_erpParams.shopAccount) body._shopAccount = _erpParams.shopAccount;
         if (_erpParams.parentSellerSku) body._parentSellerSku = _erpParams.parentSellerSku;
+        if (_erpParams.siteCode) body._siteCode = _erpParams.siteCode;
         if (_erpParams.userId) body._userId = _erpParams.userId;
       }
       opts.body = JSON.stringify(body);

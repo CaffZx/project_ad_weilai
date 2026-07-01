@@ -10,7 +10,7 @@ from typing import Any
 from app.config.settings import settings
 from app.data.campaign_prefilter import filter_campaigns
 from app.data.mcp_adapter import McpAdapter
-from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+from app.data.mcp_db_context import McpDbContext, _coerce_int, resolve_mcp_context_from_mcp
 from app.data.mcp_mapping import make_date_window
 from app.models.campaign import CampaignData, CampaignPerf, CampaignUnit
 
@@ -50,9 +50,19 @@ class CampaignFetcher:
         """
         errors: list[str] = []
 
-        # ① 解析上下文 → child_asins + shop_account（MCP）
+        # ① 解析上下文 → child_asins + shop_account（URL 注入优先 → MCP 兜底）
         db_ctx = None
-        if settings.mcp_resolve_context and not override:
+        # URL 注入：override 自带 shop_account/sku/site → 直接构造，不查 MCP/DB
+        if override and str(override.get("shop_account") or "").strip():
+            db_ctx = McpDbContext(
+                parent_asin=parent_asin,
+                parent_seller_sku=str(override.get("parent_seller_sku") or "").strip(),
+                shop_account=str(override["shop_account"]).strip(),
+                shop_id=_coerce_int(override.get("shop_id")),
+                site_code=str(override.get("site_code") or settings.mcp_default_site_code or "Amazon_US"),
+            )
+        # 无 URL 注入 → MCP 解析
+        if not db_ctx and settings.mcp_resolve_context:
             db_ctx = await resolve_mcp_context_from_mcp(parent_asin, self._mcp())
         if not db_ctx:
             return CampaignData(
