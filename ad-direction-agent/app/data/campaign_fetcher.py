@@ -291,8 +291,10 @@ class CampaignFetcher:
                         }
                 else:
                     logger.warning("basic_info 批量失败 [%d 活动]: %s", len(chunk), res.error)
+                    logger.debug("basic_info 批量失败 chunk: %s", chunk)
             except Exception as e:  # noqa: BLE001
                 logger.warning("basic_info 批量异常 [%d 活动]: %s", len(chunk), e)
+                logger.debug("basic_info 批量异常 chunk: %s", chunk)
 
         batches = [names[i:i + self._BASIC_BATCH_SIZE] for i in range(0, len(names), self._BASIC_BATCH_SIZE)]
         await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
