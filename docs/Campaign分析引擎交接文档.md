@@ -269,7 +269,10 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 06-27 | **MCP 字段安全修复** | match_type 大写归一（P1）、MCP 响应信封解包（P2）、resolve 必填字段校验 sku+shop（P3） |
 | 06-27 | **写库隐患修复** | campaign_id 为空跳过（防 UNIQUE KEY 碰撞）、`load_pending_by_card_ids` 补 perf_json+trigger_rule、`_ACTION_TO_CATEGORY` 显式加 reactivate_* 映射 |
 | 06-27 | **前端秒开配置栏** | `onNewEventClick` 改为 `await loadConfigOnly()` + 后台 `loadAll(true)`（不 await）；新增 `loadConfigOnly()` 只调 `loadStrategy()`（state DB + 静态配置），不调 `loadTactics()`（避免触发 `ensure_data_for_llm` 拉 MCP/StarRocks）。[demo/ad-asisitant-agent.html](AD_assistant_agent-v3.2/ad-direction-agent/demo/ad-asisitant-agent.html) |
-| 07-01 | **ad_campaign_basic_info 批量查询** | `build_campaign_tool_args` 加 `campaign_name_list` 参数（逗号分隔，≤20），`campaign_fetcher` 删 `_fetch_basic_one` 新增 `_fetch_basic_batch`（分批 `asyncio.gather` 并行 + 逐条解析合并），basic_info 调用从 N 次降为 `ceil(N/20)` 次（~95% 降幅），`mcp_adapter.campaign_call_tool` 透传新字段。入口 basic_info 从逐条配对改为批量 goroutine + perf goroutine 并行。**本地已改，未部署上线。** |
+| 07-01 | **ad_campaign_basic_info 批量查询** | `build_campaign_tool_args` 加 `campaign_name_list` 参数（逗号分隔，≤20），`campaign_fetcher` 删 `_fetch_basic_one` 新增 `_fetch_basic_batch`（分批 `asyncio.gather` 并行 + key 用入参名闭环），basic_info 调用从 N 次降为 `ceil(N/20)` 次（~95% 降幅），超时 300→420s。**已部署上线。** |
+| 07-01 | **MCP 字段映射补全** | `_MCP_CAMPAIGN_KEY_MAP` 加 `关键词ID`/`广告活动ID`/`子ASIN`/`子卖家SKU` 新别名，修复 `关键词D`→`关键词ID` MCP 改名导致 keyword_id 全部丢失 |
+| 07-01 | **ACOS 百分数归一** | `normalize_ad_summary`/`normalize_ad_keywords` 的 `acos`/`ctr`/`cvr` 从 `_float`→`_pct`（×100），修复数据监控 ACOS 显示 0.几 的 bug |
+| 07-01 | **汇总 LLM 临时禁用** | `_SYNTHESIS_ENABLED = False`，临时跳过 campaign synthesis 调用 |
 
 ---
 
