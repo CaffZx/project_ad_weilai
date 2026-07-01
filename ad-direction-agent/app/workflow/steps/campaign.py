@@ -56,7 +56,7 @@ LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 # 修复方式：去掉外层 asyncio.wait_for（Windows 取消不生效），改用 chat(timeout_override=)
 # 由 httpx socket 层超时接管，不依赖 asyncio 取消
 _SANITY_CHECK_ENABLED = True
-_SYNTHESIS_ENABLED = True   # 恢复(2026-06-08)：SelectorEventLoopPolicy 根治 asyncio 取消；synthesis 用 timeout_override=55(httpx 自断) + try/except fail-open
+_SYNTHESIS_ENABLED = False  # 临时禁用汇总 LLM（2026-07-01）
 
 # keyword_class 上游有两种拼写,查表前统一 .lower() 归一:
 #  - purpose-agent LLM 输出首字母大写 (Broad/Long-tail/Competitor/Brand/Custom)
