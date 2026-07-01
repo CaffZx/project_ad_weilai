@@ -181,10 +181,12 @@ class McpAdapter(DataSourceAdapter):
             start_date=start_date,
             end_date=end_date,
         )
-        listing_res = await self._call_tool("listing_basic_info", build_tool_args("listing_basic_info", base_ctx))
+        listing_res = await self._call_tool("listing_basic_info_v2", build_tool_args("listing_basic_info_v2", base_ctx))
         if listing_res.ok:
             listing = normalize_listing_basic_info(listing_res.value)
-            seller_sku = listing.get("seller_sku") or db_ctx.parent_seller_sku
+            # seller_sku 始终用 db_ctx.parent_seller_sku（parent_listing_detail 已解析）；
+            # listing_basic_info_v2 不返回此字段，原 V1 路径实际也是死代码。
+            seller_sku = db_ctx.parent_seller_sku
             return McpContext(
                 parent_asin=db_ctx.parent_asin,
                 parent_seller_sku=str(seller_sku or ""),
@@ -291,8 +293,8 @@ class McpAdapter(DataSourceAdapter):
         missing_fields: list[str],
         days: int = 7,
     ) -> ASINData:
-        listing = normalize_listing_basic_info(payload_map.get("listing_basic_info"))
-        if "listing_basic_info" not in missing_fields and not listing:
+        listing = normalize_listing_basic_info(payload_map.get("listing_basic_info_v2"))
+        if "listing_basic_info_v2" not in missing_fields and not listing:
             missing_fields.append("asin_not_found")
         inventory_rows = payload_map.get("listing_inventory")
         ad_summary = normalize_ad_summary(payload_map.get("ad_product_report"))

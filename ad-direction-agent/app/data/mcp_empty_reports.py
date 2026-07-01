@@ -39,7 +39,7 @@ def _has_ad_metrics(data: ASINData) -> bool:
 def _tool_payload_empty(tool: str, payload) -> bool:
     if payload is None:
         return True
-    if tool == "listing_basic_info":
+    if tool == "listing_basic_info_v2":
         return not normalize_listing_basic_info(payload)
     if tool == "ad_product_report":
         return not normalize_ad_summary(payload)
@@ -112,9 +112,9 @@ def empty_report_tools(
         tools.append(tool)
 
     if (
-        "listing_basic_info" in payload_map
-        and "listing_basic_info" not in missing_set
-        and normalize_listing_basic_info(payload_map.get("listing_basic_info"))
+        "listing_basic_info_v2" in payload_map
+        and "listing_basic_info_v2" not in missing_set
+        and normalize_listing_basic_info(payload_map.get("listing_basic_info_v2"))
         and "listing_inventory" in payload_map
         and "listing_inventory" not in missing_set
         and _tool_payload_empty("listing_inventory", payload_map.get("listing_inventory"))
