@@ -1267,6 +1267,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=0.3,
                 response_format={"type": "json_object"},
+                label="execution",
             )
             parsed = self._parse_json(raw)
             if parsed.get("reasoning"):
@@ -1412,6 +1413,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=0.3,
                 response_format={"type": "json_object"},
+                label="p3",
             )
             result = self._parse_json(raw)
             logger.info("P3 LLM 推荐成功 [%s]", asin)
@@ -1465,6 +1467,7 @@ class LLMReasoner:
                 messages=messages,
                 temperature=0.3,
                 response_format={"type": "json_object"},
+                label="analyze",
             )
             result = self._sanitize_analysis(
                 self._normalize_analysis_output(self._parse_json(raw))
@@ -1731,6 +1734,7 @@ class LLMReasoner:
                 response_format={"type": "json_object"},
                 max_tokens=8192,
                 timeout_override=timeout_override,
+                label="campaign_batch",
             )
             parsed = self._parse_json(raw)
             raw_adjustments = parsed.get("campaign_adjustments", [])
@@ -1872,6 +1876,7 @@ class LLMReasoner:
                 response_format={"type": "json_object"},
                 max_tokens=4096,
                 timeout_override=timeout_override,
+                label="new_campaign",
             )
             parsed = self._parse_json(raw)
             if not isinstance(parsed, dict):
@@ -1957,6 +1962,7 @@ class LLMReasoner:
                 model=settings.llm_model_strong,                    # 总览=重要节点→强档
                 thinking=True,
                 reasoning_effort=settings.llm_strong_reasoning_effort,
+                label="campaign_overview",
             )
             parsed = self._parse_json(raw)
             out = {
@@ -2036,6 +2042,7 @@ class LLMReasoner:
                 timeout_override=max(timeout_override or 0, 240),   # 强档慢，至少 240s
                 model=settings.llm_model_strong,                    # 汇总=重要节点→强档
                 # 不传 thinking：synthesis 是语义聚类不是复杂推理；思考吃 token 会导致 JSON 截断
+                label="campaign_synthesis",
             )
             parsed = self._parse_json(raw)
             groups = parsed.get("groups", []) or []
@@ -2096,6 +2103,7 @@ class LLMReasoner:
                 model=settings.llm_model_strong,
                 thinking=True,
                 reasoning_effort=settings.llm_strong_reasoning_effort,
+                label="budget_realloc",
             )
             parsed = self._parse_json(raw)
             logger.info(

@@ -20,6 +20,29 @@ from app.llm.key_pool import ApiKeyPool
 
 logger = logging.getLogger(__name__)
 
+# LLM token 消耗 / 缓存命中 专用日志，独立写入 logs/llm_usage.log
+# 每日轮转，保留 14 天历史
+_usage_logger = logging.getLogger("llm.usage")
+_usage_logger.propagate = False
+_usage_handler: logging.Handler | None = None
+
+
+def _ensure_usage_handler() -> None:
+    global _usage_handler
+    if _usage_handler is not None:
+        return
+    from logging.handlers import TimedRotatingFileHandler
+    from pathlib import Path
+    log_dir = Path(__file__).resolve().parents[3] / "logs"
+    log_dir.mkdir(exist_ok=True)
+    _usage_handler = TimedRotatingFileHandler(
+        log_dir / "llm_usage.log", when="midnight", backupCount=14, encoding="utf-8",
+    )
+    _usage_handler.suffix = "%Y%m%d"
+    _usage_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    _usage_logger.addHandler(_usage_handler)
+    _usage_logger.setLevel(logging.INFO)
+
 # 重试总执行次数（首次 + 2 次重试）。重试前指数退避 + 抖动，打散高并发雷群。
 MAX_RETRIES = 3
 
@@ -119,6 +142,7 @@ class DeepSeekClient:
         model: str | None = None,
         thinking: bool = False,
         reasoning_effort: str | None = None,
+        label: str = "",
     ) -> str:
         """调用 DeepSeek Chat API，自动轮询 Key + 失败重试。
         timeout_override: 单次 HTTP 超时，不传则用实例默认值。"""
@@ -173,8 +197,23 @@ class DeepSeekClient:
                         )
                         continue
                     resp.raise_for_status()
-                    pool.mark_success(api_key, latency=time.perf_counter() - t0)
+                    latency = time.perf_counter() - t0
+                    pool.mark_success(api_key, latency=latency)
                     data = resp.json()
+                    # token 消耗 / 缓存命中：独立写 llm_usage.log
+                    _ensure_usage_handler()
+                    usage = data.get("usage", {})
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    cached_tokens = usage.get("prompt_cache_hit_tokens", 0)
+                    _usage_logger.info(
+                        "%s prompt=%d completion=%d cached=%d total=%d model=%s %.1fs",
+                        label or "unknown",
+                        prompt_tokens, completion_tokens, cached_tokens,
+                        prompt_tokens + completion_tokens,
+                        model or self.model,
+                        latency,
+                    )
                     return data["choices"][0]["message"]["content"]
                 except httpx.TimeoutException as e:
                     logger.warning("LLM 请求超时 (Key ...%s, 第%d次)", api_key[-8:], attempt + 1)
