@@ -29,6 +29,16 @@ def _float(v) -> float | None:
         return None
 
 
+def _pct(v) -> float | None:
+    """百分比字段：MCP 返小数(0.30=30%)，归一为百分数(30.0)。"""
+    if v is None:
+        return None
+    if isinstance(v, str) and "%" in v:
+        return _float(v.replace("%", ""))
+    f = _float(v)
+    return round(f * 100, 2) if f is not None else None
+
+
 def _int(v) -> int | None:
     if v is None:
         return None
@@ -90,10 +100,10 @@ def normalize_ad_summary(payload: Any) -> dict:
         "clicks": _int(_pick(row, "clicks", "点击量")),
         "impressions": _int(_pick(row, "impressions", "曝光量")),
         "units_order": _int(_pick(row, "units_order", "orders", "广告订单量", "销售数量")),
-        "acos": _float(_pick(row, "acos", "ACOS")),
+        "acos": _pct(_pick(row, "acos", "ACOS")),
         "cpc": _float(_pick(row, "cpc", "CPC")),
-        "ctr": _float(_pick(row, "ctr", "CTR")),
-        "cvr": _float(_pick(row, "cvr", "CVR")),
+        "ctr": _pct(_pick(row, "ctr", "CTR")),
+        "cvr": _pct(_pick(row, "cvr", "CVR")),
         "campaign_budget": _float(_pick(row, "campaign_budget")),
     }
 
@@ -131,8 +141,8 @@ def normalize_keywords(payload: Any) -> list[dict]:
                 "sale": _float(_pick(row, "sale", "sales", "销售额")),
                 "units_order": _int(_pick(row, "units_order", "orders", "广告订单量")),
                 "keyword_bid": _float(_pick(row, "keyword_bid", "bid")),
-                "acos": _float(_pick(row, "acos", "ACOS")),
-                "cvr": _float(_pick(row, "cvr", "CVR")),
+                "acos": _pct(_pick(row, "acos", "ACOS")),
+                "cvr": _pct(_pick(row, "cvr", "CVR")),
             }
         )
     return out
