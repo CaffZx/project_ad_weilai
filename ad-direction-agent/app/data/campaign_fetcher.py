@@ -278,6 +278,7 @@ class CampaignFetcher:
                 res = await self._mcp().campaign_call_tool(
                     "ad_campaign_basic_info", "", shop_account,
                     campaign_name_list=",".join(chunk),
+                    timeout=420.0,   # 批量 ≤20 活动，比单活动 300s 宽
                 )
                 if res.ok:
                     # 按入参名匹配 MCP 返回行（归一化去空格），key 用入参名
