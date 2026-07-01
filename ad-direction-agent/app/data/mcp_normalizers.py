@@ -205,7 +205,7 @@ def normalize_product_sales(payload: Any) -> dict:
         total_units += _float(_pick(row, "units", "sale_num", "全部销量", "销量")) or 0
         ad_orders += _float(_pick(row, "ad_orders", "ad_sale_num", "广告单量", "广告订单量")) or 0
         total_ad_cost += _float(_pick(row, "ad_cost", "cost", "spend", "广告花费")) or 0
-        m = _float(_pick(row, "margin", "gross_margin"))
+        m = _float(_pick(row, "margin", "gross_margin", "毛利率"))
         if m is not None:
             margin = m if margin is None else (margin + m) / 2
     return {
