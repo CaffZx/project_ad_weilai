@@ -147,27 +147,26 @@ class CampaignFetcher:
                 parent_asin, parent_seller_sku, shop_account, site_code, days))
             if has_exact else None
         )
-        # basic_info + product_report 每活动配对并行
-        pair_list = await asyncio.gather(*[
-            asyncio.gather(
-                self._fetch_basic_one(name, shop_account),
-                self._fetch_perf_one(name, shop_account, start_date, end_date),
-                return_exceptions=True,
-            )
+        # basic_info 批量（campaign_name_list 逗号分隔，≤20）→ 与 perf 逐条并行
+        basic_batch_task = asyncio.create_task(
+            self._fetch_basic_batch(names, shop_account),
+        )
+        perf_list_raw = await asyncio.gather(*[
+            self._fetch_perf_one(name, shop_account, start_date, end_date)
             for name in names
-        ])
-        basic_list = [p[0] for p in pair_list]
-        perf_list = [p[1] for p in pair_list]
+        ], return_exceptions=True)
+        basic_dict = await basic_batch_task
 
-        for name, res in self._zip_results(names, basic_list):
-            if res.ok and isinstance(res.value, dict):
-                basic_results[name] = {**res.value, "source": "mcp"}
+        for name in names:
+            b = basic_dict.get(name)
+            if b is not None:
+                basic_results[name] = {**b, "source": "mcp"}
                 mcp_ok += 1
             else:
                 basic_results[name] = {"campaign_budget": 0.0, "campaign_status": "", "days_online": -1, "tos_bid_pct": 0.0, "pp_bid_pct": 0.0, "ros_bid_pct": 0.0, "source": "mcp_fail"}
                 mcp_fail += 1
 
-        for name, res in self._zip_results(names, perf_list):
+        for name, res in self._zip_results(names, perf_list_raw):
             if res.ok and isinstance(res.value, dict):
                 perf_results[name] = {**res.value, "source": "mcp"}
                 mcp_ok += 1
@@ -260,34 +259,44 @@ class CampaignFetcher:
             )
             return []
 
-    async def _fetch_basic_one(
-        self, campaign_name: str, shop_account: str,
-    ) -> tuple[str, _CallResult]:
-        """调用 ad_campaign_basic_info。解析异常降级为失败，触发回落。"""
-        try:
-            res = await self._mcp().campaign_call_tool(
-                "ad_campaign_basic_info", campaign_name, shop_account,
-            )
-            if res.ok:
-                payload = _as_rows(res.value)
-                if payload:
-                    row = payload[0]
-                    return campaign_name, _CallResult(ok=True, value={
-                        "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
-                        # 关键词当前出价（MCP 实时值，关键词级；普通小数用 _to_float）
-                        "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
-                        "campaign_status": str(row.get("状态") or ""),
-                        # 字段缺失 → -1（未知），勿伪装成 0 天触发"新活动保护"
-                        "days_online": _to_days_online(row.get("活动上线天数")),
-                        # 广告位加价比例 (KB 19 §5 决策矩阵依赖)
-                        "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
-                        "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
-                        "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
-                    })
-            return campaign_name, _CallResult(ok=False, error=res.error)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("basic_info 解析失败 [%s]: %s", campaign_name, e)
-            return campaign_name, _CallResult(ok=False, error=str(e))
+    _BASIC_BATCH_SIZE = 20  # campaign_name_list 单次上限
+
+    async def _fetch_basic_batch(
+        self, names: list[str], shop_account: str,
+    ) -> dict[str, dict]:
+        """批量调用 ad_campaign_basic_info（campaign_name_list 逗号分隔，每批 ≤20）。
+
+        返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
+               days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
+        不在返回中的活动名 → 填写 mcp_fail 默认值。
+        """
+        results: dict[str, dict] = {}
+        async def _one(chunk: list[str]) -> None:
+            try:
+                res = await self._mcp().campaign_call_tool(
+                    "ad_campaign_basic_info", "", shop_account,
+                    campaign_name_list=",".join(chunk),
+                )
+                if res.ok:
+                    for row in _as_rows(res.value):
+                        name = str(row.get("广告活动名称") or "")
+                        results[name] = {
+                            "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                            "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
+                            "campaign_status": str(row.get("状态") or ""),
+                            "days_online": _to_days_online(row.get("活动上线天数")),
+                            "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                            "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                            "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                        }
+                else:
+                    logger.warning("basic_info 批量失败 [%d 活动]: %s", len(chunk), res.error)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("basic_info 批量异常 [%d 活动]: %s", len(chunk), e)
+
+        batches = [names[i:i + self._BASIC_BATCH_SIZE] for i in range(0, len(names), self._BASIC_BATCH_SIZE)]
+        await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
+        return results
 
     async def _fetch_perf_one(
         self, campaign_name: str, shop_account: str, start_date: str, end_date: str,

@@ -185,16 +185,20 @@ def build_campaign_tool_args(
     shop_account: str,
     start_date: str = "",
     end_date: str = "",
+    *,
+    campaign_name_list: str = "",
 ) -> dict:
     """构建 campaign 级 MCP 入参。
 
     与 TOOL_ARG_BUILDERS（ASIN 级，使用 parent_asin）不同，
     campaign 级工具以 campaign_name 为必填参数。
+    ad_campaign_basic_info 支持批量：campaign_name_list 不为空时替代 campaign_name
+    （逗号分隔，上限 20），单活动也统一走此路径。
     """
-    base = {
-        "shop_account": shop_account,
-        "campaign_name": campaign_name,
-    }
+    if tool_name == "ad_campaign_basic_info" and campaign_name_list:
+        base = {"shop_account": shop_account, "campaign_name_list": campaign_name_list}
+    else:
+        base = {"shop_account": shop_account, "campaign_name": campaign_name}
     # 需要日期范围的报告类工具
     if tool_name in (
         "ad_campaign_product_report",
