@@ -1698,6 +1698,10 @@ async def _prefetch_placement(
             except Exception:
                 pass
 
+    if not shop_account:
+        logger.warning("placement 预取跳过 [%s]: shop_account 为空", parent_asin)
+        return enriched
+
     sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
@@ -1753,6 +1757,10 @@ async def _prefetch_search_terms(
                 site_code = (ctx.site_code if ctx else "") or site_code
             except Exception:
                 pass
+
+    if not shop_account:
+        logger.warning("search_terms 预取跳过 [%s]: shop_account 为空", parent_asin)
+        return enriched
 
     sd, ed = _make_date_window(days, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
