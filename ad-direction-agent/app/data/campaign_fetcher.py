@@ -268,7 +268,9 @@ class CampaignFetcher:
 
         返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
                days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
-        不在返回中的活动名 → 填写 mcp_fail 默认值。
+        不在返回中的活动名 → 调用方走 mcp_fail 默认值。
+        key 始终用入参 chunk 中的名称（非 MCP 返回名）：两个 MCP 工具的活动名
+        可能存在空格/编码差异，跨工具字符串匹配不可靠。
         """
         results: dict[str, dict] = {}
         async def _one(chunk: list[str]) -> None:
@@ -278,17 +280,24 @@ class CampaignFetcher:
                     campaign_name_list=",".join(chunk),
                 )
                 if res.ok:
+                    # 按入参名匹配 MCP 返回行（归一化去空格），key 用入参名
+                    row_by_name: dict[str, dict] = {}
                     for row in _as_rows(res.value):
-                        name = str(row.get("广告活动名称") or "")
-                        results[name] = {
-                            "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
-                            "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
-                            "campaign_status": str(row.get("状态") or ""),
-                            "days_online": _to_days_online(row.get("活动上线天数")),
-                            "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
-                            "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
-                            "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
-                        }
+                        raw = str(row.get("广告活动名称") or "").strip()
+                        if raw:
+                            row_by_name[raw] = row
+                    for name in chunk:
+                        row = row_by_name.get(name.strip())
+                        if row is not None:
+                            results[name] = {
+                                "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                                "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
+                                "campaign_status": str(row.get("状态") or ""),
+                                "days_online": _to_days_online(row.get("活动上线天数")),
+                                "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                                "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                                "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                            }
                 else:
                     logger.warning("basic_info 批量失败 [%d 活动]: %s", len(chunk), res.error)
                     logger.debug("basic_info 批量失败 chunk: %s", chunk)
@@ -804,10 +813,14 @@ class CampaignFetcher:
 # 仅名称不同；映射后下游 _assemble / filter_campaigns 零改动。
 _MCP_CAMPAIGN_KEY_MAP: dict[str, str] = {
     "广告活动D": "campaign_id",
+    "广告活动ID": "campaign_id",     # MCP 同义别名
     "广告活动名称": "campaign_name",
-    "关键词D": "keyword_id",
+    "关键词D": "keyword_id",        # 旧字段名（历史兼容）
+    "关键词ID": "keyword_id",       # MCP 已改名（2026-07）
     "子SIN": "child_asin",
+    "子ASIN": "child_asin",         # MCP 同义别名
     "子卖家KU": "seller_sku",
+    "子卖家SKU": "seller_sku",      # MCP 同义别名
     "关键词": "keyword_text",
     "关键词匹配类型": "match_type",
 }
