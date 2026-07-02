@@ -1196,6 +1196,8 @@ async function onCancelEventClick() {
     const ctx = _decisionContext || {};
     applyBatchBarFromCtx(ctx);
     const latestId = ctx.latest_completed_id;
+    // 回到快照态，清除所有 tab 上的 blocked/degraded/partial 残留告警
+    ['dataStatusTab1','dataStatusTab2','dataStatusTab3','dataStatusTab4'].forEach(id => hide(id));
     if (latestId && !ctx.in_progress) {
       await renderReadonlyDecisionPreset(latestId, { switchDefault: false });
     }
