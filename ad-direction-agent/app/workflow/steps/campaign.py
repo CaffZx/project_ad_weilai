@@ -626,6 +626,7 @@ async def _analyze_campaigns_impl(
         # 修正后，_resolve_budget_conflicts 末尾的终态 _normalize_action 会据真值重派生 action。
         item.current_budget = cu.current_budget
         item.current_bid = cu.current_bid
+        item.days_online = cu.days_online
         # 7d 指标快照回填 → card.perf_json（淘汰卡借此存淘汰前花费，KB21§7 情况二复评读取）
         item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
         # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
@@ -1959,43 +1960,65 @@ def _resolve_budget_conflicts(
     当前无总预算上限来源，仅做防御性检查：
     - 单个活动日预算 ≤ $200 (KB 19 §10 上限)
     - 淘汰活动预算固定 $1.00 / Bid 固定 $0.20 (KB 21 §4)
+    - 新活动保护 (KB 21 §2)：上线 ≤3 天不强制淘汰，LLM 误判淘汰则反修正为 keep
     """
     warnings: list[str] = []
 
     for adj in adjustments:
+        # KB 21 §2 新活动保护：上线 ≤3 天样本不足，不触发强制淘汰，LLM 误判也反修正
+        new_campaign_protected = (adj.days_online >= 0 and adj.days_online <= 3)
+
         # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 强制 eliminate。
         # （归组/强制修正用 OR + bid 0.10，独立于预过滤 AND 的 LOW_BID_MAX 0.21；见 campaign_portfolio 阈值注释）
         # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
         # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
-        if adj.action != "eliminate_to_low_bid_pool" and (
+        # ★新活动保护豁免：上线 ≤3 天不触发强制淘汰，防止初始预算=$1 的新活动被误杀。
+        if not new_campaign_protected and adj.action != "eliminate_to_low_bid_pool" and (
             (adj.current_bid is not None and adj.current_bid <= 0.1)
             or (adj.current_budget is not None and adj.current_budget <= LOW_BUDGET_MAX)
         ):
             adj.action = "eliminate_to_low_bid_pool"
-        # 淘汰执行值硬校验：无条件填充 $1.00/$0.20
-        # （LLM 听话留 None 时也要补齐，避免前端淘汰活动出价/预算空白）
+
+        # 淘汰执行值硬校验 / 新活动保护反修正
         if adj.action == "eliminate_to_low_bid_pool":
-            expected_budget = 1.0
-            expected_bid = 0.20
-            if adj.proposed_budget != expected_budget:
-                if adj.proposed_budget is not None:
-                    warnings.append(
-                        f"[{adj.campaign_name}] 淘汰活动 proposed_budget=${adj.proposed_budget} "
-                        f"(应为 ${expected_budget})，已强制修正"
-                    )
-                adj.proposed_budget = expected_budget
-            if adj.proposed_bid != expected_bid:
-                if adj.proposed_bid is not None:
-                    warnings.append(
-                        f"[{adj.campaign_name}] 淘汰活动 proposed_bid=${adj.proposed_bid} "
-                        f"(应为 ${expected_bid})，已强制修正"
-                    )
-                adj.proposed_bid = expected_bid
-            # 淘汰活动不应携带广告位/否词调整（前端展示无意义），清空
-            if adj.placement_adjustments:
-                adj.placement_adjustments = []
-            if adj.negative_keywords:
-                adj.negative_keywords = []
+            if new_campaign_protected:
+                # LLM 误判淘汰 or 兜底漏网 → 强制修正为 keep（KB 21 §2）
+                warnings.append(
+                    f"[{adj.campaign_name}] 新活动上线仅 {adj.days_online} 天，"
+                    f"不满足淘汰条件（KB 21 §2），已强制修正为 keep"
+                )
+                adj.action = "keep"
+                adj.proposed_budget = adj.current_budget
+                adj.proposed_bid = adj.current_bid
+                adj.direction = {}
+                if adj.placement_adjustments:
+                    adj.placement_adjustments = []
+                if adj.negative_keywords:
+                    adj.negative_keywords = []
+            else:
+                # 正常淘汰：无条件填充 $1.00/$0.20
+                # （LLM 听话留 None 时也要补齐，避免前端淘汰活动出价/预算空白）
+                expected_budget = 1.0
+                expected_bid = 0.20
+                if adj.proposed_budget != expected_budget:
+                    if adj.proposed_budget is not None:
+                        warnings.append(
+                            f"[{adj.campaign_name}] 淘汰活动 proposed_budget=${adj.proposed_budget} "
+                            f"(应为 ${expected_budget})，已强制修正"
+                        )
+                    adj.proposed_budget = expected_budget
+                if adj.proposed_bid != expected_bid:
+                    if adj.proposed_bid is not None:
+                        warnings.append(
+                            f"[{adj.campaign_name}] 淘汰活动 proposed_bid=${adj.proposed_bid} "
+                            f"(应为 ${expected_bid})，已强制修正"
+                        )
+                    adj.proposed_bid = expected_bid
+                # 淘汰活动不应携带广告位/否词调整（前端展示无意义），清空
+                if adj.placement_adjustments:
+                    adj.placement_adjustments = []
+                if adj.negative_keywords:
+                    adj.negative_keywords = []
 
         # 日预算上限 (KB 19 §10)
         if adj.proposed_budget is not None and adj.proposed_budget > 200:

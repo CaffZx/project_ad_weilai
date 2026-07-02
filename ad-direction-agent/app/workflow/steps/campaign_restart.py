@@ -176,6 +176,7 @@ def _build_item(
         placement_adjustments=[],           # 占位（复评不调广告位）
         negative_keywords=[],               # 占位
         review_level=review_level,
+        days_online=cu.days_online,
         ai_portfolio_class=_restart_group(cu.match_type),
         perf_7d=cu.perf_7d.model_dump() if cu.perf_7d else {},
     )

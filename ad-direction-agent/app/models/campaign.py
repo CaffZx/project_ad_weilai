@@ -154,6 +154,8 @@ class CampaignAdjustmentItem(BaseModel):
     # 逐活动 7 天指标快照(代码回填自 CampaignUnit.perf_7d)→ 落 card.perf_json;
     # 淘汰卡借此存淘汰前花费,供 KB21§7 情况二复评读取(perf_json 列既有,零加列)
     perf_7d: dict = Field(default_factory=dict)
+    # 活动上线天数（MCP ad_campaign_basic_info），-1=未知；供 KB 21 §2 新活动保护
+    days_online: int = -1
 
 
 class CampaignBatchResult(BaseModel):

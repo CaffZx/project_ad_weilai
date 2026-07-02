@@ -302,7 +302,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 - 必须输出 placement_adjustments（三个广告位全部列出）。每个只填 `placement`（头部/其他/商品）+ `action`（维持/小涨/大涨/小降/大降）+ `evidence`。**禁止输出 current_pct/proposed_pct 数字**——这些由后端按 KB 19 §3 从当前加价比例 + action 自动计算
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）
+- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
 - action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
 - 必须输出 triggered_rule（如 NO_CVR_HIGH_SPEND）和 evidence
 
@@ -359,7 +359,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 - 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）
+- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
 - action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
 - 必须输出 triggered_rule（如 IRRELEVANT_NO_IMPROVEMENT）和 evidence
 
