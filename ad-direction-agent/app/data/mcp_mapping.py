@@ -190,6 +190,8 @@ def build_campaign_tool_args(
     *,
     campaign_name_list: str = "",
     campaign_id_list: str = "",
+    parent_asin: str = "",
+    parent_seller_sku: str = "",
 ) -> dict:
     """构建 campaign 级 MCP 入参。
 
@@ -198,8 +200,12 @@ def build_campaign_tool_args(
     ad_campaign_basic_info_v2 支持批量：campaign_id_list 不为空时替代 campaign_name
     （逗号分隔，上限 20）。
     ad_campaign_basic_info (V1) 保留兼容，使用 campaign_name_list。
+    ad_campaign_list 使用 parent_asin / parent_seller_sku。
     """
-    if tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
+    if tool_name == "ad_campaign_list":
+        base = {"shop_account": shop_account, "parent_asin": parent_asin,
+                "parent_seller_sku": parent_seller_sku}
+    elif tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
     elif tool_name == "ad_campaign_basic_info" and campaign_name_list:
         base = {"shop_account": shop_account, "campaign_name_list": campaign_name_list}

@@ -292,13 +292,10 @@ class CampaignFetcher:
         与 _discover_context_from_mcp 并行调用；返回只有 2 字段，秒回。
         """
         try:
-            res = await self._mcp().call_tool_timed_with_args(
-                "ad_campaign_list",
-                {
-                    "parent_asin": parent_asin,
-                    "parent_seller_sku": parent_seller_sku,
-                    "shop_account": shop_account,
-                },
+            res = await self._mcp().campaign_call_tool(
+                "ad_campaign_list", "", shop_account,
+                parent_asin=parent_asin,
+                parent_seller_sku=parent_seller_sku,
                 timeout=60.0,
             )
             if not res.ok:
@@ -320,7 +317,8 @@ class CampaignFetcher:
             logger.warning("_fetch_campaign_list [%s] 异常: %s", parent_asin, e)
             return {}
 
-    _BASIC_BATCH_SIZE = 20  # campaign_id_list 单次上限
+
+    _BASIC_BATCH_SIZE = 20  # campaign_id_list / campaign_name_list 单次批量上限（V1+V2 共用）
 
     async def _fetch_basic_batch_v2(
         self, id_list: list[tuple[str, str]], shop_account: str,
@@ -331,7 +329,7 @@ class CampaignFetcher:
         返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
                days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
         不在返回中的活动 → 调用方走 mcp_fail 默认值。
-        注：V2 响应不含 campaign_id，匹配靠广告活动名称（与 _fetch_basic_batch 同模式）。
+        按入参 campaign_id_list 顺序与返回 rows 位置配对，不依赖名称匹配。
         """
         results: dict[str, dict] = {}
 
@@ -344,24 +342,26 @@ class CampaignFetcher:
                     timeout=420.0,   # 批量 ≤20 活动，比单活动 300s 宽
                 )
                 if res.ok:
-                    # V2 返回不含 campaign_id，按广告活动名称建索引再匹配入参名
-                    row_by_name: dict[str, dict] = {}
-                    for row in _as_rows(res.value):
-                        raw = str(row.get("广告活动名称") or "").strip()
-                        if raw:
-                            row_by_name[raw] = row
-                    for name, _ in chunk:
-                        row = row_by_name.get(name.strip())
-                        if row is not None:
-                            results[name] = {
-                                "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
-                                "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
-                                "campaign_status": str(row.get("状态") or ""),
-                                "days_online": _to_days_online(row.get("活动上线天数")),
-                                "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
-                                "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
-                                "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
-                            }
+                    rows = _as_rows(res.value)
+                    # 按入参顺序配对（入参 campaign_id_list 顺序 = MCP 返回顺序），
+                    # 避免名称匹配因空格/编码差异静默丢数据。
+                    for i, (name, cid) in enumerate(chunk):
+                        if i >= len(rows):
+                            logger.warning(
+                                "basic_info_v2 响应缺行 [%s]: campaign_id=%s 期望 %d 行实得 %d 行",
+                                name, cid, len(chunk), len(rows),
+                            )
+                            continue
+                        row = rows[i]
+                        results[name] = {
+                            "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                            "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
+                            "campaign_status": str(row.get("状态") or ""),
+                            "days_online": _to_days_online(row.get("活动上线天数")),
+                            "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                            "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                            "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                        }
                 else:
                     logger.warning("basic_info_v2 批量失败 [%d 活动]: %s", len(chunk), res.error)
                     logger.debug("basic_info_v2 批量失败 ids: %s", ids)
@@ -373,7 +373,6 @@ class CampaignFetcher:
         await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
         return results
 
-    _BASIC_BATCH_SIZE = 20  # campaign_id_list 单次上限
 
     # [V1 保留兼容] 原 _fetch_basic_batch，V2 稳定后可删除
     async def _fetch_basic_batch(
