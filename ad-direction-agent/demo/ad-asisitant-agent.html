@@ -1488,6 +1488,8 @@ function isPartialDataFreshness(fresh) {
 function renderDataStatusBanner(data, elId) {
   const el = $(elId);
   if (!el) return;
+  const dc = data && data.data_completeness;
+  const llmSt = data && data.llm_status;
   if (isLlmBlocked(data)) {
     const labels = (data.missing_required_labels || []).join('、');
     el.textContent = `⛔ ${data.message || '核心数据不足，无法生成 AI 建议'}${labels ? '（缺: ' + labels + '）' : ''}`;
@@ -1495,14 +1497,13 @@ function renderDataStatusBanner(data, elId) {
     show(elId);
     return;
   }
-  const dc = data && data.data_completeness;
-  const llmSt = data && data.llm_status;
   if (llmSt === 'degraded' && dc && dc.missing_important && dc.missing_important.length) {
     el.textContent = `⚠ 部分数据缺失，AI 已降置信度分析。缺失: ${dc.missing_important.join('、')}`;
     el.style.cssText = DATA_STATUS_BANNER_STYLE;
     show(elId);
     return;
   }
+  // 数据正常 (llm_status=ok) 或数据恢复 → 清除 blocked/degraded 残留，继续到下方 hide/partial 逻辑
   const pf = ((data && data.partial_failures) || []).filter(x => !String(x).includes('ad_keyword_report'));
   const fresh = data && data.data_freshness;
   const incomplete = pf.length > 0 || isPartialDataFreshness(fresh);
