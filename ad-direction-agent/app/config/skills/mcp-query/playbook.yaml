@@ -8,7 +8,7 @@ phases:
 
   - id: mcp_bootstrap
     tools:
-      - listing_basic_info
+      - listing_basic_info_v2
       - listing_inventory
       - ad_campaign_product_keyword_list
     timeout_seconds: ${MCP_BOOTSTRAP_TIMEOUT}
