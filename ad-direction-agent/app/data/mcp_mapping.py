@@ -172,7 +172,9 @@ def build_tool_args(tool_name: str, ctx: McpContext) -> dict:
 # ── Campaign 级 MCP 工具 ─────────────────────────────
 
 CAMPAIGN_TOOLS = [
-    "ad_campaign_basic_info",           # shop_account, campaign_name
+    "ad_campaign_list",                 # 父 ASIN → 全量在线活动 (name + id)
+    "ad_campaign_basic_info_v2",        # campaign_id → 活动详情 (替换 V1, 支持批量 ≤20)
+    "ad_campaign_basic_info",           # [已废弃] shop_account, campaign_name — 保留兼容
     "ad_campaign_product_report",       # + start_date, end_date
     "ad_campaign_placement_report",     # + start_date, end_date (懒加载)
     "ad_campaign_search_term_report",   # + start_date, end_date (懒加载)
@@ -187,15 +189,19 @@ def build_campaign_tool_args(
     end_date: str = "",
     *,
     campaign_name_list: str = "",
+    campaign_id_list: str = "",
 ) -> dict:
     """构建 campaign 级 MCP 入参。
 
     与 TOOL_ARG_BUILDERS（ASIN 级，使用 parent_asin）不同，
     campaign 级工具以 campaign_name 为必填参数。
-    ad_campaign_basic_info 支持批量：campaign_name_list 不为空时替代 campaign_name
-    （逗号分隔，上限 20），单活动也统一走此路径。
+    ad_campaign_basic_info_v2 支持批量：campaign_id_list 不为空时替代 campaign_name
+    （逗号分隔，上限 20）。
+    ad_campaign_basic_info (V1) 保留兼容，使用 campaign_name_list。
     """
-    if tool_name == "ad_campaign_basic_info" and campaign_name_list:
+    if tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
+        base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
+    elif tool_name == "ad_campaign_basic_info" and campaign_name_list:
         base = {"shop_account": shop_account, "campaign_name_list": campaign_name_list}
     else:
         base = {"shop_account": shop_account, "campaign_name": campaign_name}

@@ -2,7 +2,7 @@
 
 ## 概述
 
-定时批跑（cron → `batch_via_api.py` → `/campaign/viewmodel`）到 ERP 落库全链路涉及 **16 个 MCP 工具**，分 6 个阶段，含大量并行调用。
+定时批跑（cron → `batch_via_api.py` → `/campaign/viewmodel`）到 ERP 落库全链路涉及 **17 个 MCP 工具**，分 6 个阶段，含大量并行调用。
 
 工具调用方分为三类：
 - **Skill 执行器** (`mcp_query.py`)：主数据拉取，通过 `run_planned_mcp_tools` 并行
@@ -69,7 +69,21 @@
 - 仅当 **无 URL override**（定时批跑无 override，必然走此）时调用
 - 同 0a，解析站点/sku/店铺 → 缓存到 `self._last_shop_account`, `_last_site_code` 供懒加载复用
 
-### 1b. `ad_campaign_product_keyword_list`（串行，紧跟 1a）
+### 1b. `ad_campaign_list` ∥ `ad_campaign_product_keyword_list`（并行，紧跟 1a）
+
+两个工具通过 `asyncio.create_task` 同时发起，互不依赖。
+
+#### 1b-a. `ad_campaign_list`（新增 2026-07）
+
+| 项目 | 内容 |
+|---|---|
+| **调用位置** | `campaign_fetcher.py:268` `_fetch_campaign_list` |
+| **调用目的** | 获取父 ASIN 下全量在线活动的名称+ID，构建 `{campaign_name: campaign_id}` 映射 |
+| **入参** | `{"parent_asin", "parent_seller_sku", "shop_account"}` — 来自 1a |
+| **返回结构** | `{"success": true, "rows": [{"广告活动名称": "...", "广告活动id": "..."}, ...]}`，每条仅 2 字段，秒回 |
+| **下游消费** | ① `campaign_name_to_id` 映射供 1c 的 `_fetch_basic_batch_v2` 用 campaign_id 调 V2 ② 供 `filter_campaigns` 的 campaign_id 分组 |
+
+#### 1b-b. `ad_campaign_product_keyword_list`（并行，同 1b-a）
 
 | 项目 | 内容 |
 |---|---|
@@ -77,21 +91,22 @@
 | **调用目的** | **替代原两条 SQL（已删）**（`_resolve_and_fetch_listing` + `_fetch_campaign_context`），发现父 ASIN 下所有子 ASIN 的活跃广告活动+关键词 |
 | **入参** | `{"parent_asin", "parent_seller_sku", "shop_account"}` — 来自 1a 或缓存 |
 | **返回结构** | `[{campaign_id, campaign_name, keyword_id, child_asin, seller_sku, keyword_text, match_type}, ...]`（经 `_normalize_mcp_campaign_keywords` 中→英 key 映射） |
-| **下游消费** | ① `filter_campaigns` 硬过滤 → surviving + excluded ② surviving 的 `names` 列表作为 1c 的遍历集 |
+| **下游消费** | ① `filter_campaigns` 硬过滤 → surviving + excluded（多词活动按 `campaign_id` 分组识别）② surviving 的 `names` 列表作为 1c 的遍历集 |
 
-### 1c. 每活动配对拉取（全部并行）
+### 1c. 每活动并行拉取（basic_info 批量 + perf 逐条并行）
 
-**模式**：对每个活动名，`asyncio.gather(basic_info, product_report)` 成对并行；所有活动对再外层 `gather` 全并行。
+**模式**：basic_info 按 campaign_id 批量（V2，`campaign_id_list` 逗号分隔 ≤20），与 perf 逐条并行。
 
-#### 1c-a. `ad_campaign_basic_info` × N
+#### 1c-a. `ad_campaign_basic_info_v2` × ⌈N/20⌉（替换 V1）
 
 | 项目 | 内容 |
 |---|---|
-| **调用位置** | `campaign_fetcher.py:264` `_fetch_basic_one` |
-| **入参** | `{"shop_account", "campaign_name"}` — campaign_name 来自 1b 的 names 列表 |
+| **调用位置** | `campaign_fetcher.py:329` `_fetch_basic_batch_v2` |
+| **入参** | `{"shop_account", "campaign_id_list": "id1,id2,..."}` — campaign_id 来自 1b-a 的 `campaign_name_to_id`，回退 surviving.campaign_id |
 | **arg builder** | `mcp_mapping.py:182-208` `build_campaign_tool_args` |
-| **返回结构** | 取首行 `{campaign_budget, keyword_bid, campaign_status, days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}` |
+| **返回结构** | `{campaign_name: {campaign_budget, keyword_bid, campaign_status, days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}` |
 | **下游消费** | `_assemble` → `CampaignUnit` 的 `current_bid`, `current_budget`, `days_online`, 广告位系数 |
+| **开关** | `settings.campaign_basic_info_v2`（默认 `true`）；`false` 时回退 V1 `ad_campaign_basic_info`（`campaign_name_list`） |
 
 #### 1c-b. `ad_campaign_product_report` × N
 
@@ -204,9 +219,9 @@
   ↓
 0d (keyword_child_asins × N ≤50, 全并行)
 ─────────────────────────────────
-1a → 1b (串行)
+1a → 1b (ad_campaign_list ∥ ad_campaign_product_keyword_list, 并行)
   ↓
-1c (N 对 [ad_campaign_basic_info ∥ ad_campaign_product_report], 全并行)
+1c (ad_campaign_basic_info_v2 × ⌈N/20⌉ ∥ ad_campaign_product_report × N, 全并行)
   ∥
 1d (keyword_child_asins ∥ own_keyword_flow, Task 并行)
 ─────────────────────────────────

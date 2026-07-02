@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     campaign_mcp_tool_timeout: float = 300.0
     # 用 MCP 工具 ad_campaign_product_keyword_list 发现活动 + 关键词
     mcp_discover_campaigns: bool = True
+    # 用 MCP 工具 ad_campaign_basic_info_v2 (campaign_id_list) 替代 V1 (campaign_name_list)。
+    # V2 稳定后删除此开关及 V1 代码。
+    campaign_basic_info_v2: bool = True
     # 用 MCP 工具 parent_listing_detail 替代 mcp_db_context._LOOKUP_SQL（父ASIN→站点/sku/店铺）。
     mcp_resolve_context: bool = True
     campaign_rank_timeout: float = 45.0          # 自然排名旁路拉取墙钟上限（从 task 启动算）

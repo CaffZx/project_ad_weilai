@@ -25,19 +25,24 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
 
     注意: budget=$1 的活动不在此排除 -- 留给 LLM 按 KB 规则判断淘汰保护条件。
     """
-    # Step 1: 按 campaign_name 统计 ① 去重关键词数 ② 各子ASIN关联行数（用于选代表子ASIN）
-    name_kw_count: dict[str, set] = {}
-    name_asin_rows: dict[str, Counter] = {}
+    # Step 1: 按 campaign_id 统计 ① 去重关键词数 ② 各子ASIN关联行数（用于选代表子ASIN）
+    #         改用 campaign_id 而非 campaign_name：id 是数字主键，跨工具稳定。
+    cid_kw_count: dict[str, set] = {}
+    cid_asin_rows: dict[str, Counter] = {}
+    cid_name: dict[str, str] = {}  # cid → name（取首次出现的名称）
     for r in raw:
-        name = str(r.get("campaign_name") or "")
+        cid = str(r.get("campaign_id") or "")
         kw = str(r.get("keyword_text") or "")
         ca = str(r.get("child_asin") or "")
-        if name and kw:
-            name_kw_count.setdefault(name, set()).add(kw)
-        if name and ca:
-            name_asin_rows.setdefault(name, Counter())[ca] += 1
+        name = str(r.get("campaign_name") or "")
+        if cid and kw:
+            cid_kw_count.setdefault(cid, set()).add(kw)
+        if cid and ca:
+            cid_asin_rows.setdefault(cid, Counter())[ca] += 1
+        if cid and cid not in cid_name:
+            cid_name[cid] = name
 
-    multi_kw_names = {n for n, kws in name_kw_count.items() if len(kws) > 1}
+    multi_kw_cids = {cid for cid, kws in cid_kw_count.items() if len(kws) > 1}
 
     surviving: list[dict] = []
     excluded: list[dict] = []
@@ -45,6 +50,7 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
 
     for r in raw:
         name = str(r.get("campaign_name") or "")
+        cid = str(r.get("campaign_id") or "")
 
         # 规则 1: 非活跃状态
         # 注意：当前 _fetch_campaign_context SQL 已用 WHERE campaign_status='ENABLED' 过滤，
@@ -70,18 +76,19 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
         #   - 折叠：每活动只产 1 条 excluded（raw 按词/子ASIN 多行，否则会 N 条重复）
         #   - 子ASIN：取该活动下关联词条数最多的子ASIN（prefilter 无 perf，"花费最高"不可得）
         #   - keyword_text 硬编码"多关键词活动"
-        if name in multi_kw_names:
-            if name not in emitted_multi:
-                emitted_multi.add(name)
+        if cid in multi_kw_cids:
+            if cid not in emitted_multi:
+                emitted_multi.add(cid)
                 top_asin = ""
-                if name_asin_rows.get(name):
-                    top_asin = name_asin_rows[name].most_common(1)[0][0]
+                if cid_asin_rows.get(cid):
+                    top_asin = cid_asin_rows[cid].most_common(1)[0][0]
                 excluded.append({
                     "campaign_name": name,
+                    "campaign_id": cid,
                     "child_asin": top_asin,
                     "match_type": str(r.get("match_type") or ""),
                     "keyword_text": "多关键词活动",
-                    "keyword_count": len(name_kw_count[name]),
+                    "keyword_count": len(cid_kw_count[cid]),
                     "reason": "多关键词活动，请到ERP手动修改",
                     "__prefiltered": True,
                 })

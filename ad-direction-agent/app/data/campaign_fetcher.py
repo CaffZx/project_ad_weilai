@@ -81,8 +81,17 @@ class CampaignFetcher:
         # ② 活动+关键词发现：MCP
         shop_account = db_ctx.shop_account or ""
         raw_campaigns: list[dict] = []
+        campaign_name_to_id: dict[str, str] = {}
         if settings.mcp_discover_campaigns:
-            raw_campaigns = await self._discover_context_from_mcp(parent_asin, shop_account, parent_seller_sku)
+            # 并行：ad_campaign_list (活动清单) + ad_campaign_product_keyword_list (关键词数据)
+            list_task = asyncio.create_task(
+                self._fetch_campaign_list(parent_asin, parent_seller_sku, shop_account),
+            )
+            kw_task = asyncio.create_task(
+                self._discover_context_from_mcp(parent_asin, shop_account, parent_seller_sku),
+            )
+            raw_campaigns = await kw_task
+            campaign_name_to_id = await list_task
             if raw_campaigns:
                 logger.info(
                     "_discover_context [%s]: %d rows (MCP)", parent_asin, len(raw_campaigns),
@@ -131,8 +140,16 @@ class CampaignFetcher:
         shop_id = db_ctx.shop_id or 0
         self._last_shop_id = shop_id
 
-        # 唯一活动名（去重）
+        # 唯一活动名（去重）+ campaign_id 映射
         names = sorted({str(c.get("campaign_name") or "") for c in surviving})
+        # 构建 id_list：优先用 ad_campaign_list 返回的 id，否则从 surviving 取
+        id_list: list[tuple[str, str]] = []
+        for name in names:
+            cid = campaign_name_to_id.get(name) or str(
+                next((c.get("campaign_id") for c in surviving if c.get("campaign_name") == name), "")
+            )
+            if cid:
+                id_list.append((name, cid))
 
         basic_results: dict[str, dict] = {}
         perf_results: dict[str, dict] = {}
@@ -147,10 +164,18 @@ class CampaignFetcher:
                 parent_asin, parent_seller_sku, shop_account, site_code, days))
             if has_exact else None
         )
-        # basic_info 批量（campaign_name_list 逗号分隔，≤20）→ 与 perf 逐条并行
-        basic_batch_task = asyncio.create_task(
-            self._fetch_basic_batch(names, shop_account),
-        )
+        # basic_info 批量（ad_campaign_basic_info_v2: campaign_id_list 逗号分隔，≤20）
+        # 开关 campaign_basic_info_v2 控制；V2 稳定后可删除 V1 分支及旧 _fetch_basic_batch
+        if settings.campaign_basic_info_v2 and id_list:
+            basic_batch_task = asyncio.create_task(
+                self._fetch_basic_batch_v2(id_list, shop_account),
+            )
+        else:
+            if settings.campaign_basic_info_v2:
+                logger.warning("basic_info [%s]: 无 campaign_id，回退 V1 name 批量", parent_asin)
+            basic_batch_task = asyncio.create_task(
+                self._fetch_basic_batch(names, shop_account),
+            )
         perf_list_raw = await asyncio.gather(*[
             self._fetch_perf_one(name, shop_account, start_date, end_date)
             for name in names
@@ -259,8 +284,95 @@ class CampaignFetcher:
             )
             return []
 
-    _BASIC_BATCH_SIZE = 20  # campaign_name_list 单次上限
+    async def _fetch_campaign_list(
+        self, parent_asin: str, parent_seller_sku: str, shop_account: str,
+    ) -> dict[str, str]:
+        """调用 ad_campaign_list → 返回 {campaign_name: campaign_id}。
 
+        与 _discover_context_from_mcp 并行调用；返回只有 2 字段，秒回。
+        """
+        try:
+            res = await self._mcp().call_tool_timed_with_args(
+                "ad_campaign_list",
+                {
+                    "parent_asin": parent_asin,
+                    "parent_seller_sku": parent_seller_sku or "",
+                    "shop_account": shop_account or "",
+                },
+                timeout=60.0,
+            )
+            if not res.ok:
+                logger.warning(
+                    "_fetch_campaign_list [%s] MCP 失败: %s", parent_asin, res.error,
+                )
+                return {}
+            name_to_id: dict[str, str] = {}
+            for row in _as_rows(res.value):
+                n = str(row.get("广告活动名称") or "").strip()
+                cid = str(row.get("广告活动id") or "").strip()
+                if n and cid:
+                    name_to_id[n] = cid
+            logger.info(
+                "_fetch_campaign_list [%s]: %d 活动 (MCP)", parent_asin, len(name_to_id),
+            )
+            return name_to_id
+        except Exception as e:  # noqa: BLE001
+            logger.warning("_fetch_campaign_list [%s] 异常: %s", parent_asin, e)
+            return {}
+
+    _BASIC_BATCH_SIZE = 20  # campaign_id_list 单次上限
+
+    async def _fetch_basic_batch_v2(
+        self, id_list: list[tuple[str, str]], shop_account: str,
+    ) -> dict[str, dict]:
+        """批量调用 ad_campaign_basic_info_v2（campaign_id_list 逗号分隔，每批 ≤20）。
+
+        id_list = [(campaign_name, campaign_id), ...]
+        返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
+               days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
+        不在返回中的活动 → 调用方走 mcp_fail 默认值。
+        key 始终用入参的 campaign_name（与 surviving 对齐）。
+        """
+        results: dict[str, dict] = {}
+        id_to_name = {cid: name for name, cid in id_list}
+
+        async def _one(chunk: list[tuple[str, str]]) -> None:
+            ids = [cid for _, cid in chunk]
+            try:
+                res = await self._mcp().campaign_call_tool(
+                    "ad_campaign_basic_info_v2", "", shop_account,
+                    campaign_id_list=",".join(ids),
+                    timeout=420.0,   # 批量 ≤20 活动，比单活动 300s 宽
+                )
+                if res.ok:
+                    # 按入参 id 匹配 MCP 返回行，key 用入参 name
+                    for row in _as_rows(res.value):
+                        cid = str(row.get("广告活动id") or row.get("campaign_id") or "").strip()
+                        name = id_to_name.get(cid)
+                        if name:
+                            results[name] = {
+                                "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                                "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
+                                "campaign_status": str(row.get("状态") or ""),
+                                "days_online": _to_days_online(row.get("活动上线天数")),
+                                "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                                "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                                "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                            }
+                else:
+                    logger.warning("basic_info_v2 批量失败 [%d 活动]: %s", len(chunk), res.error)
+                    logger.debug("basic_info_v2 批量失败 ids: %s", ids)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("basic_info_v2 批量异常 [%d 活动]: %s", len(chunk), e)
+                logger.debug("basic_info_v2 批量异常 ids: %s", ids)
+
+        batches = [id_list[i:i + self._BASIC_BATCH_SIZE] for i in range(0, len(id_list), self._BASIC_BATCH_SIZE)]
+        await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
+        return results
+
+    _BASIC_BATCH_SIZE = 20  # campaign_id_list 单次上限
+
+    # [V1 保留兼容] 原 _fetch_basic_batch，V2 稳定后可删除
     async def _fetch_basic_batch(
         self, names: list[str], shop_account: str,
     ) -> dict[str, dict]:

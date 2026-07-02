@@ -463,17 +463,20 @@ class McpAdapter(DataSourceAdapter):
         timeout: float | None = None,
         *,
         campaign_name_list: str = "",
+        campaign_id_list: str = "",
     ) -> _CallResult:
         """Campaign 级 MCP 工具调用封装。
 
         与 call_tool_timed（ASIN 级）不同，使用 campaign_name 而非 parent_asin。
-        ad_campaign_basic_info 支持 campaign_name_list 批量（逗号分隔，≤20）。
+        ad_campaign_basic_info_v2 支持 campaign_id_list 批量（逗号分隔，≤20）。
+        ad_campaign_basic_info (V1) 支持 campaign_name_list 批量。
         """
         from app.data.mcp_mapping import build_campaign_tool_args
 
         args = build_campaign_tool_args(
             tool_name, campaign_name, shop_account, start_date, end_date,
             campaign_name_list=campaign_name_list,
+            campaign_id_list=campaign_id_list,
         )
         t = timeout if timeout is not None else getattr(settings, "campaign_mcp_tool_timeout", 300.0)
         return await self.call_tool_timed_with_args(tool_name, args, t)
