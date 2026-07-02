@@ -248,8 +248,8 @@ class CampaignFetcher:
                 "ad_campaign_product_keyword_list",
                 {
                     "parent_asin": parent_asin,
-                    "parent_seller_sku": parent_seller_sku or "",
-                    "shop_account": shop_account or "",
+                    "parent_seller_sku": parent_seller_sku,
+                    "shop_account": shop_account,
                 },
                 timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
             )
@@ -296,8 +296,8 @@ class CampaignFetcher:
                 "ad_campaign_list",
                 {
                     "parent_asin": parent_asin,
-                    "parent_seller_sku": parent_seller_sku or "",
-                    "shop_account": shop_account or "",
+                    "parent_seller_sku": parent_seller_sku,
+                    "shop_account": shop_account,
                 },
                 timeout=60.0,
             )
@@ -331,10 +331,9 @@ class CampaignFetcher:
         返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
                days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
         不在返回中的活动 → 调用方走 mcp_fail 默认值。
-        key 始终用入参的 campaign_name（与 surviving 对齐）。
+        注：V2 响应不含 campaign_id，匹配靠广告活动名称（与 _fetch_basic_batch 同模式）。
         """
         results: dict[str, dict] = {}
-        id_to_name = {cid: name for name, cid in id_list}
 
         async def _one(chunk: list[tuple[str, str]]) -> None:
             ids = [cid for _, cid in chunk]
@@ -345,11 +344,15 @@ class CampaignFetcher:
                     timeout=420.0,   # 批量 ≤20 活动，比单活动 300s 宽
                 )
                 if res.ok:
-                    # 按入参 id 匹配 MCP 返回行，key 用入参 name
+                    # V2 返回不含 campaign_id，按广告活动名称建索引再匹配入参名
+                    row_by_name: dict[str, dict] = {}
                     for row in _as_rows(res.value):
-                        cid = str(row.get("广告活动id") or row.get("campaign_id") or "").strip()
-                        name = id_to_name.get(cid)
-                        if name:
+                        raw = str(row.get("广告活动名称") or "").strip()
+                        if raw:
+                            row_by_name[raw] = row
+                    for name, _ in chunk:
+                        row = row_by_name.get(name.strip())
+                        if row is not None:
                             results[name] = {
                                 "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
                                 "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
