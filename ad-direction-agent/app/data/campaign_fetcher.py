@@ -329,7 +329,7 @@ class CampaignFetcher:
         返回 {campaign_name: {campaign_budget, keyword_bid, campaign_status,
                days_online, tos_bid_pct, pp_bid_pct, ros_bid_pct}}。
         不在返回中的活动 → 调用方走 mcp_fail 默认值。
-        按入参 campaign_id_list 顺序与返回 rows 位置配对，不依赖名称匹配。
+        V2 响应含广告活动名称，按名称匹配入参，不依赖返回顺序。
         """
         results: dict[str, dict] = {}
 
@@ -342,26 +342,24 @@ class CampaignFetcher:
                     timeout=420.0,   # 批量 ≤20 活动，比单活动 300s 宽
                 )
                 if res.ok:
-                    rows = _as_rows(res.value)
-                    # 按入参顺序配对（入参 campaign_id_list 顺序 = MCP 返回顺序），
-                    # 避免名称匹配因空格/编码差异静默丢数据。
-                    for i, (name, cid) in enumerate(chunk):
-                        if i >= len(rows):
-                            logger.warning(
-                                "basic_info_v2 响应缺行 [%s]: campaign_id=%s 期望 %d 行实得 %d 行",
-                                name, cid, len(chunk), len(rows),
-                            )
-                            continue
-                        row = rows[i]
-                        results[name] = {
-                            "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
-                            "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
-                            "campaign_status": str(row.get("状态") or ""),
-                            "days_online": _to_days_online(row.get("活动上线天数")),
-                            "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
-                            "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
-                            "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
-                        }
+                    # 按广告活动名称建索引，再按入参名查找（不依赖 MCP 返回顺序）
+                    row_by_name: dict[str, dict] = {}
+                    for row in _as_rows(res.value):
+                        raw = str(row.get("广告活动名称") or "").strip()
+                        if raw:
+                            row_by_name[raw] = row
+                    for name, _ in chunk:
+                        row = row_by_name.get(name.strip())
+                        if row is not None:
+                            results[name] = {
+                                "campaign_budget": _to_float(row.get("广告活动预算")) or 0.0,
+                                "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
+                                "campaign_status": str(row.get("状态") or ""),
+                                "days_online": _to_days_online(row.get("活动上线天数")),
+                                "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
+                                "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
+                                "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                            }
                 else:
                     logger.warning("basic_info_v2 批量失败 [%d 活动]: %s", len(chunk), res.error)
                     logger.debug("basic_info_v2 批量失败 ids: %s", ids)
