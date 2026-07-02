@@ -129,6 +129,9 @@ class McpAdapter(DataSourceAdapter):
         retries = max(0, settings.mcp_retries)
         last_err = None
         for attempt in range(retries + 1):
+            # 首次请求加 50-200ms 随机抖动，打散批量并发，避免瞬间压满网关连接池
+            if attempt == 0:
+                await asyncio.sleep(random.uniform(0.01, 0.30))
             t0 = time.monotonic()
             try:
                 async with self._sem:
