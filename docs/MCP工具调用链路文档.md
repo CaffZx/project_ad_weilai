@@ -14,7 +14,7 @@
 ## 阶段 0：ASIN 主数据拉取
 
 **入口**：`mcp_adapter.fetch_asin_data()`  
-**并发行**：`run_planned_mcp_tools` 通过 `asyncio.gather` + `Semaphore(115)` 控制
+**并发行**：`run_planned_mcp_tools` 通过 `asyncio.gather` + per-worker `Semaphore(mcp_max_concurrency)` 控制（默认 115，服务器当前 5）
 
 ### 0a. `parent_listing_detail`（串行，最先）
 
@@ -27,7 +27,7 @@
 | **返回结构** | `{父ASIN, 父卖家SKU, 店铺ID, 店铺账号, 站点, 产品中文名, 产品名称}` → 映射为 `McpDbContext` |
 | **下游消费** | 构造 `McpContext`（含 start_date/end_date），注入 0b–0d 所有工具的入参；site_code 决定日期窗口时区 |
 
-### 0b. `listing_basic_info`（串行，紧跟 0a）
+### 0b. `listing_basic_info_v2`（串行，紧跟 0a）
 
 | 项目 | 内容 |
 |---|---|
@@ -35,7 +35,7 @@
 | **调用目的** | 获取星级、价格等基础信息 |
 | **入参** | `{"shop_account", "parent_asin", "parent_seller_sku"}` — 来自 0a 返回 |
 | **arg builder** | `mcp_mapping.py:103-107` |
-| **返回结构** | `{seller_sku, product_price, star_level, comment_num, brand, category_name, refund_rate}`（经 `normalize_listing_basic_info`） |
+| **返回结构** | `{标题, 星级, 售价, 16周退款率}`（V2 精简版，经 `normalize_listing_basic_info`） |
 | **下游消费** | 总览分析消费以上内容 |
 
 ### 0c. Phase 1 — Bootstrap + 报告工具（全部并行）
@@ -45,7 +45,7 @@
 
 | 工具 | 来源 | 入参（均来自 0a+0b 构造的 McpContext） | 返回（经 normalizer） | 下游消费 |
 |---|---|---|---|---|
-| 0c-1 `listing_basic_info` | BOOTSTRAP_TOOLS | `{shop_account, parent_asin, parent_seller_sku}` | 同 0b | `assemble_from_payloads` → `data.sku` |
+| 0c-1 `listing_basic_info_v2` | BOOTSTRAP_TOOLS | `{shop_account, parent_asin, parent_seller_sku}` | 同 0b | `assemble_from_payloads` → `data.sku` |
 | 0c-2 `listing_inventory` | BOOTSTRAP_TOOLS | `{parent_asin, parent_seller_sku, shop_account}` | `{FBA可售}`（库存量） | `data.signals.inventory_qty`（跨子 ASIN 汇总） |
 | 0c-3 `ad_campaign_product_keyword_list` | BOOTSTRAP_TOOLS | `{parent_asin, parent_seller_sku, shop_account}` | `[{广告活动名称, 关键词, 关键词匹配类型, 子ASIN, ...}]` | ① `_extract_campaign_exact_keywords` 提取 EXACT 关键词 → 供 Phase 2 逐词查排名 ② 当 `ad_keyword_report` 空时回退为关键词列表 |
 | 0c-4 `ad_product_report` | META_AD_PRODUCT | `{parent_asin, parent_seller_sku, shop_account, start_date, end_date}` | `{cost, sale, clicks, impressions, orders, acos, cpc, ctr, cvr, campaign_budget}` | `data.ad_data`（AdData 模型） |
@@ -215,7 +215,7 @@
 ```
 0a → 0b (串行)
   ↓
-0c (5 工具全并行: listing_basic_info, listing_inventory, ad_campaign_product_keyword_list, ad_product_report, product_sales)
+0c (5 工具全并行: listing_basic_info_v2, listing_inventory, ad_campaign_product_keyword_list, ad_product_report, product_sales)
   ↓
 0d (keyword_child_asins × N ≤50, 全并行)
 ─────────────────────────────────
@@ -249,4 +249,5 @@ ERP Write (MySQL, 21 表)
 | `ad_placement_report`（ASIN 级） | 被 campaign 级 `ad_campaign_placement_report` 替代 |
 | `ad_search_term_report`（ASIN 级） | 被 campaign 级 `ad_campaign_search_term_report` 替代 |
 | `ad_optimization` | 工具已注册，尚未接入 |
+| `listing_basic_info`（V1） | 已注册但项目已全量切换到 V2（V1 返回字段冗余，V2 精简） |
 | `shein_*` / `product_competitors*` 系列 | 非广告方向，不适用 |
