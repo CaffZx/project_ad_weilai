@@ -299,7 +299,7 @@ class McpAdapter(DataSourceAdapter):
         listing = normalize_listing_basic_info(payload_map.get("listing_basic_info_v2"))
         if "listing_basic_info_v2" not in missing_fields and not listing:
             missing_fields.append("asin_not_found")
-        inventory_rows = payload_map.get("listing_inventory")
+        inventory_rows = payload_map.get("parent_listing_stock_summary")
         ad_summary = normalize_ad_summary(payload_map.get("ad_product_report"))
         placement = normalize_ad_placement(payload_map.get("ad_placement_report"))
         keywords = normalize_keywords(payload_map.get("ad_keyword_report"))
@@ -420,13 +420,12 @@ class McpAdapter(DataSourceAdapter):
         if nor is not None:
             data.natural_order_ratio = nor
 
-        # listing_inventory 原始返回可能是 envelope（{"rows":[...]}/{"data":[...]}/单行 dict），
-        # 必须经 _as_rows 解包（与空检查、其它工具口径一致）；原先裸 isinstance(list) 在 envelope 下
-        # 恒为 False → 库存被丢成 None（数据查到了但没透传）。
+        # parent_listing_stock_summary 返回已在父 ASIN 层聚合好的 4 种 FBA 库存（单行汇总）。
         inv_rows = _as_rows(inventory_rows)
-        # FBA可售：实测中文 key，父 ASIN 下各子 ASIN 加总
+        row = inv_rows[0] if inv_rows else {}
         data.signals = SpecialSignals(
-            inventory_qty=sum(_int(r.get("FBA可售")) or 0 for r in inv_rows)
+            inventory_qty=_int(row.get("FBA可售库存")) or 0,
+            in_transit_inventory=_int(row.get("FBA入库库存")),
         )
 
         for row in trend_rows:

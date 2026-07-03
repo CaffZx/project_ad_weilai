@@ -77,7 +77,7 @@ def _ad_common(ctx: McpContext) -> dict:
 
 # 每次 ASIN 数据拉取必调的基础工具（上下文解析前提）。
 # 原定义在 mcp_tool_fallback.py（已随 Doris 切除删除），此处为唯一真源。
-BOOTSTRAP_TOOLS: frozenset[str] = frozenset({"listing_basic_info_v2", "listing_inventory", "ad_campaign_product_keyword_list"})
+BOOTSTRAP_TOOLS: frozenset[str] = frozenset({"listing_basic_info_v2", "parent_listing_stock_summary", "ad_campaign_product_keyword_list"})
 
 META_TO_MCP_TOOLS: dict[str, list[str]] = {
     # 2026-06-30: ad_keyword_report MCP 工具已下线（服务端拆分），Doris 回落已切除。
@@ -105,7 +105,7 @@ TOOL_ARG_BUILDERS: dict[str, ArgBuilder] = {
         "parent_asin": ctx.parent_asin,
         "parent_seller_sku": ctx.parent_seller_sku,
     },
-    "listing_inventory": lambda ctx: {
+    "parent_listing_stock_summary": lambda ctx: {
         "parent_asin": ctx.parent_asin,
         "parent_seller_sku": ctx.parent_seller_sku,
         "shop_account": ctx.shop_account,

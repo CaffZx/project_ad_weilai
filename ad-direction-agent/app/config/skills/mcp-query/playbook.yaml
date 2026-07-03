@@ -9,7 +9,7 @@ phases:
   - id: mcp_bootstrap
     tools:
       - listing_basic_info_v2
-      - listing_inventory
+      - parent_listing_stock_summary
       - ad_campaign_product_keyword_list
     timeout_seconds: ${MCP_BOOTSTRAP_TIMEOUT}
     concurrency: ${MCP_MAX_CONCURRENCY}

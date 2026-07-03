@@ -112,7 +112,7 @@ async def probe_mcp(asin: str) -> None:
         end_date=end,
     )
     adapter = McpAdapter()
-    for tool in ("listing_inventory", "ad_keyword_report"):
+    for tool in ("parent_listing_stock_summary",):
         limit = (
             settings.mcp_bootstrap_timeout if tool in BT else settings.mcp_tool_timeout
         )

@@ -55,7 +55,7 @@ def _tool_payload_empty(tool: str, payload) -> bool:
         return not normalize_flow_keywords(payload)
     if tool == "ad_placement_report":
         return not _as_rows(payload)
-    if tool == "listing_inventory":
+    if tool == "parent_listing_stock_summary":
         return not _as_rows(payload)
     return not _as_rows(payload)
 
@@ -115,11 +115,11 @@ def empty_report_tools(
         "listing_basic_info_v2" in payload_map
         and "listing_basic_info_v2" not in missing_set
         and normalize_listing_basic_info(payload_map.get("listing_basic_info_v2"))
-        and "listing_inventory" in payload_map
-        and "listing_inventory" not in missing_set
-        and _tool_payload_empty("listing_inventory", payload_map.get("listing_inventory"))
+        and "parent_listing_stock_summary" in payload_map
+        and "parent_listing_stock_summary" not in missing_set
+        and _tool_payload_empty("parent_listing_stock_summary", payload_map.get("parent_listing_stock_summary"))
     ):
-        tools.append("listing_inventory")
+        tools.append("parent_listing_stock_summary")
 
     return list(dict.fromkeys(tools))
 

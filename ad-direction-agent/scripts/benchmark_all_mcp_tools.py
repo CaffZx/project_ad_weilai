@@ -30,11 +30,10 @@ APP_TOOLS = tuple(
     dict.fromkeys(
         [
             "listing_basic_info",
-            "listing_inventory",
+            "parent_listing_stock_summary",
             "ad_product_report",
             "ad_placement_report",
             "ad_search_term_report",
-            "ad_keyword_report",
             "keyword_competitors",
             "keyword_child_asins",
             "flow_keywords",
@@ -174,15 +173,14 @@ def _print_stats(rows: list[tuple[str, str, float, str, str]]) -> None:
     )
 
     tool_sec = {r[0]: r[2] for r in ok_rows}
-    bootstrap = max(tool_sec.get("listing_basic_info", 0.0), tool_sec.get("listing_inventory", 0.0))
+    bootstrap = max(tool_sec.get("listing_basic_info", 0.0), tool_sec.get("parent_listing_stock_summary", 0.0))
     for scene, meta_ids in DEFAULT_META_FILTERS.items():
-        scene_tools = ["listing_basic_info", "listing_inventory"]
+        scene_tools = ["listing_basic_info", "parent_listing_stock_summary"]
         for meta in meta_ids:
             scene_tools.extend({
                 "META_AD_PRODUCT": ["ad_product_report"],
                 "META_AD_PLACEMENT": ["ad_placement_report"],
                 "META_AD_SEARCH_TERM": ["ad_search_term_report"],
-                "META_KW_AD": ["ad_keyword_report"],
                 "META_KW_COMPETITOR_RANK": ["keyword_competitors", "keyword_child_asins"],
                 "META_KW_SUB_ASIN_RANK": ["keyword_child_asins"],
                 "META_FLOW_KEYWORD": ["flow_keywords"],
@@ -190,7 +188,7 @@ def _print_stats(rows: list[tuple[str, str, float, str, str]]) -> None:
                 "META_COMPETITOR": ["direct_competitors"],
             }.get(meta, []))
         unique_tools = sorted(dict.fromkeys(scene_tools))
-        phase_b = [t for t in unique_tools if t not in ("listing_basic_info", "listing_inventory")]
+        phase_b = [t for t in unique_tools if t not in ("listing_basic_info", "parent_listing_stock_summary")]
         estimated = bootstrap + max([tool_sec.get(t, 0.0) for t in phase_b] or [0.0])
         print(
             f"Estimated phased wall-time ({scene}): "
