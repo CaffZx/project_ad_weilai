@@ -212,6 +212,29 @@ class CampaignFetcher:
             parent_asin, mcp_ok, mcp_fail, fetch_source,
         )
 
+        # ④½ basic_info 批量失败 → 移入 excluded（预过滤灰卡），不进 LLM
+        mcp_fail_names = {n for n, b in basic_results.items() if b.get("source") == "mcp_fail"}
+        if mcp_fail_names:
+            _kept: list[dict] = []
+            for camp in surviving:
+                name = str(camp.get("campaign_name") or "")
+                if name in mcp_fail_names:
+                    excluded.append({
+                        "campaign_name": name,
+                        "campaign_id": str(camp.get("campaign_id") or ""),
+                        "child_asin": str(camp.get("child_asin") or ""),
+                        "match_type": str(camp.get("match_type") or ""),
+                        "keyword_text": str(camp.get("keyword_text") or ""),
+                        "reason": "MCP 批量拉取失败（basic_info 不可用），请到 ERP 手动修改",
+                    })
+                else:
+                    _kept.append(camp)
+            logger.warning(
+                "Campaign MCP [%s]: %d 个活动 basic_info 拉取失败 → 移入预过滤灰卡",
+                parent_asin, len(mcp_fail_names),
+            )
+            surviving = _kept
+
         # ⑤ 组装 CampaignUnit
         campaigns: list[CampaignUnit] = []
         for camp in surviving:

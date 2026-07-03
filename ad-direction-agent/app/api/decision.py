@@ -45,16 +45,13 @@ async def decision_context(asin: str = "", shopId: str = ""):
                 "latest_completed_updated_at": None, "batches": [], "degraded": False}
 
     try:
-        # 1. 检查长期配置是否已存在（state DB）
+        # 1. 进行中事件标记（state 库，run_id 句柄；不污染 ERP 库）
         state = get_state_manager()
-        long_term = state.get_long_term_config(asin) or {}
-        has_config = bool(long_term.get("product_level") or long_term.get("product_stage"))
-
-        # 2. 进行中事件标记（state 库，run_id 句柄；不污染 ERP 库）
         sess = state.get_analysis_session(asin)
         in_progress = sess.get("run_id") if sess else None
 
-        # 3. ERP DB 已完成批次列表（容错: DB 不通不崩）
+        # 2. ERP DB 已完成批次列表（容错: DB 不通不崩）
+        #    has_config 以 ERP 历史记录为准：有已完成批次即视为已配置（与 state 库无关）。
         batches = []
         latest_updated = None
         try:
@@ -67,13 +64,15 @@ async def decision_context(asin: str = "", shopId: str = ""):
         except Exception as e:
             logger.warning("ERP DB 连不上，批次查询降级: %s", e)
             return {
-                "has_config": has_config,
+                "has_config": False,
                 "in_progress": in_progress,
                 "latest_completed_id": None,
                 "latest_completed_updated_at": None,
                 "batches": [],
                 "degraded": True,
             }
+
+        has_config = len(batches) > 0
 
         # 4. 计算 executable = 最新批次 且 无进行中事件
         for b in batches:

@@ -129,15 +129,15 @@ def test_batch_exception_returns_partial():
     assert results == {}
 
 
-def test_batch_returns_only_sent_campaigns():
-    """批量返回不应包含未请求的活动名。"""
+def test_batch_filters_to_only_requested_campaigns():
+    """批量返回只包含请求的活动名（MCP 多返回的无关联活动被过滤）。"""
     f = _make_fetcher()
     f._mcp_adapter.campaign_call_tool = AsyncMock(return_value=MagicMock(
         ok=True,
         value={"rows": [_basic_row("c0"), _basic_row("c1"), _basic_row("ghost")]},
     ))
     results = asyncio.run(f._fetch_basic_batch(["c0", "c1"], "shop1"))
-    assert set(results.keys()) == {"c0", "c1", "ghost"}  # MCP 返回的全保留
+    assert set(results.keys()) == {"c0", "c1"}
 
 
 def test_batch_empty_names():

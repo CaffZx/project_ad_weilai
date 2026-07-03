@@ -19,8 +19,8 @@ def test_load_mcp_query_playbook(skills_dir: Path):
     assert pb.name == "mcp-query"
     assert pb.version == 1
     assert pb.phase("context") is not None
-    assert "listing_basic_info" in pb.bootstrap_tools
-    assert pb.fallback.on_mcp_failure == "doris"
+    assert "listing_basic_info_v2" in pb.bootstrap_tools
+    assert pb.fallback.on_mcp_failure == "none"
 
 
 def test_playbook_resolves_settings_timeouts(skills_dir: Path):
@@ -56,7 +56,7 @@ async def test_fetch_phased_delegates_to_skill(monkeypatch):
         fake_run,
     )
 
-    result = await fetch_phased("B0TEST", days=7, prefer_db=False)
+    result = await fetch_phased("B0TEST", days=7)
     assert called["skill"] == "mcp-query"
     assert called["asin"] == "B0TEST"
     assert result.data_freshness == "fresh"
