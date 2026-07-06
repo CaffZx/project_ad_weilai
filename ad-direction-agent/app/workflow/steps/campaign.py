@@ -1951,8 +1951,8 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
     Returns:
         bool: True 表示 action 被改写过 (用于日志统计)
     """
-    # 淘汰/复评由 LLM+规则引擎决定,代码不 derive (淘汰组业务语义 + 复评情况一/二语义)
-    if item.action == "eliminate_to_low_bid_pool" or (item.action or "").startswith("reactivate"):
+    # 淘汰由 LLM 决定,代码不干预 (淘汰组业务语义)
+    if item.action == "eliminate_to_low_bid_pool":
         return False
 
     _EPS = 0.001
