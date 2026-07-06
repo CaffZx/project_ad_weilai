@@ -1,17 +1,23 @@
-"""_resolve_budget_conflicts 新活动保护（KB 21 §2）单测。
+"""_resolve_budget_conflicts 淘汰保护（KB 21 §2）单测。
 
-验证上线 ≤3 天的新活动不被强制淘汰，LLM 误判淘汰时强制修正为 keep。
+验证三种保护条件 OR：
+  1. 上线 ≤3 天（新活动样本不足）
+  2. 测试期 + 上线 <14 天（测试期样本保护）
+  3. 复评后 ≤3 天（防淘汰↔复评抖动 / days_since_reactivation）
+命中任一 → 不强制淘汰，LLM 误判淘汰时强制修正为 keep。
 """
 
 import os
 os.environ["LLM_GLOBAL_CONCURRENCY"] = "420"
 
+import pytest
 from app.models.campaign import CampaignAdjustmentItem
 from app.workflow.steps.campaign import _resolve_budget_conflicts
 
 
 def _item(name="c1", action="keep", current_budget=1.0, current_bid=0.20,
-          proposed_budget=None, proposed_bid=None, days_online=-1):
+          proposed_budget=None, proposed_bid=None, days_online=-1,
+          days_since_reactivation=-1):
     """工厂：构造 CampaignAdjustmentItem，默认模拟已淘汰池活动。"""
     return CampaignAdjustmentItem(
         campaign_name=name,
@@ -22,6 +28,7 @@ def _item(name="c1", action="keep", current_budget=1.0, current_bid=0.20,
         proposed_budget=proposed_budget,
         proposed_bid=proposed_bid,
         days_online=days_online,
+        days_since_reactivation=days_since_reactivation,
     )
 
 
@@ -156,4 +163,119 @@ def test_mixed_batch_new_and_old():
     assert old1.action == "eliminate_to_low_bid_pool"  # 照常淘汰
     assert new2.action == "keep"                    # LLM 误判修正
     assert len(warnings) == 1  # 仅 new2 产生 warning
-    assert "new2" in warnings[0]
+
+
+# ── 测试期保护（product_stage=测试期 + days_online < 14）──────────
+
+def test_testing_stage_under_14_days_protected():
+    """测试期活动上线 10 天、预算=$1 → 不强制淘汰（KB 21 §2 测试期样本保护）。"""
+    item = _item(days_online=10, current_budget=1.0, current_bid=0.50, action="keep")
+    _resolve_budget_conflicts([item], product_stage="测试期")
+    assert item.action == "keep"
+
+
+def test_testing_stage_llm_misjudge_corrected():
+    """测试期活动上线 10 天，LLM 误判 eliminate → 强制修正为 keep。"""
+    item = _item(days_online=10, current_budget=5.0, current_bid=0.50,
+                 proposed_budget=1.0, proposed_bid=0.20,
+                 action="eliminate_to_low_bid_pool")
+    item.direction = {"bid": "down"}
+    warnings = _resolve_budget_conflicts([item], product_stage="测试期")
+
+    assert item.action == "keep"
+    assert item.proposed_budget == 5.0
+    assert item.proposed_bid == 0.50
+    assert item.direction == {}
+    assert len(warnings) == 1
+    assert "测试期且上线仅 10 天" in warnings[0]
+    assert "受样本保护" in warnings[0]
+
+
+def test_testing_stage_boundary_14_days_not_protected():
+    """测试期活动上线恰好 14 天 → 不再受保护（≥14），触发强制淘汰。"""
+    item = _item(days_online=14, current_budget=1.0, current_bid=0.50, action="keep")
+    _resolve_budget_conflicts([item], product_stage="测试期")
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+def test_non_testing_stage_not_protected_by_stage_rule():
+    """产品阶段不是测试期时仅靠 days_online=10 不触发测试期保护（走新活动 ≤3 那条也够不着）。"""
+    item = _item(days_online=10, current_budget=1.0, current_bid=0.50, action="keep")
+    _resolve_budget_conflicts([item], product_stage="推进期")
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+def test_testing_stage_unknown_days_not_protected():
+    """测试期但 days_online=-1 → 未知天数不给保护（安全侧）。"""
+    item = _item(days_online=-1, current_budget=1.0, current_bid=0.50, action="keep")
+    _resolve_budget_conflicts([item], product_stage="测试期")
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+# ── 复评防抖（days_since_reactivation ≤ 3）────────────────────────
+
+def test_reactivation_within_3_days_protected():
+    """复评后 2 天，预算=$1 → 不强制淘汰（防淘汰↔复评抖动）。"""
+    item = _item(days_online=30, current_budget=1.0, current_bid=0.50,
+                 days_since_reactivation=2, action="keep")
+    _resolve_budget_conflicts([item])
+    assert item.action == "keep"
+
+
+def test_reactivation_llm_misjudge_corrected():
+    """复评后 1 天，LLM 误判 eliminate → 强制修正为 keep。"""
+    item = _item(days_online=30, current_budget=8.0, current_bid=0.80,
+                 proposed_budget=1.0, proposed_bid=0.20,
+                 days_since_reactivation=1, action="eliminate_to_low_bid_pool")
+    item.direction = {"bid": "down", "budget": "down"}
+    warnings = _resolve_budget_conflicts([item])
+
+    assert item.action == "keep"
+    assert item.proposed_budget == 8.0
+    assert item.proposed_bid == 0.80
+    assert item.direction == {}
+    assert len(warnings) == 1
+    assert "复评后仅 1 天" in warnings[0]
+
+
+def test_reactivation_boundary_3_days_protected():
+    """复评后恰好 3 天 → 受保护（≤3）。"""
+    item = _item(days_online=30, current_budget=1.0, current_bid=0.50,
+                 days_since_reactivation=3, action="keep")
+    _resolve_budget_conflicts([item])
+    assert item.action == "keep"
+
+
+def test_reactivation_boundary_4_days_not_protected():
+    """复评后 4 天 → 不再受保护，触发强制淘汰。"""
+    item = _item(days_online=30, current_budget=1.0, current_bid=0.50,
+                 days_since_reactivation=4, action="keep")
+    _resolve_budget_conflicts([item])
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+def test_never_reactivated_not_protected():
+    """days_since_reactivation=-1（从未复评）→ 不触发复评防抖，但不影响新活动保护（days_online=2 也够）。"""
+    item = _item(days_online=30, current_budget=1.0, current_bid=0.50,
+                 days_since_reactivation=-1, action="keep")
+    _resolve_budget_conflicts([item])
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+# ── 三条件同时覆盖的混合场景 ──────────────────────────────────────
+
+@pytest.mark.parametrize("days_online,days_since_react,stage,expected_action", [
+    (2, -1, "", "keep"),           # 新活动 ≤3 天
+    (10, -1, "测试期", "keep"),     # 测试期 <14 天
+    (30, 2, "", "keep"),           # 复评后 ≤3 天
+    (4, -1, "", "eliminate_to_low_bid_pool"),  # 都不满足 → 强制淘汰
+    (30, 4, "推进期", "eliminate_to_low_bid_pool"),  # 都不满足
+])
+def test_all_protection_conditions_orthogonal(
+    days_online, days_since_react, stage, expected_action,
+):
+    """三条件正交：任一中=保护，都不中=淘汰。"""
+    item = _item(days_online=days_online, current_budget=1.0, current_bid=0.50,
+                 days_since_reactivation=days_since_react, action="keep")
+    _resolve_budget_conflicts([item], product_stage=stage)
+    assert item.action == expected_action

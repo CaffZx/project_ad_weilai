@@ -1741,7 +1741,7 @@ class ErpDualWriterRepository:
                             campaign_key, campaign_name, keyword_text, decision_id, source,
                             entry_date, exit_date, eliminate_spend_7d,
                             create_time, update_time)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
                            ON DUPLICATE KEY UPDATE
                             exit_date = NULL,
                             entry_date = VALUES(entry_date),
