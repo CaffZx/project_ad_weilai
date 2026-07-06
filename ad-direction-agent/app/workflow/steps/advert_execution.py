@@ -29,6 +29,88 @@ from app.workflow.steps.portfolio_execution import (
 logger = logging.getLogger(__name__)
 
 
+def _sync_pool_entries_from_exec(
+    pending: dict, plan, *, mcp_async_ok: bool, repo,
+) -> None:
+    """执行钩子：根据本次 MCP 真跑结果写/删 t_advert_agent_pool_entry。
+
+    触发条件：
+      - 淘汰卡（suggest_category='ELIMINATE'）：async_batch_update 成功 → upsert_pool_entry
+      - 复评卡（trigger_rule 以 'REACTIVATE_' 开头）：async_batch_update 成功 → mark_pool_exit
+
+    只看 async_batch_update 的整批结果（改已有活动统一走过它）：
+      新建/否词路径不涉及淘汰/复评，无需单独判。MCP 部分失败时 ops 已逐条带 execute_status，
+      但池表语义是「活动已真被改成 $1/$0.20」或「真被改成 $3」——只要 async 这一批成功就写。
+
+    fail-open：DB 异常仅记日志，不阻断 MCP 已生效的事实。
+    """
+    dec = pending.get("decision") or {}
+    parent_asin = str(dec.get("parent_asin") or "")
+    if not parent_asin:
+        return
+    if not mcp_async_ok:
+        return  # MCP 没真跑成功，不写池表
+
+    shop_id = int(dec.get("shop_id") or 0) or None
+    shop_account = ""  # decision 行未含，由 sync_pool_entries 路径在分析时补；执行钩子无新源
+    parent_sku = str(dec.get("parent_seller_sku") or "") or None
+    decision_id = str(dec.get("id") or "") or None
+
+    cards = {str(c.get("id")): c for c in (pending.get("cards") or [])}
+    camp_pendings = pending.get("campaign_pending") or []
+
+    # 卡 → campaign_id 映射（改已有活动时 campaign_pending 上的 campaign_id 才是真值）
+    card_to_campaign: dict[str, str] = {}
+    for r in camp_pendings:
+        cid = str(r.get("suggest_card_id") or "")
+        camp_id = str(r.get("campaign_id") or "")
+        if cid and camp_id:
+            card_to_campaign[cid] = camp_id
+
+    for card_id, card in cards.items():
+        category = str(card.get("suggest_category") or "").upper()
+        trigger = str(card.get("trigger_rule") or "")
+        campaign_id = card_to_campaign.get(card_id) or str(card.get("campaign_id") or "")
+        if not campaign_id:
+            continue
+
+        if category == "ELIMINATE":
+            try:
+                repo.upsert_pool_entry(
+                    parent_asin,
+                    campaign_id=campaign_id,
+                    child_asin=str(card.get("asin") or "") or None,
+                    campaign_key=str(card.get("campaign_key") or "") or None,
+                    campaign_name=str(card.get("campaign_name") or "") or "",
+                    keyword_text=str(card.get("keyword") or "") or None,
+                    decision_id=decision_id,
+                    eliminate_spend_7d=_perf_json_cost(card.get("perf_json")),
+                    shop_id=shop_id,
+                    shop_account=shop_account or None,
+                    parent_sku=parent_sku,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("upsert_pool_entry 失败 [%s/%s]: %s", parent_asin, campaign_id, e)
+
+        if trigger.startswith("REACTIVATE_"):
+            try:
+                repo.mark_pool_exit(parent_asin, campaign_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("mark_pool_exit 失败 [%s/%s]: %s", parent_asin, campaign_id, e)
+
+
+def _perf_json_cost(perf_json) -> float | None:
+    """复用同名私有函数的轻量副本，避免跨模块循环导入。"""
+    if not perf_json:
+        return None
+    try:
+        d = perf_json if isinstance(perf_json, dict) else __import__("json").loads(perf_json)
+        v = d.get("cost")
+        return float(v) if v is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 async def _resolve_create_portfolios(
     client, plan, *, shop_id: int, parent_asin: str, parent_sku: str, operator: str,
 ) -> set[str]:
@@ -197,6 +279,16 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     )
     logger.info("Advert exec submitted [%s] record=%s tasks=%s ops=%d",
                 decision_id, record_id, task_ids, len(plan.ops))
+
+    # ★ 执行钩子：async_batch_update 成功 → 写/删 池表
+    async_ok = bool(results.get("async")) and not any(
+        str(e).startswith("async:") for e in errors
+    )
+    if async_ok:
+        _sync_pool_entries_from_exec(
+            pending, plan, mcp_async_ok=True, repo=repo,
+        )
+
     return {"ok": True, "record_id": record_id, "task_ids": task_ids,
             "ops": len(plan.ops), "warnings": plan.warnings}
 
@@ -290,6 +382,16 @@ async def submit_execution_direct(
         for i, e in enumerate(errors, 1):
             logger.warning("Advert exec direct [%s] error %d/%d: %s",
                            decision_id, i, len(errors), str(e)[:500])
+
+    # ★ 执行钩子：async_batch_update 成功 → 写/删 池表。新建/否词路径不影响池表。
+    async_ok = bool(results.get("async")) and not any(
+        str(e).startswith("async:") for e in errors
+    )
+    if async_ok:
+        _sync_pool_entries_from_exec(
+            pending, plan, mcp_async_ok=True, repo=_get_repository(),
+        )
+
     return {"ok": not errors, "ops": len(plan.ops), "task_ids": task_ids,
             "errors": errors, "warnings": plan.warnings}
 

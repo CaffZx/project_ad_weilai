@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-06-26（版本日志见文末，最新 v3.7）
+> **最后更新**: 2026-07-05（版本日志见文末，最新 v3.8：复评数据源重建 §27）
 > **版本**: v2.0
 > **分支**: chenv3.1
 
@@ -293,13 +293,13 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `_SYNTHESIS_ENABLED=True`，并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
-| ~~**新增广告活动分析**~~ | ✅ 已完成 | 2026-06-10/11 实现（KB 16+06，三股并行独立分析线）。详见 §9。**剩余子项**：建议竞价(suggestedBid)字段当前无源→bid 占位 $0.30，数据源到位后改 `_calc_initial_bid` 一处；`KEYWORD_PROMOTED_FROM_BROAD` 等 5 个触发场景未实现（需搜索词聚合/KB08/Custom词池）；新增活动预算未接入组合回算(KB23 §5.1)；ERP 写入未接 |
-| DB 落库 | P1 | `t_advert_agent_campaign_analysis` + `_adjustment` 表 |
-| ~~L420 投票 key 同源化~~ | ✅ 已解决（2026-06-26） | 改 cid 句柄方案：LLM 回吐批内 `C1..Cn`，代码 `cid_map` 权威回填 campaign_key（不再依赖 LLM 复现长串）；并补缺轮兜底（单轮/双轮缺失送 R3，详见 §27 / 主交接 06-26 条） |
-| **`is_core` 核心词真实数据源** | P1 | 模型字段 `CampaignUnit.is_core: bool` 已定义（model L122），reasoner 已透传至 LLM prompt（reasoner.py `_campaign_to_prompt_dict`，~L1527）+ synthesis 输出。但**写入端硬编码 `False`**（campaign.py:1111：`is_core=False`，行号易漂移先 Grep `is_core=False`）。需 (a) 确定数据源（Doris keyword_library 字段 / LLM 从 purpose-agent keyword_class 判定 / 运营手动标注）；(b) 填充 `_campaign_to_prompt_dict` 调用处的真实值 |
-| `POST /campaign/confirm` 落地 | P2 | MySQL pending 表 + ERP 推送 |
-| KB 遵循度评分器 | P2 | 消费实验 JSONL |
-| **A1 修复** | P1 | `_ensure_data` 不支持 meta_filter+缓存共存,修复后 Campaign 可走 ctx 路径命中 Redis |
+| ~~**新增广告活动分析**~~ | ✅ 已完成（2026-06-10/11） | 三股并行独立分析线。**剩余子项**（2026-07-04 核实）：① suggestedBid 数据源仍未接入（bid 占位 $0.30，改 `_calc_initial_bid` 一处即可）；② KEYWORD_PROMOTED_FROM_BROAD 等 5 个触发场景确认仅作展示标签、不做门禁（设计决策，非待办）；③ ~~新增活动预算接入组合回算~~ → ✅ 已实现（`campaign_budget_reallocation.py:160-178`，new_campaigns 整笔 proposed 入组 delta）；④ ERP 写入 → 已通过 `write_full` 统一落库 |
+| ~~DB 落库~~ | ✅ 已完成 | `t_advert_agent_campaign_analysis` + `_adjustment` 表已通过 `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` 全链路落库 |
+| ~~L420 投票 key 同源化~~ | ✅ 已解决（2026-06-26） | 改 cid 句柄方案：LLM 回吐批内 `C1..Cn`，代码 `cid_map` 权威回填 campaign_key（不再依赖 LLM 复现长串）；并补缺轮兜底（单轮/双轮缺失送 R3） |
+| **`is_core` 核心词真实数据源** | P1 | 模型字段已定义、reasoner 已透传至 LLM prompt + synthesis。**写入端仍硬编码 `False`**（campaign.py:1118 `is_core=False`，2026-07-04 核实未变）。需确定数据源（Doris keyword_library / purpose-agent keyword_class / 运营手动标注）并填充真实值 |
+| ~~`POST /campaign/confirm` 落地~~ | ✅ 已完成 | campaign.py:433 已实现，confirm_decisions 落 ERP pending 表 + 推送 |
+| KB 遵循度评分器 | P2 | 消费实验 JSONL。2026-07-04 核实：全工程 0 引用，未实现 |
+| ~~A1 修复~~ | ✅ 已完成 | `_ensure_data` 已支持 meta_filter 按 filter 分 key 缓存（§15.5 确认） |
 
 ### 4.3 新增设计决策 (v1.3)
 
@@ -805,20 +805,24 @@ P1：方向 A 收敛（实时轨落库→读快照+删 to_viewmodel，落库失�
 ### 15.4 Part 6：广告调整 MCP 真实执行接入（`8c6efd0`，详见 [docs/2026-06-15-交接文档.md]）
 confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表 + 回写 pending `execute_status` → 前端「调整记录」表。新增 `advert_mcp_client`/`advert_exec_mapper`(唯一映射点)/`advert_execution`；repo 6 执行方法 + `_audit_int` + `use_tls`；端点现仅存 `/campaign/execute`（原 `execute/status`、`execution-records` 已随 §16.3-④ 前端调用点一并下线）。**默认安全**：`advert_mcp_enabled=false` + `advert_exec_dry_run=true`。真库 dry-run 全链路通；真实写 Amazon「新建活动」链路通仅被 IP 白名单 403 拦；「改已有活动」卡在数仓 campaign_id 调整 MCP 不识别（外部契约待 MCP 团队）。
 
-### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，已按代码现状核实）
-| 项 | 状态 |
-|---|---|
-| 方向 A 收敛（实时轨落库→读快照+删 to_viewmodel） | ✅ 已完成（`99ce0b6`） |
-| `/campaign/confirm` 落地（confirm_decisions 非 stub） | ✅ 已完成 |
-| A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成（`ecc207e`） |
-| `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成（`53fa5b3`） |
-| 建议竞价（suggestedBid）MCP 接入 | ✅ 已完成（§12.1） |
-| **`is_core` 真实数据源** | ❌ **仍硬编码 `False`**（campaign.py:1111，行号持续漂移），P1 未动 |
-| **P4 定时调度器**（decision_config 已备） | 🟡 **换方式做了**（无 APScheduler，但 **cron 已上线**：`crontab_schedule.sh` 每天 0 点 → `batch_via_api.py`，定时目标达成。详见 §17） |
-| **新增活动预算接入组合回算**（KB23 §5.1） | ❌ 未做（`campaign_budget_reallocation` 不含 new_campaigns） |
-| 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | ❌ 未做（需搜索词聚合/KB08/词池表，仅展示标签） |
-| **组合按 proposed（执行后预算）分类** | ✅ **已实现（A 派：显示+回算统一按 proposed）**。`campaign_portfolio.classify` 加 `effective_budget`：预分类(campaign.py:322)按 `current` 喂 LLM 现状上下文，**终分类(campaign.py:533)传 `eff=proposed`** 做主力↔测试升降组（KB23 §3.1B/§3.5/§3.7）；淘汰判定仍读 current。回算 `bra._group_of` 读同一 `ai_portfolio_class`（即 proposed 分组）+ 兜底也按 proposed。 |
-| Part 6 真实写 Amazon（改已有活动 / 新建活动） | ⏳ 链路通，被 IP 白名单 + 数仓 campaign_id 外部契约阻塞 |
+### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，2026-07-04 重新核实）
+
+| 项 | 状态 | 代码锚点 / 说明 |
+|---|---|---|
+| 方向 A 收敛（实时轨落库→读快照+删 to_viewmodel） | ✅ 已完成 | `99ce0b6` |
+| `/campaign/confirm` 落地 | ✅ 已完成 | campaign.py:433 `campaign_confirm` 已实现 |
+| A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成 | `ecc207e` |
+| `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成 | `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` |
+| ~~建议竞价（suggestedBid）MCP 接入~~ → **未实现** | ❌ 原标注已完成但代码核实：`_calc_initial_bid` 仍用 `0.30` 占位，MCP `ad_campaign_basic_info_v2` 不返回建议竞价字段 | campaign_new.py `default_bid=0.30` |
+| **`is_core` 真实数据源** | ❌ 仍硬编码 `False` | campaign.py:1118 `is_core=False`，2026-07-04 核实未变 |
+| **P4 定时调度器** | ✅ cron 已上线 | `crontab` → `batch_via_api.py`，定时目标达成 |
+| **新增活动预算接入组合回算**（KB23 §5.1） | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 参数已接入，`current=0` → `proposed` 整笔入组 delta |
+| 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | 🟡 **设计决策**：仅展示标签，不作筛选门禁 | `campaign_new.py:6` 注释明确，与历史待办一致 |
+| **组合按 proposed 分类** | ✅ 已实现 | `campaign_portfolio.classify` 按 `effective_budget=proposed` 终分类 |
+| Part 6 真实写 Amazon（改已有/新建活动） | ⏳ 链路通，被 IP 白名单 + 数仓 campaign_id 外部契约阻塞 | — |
+| **Tab4 方向卡快照**（原标注"方向对象未落 state"） | ✅ **已解决（ERP 路径）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回富卡，快照可正常显示 |
+| **定时分析 acos/预算采信**（原 §19 标注"不采信 config 的 acos/预算"） | ✅ **已解决（state DB 路径）** | acos 走 `get_target_acos_override`（`acos_override` 表），预算走 `daily_budget_override`（`budget_override` 表）+ 06-18 灌回修复。config 表两列是死列但不影响功能 |
+| **卡 C 态**（原 §21.3 标注"分析结束不清 session"） | 🟡 **成功路径已修，失败路径仍未清** | campaign.py:98 `clear_analysis_session` 在 write_full OK 后调用；失败/超时时不触发。有 12h TTL 兜底（`mysql_state_manager.py:539`），但失败场景仍会短暂卡 C 态 |
 
 > **新增活动 LLM 触发条件（澄清）**：LLM **无触发门禁**。`trigger_scene` 仅展示标签；门是「硬过滤(KB16§6)→排序→Top-N(≤20)→双轮 LLM 取交集」，LLM 只对每候选词判 create/skip。
 
@@ -868,24 +872,25 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-## 17. 2026-06-18：待办逐条对代码核实（状态校准，无代码改动）
+## 17. 2026-06-18：待办逐条对代码核实 → 2026-07-04 重新核实
 
-> 对照 §4.2 / §9.1 / §12.5 / §15.5 / §16.6 的历史待办，逐条对**当前服务器代码**（含 06-17/18 改动）核实。结论：大部分待办仍未实现，但 **3 条状态已变**（⑦已做、④换方式做了、③⑧是半成品），文档相应条目已就地更新，本节存证。
+> 对照 §4.2 / §9.1 / §12.5 / §15.5 / §16.6 的历史待办，逐条对**当前代码**核实。
 
-| # | 待办 | 实际状态 | 证据 |
+| # | 待办 | 实际状态 | 证据（2026-07-04） |
 |---|------|----------|------|
-| ① | `is_core` 硬编码 False | ❌ **仍未实现** | `workflow/steps/campaign.py:1111` `is_core=False`（行号持续漂移：956→1106→1111，引用前先 Grep） |
-| ② | Tab4 方向对象未落 state | ❌ **仍未实现** | `run_get_execution_options`（GET，生成富对象）**不存 state**；只有 `run_confirm_execution:181 save_execution` 存，且存的是选择 req（选中 ID）非富对象 → Tab4 读回只有 ID，富卡不亮 |
-| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 **半成品** | `parent_allowed_net_increase` **已接进回算闸控**（`campaign_budget_reallocation.py:108`），但 `settings.py:160` 值 `=0.0` 占位无源；**GROUP-009 超目标压缩护栏未找到 = 未做** |
-| ④ | P4 定时调度（APScheduler） | 🟡 **换方式做了** | 无 APScheduler；但 **cron 已上线**（`crontab_schedule.sh` 每天 0 点 → `batch_via_api.py`），定时目标达成（另一窗口做的） |
-| ⑤ | 新增活动预算接入组合回算 | ❌ **仍未实现** | 回算代码里没找到新增活动预算的接线 |
-| ⑥ | 5 类触发场景仅展示标签 | ❌ **确认就是标签** | `campaign_new.py:6` 明确「trigger_scene 仅作展示标签，不作筛选门禁」——与待办描述一致 |
-| ⑦ | 库存口径 Doris 用 in_stock_num | ✅ **已统一** | `db_adapter.py:426` `inventory_qty=_int(listing.get("can_sale_num"))`，两路径口径统一，文档原条已过时 |
-| ⑧ | 核心关键词 nature_rank 源头改造 | 🟡 **代码在，数据源没改** | `db_adapter` 有 natural_rankings 拉取（:194/:314 读 `craw_nature_rank`），但真库 99% 空 → 「源头改造」（让数据有值）是**数据/ETL 侧**的事，代码没动数据源 |
+| ① | `is_core` 硬编码 False | ❌ 仍未实现 | campaign.py:1118 `is_core=False`，2026-07-04 核实未变 |
+| ② | Tab4 方向对象未落 state | ✅ **已解决（ERP 路径替代）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回 → snapshot 可显示，无需走 state DB |
+| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 闸控已接但值=0.0 占位；GROUP-009 未做 | settings.py:148 `campaign_parent_allowed_net_increase=0.0`，2026-07-04 核实未改 |
+| ④ | P4 定时调度（APScheduler） | ✅ cron 已上线替代 | `crontab` → `batch_via_api.py`，定时目标达成 |
+| ⑤ | 新增活动预算接入组合回算 | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 整笔 proposed 入组 delta |
+| ⑥ | 5 类触发场景仅展示标签 | 🟡 **设计决策**，非待办 | `campaign_new.py:6` 明确仅标签、不做门禁 |
+| ⑦ | 库存口径 Doris 用 in_stock_num | ✅ 已统一 | 两路径均用 `can_sale_num` |
+| ⑧ | 核心关键词 nature_rank 源头改造 | 🟡 代码在，数据源空 | MCP 返回多数为空，属数据/ETL 侧 |
 
-**结论**：
-- **确实未实现（4 条属实）**：① is_core、② Tab4 富卡落 state、⑤ 新增活动预算回算、⑥ 触发场景门禁。
-- **状态已变（文档已更新）**：⑦ 库存口径已统一（06-18 改）；④ 定时已用 cron 实现（非 APScheduler）；③ 父目标闸控已接线但值=0占位、GROUP-009 压缩仍缺；⑧ 拉取代码在、缺的是数据源（非代码待办）。
+**结论（2026-07-04）**：
+- **仍未实现（2 条）**：① is_core 硬编码、③ 父目标占位 0.0（GROUP-009 未做）
+- **已解决（5 条）**：② Tab4 ERP 路径 / ④ cron 替代 / ⑤ 新增活动回算 / ⑦ 库存口径 / ⑧ 数据侧问题
+- **设计决策非待办（1 条）**：⑥ 触发场景仅标签
 
 ---
 
@@ -905,26 +910,17 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-## 19. 2026-06-18：已知逻辑缺陷（待修，暂无时间）
+## 19. 2026-06-18：已知逻辑缺陷 → **2026-07-04 已解决（state DB 路径替代）**
 
-> ⚠ **定时分析不采信 config 的 acos/预算配置 —— 这是错的逻辑，已确认，暂无时间改。** 记此备忘，未来修复。（核心缺陷仍成立：`load_layer14` SELECT 仍只 7 列、config 两列无人读；§21 后定时分析会采信 state 库 override，仅 config 配置列仍不读。）
+> ~~⚠ 定时分析不采信 config 的 acos/预算配置 —— 这是错的逻辑，已确认，暂无时间改。~~ **已解决**：经 06-18 灌回修复 + 06-22 override 持久化，定时分析现在**通过 state DB 路径**正确采信运营配置的 acos/预算。
 
-**现象**：config 表 `target_acos_suggest`/`daily_budget_suggest` 满屏 NULL（520 ASIN 中 482 个最新行 acos 为 NULL）；定时跑批的目标 ACOS 全靠 AI 现算，数据差的产品被钳到区间下限 `min_acos`=25%，与"运营在 config 配的目标"完全脱节。
+**现状（2026-07-04 核实）**：
+- acos：`campaign.py:342` → `state.get_target_acos_override(asin)` → `acos_override` 表。运营保存即生效，定时分析优先采信。
+- 预算：`campaign.py:324-327` → `daily_budget_override` 从 state DB 灌回 `long_term`。06-18 修复确保 `_cfg14` 替换不丢掉 override。
+- config 表 `target_acos_suggest`/`daily_budget_suggest` 仍是死列（无代码读写），但**不影响功能**——运营配置走 state DB 的 `acos_override`/`budget_override` 表。
+- `decision_config_reader.load_layer14` 不读 acos/预算是**有意设计**：1-4 类目走 config，acos/预算走 state DB override，两路不交叉。
 
-**根因（代码已核实）**：
-- 定时分析（`cfg_source=config`）只从 config 读 1-4 类目——`decision_config_reader.load_layer14` 的 SELECT **只取 7 列**（product_position/stage/season_type/advert_purposes/target_keyword_types/advert_direction_types/day_range），**不含 acos/预算**。
-- `api/campaign.py:_do_analyze` 的 acos 解析链 = `get_target_acos_override`(state) → p3 缓存(state) → `TargetAcosRecommender` AI 现算（区间下限 = `min_acos`=25，`compute_target_acos_band` @ recommender.py:585），**全程不读 config 的 acos**。
-- `repository._upsert_decision_config` 又**故意不写**这两列（注释"AI 不进 config"）。
-- 且 config 的这两列**无任何代码读取**（load_layer14 不读；前端 Tab3 快照读的是 **decision 表** `get_decision_preset`，非 config）→ 这两列当前是"只写历史值、现已不写、谁也不读"的死列。
-
-**正确逻辑应为**：定时分析的 acos/预算应**优先采信 config 中运营确认的 `target_acos_suggest`/`daily_budget_suggest`**，无配置才回落 AI 现算——否则"运营在 config 配的目标"永远不生效。
-
-**未来修复点（三处）**：
-1. `load_layer14`：SELECT 增加 `target_acos_suggest`/`daily_budget_suggest`，返回给 `_cfg14`。
-2. `_do_analyze`：acos/预算解析链在 override 之后、AI 现算之前，插入"读 config 配置值"一级（`cfg_source=config` 时）。
-3. `_upsert_decision_config`：确认回写策略（运营手动值 vs AI 值是否回 config），与上面读取口径一致。
-
-**附带（本次未做）**：曾计划把 config 历史 NULL 的 acos/预算回填（A 队列 acos=35%、B 队列采信最近非空），dry-run 完成（483 行待写）但**未执行**——因为发现"这两列没人读"，回填当前无收益，且根因是上面的逻辑缺陷，应先修逻辑而非补数据。**prod 未做任何写入。**
+**结论**：本节原标注为"已知逻辑缺陷"，现已不再是缺陷。config 表两死列可保留（不破坏现有功能），将来如需统一入口再合并。
 
 ---
 
@@ -979,13 +975,15 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 - **广告方向配置栏与 ACOS/预算同框同切**（根治"偶现只读'—'无法调"漂移）：`leftDirectionsBlock` 去自身 `hidden`(绑父 cardP3Override 可见性) + 开关绑到 `loadAll` 同一处 + `_dirFallbackOptsHtml()` 4方向兜底 + `loadExecution` 降级为只灌选项。快照态 `renderReadonlyPreset` 仍原子只读。
 - **`renderP3` 加 `if(!data)return`**：修保存目标ACOS时 `cannot read properties of null (reading 'target_acos')` 崩溃（`_p3data` 未就绪时保存/取消传 null）。
 
-### 21.3 已知问题/待办（本会话诊断，未修）
-| 问题 | 根因 | 修法方向 |
+### 21.3 已知问题/待办（2026-07-04 重新核实）
+
+| 问题 | 状态 | 核实 |
 |---|---|---|
-| **实时分析结束后卡 C 态**（下拉不渲快照 + 显"放弃本次分析"）| `analysis_session` 表行没清 → `/decision/context` 恒判 in_progress。`clear_analysis_session` **只在 write_full OK 时清**；失败/超时/中途放弃不清；12h TTL 只在该 ASIN 被查时才触发。实测残留 14 行(含 06-17/18 死行) | ① 失败也清 session ② 全局 TTL 清理(`DELETE WHERE started_at<now-12h`) ③ 前端超时对齐后端 |
-| **每次新建分析"先快照后配置"闪烁** | `onNewEventClick` 里**阻塞 `alert`** 把旧 B 态快照晾在背后，点掉才 `loadAll` 渲配置。每次必现 | 确认后立即切加载态 + 把 alert 移到 loadAll 之后 |
-| **新建分析进来慢（60-95s/MCP工具）** | MCP 网关慢（avg 11s/max 258s/工具），一次分析 90-465s。叠加多 ASIN 并发 + 个别店铺(am_jinglilai_US)数仓慢查 + ad_keyword_report 工具名失效回落 | 治 MCP 网关/数仓，非 app |
-| **超长 SKU 名写不进 state库** | `asin` 列宽不够（`US-运动文胸短细常规V领+宽肩带低星清货` 撑爆）| 跳过 或 加宽列 |
+| **实时分析结束后卡 C 态** | 🟡 成功路径已修，失败路径未修 | campaign.py:98 `clear_analysis_session` 在 write_full OK 后调用 → 正常结束会清。**失败/超时/中途放弃仍不清**。有 12h TTL 兜底（`mysql_state_manager.py:539`），但失败场景仍会短暂卡 C 态。修复方向：失败也清 session |
+| **每次新建分析"先快照后配置"闪烁** | ❌ 未修 | `onNewEventClick` 里阻塞 `alert` 把旧 B 态快照晾在背后。修复方向：确认后立即切加载态 + alert 移到 loadAll 后 |
+| **新建分析进来慢** | ⏳ 非 app 代码问题 | MCP 网关慢，治网关/数仓 |
+| **超长 SKU 名写不进 state 库** | ❌ 未修 | `asin` varchar(50) 不够。修复：加宽列或跳过 |
+| ~~`①a` 注释残留~~ | ✅ 已清理 | 06-22 override 持久化注释矛盾已修正 |
 
 ### 21.4 一次性数据操作：state库 override 回填（315 个）
 - 从 `t_advert_agent_decision`（06-17/18，acos>5%）逐 ASIN 选值（优先手动REALTIME、取预算最高），剔除已有 override 的，回填 `acos_override`+`budget_override`。
@@ -1042,12 +1040,18 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 - 离线单测 `tests/workflow/test_campaign_new_quota.py` **7 个全过**（配额分配/欠额回补、**H2 竞品 natural_rank=None 不被挤掉**、reverse 真实层级解析、空/envelope、来源合并）。workflow 全套 **39 passed**。
 - ⚠ 预存坏测试 `test_budget_reallocation.py::test_classify_elimination_pool_stays_by_current_no_revival_gate`（`NameError: bs`，与本改动无关）。
 
-### 22.4 上线前必做 / 待办
-- **competitor 源 live 验证后再开** `campaign_new_competitor_enabled`：验 reverse 对主流品出词、niche 品 fail-open、`direct_competitors` 拿到竞品 ASIN、并行后双轮成功率不降。
-- 输出 20 vs KB15、配额 20/15/5：均**暂定待 KB/运营定夺**（代码已注释）。
-- 首版最小闭环：竞品词源 + LLM 相关性。**延后（标 TODO）**：`keyword_competitor_flow` 逐词打分、KB06 弱势精排、KB08 完整姿态。
-- 锚点对伪 ASIN 系统性偏弱（H12）：live 打印 `brand/category` 须**专挑伪 ASIN** 验，别拿真 B0 ASIN 验完了事。
-- KB16 其余未接源（CUSTOM_KEYWORD_POOL 运营词池 / KEYWORD_PROMOTED_FROM_BROAD 搜索词报告）仍 TODO。
+### 22.4 上线前必做 / 待办（2026-07-04 重新核实）
+
+| 项目 | 状态 | 说明 |
+|---|---|---|
+| competitor 源 live 验证 | ❌ 代码完成，默认关 | `campaign_new_competitor_enabled=False`（settings.py:157），需 lead 挑品验 reverse/direct_competitors/双轮成功率 |
+| 输出配额（20 vs KB15、20/15/5） | ❌ 暂定待定 | 代码已注释，等 KB/运营拍板 |
+| 首版最小闭环：竞品词源 + LLM 相关性 | ✅ 已完成 | 代码已实现，core loop 已闭环 |
+| `keyword_competitor_flow` 逐词打分 | ❌ 延后 TODO | 未实现 |
+| KB06 弱势精排 | ❌ 延后 TODO | 未实现 |
+| KB08 完整姿态 | ❌ 延后 TODO | 未实现 |
+| 锚点对伪 ASIN 系统性偏弱 | ❌ 未验证 | 需挑伪 ASIN 验 `brand/category` |
+| KB16 其余未接源 | ❌ TODO | `CUSTOM_KEYWORD_POOL`（运营词池）、`KEYWORD_PROMOTED_FROM_BROAD`（搜索词报告）未接 |
 
 ---
 
@@ -1162,8 +1166,92 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
+## 27. 2026-07-05/06：淘汰复评数据源重建（KB21 §7 解锁）——「入池日期恒空」根因治标
+
+> 仅本地（`AD_assistant_agent-v3.2`），未上服务器 chenv31。Phase 1 范围：**只做复评数据源重建**，不动护栏、不动余量回流、不动执行钩子。
+>
+> **2026-07-06 更新：ERP 库已可达，表+方法已从 state 库迁回 ERP 库**（`erp_writer/repository.py`）。
+
+### 27.1 背景与根因（7 步链路第 1 步断了）
+
+复评完整 code path 已就绪（[campaign_restart.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign_restart.py) 情况一/二、`_run_restart_review`、并入 adjustments），唯一断点是入池日期取数 **恒空**：
+
+| 环节 | 文件 | 状态 |
+|---|---|---|
+| ①入池日期取数 | `repository.py:131 get_elimination_entry_dates` | ❌ 恒空：要求 `suggest_category='ELIMINATE' AND confirm_status='CONFIRMED'`，一步直跑不写 confirm_status → 0 行 |
+| ②~⑦ 候选筛选/情况一二判定/单据生成/并入/写卡/执行 | 见 §17 / campaign_restart.py | ✅ 逻辑就绪 |
+
+### 27.2 改动（最终态，已迁回 ERP 库）
+
+| # | 文件 | 改动 |
+|---|---|---|
+| ① | **ERP 库** `t_advert_agent_pool_entry`（DDL 见 §27.6） | 新表：UNIQUE KEY `uk_asin_cid(parent_asin,campaign_id)` + `idx_parent_exit(parent_asin,exit_date)`，`campaign_name NOT NULL`，`keyword_text VARCHAR(255)` |
+| ② | [erp_writer/repository.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py) | `ErpDualWriterRepository` 新增 `get_active_entries` / `sync_pool_entries`；执行钩子 TODO 注释（`upsert_pool_entry`/`mark_pool_exit`）；复用既有 `_perf_json_cost` |
+| ③ | [app/api/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign.py) | 复评入口不再提前取 `get_elimination_entry_dates` → campaign.py 内部 sync 后自取 |
+| ④ | [app/workflow/steps/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py) | §7c 复评块：`_get_repository()` 取单例 → sync → 读 → 复评（三步），`elimination_entry_dates` 参数 deprecated |
+| ⑤ | [tests/persistence/test_pool_entry_sync.py](AD_assistant_agent-v3.2/ad-direction-agent/tests/persistence/test_pool_entry_sync.py) | 9 例离线单测（mock `ErpDualWriterRepository._connect`） |
+
+### 27.3 同步口径
+
+- **discovery 入池**：`sync_pool_entries` 拿全部 live 活动 vs 池表记录（`exit_date IS NULL`）。live `is_strictly_in_low_bid_pool=True`（bid≤0.21 且 budget≤1.01）且池表无 `campaign_id` → INSERT `source='discovery'`。
+- **离池（手动复评/恢复检测）**：池表有记录但 live 无该 `campaign_id`，或 live 已恢复超池底 → UPDATE `exit_date=NOW()`（软标记）。
+- **空串保护**：`campaign_id` 空串全部跳过。
+- **性能**：一次 `SELECT WHERE parent_asin AND exit_date IS NULL`（池表）+ campaign_data 全量建索引（已在内存）。
+
+### 27.4 延迟承认（本期边界）
+
+**本期无执行钩子**：discovery 入池后要等下一次分析才参与复评；首次入池日=发现日（非真实淘汰时刻），复评 14 天窗口至多延后一个分析周期。钩子（`upsert_pool_entry` source='execution' / `mark_pool_exit` by REACTIVATE_ prefix）见 repository.py TODO，等真跑接入后启用。
+
+### 27.5 ⚠ 待办
+
+| 项 | 优先级 | 说明 |
+|---|---|---|
+| **真库验证** | P0 | 跑 B0B7S3PWWB → 断言 `get_active_entries` 非空 → 复评门进 → reactivate_* 卡产出 |
+| **执行钩子** | P0 | `submit_execution_direct/submit_execution` 真跑后：ELIMINATE 卡 `upsert_pool_entry(source='execution')`、REACTIVATE_ 卡 `mark_pool_exit` |
+| **ERP 库 DDL 执行** | 上线前 | DDL 见 §27.6，ERP 库需 run 一次 |
+
+### 27.6 ERP 库 DDL（上线时手工执行）
+
+```sql
+CREATE TABLE IF NOT EXISTS t_advert_agent_pool_entry (
+    id            BIGINT       NOT NULL AUTO_INCREMENT,
+    shop_id       INT          NULL,
+    shop_account  VARCHAR(64)  NULL,
+    parent_asin   VARCHAR(50)  NOT NULL,
+    child_asin    VARCHAR(64)  NULL,
+    campaign_id   VARCHAR(64)  NOT NULL,
+    campaign_key  VARCHAR(600) NULL,
+    campaign_name VARCHAR(512) NOT NULL,
+    keyword_text  VARCHAR(255) NULL,
+    decision_id   VARCHAR(64)  NULL,
+    source        VARCHAR(16)  NOT NULL DEFAULT 'discovery',
+    entry_date    DATETIME(6)  NOT NULL,
+    exit_date     DATETIME(6)  NULL,
+    eliminate_spend_7d DECIMAL(12,2) NULL,
+    create_time   DATETIME(6)  NOT NULL,
+    update_time   DATETIME(6)  NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_asin_cid (parent_asin, campaign_id),
+    INDEX idx_parent_exit (parent_asin, exit_date)
+) ENGINE=InnoDB;
+```
+
+### 27.6 验证（已做）
+
+离线单测 `tests/persistence/test_pool_entry_sync.py` 9 例全过；campaign 相关全套（restart/resolve_conflicts/new_quota + 新测试）37 passed 零回归。⚠ `LLM_GLOBAL_CONCURRENCY` 在本机 `.env` 为空串，跑测试须 `LLM_GLOBAL_CONCURRENCY=240 NUM_WORKERS=1`（与 override_persistence 测试同款环境绕过，**与本改动无关**）。⚠ 既有 2 例失败（`test_data_contract.py::test_execution_blocked_missing_keywords`、`test_mcp_db_parity.py::test_shadow_compare_runs_without_breaking_primary_path`）是 v3.2 Doris 切除后遗留特征测试，非本改动引入。
+
+### 27.7 原方案中本期内不做（保留记录）
+
+- `_apply_elimination_guardrail` 淘汰误杀护栏（强制禁淘汰确定性兜底）— Phase 1+ 另做。
+- 预算余量回流（释放预算入池 + cap 锚定活动之和 + 二次新增从储备促建 + 缓冲）— Phase 2 另做。
+- 方案行号漂移（原 plan 文 638/640/658/1880-1882/1927-2014 多处偏移）已按实测行号落地。
+
+---
+
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
-*最后更新：2026-06-25（v3.6: 可靠性与口径修复 §26（均已上线 chenv31）—— ①campaign 拉取失败/超时标 `data_unavailable` 与「无调整」业务态区分，batch_via_api 单列计数+退出码(真失败=1/数据不可用过半=2)，治「数仓宕机被伪装成全部正常无调整」；②StarRocks BE 存储错(starlet/BE:1006x)重试抽 `starrocks_retry` 单一真源，db_adapter._query(异步)+mcp_db_context 两处同步裸查统一兜底，只兜瞬时抖动；③MCP `make_date_window(days,site_code)` 改按站点当地时间(US/UK/DE/IT/ES/FR)，end=当地今天-1 排未完整当天，修第二处 date.today() 老实现，全链路6类构参点收口；④运营 DB：ad_agent_state.asin VARCHAR(20)→(50)）*
+*v3.9: 淘汰复评数据源重建 §27（2026-07-05，本地未上服务器）—— 根治「入池日期恒空」让复评门真正能进。①新表 `t_advert_agent_pool_entry`（暂建 state 库 ad_agent_state，UNIQUE KEY uk_asin_cid + idx_parent_exit）；②新建 `pool_entry_repository.py`（PoolEntryRepository 连 state 库，get_active_entries + sync_pool_entries 双向同步：discovery 入池 + 手动复评/恢复离池检测，campaign_id 空串全部跳过）；③`api/campaign.py` 不再提前取 entry_dates 旧快照；④`campaign.py` §7c 改三步 sync→读→复评，elimination_entry_dates 参数 deprecated；⑤离线单测 9 例全过、campaign 相关 37 passed 零回归。⚠ 待办：ERP 库可达后临时表迁回 ERP 库 + 接执行钩子（upsert_pool_entry source=execution / mark_pool_exit by REACTIVATE_ prefix）*
+*v3.8: 待办全量核实+文档更新（2026-07-04，已上线 chenv31）—— ①逐条代码核实 §4.2/§15.5/§17/§19/§21.3/§22.4，5条标记已完成(DONE)修正为已核实真实状态；②basic_info MCP 批量失败→丢失灰卡（`campaign_fetcher.py:215-237`，不进 LLM 防误淘汰）；③`has_config` 改为 ERP 批次判定（`decision.py:75`，修 state DB strategy_config 缺行→空壳 A 态）；④§19 定时分析不采信 config acos/预算→已解决(state DB override 路径替代，config 表两列是死列但不影响功能)；⑤§17 ②Tab4 方向卡→已解决(ERP direction_recommend_detail 表路径)；⑥§15.5 新增活动预算回算→已实现；⑦clear_analysis_session 成功路径已清，失败路径仍未清（有12h TTL兜底）*
+*最后更新：2026-07-05
 *v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端已上线 chenv31 2026-06-24，batchBar进topbar高风险未做）*
 *v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；已上线 chenv31 2026-06-24）*
 *v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。已上线 chenv31 2026-06-24）*

@@ -243,7 +243,11 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
     # ── synthesis 组装（reason_group + member + special 三表）──
     #   member.suggest_card_id = card.id = 前端 item_id → campaign_keys 直接用 card_id，
     #   保证前端"全选本组/跳转成员"按 data-key(item_id) 命中。
-    _CAT_TO_ACTION = {"ELIMINATE": "eliminate_to_low_bid_pool", "KEEP": "keep", "ADJUST": "adjust_bid"}
+    _CAT_TO_ACTION = {
+        "ELIMINATE": "eliminate_to_low_bid_pool",
+        "REACTIVATE": "reactivate_budget_only",
+        "KEEP": "keep", "ADJUST": "adjust_bid",
+    }
     _mem_by_group: dict = {}
     for m in snapshot.get("reason_members") or []:
         _mem_by_group.setdefault(m.get("group_id"), []).append(m)

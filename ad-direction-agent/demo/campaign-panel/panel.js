@@ -66,7 +66,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <div class="stat"><div class="num" id="camp-sum-elim">0</div><div class="lab">淘汰</div></div>
             <div class="stat"><div class="num" id="camp-sum-adj">0</div><div class="lab">调整</div></div>
             <div class="stat"><div class="num" id="camp-sum-keep">0</div><div class="lab">保持</div></div>
-            <div class="stat"><div class="num" id="camp-sum-new">0</div><div class="lab">新增</div></div>
+            <div class="stat"><div class="num" id="camp-sum-new">0</div><div class="lab">新增/复评</div></div>
             <div style="grid-column:1/-1;font-size:11px;color:var(--camp-muted-fg);" id="camp-sum-meta"></div>
           </div>
 
@@ -192,7 +192,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
     if (loader) { loader.textContent = '分析失败：' + (e.message || '未知错误'); loader.style.cssText = 'color:#DC2626;padding:20px;'; }
     state.setData({
       mode, parent_asin: asin, days, run_id: '', snapshot_time: null,
-      summary: { total: 0, eliminate: 0, adjust: 0, keep: 0, create: 0, prefiltered: 0, lost: 0,
+      summary: { total: 0, eliminate: 0, adjust: 0, keep: 0, create: 0, reactivate: 0, prefiltered: 0, lost: 0,
                  confidence_high: 0, confidence_medium: 0, confidence_low: 0,
                  budget_impact: null, sanity_check_passed: false },
       overview: null, budget_summary: null, synthesis: null, items: [],

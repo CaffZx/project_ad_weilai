@@ -161,7 +161,8 @@ function _renderSummaryStats(vm) {
   _$('camp-sum-elim').textContent = s.eliminate ?? 0;
   _$('camp-sum-adj').textContent = s.adjust ?? 0;
   _$('camp-sum-keep').textContent = s.keep ?? 0;
-  _$('camp-sum-new').textContent = s.create ?? 0;
+  // 「新增/复评」合并位（KB16 新增 + KB21§7 复评）
+  _$('camp-sum-new').textContent = (s.create ?? 0) + (s.reactivate ?? 0);
 
   const conf = `高 ${s.confidence_high || 0} / 中 ${s.confidence_medium || 0} / 低 ${s.confidence_low || 0}`;
   const budget = s.budget_impact ?? 0;

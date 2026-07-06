@@ -266,7 +266,7 @@ async def analyze_campaigns(
     keyword_analysis: dict | None = None,
     run_id: str | None = None,
     erp_override: dict | None = None,
-    elimination_entry_dates: dict | None = None,
+    elimination_entry_dates: dict | None = None,  # deprecated: 现由内部 sync 后从 state 库读取，外部传 None 即可
 ) -> CampaignAnalysisResult:
     """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
 
@@ -324,7 +324,7 @@ async def _analyze_campaigns_impl(
     run_id: str,
     _t,
     erp_override: dict | None = None,
-    elimination_entry_dates: dict | None = None,
+    elimination_entry_dates: dict | None = None,  # deprecated/unused: 内部 sync 后从 state 库读取
 ) -> CampaignAnalysisResult:
 
     # 1. 获取活动数据 — 优先 Redis 缓存（refresh=True 时跳过），miss 时拉 MCP/Doris
@@ -642,8 +642,21 @@ async def _analyze_campaigns_impl(
         # 此处 proposed 尚未定稿，故不在 loop 内分类。
         # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
 
+    # 6c. 复评保护回填：取池表最近 N 天内离池（= 被复评捞回）的 campaign_id 集合，
+    #     算 days_since_reactivation，供 _resolve_budget_conflicts 防淘汰↔复评抖动。
+    #     在 _resolve_budget_conflicts 之前、回填循环之后执行。
+    recent_reactivated: dict[str, int] = {}
+    try:
+        from app.persistence.erp_writer.repository import _get_repository
+        recent_reactivated = _get_repository().get_recently_reactivated(parent_asin, max_days=3)
+    except Exception:
+        pass  # fail-open: DB 不通则无保护，不影响主分析
+    for item in adjustments:
+        cid = (item.campaign_id or "").strip()
+        item.days_since_reactivation = recent_reactivated.get(cid, -1)
+
     # 7. 预算冲突裁决
-    budget_warnings = _resolve_budget_conflicts(adjustments)
+    budget_warnings = _resolve_budget_conflicts(adjustments, product_stage=strategy_context.product_stage)
     warnings_list.extend(budget_warnings)
 
     # 7b. 终态组合分类（KB23 §3.1B/§3.5/§3.7：升降组按【本轮建议预算 proposed】跨 $5 阈值判）。
@@ -661,21 +674,54 @@ async def _analyze_campaigns_impl(
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
     #   位置关键：必须在 _resolve_budget_conflicts(§7) 之后——否则"低价捡漏强制淘汰兜底"会因
     #   复评项 current=$1/$0.20 把它打回 eliminate。复评项已带完整字段，无需 backfill/终态分类。
-    if settings.campaign_restart_enabled and pool_units and elimination_entry_dates:
+    #
+     #   ★入池日期数据源：现走 ERP 库 t_advert_agent_pool_entry（原依赖 card+pending 表
+    #     confirm_status='CONFIRMED'，一步直跑不写 → 恒空 → 复评门永不进）。
+    #   流程：① 分析后双向同步池表(discovery 入池 + 手动复评离池)→ ② 读最新在池记录 → ③ 复评。
+    #   fail-open：ERP 库不通 → sync/读 失败 → 不复评，不连累主分析。
+    if settings.campaign_restart_enabled and pool_units:
+        shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+        from app.persistence.erp_writer.repository import _get_repository
+        repo = _get_repository()
+
+        # ① 分析后双向同步池表（用全部 live 活动 vs 池表记录）
+        all_live = list((campaign_data.campaigns if campaign_data else []) or [])
         try:
-            reactivate_items, reactivated_keys = await _run_restart_review(
-                pool_units, elimination_entry_dates, fetcher, campaign_data, parent_asin,
+            await asyncio.to_thread(
+                repo.sync_pool_entries,
+                parent_asin, all_live, shop_account,
+                (campaign_data.parent_seller_sku if campaign_data else None),
+                (campaign_data.shop_id if campaign_data else None),
             )
-            if reactivate_items:
-                adjustments.extend(reactivate_items)
-                skipped_campaigns = [
-                    s for s in skipped_campaigns
-                    if s.get("campaign_key") not in reactivated_keys
-                ]
-                _t(f"DONE restart_review ({len(reactivate_items)} 复评卡)")
         except Exception as e:  # noqa: BLE001
-            logger.warning("Campaign 复评异常 [%s]: %s (fail-open)", parent_asin, e)
-            warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
+            logger.warning("sync_pool_entries 失败 [%s]: %s (fail-open)", parent_asin, e)
+            warnings_list.append(f"淘汰池表同步失败: {type(e).__name__}: {e}")
+
+        # ② 读最新在池记录（覆盖上层传入的 elimination_entry_dates 旧快照）
+        entry_dates: dict = {}
+        try:
+            entry_dates = await asyncio.to_thread(
+                repo.get_active_entries, parent_asin,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("get_active_entries 失败 [%s]: %s (复评跳过)", parent_asin, e)
+
+        # ③ 复评
+        if entry_dates:
+            try:
+                reactivate_items, reactivated_keys = await _run_restart_review(
+                    pool_units, entry_dates, fetcher, campaign_data, parent_asin,
+                )
+                if reactivate_items:
+                    adjustments.extend(reactivate_items)
+                    skipped_campaigns = [
+                        s for s in skipped_campaigns
+                        if s.get("campaign_key") not in reactivated_keys
+                    ]
+                    _t(f"DONE restart_review ({len(reactivate_items)} 复评卡)")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Campaign 复评异常 [%s]: %s (fail-open)", parent_asin, e)
+                warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
 
     # 8 + 8b：Sanity check 与 AI 汇总合成【并行】。
     # 两者都只读已定稿的 adjustments，产出独立（warnings vs 分组叙事），无数据依赖 →
@@ -783,6 +829,7 @@ async def _analyze_campaigns_impl(
         "to_eliminate": sum(1 for a in adjustments if a.action == "eliminate_to_low_bid_pool"),
         "to_adjust": sum(1 for a in adjustments if a.action.startswith("adjust")),
         "to_keep": sum(1 for a in adjustments if a.action == "keep"),
+        "to_reactivate": sum(1 for a in adjustments if (a.action or "").startswith("reactivate")),
         "confidence_high": sum(1 for a in adjustments if a.confidence == "high"),
         "confidence_medium": sum(1 for a in adjustments if a.confidence == "medium"),
         "confidence_low": sum(1 for a in adjustments if a.confidence == "low"),
@@ -1954,38 +2001,53 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
 def _resolve_budget_conflicts(
     adjustments: list[CampaignAdjustmentItem],
     total_budget_limit: float | None = None,
+    *,
+    product_stage: str = "",
 ) -> list[str]:
     """预算冲突后处理：按优先级依次执行，超总预算上限时截断不缩放。
 
     当前无总预算上限来源，仅做防御性检查：
     - 单个活动日预算 ≤ $200 (KB 19 §10 上限)
     - 淘汰活动预算固定 $1.00 / Bid 固定 $0.20 (KB 21 §4)
-    - 新活动保护 (KB 21 §2)：上线 ≤3 天不强制淘汰，LLM 误判淘汰则反修正为 keep
+    - 淘汰保护 (KB 21 §2)：上线 ≤3 天 / 测试期且上线 <14 天 → LLM 误判淘汰则反修正为 keep
     """
     warnings: list[str] = []
 
     for adj in adjustments:
-        # KB 21 §2 新活动保护：上线 ≤3 天样本不足，不触发强制淘汰，LLM 误判也反修正
-        new_campaign_protected = (adj.days_online >= 0 and adj.days_online <= 3)
+        # KB 21 §2 淘汰保护：
+        #   上线 ≤3 天 → 样本不足 / 测试期且上线 <14 天 → 受样本保护
+        #   复评后 ≤3 天 → 等同新增活动保护，防止 LLM 在复评后马上又判淘汰（淘汰↔复评抖动）
+        days_online = adj.days_online                       # 活动在亚马逊上线天数，-1=未知
+        days_since_react = adj.days_since_reactivation      # 距最近复评离池天数，-1=从未复评
+        elimination_protected = (
+            (days_online >= 0 and days_online <= 3)
+            or (product_stage == "测试期" and days_online >= 0 and days_online < 14)
+            or (days_since_react >= 0 and days_since_react <= 3)
+        )
 
         # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 强制 eliminate。
         # （归组/强制修正用 OR + bid 0.10，独立于预过滤 AND 的 LOW_BID_MAX 0.21；见 campaign_portfolio 阈值注释）
         # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
         # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
-        # ★新活动保护豁免：上线 ≤3 天不触发强制淘汰，防止初始预算=$1 的新活动被误杀。
-        if not new_campaign_protected and adj.action != "eliminate_to_low_bid_pool" and (
+        # ★淘汰保护豁免：受保护活动不触发强制淘汰，防止新活动/测试期活动被误杀。
+        if not elimination_protected and adj.action != "eliminate_to_low_bid_pool" and (
             (adj.current_bid is not None and adj.current_bid <= 0.1)
             or (adj.current_budget is not None and adj.current_budget <= LOW_BUDGET_MAX)
         ):
             adj.action = "eliminate_to_low_bid_pool"
 
-        # 淘汰执行值硬校验 / 新活动保护反修正
+        # 淘汰执行值硬校验 / 淘汰保护反修正
         if adj.action == "eliminate_to_low_bid_pool":
-            if new_campaign_protected:
+            if elimination_protected:
                 # LLM 误判淘汰 or 兜底漏网 → 强制修正为 keep（KB 21 §2）
+                if days_since_react >= 0:
+                    reason = f"复评后仅 {days_since_react} 天，等同新增活动受样本保护"
+                elif days_online <= 3:
+                    reason = f"上线仅 {days_online} 天，样本不足"
+                else:
+                    reason = f"测试期且上线仅 {days_online} 天，受样本保护"
                 warnings.append(
-                    f"[{adj.campaign_name}] 新活动上线仅 {adj.days_online} 天，"
-                    f"不满足淘汰条件（KB 21 §2），已强制修正为 keep"
+                    f"[{adj.campaign_name}] {reason}（KB 21 §2），已强制修正为 keep"
                 )
                 adj.action = "keep"
                 adj.proposed_budget = adj.current_budget

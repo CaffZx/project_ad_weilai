@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import pymysql
 from pymysql.cursors import DictCursor
 
+from app.workflow.steps.campaign_portfolio import is_strictly_in_low_bid_pool
 from .erp_display import build_whip_display_fields
 from .models import CanonicalRun, stable_id, warehouse_pending_id
 from .text_utils import (
@@ -25,6 +26,9 @@ from .text_utils import (
     split_reason_sections,
     to_enum_list,
 )
+
+if TYPE_CHECKING:
+    from app.models.campaign import CampaignUnit
 
 logger = logging.getLogger(__name__)
 
@@ -125,47 +129,6 @@ class ErpDualWriterRepository:
                     (asin,),
                 )
                 return cur.fetchall()
-        finally:
-            conn.close()
-
-    def get_elimination_entry_dates(self, parent_asin: str) -> dict[str, dict]:
-        """重建每活动「进入低价捡漏组日期 + 淘汰前7d花费」（KB 21 §7 复评用，零加列，仅读既有列）。
-
-        返回 {campaign_id: {"entry_date": datetime, "eliminate_spend_7d": float|None}}。
-        入池日期 = 该 campaign 最近一次 CONFIRMED 的 ELIMINATE 卡所对应 campaign_pending 的
-        COALESCE(execute_time, confirm_time)（活动真正变 $1/$0.20 的时刻；执行未回写则退确认时刻）。
-        淘汰前花费 = 该淘汰卡 perf_json.cost（淘汰那次的 7d 花费）；历史卡无 perf_json → None。
-        复淘汰按 entry_date DESC 取最近一次。
-        """
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT c.campaign_id AS campaign_id,
-                              c.perf_json AS perf_json,
-                              COALESCE(cp.execute_time, cp.confirm_time) AS entry_date
-                       FROM t_advert_agent_modify_suggest_card c
-                       JOIN t_advert_agent_modify_campaign_pending cp
-                            ON cp.suggest_card_id = c.id
-                       WHERE c.parent_asin = %s
-                         AND c.suggest_category = 'ELIMINATE'
-                         AND cp.confirm_status = 'CONFIRMED'
-                         AND c.campaign_id IS NOT NULL AND c.campaign_id <> ''
-                         AND COALESCE(cp.execute_time, cp.confirm_time) IS NOT NULL
-                       ORDER BY c.campaign_id,
-                                COALESCE(cp.execute_time, cp.confirm_time) DESC""",
-                    (parent_asin,),
-                )
-                out: dict[str, dict] = {}
-                for r in cur.fetchall():
-                    cid = str(r.get("campaign_id") or "").strip()
-                    if not cid or cid in out:
-                        continue  # 每 campaign 取首条 = 最近一次入池
-                    out[cid] = {
-                        "entry_date": r.get("entry_date"),
-                        "eliminate_spend_7d": _perf_json_cost(r.get("perf_json")),
-                    }
-                return out
         finally:
             conn.close()
 
@@ -724,7 +687,9 @@ class ErpDualWriterRepository:
         eliminate_count = int(s.get("to_eliminate") or 0)
         adjust_count = int(s.get("to_adjust") or 0)
         keep_count = int(s.get("to_keep") or 0)
-        categorized_total = eliminate_count + adjust_count + keep_count
+        reactivate_count = int(s.get("to_reactivate") or 0)
+        # categorized_total 纳入所有动作桶（含复评），告警只在真实漏桶时触发
+        categorized_total = eliminate_count + adjust_count + keep_count + reactivate_count
         declared_total = int(run.total_campaigns or 0)
 
         base_warnings = list(run.raw_payload.get("warnings") or [])
@@ -746,7 +711,7 @@ class ErpDualWriterRepository:
         sql = """
         INSERT INTO t_advert_agent_modify_suggest_summary (
             id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no,
-            total_count, eliminate_count, adjust_count, keep_count,
+            total_count, eliminate_count, adjust_count, keep_count, reactivate_count,
             confidence_high_count, confidence_medium_count, confidence_low_count,
             budget_impact, validation_passed, alert_count, alert_msg,
             main_push_count, main_push_budget, broad_auto_count, broad_auto_budget,
@@ -756,7 +721,7 @@ class ErpDualWriterRepository:
             create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,
@@ -773,6 +738,7 @@ class ErpDualWriterRepository:
             eliminate_count=VALUES(eliminate_count),
             adjust_count=VALUES(adjust_count),
             keep_count=VALUES(keep_count),
+            reactivate_count=VALUES(reactivate_count),
             confidence_high_count=VALUES(confidence_high_count),
             confidence_medium_count=VALUES(confidence_medium_count),
             confidence_low_count=VALUES(confidence_low_count),
@@ -808,6 +774,7 @@ class ErpDualWriterRepository:
                 eliminate_count,
                 adjust_count,
                 keep_count,
+                reactivate_count,
                 s.get("confidence_high"),
                 s.get("confidence_medium"),
                 s.get("confidence_low"),
@@ -1662,6 +1629,273 @@ class ErpDualWriterRepository:
             )
             count += 1
         return recommend_id, count
+
+    # ── 淘汰复评入池表（KB 21 §7 数据源） ────────────────────────────
+
+    def get_active_entries(self, parent_asin: str) -> dict[str, dict]:
+        """返回 {campaign_id: {"entry_date": datetime, "eliminate_spend_7d": float|None}}。
+
+        返回结构与旧 get_elimination_entry_dates 完全一致
+        → analyze_eliminated_restart / _run_restart_review 零改。
+        仅取 exit_date IS NULL（仍在池）的记录。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT campaign_id, entry_date, eliminate_spend_7d
+                       FROM t_advert_agent_pool_entry
+                       WHERE parent_asin = %s AND exit_date IS NULL
+                       ORDER BY entry_date DESC""",
+                    (parent_asin,),
+                )
+                out: dict[str, dict] = {}
+                for r in cur.fetchall():
+                    cid = str(r.get("campaign_id") or "").strip()
+                    if not cid or cid in out:
+                        continue
+                    out[cid] = {
+                        "entry_date": r.get("entry_date"),
+                        "eliminate_spend_7d": r.get("eliminate_spend_7d"),
+                    }
+                return out
+        finally:
+            conn.close()
+
+    def sync_pool_entries(
+        self,
+        parent_asin: str,
+        live_campaigns: "list[CampaignUnit]",
+        shop_account: str | None = None,
+        parent_sku: str | None = None,
+        shop_id: int | None = None,
+    ) -> dict[str, int]:
+        """分析后双向同步池表。
+
+        1. 读当前在池记录(exit_date IS NULL)，建集合；
+        2. 以 campaign_id 为 key 从 live_campaigns 建索引；
+        3. 离池方向：池表有记录但 live 无该 campaign_id,
+           或 live is_strictly_in_low_bid_pool=False(已恢复) → UPDATE exit_date=NOW();
+        4. 入池方向(discovery)：live is_strictly_in_low_bid_pool=True 且池表无该 campaign_id
+           → INSERT source='discovery', entry_date=NOW(), exit_date=NULL;
+        5. campaign_id 空串全部跳过(UNIQUE KEY 碰撞风险)。
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        inserted = 0
+        exited = 0
+
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT campaign_id FROM t_advert_agent_pool_entry
+                       WHERE parent_asin = %s AND exit_date IS NULL""",
+                    (parent_asin,),
+                )
+                in_pool_cids: set[str] = {
+                    str(r.get("campaign_id") or "").strip()
+                    for r in cur.fetchall()
+                }
+                in_pool_cids.discard("")
+
+                live_by_cid: dict[str, "CampaignUnit"] = {}
+                for cu in live_campaigns:
+                    cid = (cu.campaign_id or "").strip()
+                    if not cid:
+                        continue
+                    live_by_cid[cid] = cu
+
+                for cid in in_pool_cids:
+                    cu = live_by_cid.get(cid)
+                    if cu is None:
+                        cur.execute(
+                            """UPDATE t_advert_agent_pool_entry
+                               SET exit_date = %s, update_time = %s
+                               WHERE parent_asin = %s AND campaign_id = %s
+                                 AND exit_date IS NULL""",
+                            (now, now, parent_asin, cid),
+                        )
+                        exited += cur.rowcount
+                        continue
+                    if not is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
+                        cur.execute(
+                            """UPDATE t_advert_agent_pool_entry
+                               SET exit_date = %s, update_time = %s
+                               WHERE parent_asin = %s AND campaign_id = %s
+                                 AND exit_date IS NULL""",
+                            (now, now, parent_asin, cid),
+                        )
+                        exited += cur.rowcount
+
+                for cid, cu in live_by_cid.items():
+                    if cid in in_pool_cids:
+                        continue
+                    if not is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
+                        continue
+                    spend = _perf_json_cost(
+                        cu.perf_7d.model_dump() if cu.perf_7d else None
+                    )
+                    cur.execute(
+                        """INSERT INTO t_advert_agent_pool_entry
+                           (shop_id, shop_account, parent_asin, parent_sku, child_asin, campaign_id,
+                            campaign_key, campaign_name, keyword_text, decision_id, source,
+                            entry_date, exit_date, eliminate_spend_7d,
+                            create_time, update_time)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
+                           ON DUPLICATE KEY UPDATE
+                            exit_date = NULL,
+                            entry_date = VALUES(entry_date),
+                            eliminate_spend_7d = VALUES(eliminate_spend_7d),
+                            source = VALUES(source),
+                            update_time = VALUES(update_time)""",
+                        (
+                            shop_id,
+                            shop_account,
+                            parent_asin,
+                            parent_sku,
+                            cu.child_asin or "",
+                            cid,
+                            cu.campaign_key or "",
+                            cu.campaign_name or "",
+                            cu.keyword_text or "",
+                            None,
+                            "discovery",
+                            now,
+                            spend,
+                            now,
+                            now,
+                        ),
+                    )
+                    inserted += cur.rowcount
+
+            conn.commit()
+            if inserted or exited:
+                logger.info(
+                    "PoolEntry sync [%s]: discovery 入池 %d 条, 离池 %d 条",
+                    parent_asin, inserted, exited,
+                )
+            return {"inserted": inserted, "exited": exited}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    # ── 执行钩子（运营同意执行淘汰/复评后调用）──
+
+    def upsert_pool_entry(
+        self,
+        parent_asin: str,
+        *,
+        campaign_id: str,
+        child_asin: str | None = None,
+        campaign_key: str | None = None,
+        campaign_name: str = "",
+        keyword_text: str | None = None,
+        decision_id: str | None = None,
+        eliminate_spend_7d: float | None = None,
+        shop_id: int | None = None,
+        shop_account: str | None = None,
+        parent_sku: str | None = None,
+    ) -> None:
+        """执行淘汰→入池：source='execution', entry_date=NOW(), exit_date=NULL。
+
+        复淘汰（同 campaign 二次淘汰）走 ON DUPLICATE KEY UPDATE：
+          重置 exit_date=NULL，刷新 entry_date/spend/source 到本次执行时刻。
+        """
+        if not campaign_id:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_pool_entry
+                       (shop_id, shop_account, parent_asin, parent_sku, child_asin, campaign_id,
+                        campaign_key, campaign_name, keyword_text, decision_id, source,
+                        entry_date, exit_date, eliminate_spend_7d,
+                        create_time, update_time)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                        exit_date = NULL,
+                        entry_date = VALUES(entry_date),
+                        eliminate_spend_7d = VALUES(eliminate_spend_7d),
+                        source = VALUES(source),
+                        decision_id = VALUES(decision_id),
+                        shop_id = VALUES(shop_id),
+                        shop_account = VALUES(shop_account),
+                        parent_sku = VALUES(parent_sku),
+                        update_time = VALUES(update_time)""",
+                    (
+                        shop_id, shop_account, parent_asin, parent_sku,
+                        child_asin or "", campaign_id,
+                        campaign_key or "", campaign_name or "",
+                        keyword_text or None, decision_id, "execution",
+                        now, eliminate_spend_7d, now, now,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def mark_pool_exit(self, parent_asin: str, campaign_id: str, *, exit_date=None) -> None:
+        """执行复评→离池：UPDATE exit_date=NOW()（软标记，不硬删）。"""
+        if not campaign_id:
+            return
+        ed = exit_date or datetime.now(timezone.utc).replace(tzinfo=None)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE t_advert_agent_pool_entry
+                       SET exit_date = %s, update_time = %s
+                       WHERE parent_asin = %s AND campaign_id = %s
+                         AND exit_date IS NULL""",
+                    (ed, ed, parent_asin, campaign_id),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_recently_reactivated(
+        self, parent_asin: str, *, max_days: int = 3,
+    ) -> dict[str, int]:
+        """返回 {campaign_id: days_since_reactivation}，限过去 max_days 内离池的记录。
+
+        供 _resolve_budget_conflicts 用：复评后 N 天内禁止再次淘汰（防淘汰↔复评抖动）。
+        """
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT campaign_id, exit_date
+                       FROM t_advert_agent_pool_entry
+                       WHERE parent_asin = %s
+                         AND exit_date IS NOT NULL
+                         AND exit_date >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                       ORDER BY exit_date DESC""",
+                    (parent_asin, max_days),
+                )
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                out: dict[str, int] = {}
+                for r in cur.fetchall():
+                    cid = str(r.get("campaign_id") or "").strip()
+                    if not cid or cid in out:
+                        continue
+                    ed = r.get("exit_date")
+                    if ed is None:
+                        continue
+                    days = (now - ed).days
+                    out[cid] = max(0, days)
+                return out
+        finally:
+            conn.close()
 
 
 # ── 模块级 repository 单例（决策批次端点复用） ──────────────────────────

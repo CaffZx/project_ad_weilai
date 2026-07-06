@@ -55,11 +55,15 @@ _ACTION_TO_CATEGORY = {
     # 漏此键 → 淘汰卡 suggest_category 落默认 ADJUST，淘汰复评 WHERE='ELIMINATE' 永远 0 候选。
     # 快照渲染侧 _card_action 已含 ELIMINATE 分支 + group_type 兜底，对齐 DDL「启用 ELIMINATE 枚举」。
     "eliminate_to_low_bid_pool": "ELIMINATE",
+    # 复评（KB21 §7）两种 action_type 单独归类，前端照 _actionLabel 显示「复评」而非默认 ADJUST。
+    # 执行钩子按 trigger_rule 以 'REACTIVATE_' 开头判离池，与此映射无关。
+    "reactivate_budget_only": "REACTIVATE",
+    "reactivate_with_calibrated_bid": "REACTIVATE",
     "adjust": "ADJUST",
     "keep": "KEEP",
 }
 
-_CATEGORY_PRIORITY = {"ELIMINATE": 0, "ADJUST": 1, "KEEP": 2}
+_CATEGORY_PRIORITY = {"ELIMINATE": 0, "REACTIVATE": 1, "ADJUST": 2, "KEEP": 3}
 
 _PORTFOLIO_LABELS = ALL_PORTFOLIOS
 

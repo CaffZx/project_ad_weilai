@@ -78,7 +78,8 @@ def test_new_campaign_llm_misjudge_eliminate_corrected_to_keep():
     assert item.placement_adjustments == []
     assert item.negative_keywords == []
     assert len(warnings) == 1
-    assert "新活动上线仅 2 天" in warnings[0]
+    assert "上线仅 2 天" in warnings[0]
+    assert "样本不足" in warnings[0]
     assert "强制修正为 keep" in warnings[0]
 
 

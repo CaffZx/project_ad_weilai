@@ -396,7 +396,7 @@ input:focus, select:focus { outline: none; border-color: var(--primary); }
         <div class="stat"><div class="num" id="sumElim" style="color:#DC2626;">-</div><div class="lab">淘汰</div></div>
         <div class="stat"><div class="num" id="sumAdj" style="color:#F59E0B;">-</div><div class="lab">调整</div></div>
         <div class="stat"><div class="num" id="sumKeep" style="color:#374151;">-</div><div class="lab">保持</div></div>
-        <div class="stat"><div class="num" id="sumNew" style="color:#16A34A;">-</div><div class="lab">新增</div></div>
+        <div class="stat"><div class="num" id="sumNew" style="color:#16A34A;">-</div><div class="lab">新增/复评</div></div>
       </div>
       <div class="text-sm muted" id="sumMeta" style="margin-top:8px;"></div>
       <div class="text-sm" style="color:#DC2626; margin-top:6px; cursor:help;" id="sumWarnings"></div>
@@ -802,7 +802,7 @@ function renderResult(r) {
   $('sumElim').textContent  = s.to_eliminate ?? 0;
   $('sumAdj').textContent   = s.to_adjust ?? 0;
   $('sumKeep').textContent  = s.to_keep ?? 0;
-  $('sumNew').textContent   = (r.new_campaigns || []).length;
+  $('sumNew').textContent   = (r.new_campaigns || []).length + (s.to_reactivate ?? 0);
 
   const conf = `高 ${s.confidence_high||0} / 中 ${s.confidence_medium||0} / 低 ${s.confidence_low||0}`;
   const budget = s.estimated_budget_impact ?? 0;

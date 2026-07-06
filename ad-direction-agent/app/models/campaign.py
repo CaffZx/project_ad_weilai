@@ -156,6 +156,8 @@ class CampaignAdjustmentItem(BaseModel):
     perf_7d: dict = Field(default_factory=dict)
     # 活动上线天数（MCP ad_campaign_basic_info），-1=未知；供 KB 21 §2 新活动保护
     days_online: int = -1
+    # 距最近一次复评离池的天数，-1=从未复评/未知；供复评后 N 天保护（防淘汰↔复评抖动）
+    days_since_reactivation: int = -1
 
 
 class CampaignBatchResult(BaseModel):
