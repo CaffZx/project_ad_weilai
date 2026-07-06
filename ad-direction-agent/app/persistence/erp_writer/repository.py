@@ -1727,11 +1727,40 @@ class ErpDualWriterRepository:
                         )
                         exited += cur.rowcount
 
+               # 4a. 批量取 pending 表执行/确认时间（discovery 入池日优先用此时间）
+                discovery_cids = [
+                    cid for cid, cu in live_by_cid.items()
+                    if cid not in in_pool_cids
+                    and is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget)
+                ]
+                pending_entry: dict[str, datetime] = {}
+                if discovery_cids:
+                    ph = ",".join(["%s"] * len(discovery_cids))
+                    cur.execute(
+                        f"""SELECT c.campaign_id,
+                                    MIN(COALESCE(cp.execute_time, cp.confirm_time)) AS entry_time
+                            FROM t_advert_agent_modify_suggest_card c
+                            JOIN t_advert_agent_modify_campaign_pending cp
+                              ON cp.suggest_card_id = c.id
+                            WHERE c.parent_asin = %s AND c.campaign_id IN ({ph})
+                              AND c.suggest_category = 'ELIMINATE'
+                              AND COALESCE(cp.execute_time, cp.confirm_time) IS NOT NULL
+                            GROUP BY c.campaign_id""",
+                        (parent_asin, *discovery_cids),
+                    )
+                    for r in cur.fetchall():
+                        cid = str(r.get("campaign_id") or "").strip()
+                        et = r.get("entry_time")
+                        if cid and et:
+                            pending_entry[cid] = et
+
+                # 4b. 入池方向(discovery)
                 for cid, cu in live_by_cid.items():
                     if cid in in_pool_cids:
                         continue
                     if not is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
                         continue
+                    entry_dt = pending_entry.get(cid, now)  # pending 执行时间 > NOW()
                     spend = _perf_json_cost(
                         cu.perf_7d.model_dump() if cu.perf_7d else None
                     )
@@ -1760,7 +1789,7 @@ class ErpDualWriterRepository:
                             cu.keyword_text or "",
                             None,
                             "discovery",
-                            now,
+                            entry_dt,
                             spend,
                             now,
                             now,

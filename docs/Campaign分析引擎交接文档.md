@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-06（版本日志见文末，最新 v3.10：复评全链路 + 护栏 + 统计 §27）
+> **最后更新**: 2026-07-06（版本日志见文末，最新 v3.11：复评 production-verified + pending execute_time 回写 §27）
 > **版本**: v2.0
 > **分支**: chenv3.1
 
@@ -1222,9 +1222,11 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ### 27.6 验证
 
-离线单测 `tests/persistence/test_pool_entry_sync.py` 覆盖 sync 双向语义；campaign 相关全套 37 passed 零回归。⚠ `LLM_GLOBAL_CONCURRENCY` 在本机 `.env` 为空串，跑测试须 `LLM_GLOBAL_CONCURRENCY=240 NUM_WORKERS=1`。标注既有失败的 2 例（`test_data_contract.py::test_execution_blocked_missing_keywords`、`test_mcp_db_parity.py::test_shadow_compare_runs_without_breaking_primary_path`）为 Doris 切除后遗留，非本改动引入。
+离线单测 `tests/persistence/test_pool_entry_sync.py` 9 例全过 + `test_campaign_resolve_conflicts.py` 26 例（含新增测试期/复评防抖 12 例）+ `test_campaign_restart.py` 8 例 = **44 passed 零回归**。
 
-### 27.7 未做的事（保留记录）
+**生产库确证**（2026-07-06 SSH 直连 ERP 库）：旧逻辑曾生效——`confirm_status='CONFIRMED'` 的 ELIMINATE 卡 15,738 条（全 ASIN），其中 B0B7S3PWWB 有 77 条（confirm_time=2026-06-17）。一步直跑合并后 confirm 路径断，后续全是 PENDING。执行钩子补了 `update_pending_execute_status('SUCCESS')` 后，未来真执行会写回 `execute_time`，discovery 路径可读到真实入池时间。
+
+### 27.7 未尽事项
 
 - 回算口径修复（释放预算入池 + cap 锚定活动之和）— Phase 2b
 - 余量出口（复评捞回 + 二次新增 + 缓冲）— Phase 2c
@@ -1234,6 +1236,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.11: 复评生产库确证 + pending execute_time 回写 §27（2026-07-06，本地未部署）—— ①生产库确认旧 logic 曾生效(B0B7S3PWWB 有 77 条 CONFIRMED ELIMINATE)；②执行钩子补 `update_pending_execute_status('SUCCESS')` 回写 execute_time,discovery 路径可读到真实入池时间不再寄望 NOW()；③sync_pool_entries discovery 入池日改用 `COALESCE(execute_time,confirm_time)` > NOW() 两级回落；④复评 badge/card 边框改克莱因蓝 #2563EB；⑤护栏测试补全(44 passed) + 文档同步*
 *v3.10: 淘汰复评全链路 + 护栏 + 统计 §27（2026-07-06，本地未部署服务器）—— ①建表 `t_advert_agent_pool_entry`+双向 sync+ON DUPLICATE KEY 防复淘汰 + `parent_sku/shop_id/keyword_text` 全透传；②执行钩子接入 `submit_execution_direct/submit_execution` 真跑后(ELIMINATE→upsert source=execution / REACTIVATE_*→mark_pool_exit，async_batch MCP 整批成功才写)；③淘汰护栏三条件(`days_online≤3`/测试期`<14`/`days_since_reactivation≤3` 防淘汰↔复评抖动)，`product_stage` 从 strategy_context 透传；④`days_since_reactivation` 新模型字段+`get_recently_reactivated` 查池表 exit_date 反算；⑤reactivate_* 映射为 REACTIVATE 类别 +`to_reactivate` 独立桶 +ERP summary 加列 reactivate_count + 前端「新增/复评」合并展示位；⑥删死代码 `get_elimination_entry_dates`；⑦`load_pending_by_card_ids` SELECT 补 perf_json/trigger_rule。待部署服务器。*
 *v3.9: 原淘汰复评初版(2026-07-05，已废弃) — 建表 state 库 + pool_entry_repository 独立文件 + sync 双向同步；v3.10 迁回 ERP 库并补全钩子/护栏/统计*
 *v3.8: 待办全量核实+文档更新（2026-07-04，已上线 chenv31）—— ①逐条代码核实 §4.2/§15.5/§17/§19/§21.3/§22.4，5条标记已完成(DONE)修正为已核实真实状态；②basic_info MCP 批量失败→丢失灰卡（`campaign_fetcher.py:215-237`，不进 LLM 防误淘汰）；③`has_config` 改为 ERP 批次判定（`decision.py:75`，修 state DB strategy_config 缺行→空壳 A 态）；④§19 定时分析不采信 config acos/预算→已解决(state DB override 路径替代，config 表两列是死列但不影响功能)；⑤§17 ②Tab4 方向卡→已解决(ERP direction_recommend_detail 表路径)；⑥§15.5 新增活动预算回算→已实现；⑦clear_analysis_session 成功路径已清，失败路径仍未清（有12h TTL兜底）*

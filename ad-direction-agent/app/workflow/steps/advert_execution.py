@@ -98,6 +98,13 @@ def _sync_pool_entries_from_exec(
             except Exception as e:  # noqa: BLE001
                 logger.warning("mark_pool_exit 失败 [%s/%s]: %s", parent_asin, campaign_id, e)
 
+    # 回写 pending 表 execute_status='SUCCESS' + execute_time=NOW()
+    # （填补 submit_execution_direct "不写库"的历史缺口：MCP 真跑了但 DB 无记录）
+    try:
+        repo.update_pending_execute_status(plan.ops, "SUCCESS", operator="system", msg="direct execution via MCP")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("update_pending_execute_status 失败 [%s]: %s", parent_asin, e)
+
 
 def _perf_json_cost(perf_json) -> float | None:
     """复用同名私有函数的轻量副本，避免跨模块循环导入。"""
