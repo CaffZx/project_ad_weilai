@@ -60,18 +60,26 @@ def _normalize_portfolio_list(res: Any) -> list[dict]:
 
 
 def _match_portfolio(group_name: str, portfolios: list[dict]) -> dict | None:
-    """组合分组名(精准主力组…) → MCP portfolio。精确名 > 互相包含。"""
+    """组合分组名(精准主力组…) → MCP portfolio。仅子串包含匹配，必须唯一。
+
+    - 0 个匹配 → None
+    - ≥2 个匹配 → None（ambiguous，记 warning）
+    - 恰好 1 个 → 返回该 portfolio
+    """
     g = (group_name or "").strip()
-    named = []
+    matches: list[dict] = []
     for pf in portfolios:
-        nm = _pf_field(pf, "portfolioName", "name", "title", "portfolio_name")
-        named.append((str(nm or "").strip(), pf))
-    for nm, pf in named:
-        if nm and nm == g:
-            return pf
-    for nm, pf in named:
+        nm = str(_pf_field(pf, "portfolioName", "name", "title", "portfolio_name") or "").strip()
         if g and nm and (g in nm or nm in g):
-            return pf
+            matches.append(pf)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) >= 2:
+        logger.warning(
+            "portfolio 子串匹配不唯一 [%s]: 命中 %d 个 (%s)，跳过",
+            g, len(matches),
+            ", ".join(str(_pf_field(m, "portfolioName", "name")) for m in matches[:5]),
+        )
     return None
 
 

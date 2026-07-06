@@ -156,6 +156,47 @@ async def _resolve_create_portfolios(
     return skip
 
 
+async def _resolve_modify_portfolios(
+    client, plan, *, shop_id: int, parent_asin: str, parent_sku: str, operator: str,
+) -> None:
+    """为 MODIFY 路径的 campaignVoList 注入 portfolioId（挪组）。
+
+    - mapper 已将 card.campaign_group_type → campaignVo["campaignGroupType"]（ERP 码）。
+    - 此处查 query_portfolio_list → 按组名匹配 → 注入 portfolioId。
+    - 未匹配到的活动不阻断（仅 warning），仍正常执行（不改组）。
+    """
+    if not plan.params_vo_list:
+        return
+    try:
+        res = await client.query_portfolio_list(
+            shop_id, parent_asin, parent_sku, current_user_id=operator)
+        portfolios = _normalize_portfolio_list(res)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "query_portfolio_list 失败 [%s/%s]，挪组跳过: %s",
+            parent_asin, parent_sku, e)
+        plan.warnings.append(
+            f"组合列表查询失败，挪组跳过：{type(e).__name__}: {e}")
+        return
+
+    for params_vo in plan.params_vo_list:
+        for vo in (params_vo.get("campaignVoList") or []):
+            group_code = (vo.get("campaignGroupType") or "").strip()
+            if not group_code:
+                continue
+            zh = unmap_campaign_group_type(group_code)
+            if not zh:
+                continue
+            pf = _match_portfolio(zh, portfolios)
+            pid = _pf_field(pf, "portfolioId", "id", "portfolio_id") if pf else None
+            if pid:
+                vo["portfolioId"] = str(pid)
+            else:
+                cid = vo.get("campaignId", "?")
+                plan.warnings.append(
+                    f"活动「{cid}」的目标组「{zh}」未匹配到 portfolio，未挪组")
+
+
 async def submit_execution(decision_id: str, *, operator: str) -> dict:
     """执行一个批次已确认(CONFIRMED)的调整。返回汇总 dict。"""
     if not settings.advert_mcp_enabled:
@@ -222,6 +263,23 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
                     if not op.get("is_create") and not op.get("is_negative"):
                         op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
                         op["error_msg"] = f"{type(e).__name__}: {e}"
+
+        # 挪组：MODIFY 路径注入 portfolioId（fail-open：解析失败不阻断 MCP 调用）
+        try:
+            await _resolve_modify_portfolios(
+                client, plan,
+                shop_id=int(dec.get("shop_id") or 0),
+                parent_asin=str(dec.get("parent_asin") or ""),
+                parent_sku=str(dec.get("parent_seller_sku") or ""),
+                operator=operator,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("portfolio 解析失败 [%s]: %s", decision_id, e)
+            plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
+        # 清理内部字段：campaignGroupType 仅供 _resolve_modify_portfolios 使用，不传给 MCP
+        for pv in plan.params_vo_list:
+            for vo in (pv.get("campaignVoList") or []):
+                vo.pop("campaignGroupType", None)
 
         skip_create = await _resolve_create_portfolios(
             client, plan,
@@ -330,6 +388,22 @@ async def submit_execution_direct(
 
     # 真跑：调 MCP，不写库
     client = AdvertMcpClient()
+    try:
+        # 挪组：MODIFY 路径注入 portfolioId
+        await _resolve_modify_portfolios(
+            client, plan,
+            shop_id=int((pending.get("decision") or {}).get("shop_id") or 0),
+            parent_asin=str((pending.get("decision") or {}).get("parent_asin") or ""),
+            parent_sku=str((pending.get("decision") or {}).get("parent_seller_sku") or ""),
+            operator=operator,
+        )
+        for pv in plan.params_vo_list:
+            for vo in (pv.get("campaignVoList") or []):
+                vo.pop("campaignGroupType", None)
+    except Exception as e:
+        logger.exception("portfolio 解析失败(direct) [%s]: %s", decision_id, e)
+        plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
+
     results: dict = {"async": None, "create": [], "negative": []}
     task_ids: list[str] = []
     errors: list[str] = []
