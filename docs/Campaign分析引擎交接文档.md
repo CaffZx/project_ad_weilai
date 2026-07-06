@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-05（版本日志见文末，最新 v3.8：复评数据源重建 §27）
+> **最后更新**: 2026-07-06（版本日志见文末，最新 v3.10：复评全链路 + 护栏 + 统计 §27）
 > **版本**: v2.0
 > **分支**: chenv3.1
 
@@ -1172,86 +1172,72 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 >
 > **2026-07-06 更新：ERP 库已可达，表+方法已从 state 库迁回 ERP 库**（`erp_writer/repository.py`）。
 
-### 27.1 背景与根因（7 步链路第 1 步断了）
+### 27.1 背景（为什么做）
 
-复评完整 code path 已就绪（[campaign_restart.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign_restart.py) 情况一/二、`_run_restart_review`、并入 adjustments），唯一断点是入池日期取数 **恒空**：
+复评（KB21 §7）完整 code path 已就绪，唯一断点是入池日期取数 [repository.py:131](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:131) `get_elimination_entry_dates` 恒空——旧查询依赖 `suggest_category='ELIMINATE' AND confirm_status='CONFIRMED'`，一步直跑 `submit_execution_direct` 不写 confirm_status → 0 行 → 复评门永不进。
 
-| 环节 | 文件 | 状态 |
-|---|---|---|
-| ①入池日期取数 | `repository.py:131 get_elimination_entry_dates` | ❌ 恒空：要求 `suggest_category='ELIMINATE' AND confirm_status='CONFIRMED'`，一步直跑不写 confirm_status → 0 行 |
-| ②~⑦ 候选筛选/情况一二判定/单据生成/并入/写卡/执行 | 见 §17 / campaign_restart.py | ✅ 逻辑就绪 |
+同时存在淘汰误杀（LLM 100% 拍板、无代码否决）、复评卡归类为 ADJUST、统计漏桶、复评后抖动（刚捞回又被淘汰）等问题。本迭代（v3.10）一并治理。
 
-### 27.2 改动（最终态，已迁回 ERP 库）
+### 27.2 总改动清单
 
 | # | 文件 | 改动 |
 |---|---|---|
-| ① | **ERP 库** `t_advert_agent_pool_entry`（DDL 见 §27.6） | 新表：UNIQUE KEY `uk_asin_cid(parent_asin,campaign_id)` + `idx_parent_exit(parent_asin,exit_date)`，`campaign_name NOT NULL`，`keyword_text VARCHAR(255)` |
-| ② | [erp_writer/repository.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py) | `ErpDualWriterRepository` 新增 `get_active_entries` / `sync_pool_entries`；执行钩子 TODO 注释（`upsert_pool_entry`/`mark_pool_exit`）；复用既有 `_perf_json_cost` |
-| ③ | [app/api/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign.py) | 复评入口不再提前取 `get_elimination_entry_dates` → campaign.py 内部 sync 后自取 |
-| ④ | [app/workflow/steps/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py) | §7c 复评块：`_get_repository()` 取单例 → sync → 读 → 复评（三步），`elimination_entry_dates` 参数 deprecated |
-| ⑤ | [tests/persistence/test_pool_entry_sync.py](AD_assistant_agent-v3.2/ad-direction-agent/tests/persistence/test_pool_entry_sync.py) | 9 例离线单测（mock `ErpDualWriterRepository._connect`） |
+| ① | ERP 库 `t_advert_agent_pool_entry` | 新建入池专表；DDL 见 [migration_20260706_pool_entry_table.sql](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/migration_20260706_pool_entry_table.sql)；ERP 库已执行建表 |
+| ② | ERP 库 `t_advert_agent_modify_suggest_summary` | ALTER TABLE 加 `reactivate_count INT NOT NULL DEFAULT 0 AFTER keep_count`；migration 见 [migration_20260706b_summary_reactivate_count.sql](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/migration_20260706b_summary_reactivate_count.sql)；ERP 库已执行 |
+| ③ | [erp_writer/repository.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py) | 新增 `get_active_entries`(:1636) / `sync_pool_entries`(:1668) / `upsert_pool_entry`(:1783) / `mark_pool_exit`(:1843) / `get_recently_reactivated`(:1867)；`load_pending_by_card_ids` SELECT 增 `perf_json, trigger_rule`(:394)；删死代码 `get_elimination_entry_dates` |
+| ④ | [advert_execution.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/advert_execution.py) | 新增 `_sync_pool_entries_from_exec` 辅助函数；`submit_execution_direct`(:375) 和 `submit_execution`(:282) 真跑后各调一次：ELIMINATE → upsert / REACTIVATE_* → mark_pool_exit。async_batch MCP 整批成功后写，失败不写 |
+| ⑤ | [campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py) | §7c 复评块改三步(sync→读→复评)(:669)；淘汰护栏扩充(:2005-2017)：`days_online≤3` / 测试期+`<14` / `days_since_reactivation≤3`(防淘汰↔复评抖动)；`summary_stats` 加 `to_reactivate`(:818)；复评保护回填块(:641-650)批量取池表给 adj 赋 `days_since_reactivation` |
+| ⑥ | [models/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/models/campaign.py) | `CampaignAdjustmentItem` 新增 `days_since_reactivation: int = -1`(:161) |
+| ⑦ | [mappers.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/mappers.py) | `_ACTION_TO_CATEGORY` 加 `reactivate_budget_only` / `reactivate_with_calibrated_bid` → `'REACTIVATE'`(:60)；`_CATEGORY_PRIORITY` 调序(:66) |
+| ⑧ | [api/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign.py) | 不再提前取 `get_elimination_entry_dates` → campaign.py 内部 sync 后自取(:362) |
+| ⑨ | [campaign_viewmodel.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign_viewmodel.py) | `_CAT_TO_ACTION` 加 REACTIVATE(:246) |
+| ⑩ | [db_health_check.py](AD_assistant_agent-v3.2/ad-direction-agent/scripts/erp_db/db_health_check.py) | `VALID_CAT` 加 REACTIVATE + CREATE(:125) |
+| ⑪ | 前端 [panel.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/panel.js) + [render.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/render.js) + [viewmodel.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/viewmodel.js) + [campaign_test.html](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign_test.html) | 汇总统计「新增/复评」合并展示位；viewmodel 加 `reactivate` 桶；render.js:164 数字 = create + reactivate |
+| ⑫ | [tests/persistence/test_pool_entry_sync.py](AD_assistant_agent-v3.2/ad-direction-agent/tests/persistence/test_pool_entry_sync.py) | 离线单测 |
 
-### 27.3 同步口径
+### 27.3 入池表同步口径
 
-- **discovery 入池**：`sync_pool_entries` 拿全部 live 活动 vs 池表记录（`exit_date IS NULL`）。live `is_strictly_in_low_bid_pool=True`（bid≤0.21 且 budget≤1.01）且池表无 `campaign_id` → INSERT `source='discovery'`。
+- **discovery 入池**（[repository.py:1668](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:1668)）：分析后取全量 live 活动 vs 池表 `exit_date IS NULL` 记录。live `is_strictly_in_low_bid_pool=True` 且池表无 → INSERT `source='discovery', entry_date=NOW()`。复淘汰走 `ON DUPLICATE KEY UPDATE`（重置 exit_date=NULL）。
 - **离池（手动复评/恢复检测）**：池表有记录但 live 无该 `campaign_id`，或 live 已恢复超池底 → UPDATE `exit_date=NOW()`（软标记）。
 - **空串保护**：`campaign_id` 空串全部跳过。
-- **性能**：一次 `SELECT WHERE parent_asin AND exit_date IS NULL`（池表）+ campaign_data 全量建索引（已在内存）。
+- **执行钩子**（[repository.py:1783](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:1783)）：`upsert_pool_entry(source='execution', entry_date=NOW())` → ELIMINATE 卡 MCP 真跑后写；`mark_pool_exit(exit_date=NOW())` → REACTIVATE_ 卡 MCP 真跑后软标记。
+- **性能**：一次 `SELECT WHERE parent_asin AND exit_date IS NULL` + campaign_data 全量 dict（O(池行数)，不逐活动查）。
 
-### 27.4 延迟承认（本期边界）
+### 27.4 复评保护护栏
 
-**本期无执行钩子**：discovery 入池后要等下一次分析才参与复评；首次入池日=发现日（非真实淘汰时刻），复评 14 天窗口至多延后一个分析周期。钩子（`upsert_pool_entry` source='execution' / `mark_pool_exit` by REACTIVATE_ prefix）见 repository.py TODO，等真跑接入后启用。
+`_resolve_budget_conflicts`（[campaign.py:2005-2017](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:2005)）三种条件 OR，命中任一即禁强制淘汰、LLM 误判淘汰翻正为 keep：
 
-### 27.5 ⚠ 待办
+1. `days_online ≥ 0 and ≤ 3` — 新活动样本不足（KB21 §2）
+2. `product_stage == "测试期" and days_online ≥ 0 and < 14` — 测试期样本保护（KB21 §2）
+3. `days_since_reactivation ≥ 0 and ≤ 3` — 复评后防抖（KB21 §2 精神，复用池表 `exit_date` 反算）
 
-| 项 | 优先级 | 说明 |
-|---|---|---|
-| **真库验证** | P0 | 跑 B0B7S3PWWB → 断言 `get_active_entries` 非空 → 复评门进 → reactivate_* 卡产出 |
-| **执行钩子** | P0 | `submit_execution_direct/submit_execution` 真跑后：ELIMINATE 卡 `upsert_pool_entry(source='execution')`、REACTIVATE_ 卡 `mark_pool_exit` |
-| **ERP 库 DDL 执行** | 上线前 | DDL 见 §27.6，ERP 库需 run 一次 |
+`days_since_reactivation` 的回填链路（[campaign.py:641-650](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:641)）：`get_recently_reactivated(parent_asin, max_days=3)` 查池表近 3 天离池记录 → 算 `(now - exit_date).days` → 赋到 `adj.days_since_reactivation`。`_resolve_budget_conflicts` 通过 `product_stage` 参数接收产品阶段（从 `strategy_context` 透传，[campaign.py:656](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:656)）。
 
-### 27.6 ERP 库 DDL（上线时手工执行）
+### 27.5 复评卡归类 + 汇总统计
 
-```sql
-CREATE TABLE IF NOT EXISTS t_advert_agent_pool_entry (
-    id            BIGINT       NOT NULL AUTO_INCREMENT,
-    shop_id       INT          NULL,
-    shop_account  VARCHAR(64)  NULL,
-    parent_asin   VARCHAR(50)  NOT NULL,
-    child_asin    VARCHAR(64)  NULL,
-    campaign_id   VARCHAR(64)  NOT NULL,
-    campaign_key  VARCHAR(600) NULL,
-    campaign_name VARCHAR(512) NOT NULL,
-    keyword_text  VARCHAR(255) NULL,
-    decision_id   VARCHAR(64)  NULL,
-    source        VARCHAR(16)  NOT NULL DEFAULT 'discovery',
-    entry_date    DATETIME(6)  NOT NULL,
-    exit_date     DATETIME(6)  NULL,
-    eliminate_spend_7d DECIMAL(12,2) NULL,
-    create_time   DATETIME(6)  NOT NULL,
-    update_time   DATETIME(6)  NOT NULL,
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_asin_cid (parent_asin, campaign_id),
-    INDEX idx_parent_exit (parent_asin, exit_date)
-) ENGINE=InnoDB;
-```
+- **映射**：[mappers.py:60-63](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/mappers.py:60) `reactivate_budget_only` / `reactivate_with_calibrated_bid` → `suggest_category='REACTIVATE'`（前端 badge 深蓝，render.js:42-43 `_actionLabel` 返回「复评」）
+- **后端 `to_reactivate` 桶**：[campaign.py:818](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:818) `summary_stats` 独立统计；ERP 库 summary 表已加 `reactivate_count` 列
+- **前端展示**：汇总统计「新增/复评」合并位，值 = `create + reactivate`
+- **`categorized_total`**：[repository.py:689](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:689) 纳入所有四桶(eliminate/adjust/keep/reactivate)，告警不再误触
 
-### 27.6 验证（已做）
+### 27.6 验证
 
-离线单测 `tests/persistence/test_pool_entry_sync.py` 9 例全过；campaign 相关全套（restart/resolve_conflicts/new_quota + 新测试）37 passed 零回归。⚠ `LLM_GLOBAL_CONCURRENCY` 在本机 `.env` 为空串，跑测试须 `LLM_GLOBAL_CONCURRENCY=240 NUM_WORKERS=1`（与 override_persistence 测试同款环境绕过，**与本改动无关**）。⚠ 既有 2 例失败（`test_data_contract.py::test_execution_blocked_missing_keywords`、`test_mcp_db_parity.py::test_shadow_compare_runs_without_breaking_primary_path`）是 v3.2 Doris 切除后遗留特征测试，非本改动引入。
+离线单测 `tests/persistence/test_pool_entry_sync.py` 覆盖 sync 双向语义；campaign 相关全套 37 passed 零回归。⚠ `LLM_GLOBAL_CONCURRENCY` 在本机 `.env` 为空串，跑测试须 `LLM_GLOBAL_CONCURRENCY=240 NUM_WORKERS=1`。标注既有失败的 2 例（`test_data_contract.py::test_execution_blocked_missing_keywords`、`test_mcp_db_parity.py::test_shadow_compare_runs_without_breaking_primary_path`）为 Doris 切除后遗留，非本改动引入。
 
-### 27.7 原方案中本期内不做（保留记录）
+### 27.7 未做的事（保留记录）
 
-- `_apply_elimination_guardrail` 淘汰误杀护栏（强制禁淘汰确定性兜底）— Phase 1+ 另做。
-- 预算余量回流（释放预算入池 + cap 锚定活动之和 + 二次新增从储备促建 + 缓冲）— Phase 2 另做。
-- 方案行号漂移（原 plan 文 638/640/658/1880-1882/1927-2014 多处偏移）已按实测行号落地。
+- 回算口径修复（释放预算入池 + cap 锚定活动之和）— Phase 2b
+- 余量出口（复评捞回 + 二次新增 + 缓冲）— Phase 2c
+- `pool_entry_record_on_dryrun` 开关 — settings.py 可选
 
 ---
 
+
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
-*v3.9: 淘汰复评数据源重建 §27（2026-07-05，本地未上服务器）—— 根治「入池日期恒空」让复评门真正能进。①新表 `t_advert_agent_pool_entry`（暂建 state 库 ad_agent_state，UNIQUE KEY uk_asin_cid + idx_parent_exit）；②新建 `pool_entry_repository.py`（PoolEntryRepository 连 state 库，get_active_entries + sync_pool_entries 双向同步：discovery 入池 + 手动复评/恢复离池检测，campaign_id 空串全部跳过）；③`api/campaign.py` 不再提前取 entry_dates 旧快照；④`campaign.py` §7c 改三步 sync→读→复评，elimination_entry_dates 参数 deprecated；⑤离线单测 9 例全过、campaign 相关 37 passed 零回归。⚠ 待办：ERP 库可达后临时表迁回 ERP 库 + 接执行钩子（upsert_pool_entry source=execution / mark_pool_exit by REACTIVATE_ prefix）*
+*v3.10: 淘汰复评全链路 + 护栏 + 统计 §27（2026-07-06，本地未部署服务器）—— ①建表 `t_advert_agent_pool_entry`+双向 sync+ON DUPLICATE KEY 防复淘汰 + `parent_sku/shop_id/keyword_text` 全透传；②执行钩子接入 `submit_execution_direct/submit_execution` 真跑后(ELIMINATE→upsert source=execution / REACTIVATE_*→mark_pool_exit，async_batch MCP 整批成功才写)；③淘汰护栏三条件(`days_online≤3`/测试期`<14`/`days_since_reactivation≤3` 防淘汰↔复评抖动)，`product_stage` 从 strategy_context 透传；④`days_since_reactivation` 新模型字段+`get_recently_reactivated` 查池表 exit_date 反算；⑤reactivate_* 映射为 REACTIVATE 类别 +`to_reactivate` 独立桶 +ERP summary 加列 reactivate_count + 前端「新增/复评」合并展示位；⑥删死代码 `get_elimination_entry_dates`；⑦`load_pending_by_card_ids` SELECT 补 perf_json/trigger_rule。待部署服务器。*
+*v3.9: 原淘汰复评初版(2026-07-05，已废弃) — 建表 state 库 + pool_entry_repository 独立文件 + sync 双向同步；v3.10 迁回 ERP 库并补全钩子/护栏/统计*
 *v3.8: 待办全量核实+文档更新（2026-07-04，已上线 chenv31）—— ①逐条代码核实 §4.2/§15.5/§17/§19/§21.3/§22.4，5条标记已完成(DONE)修正为已核实真实状态；②basic_info MCP 批量失败→丢失灰卡（`campaign_fetcher.py:215-237`，不进 LLM 防误淘汰）；③`has_config` 改为 ERP 批次判定（`decision.py:75`，修 state DB strategy_config 缺行→空壳 A 态）；④§19 定时分析不采信 config acos/预算→已解决(state DB override 路径替代，config 表两列是死列但不影响功能)；⑤§17 ②Tab4 方向卡→已解决(ERP direction_recommend_detail 表路径)；⑥§15.5 新增活动预算回算→已实现；⑦clear_analysis_session 成功路径已清，失败路径仍未清（有12h TTL兜底）*
-*最后更新：2026-07-05
+*最后更新：2026-07-06
 *v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端已上线 chenv31 2026-06-24，batchBar进topbar高风险未做）*
 *v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；已上线 chenv31 2026-06-24）*
 *v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。已上线 chenv31 2026-06-24）*
