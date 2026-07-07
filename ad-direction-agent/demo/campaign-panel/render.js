@@ -32,6 +32,54 @@ function _fmtChange(cur, prop) {
        + ` <span style="color:${color};font-size:11px;">(${sign}$${d.toFixed(2)})</span>`;
 }
 
+// 真实 bid = 基础 bid ×(1 + 加价比例%/100)。广告位实际出价并非基础 bid。
+function _realBid(bid, pct) {
+  if (bid == null || isNaN(bid)) return null;
+  const p = Number(pct) || 0;
+  return Number(bid) * (1 + p / 100);
+}
+
+// ── 广告位加价 常驻简要渲染（与 预算/出价 同级常驻）──
+// 不改动 .detail 里的 _renderPlacements（展开详情原样保留）；仅追加一个只读简表。
+// 真实 bid：当前 = current_bid×(1+current_pct)；调整后 =(proposed_bid ?? current_bid)×(1+proposed_pct)。
+// bid 与广告位比例同时变时，右值体现复合后的真实出价。
+const _PLACEMENT_ORDER = { '头部': 0, '商品': 1, '其他': 2 };
+function _renderPlacementsBrief(adj) {
+  const placements = (adj.placement_adjustments || []).filter(p => !p.is_declaration);
+  if (!placements.length) return '';
+  const baseCur = adj.current_bid;
+  const baseProp = (adj.proposed_bid != null) ? adj.proposed_bid : adj.current_bid;
+  if (baseCur == null && baseProp == null) return '';
+
+  const sorted = placements.slice().sort((a, b) =>
+    (_PLACEMENT_ORDER[a.placement] ?? 9) - (_PLACEMENT_ORDER[b.placement] ?? 9));
+
+  const rows = sorted.map(p => {
+    const cp = p.current_pct;
+    const pp = (p.proposed_pct != null) ? p.proposed_pct : p.current_pct;
+    const rbCur = _realBid(baseCur, cp);
+    const rbProp = _realBid(baseProp, pp);
+    const name = _esc(p.placement || '?');
+    const curStr = `${cp ?? '?'}%（${rbCur != null ? _fmtMoney(rbCur) : '—'}）`;
+    // 无变化（比例与真实 bid 均未变）→ 单值
+    const changed = (Number(cp) !== Number(pp))
+      || (rbCur != null && rbProp != null && Math.abs(rbProp - rbCur) >= 0.005);
+    if (!changed) {
+      return `<div class="camp-placement-brief-row">${name}：${curStr}</div>`;
+    }
+    const propStr = `${pp ?? '?'}%（${rbProp != null ? _fmtMoney(rbProp) : '—'}）`;
+    const d = (rbProp != null && rbCur != null) ? (rbProp - rbCur) : null;
+    const color = d == null ? 'var(--camp-muted-fg)' : (d >= 0 ? '#16A34A' : '#DC2626');
+    return `<div class="camp-placement-brief-row">${name}：${curStr}`
+         + ` <span style="color:${color};">→</span> ${propStr}</div>`;
+  }).join('');
+
+  return `<div class="camp-placement-brief" style="margin-top:4px;font-size:12px;line-height:1.7;">`
+       + `<span class="k" style="color:var(--camp-muted-fg);">广告位加价</span>`
+       + ` <span style="color:var(--camp-muted-fg);font-size:11px;">(括号内为真实bid)</span>`
+       + rows + `</div>`;
+}
+
 function _actionLabel(a) {
   return {
     eliminate_to_low_bid_pool: '淘汰',
@@ -272,9 +320,12 @@ function _renderCards(state) {
 
     // 广告位/否词 专用渲染
     let extras = '';
+    let placementBrief = '';
     if (klass === 'create') {
       extras = _renderNewCampaignExtras(adj);
     } else {
+      // 常驻广告位加价简表（真实 bid），不进 .detail
+      placementBrief = _renderPlacementsBrief(adj);
       if (adj.placement_adjustments && adj.placement_adjustments.length > 0) {
         extras += _renderPlacements(adj.placement_adjustments);
       }
@@ -307,6 +358,7 @@ function _renderCards(state) {
             ${adj.review_level ? '| 审核: ' + _esc(adj.review_level) : ''}
           </div>
           <div class="values">${vals}</div>
+          ${placementBrief}
           <div class="reason" style="white-space:pre-wrap;">${_esc(fullReason)}</div>
           <div class="detail hidden" style="display:none;">
             ${_renderEvidence(adj)}

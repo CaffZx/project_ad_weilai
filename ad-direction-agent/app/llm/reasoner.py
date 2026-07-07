@@ -300,6 +300,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 - **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
 - 必须输出 placement_adjustments（三个广告位全部列出）。每个只填 `placement`（头部/其他/商品）+ `action`（维持/小涨/大涨/小降/大降）+ `evidence`。**禁止输出 current_pct/proposed_pct 数字**——这些由后端按 KB 19 §3 从当前加价比例 + action 自动计算
+- **真实出价复合评估**：某广告位的真实出价 = Bid×(1+该位加价比例)，并非基础 Bid。当你同时调整 `proposed_bid` 与某广告位 `action` 时，两者会叠加放大/抵消该位的真实出价。给广告位 action 前必须以「当前真实出价」为基准评估复合后的真实出价变动幅度，勿只看加价比例步长；若复合后真实出价变动过大（如 >30%）而证据不足，应下调 action 档位（大涨→小涨/维持）或收敛 proposed_bid，并在 evidence 说明
 
 ### 淘汰活动
 - **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
@@ -1676,6 +1677,20 @@ class LLMReasoner:
             if ppcts:
                 camp_parts.append(f"  - 当前加价比例: 头部:{ppcts.get('头部',0)}%, "
                                  f"商品:{ppcts.get('商品',0)}%, 其他:{ppcts.get('其他',0)}%")
+                # 各广告位真实出价 = Bid×(1+加价比例)。调 bid 与广告位加价会叠加，
+                # 分析建议须以真实出价评估幅度，勿只看基础 Bid。
+                _cbid = s.get("current_bid", 0) or 0
+                def _real_bid(_pct):
+                    try:
+                        return round(float(_cbid) * (1 + (float(_pct) or 0) / 100), 3)
+                    except (TypeError, ValueError):
+                        return _cbid
+                camp_parts.append(
+                    f"  - 当前真实出价(Bid×(1+加价比例)): "
+                    f"头部 ${_real_bid(ppcts.get('头部',0))}, "
+                    f"商品 ${_real_bid(ppcts.get('商品',0))}, "
+                    f"其他 ${_real_bid(ppcts.get('其他',0))}"
+                )
             # 自然排名（周排名，仅精准；三态：有排名/已掉榜/无数据不渲染）
             nr = s.get("_natural_rank")
             if nr:
