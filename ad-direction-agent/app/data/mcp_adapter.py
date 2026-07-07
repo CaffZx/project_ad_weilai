@@ -169,6 +169,8 @@ class McpAdapter(DataSourceAdapter):
         db_ctx = None
         if settings.mcp_resolve_context:
             db_ctx = await resolve_mcp_context_from_mcp(asin, self)
+        if db_ctx and db_ctx.product_name:
+            self._cached_product_name = db_ctx.product_name
         if not db_ctx:
             raise RuntimeError(
                 f"无法解析 MCP 上下文（ASIN={asin}）。"
@@ -286,6 +288,9 @@ class McpAdapter(DataSourceAdapter):
             missing_fields=missing_fields,
             days=days,
         )
+        # 产品标题：复用 _resolve_context 中 parent_listing_detail 已返回的 product_name，
+        # 注入新增扩词流作相关性锚点（KB28 §2）。零额外 MCP 调用。
+        data.title = getattr(self, '_cached_product_name', '') or ''
         return finalize_mcp_asin_data(data, payload_map, missing_fields, meta_ids, partial_failures)
 
     def assemble_from_payloads(
