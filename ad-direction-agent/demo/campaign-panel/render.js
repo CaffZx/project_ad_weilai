@@ -143,6 +143,11 @@ function _fullRender(state) {
     _renderPortfolioFilterPills(state);
     _renderBatchToolbar(state);
     _renderCards(state);
+    // 折叠：隐藏筛选器 + 广告组合栏（执行工具栏 camp-batch-toolbar 保持常驻）
+    if (_controlsCollapsed()) {
+      _hide('camp-filters');
+      _hide('camp-portfolio-pills-row');
+    }
   }
 
   // 预算汇总（固定区）
@@ -225,14 +230,21 @@ function _renderSummaryStats(vm) {
 }
 
 // ── Tab 按钮 ──
+// 折叠筛选器/广告组合栏 的持久化标记（localStorage，跨重渲染/刷新保持）
+function _controlsCollapsed() {
+  try { return localStorage.getItem('camp_controls_collapsed') === '1'; } catch (e) { return false; }
+}
+
 function _renderTabButtons(state) {
   const tabs = _$('camp-tabs');
   if (!tabs) return;
   const warnN = (state.warnings || []).length;
+  const collapsed = _controlsCollapsed();
   tabs.innerHTML = `
     <button class="camp-ctab-btn ${state._activeTab === 'detail' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="detail">明细</button>
     <button class="camp-ctab-btn ${state._activeTab === 'summary' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="summary">汇总</button>
     <button class="camp-ctab-btn ${state._activeTab === 'warnings' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="warnings">告警${warnN ? ` (${warnN})` : ''}</button>
+    ${state._activeTab === 'detail' ? `<button class="camp-ctab-fold" data-action="camp-toggle-controls" title="折叠/展开 筛选器与广告组合栏（执行工具栏保持常驻）">${collapsed ? '▸ 展开筛选栏' : '▾ 折叠筛选栏'}</button>` : ''}
   `;
 }
 
@@ -246,9 +258,13 @@ function _renderBatchToolbar(state) {
 }
 
 // ── 卡片列表 ──
+// 卡片数达到此阈值才切两列瀑布（低于则单列满宽，避免筛选后仅剩 1 张时半宽孤卡）
+const _TWO_COL_MIN = 2;
 function _renderCards(state) {
   const items = state._filteredItems;
   const el = _$('camp-list');
+  // 两列瀑布：卡片数 ≥ 阈值时启用（浏览器自动均衡两列高度）；1 张或空时单列满宽
+  if (el) el.classList.toggle('camp-2col', items.length >= _TWO_COL_MIN);
   if (!items.length) {
     el.innerHTML = '<div class="camp-card" style="text-align:center;color:var(--camp-muted-fg);padding:30px;">无匹配活动</div>';
     return;

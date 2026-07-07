@@ -75,6 +75,12 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-reset-all':
         st.resetConstraints();
         return;
+      case 'camp-toggle-controls':
+        try {
+          const cur = localStorage.getItem('camp_controls_collapsed') === '1';
+          localStorage.setItem('camp_controls_collapsed', cur ? '0' : '1');
+        } catch (e) { /* localStorage 不可用则忽略 */ }
+        break;  // 落到下方 applyFilters() 触发重渲染
       default:
         break;
     }

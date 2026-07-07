@@ -391,3 +391,23 @@
   content: '无匹配活动'; display: block; text-align: center;
   padding: 40px 20px; color: var(--camp-muted-fg); font-size: 13px;
 }
+
+/* ── 两列瀑布式卡片（render.js 按卡片数 ≥ _TWO_COL_MIN 时加 .camp-2col）── */
+/* columns:2 = 浏览器自动均衡两列高度（column-fill:balance 默认），无硬编码高度；
+   break-inside:avoid 防单卡跨列被截断；卡片自带 margin-bottom:8px 作纵向间距。 */
+#camp-list.camp-2col { columns: 2; column-gap: 12px; }
+#camp-list.camp-2col .camp-adjustment-card {
+  break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
+}
+/* iframe 被压窄时退回单列，避免卡片过挤 */
+@media (max-width: 900px) { #camp-list.camp-2col { columns: 1; } }
+
+/* ── tab 栏右侧「折叠筛选栏」按钮 ── */
+#camp-tabs { display: flex; align-items: center; gap: 4px; }
+.camp-ctab-fold {
+  margin-left: auto; font-size: 12px; line-height: 1.2;
+  color: var(--camp-muted-fg); background: none;
+  border: 1px solid var(--camp-border); border-radius: 8px;
+  padding: 3px 10px; cursor: pointer; white-space: nowrap;
+}
+.camp-ctab-fold:hover { color: var(--camp-foreground); border-color: var(--camp-primary); }
