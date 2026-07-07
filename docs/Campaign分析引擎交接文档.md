@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-06（版本日志见文末，最新 v3.11：复评 production-verified + pending execute_time 回写 §27）
+> **最后更新**: 2026-07-07（版本日志见文末，最新 v3.12：扩词相关性锚点 product_name 接线 §24）
 > **版本**: v2.0
 > **分支**: chenv3.1
 
@@ -1236,11 +1236,12 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.12: 扩词相关性锚点 product_name 接线（2026-07-07，已部署 chenv31）—— 新增扩词流 LLM 判词相关性依赖 `asin_data.title` 作锚点，但 v3.2 切除 Doris 后该字段恒为 None（listing_basic_info_v2 normalizer 不提取 title，parent_listing_detail 的 product_name 只到 McpDbContext 就断了）。修复：`mcp_adapter._resolve_context` 把 `McpDbContext.product_name` 缓存到实例变量，`fetch_asin_data` 注入 `data.title`。零额外 MCP 调用（parent_listing_detail 本就在 context 阶段已调过）。1 文件 +5 行。*
 *v3.11: 复评生产库确证 + pending execute_time 回写 §27（2026-07-06，本地未部署）—— ①生产库确认旧 logic 曾生效(B0B7S3PWWB 有 77 条 CONFIRMED ELIMINATE)；②执行钩子补 `update_pending_execute_status('SUCCESS')` 回写 execute_time,discovery 路径可读到真实入池时间不再寄望 NOW()；③sync_pool_entries discovery 入池日改用 `COALESCE(execute_time,confirm_time)` > NOW() 两级回落；④复评 badge/card 边框改克莱因蓝 #2563EB；⑤护栏测试补全(44 passed) + 文档同步*
 *v3.10: 淘汰复评全链路 + 护栏 + 统计 §27（2026-07-06，本地未部署服务器）—— ①建表 `t_advert_agent_pool_entry`+双向 sync+ON DUPLICATE KEY 防复淘汰 + `parent_sku/shop_id/keyword_text` 全透传；②执行钩子接入 `submit_execution_direct/submit_execution` 真跑后(ELIMINATE→upsert source=execution / REACTIVATE_*→mark_pool_exit，async_batch MCP 整批成功才写)；③淘汰护栏三条件(`days_online≤3`/测试期`<14`/`days_since_reactivation≤3` 防淘汰↔复评抖动)，`product_stage` 从 strategy_context 透传；④`days_since_reactivation` 新模型字段+`get_recently_reactivated` 查池表 exit_date 反算；⑤reactivate_* 映射为 REACTIVATE 类别 +`to_reactivate` 独立桶 +ERP summary 加列 reactivate_count + 前端「新增/复评」合并展示位；⑥删死代码 `get_elimination_entry_dates`；⑦`load_pending_by_card_ids` SELECT 补 perf_json/trigger_rule。待部署服务器。*
 *v3.9: 原淘汰复评初版(2026-07-05，已废弃) — 建表 state 库 + pool_entry_repository 独立文件 + sync 双向同步；v3.10 迁回 ERP 库并补全钩子/护栏/统计*
 *v3.8: 待办全量核实+文档更新（2026-07-04，已上线 chenv31）—— ①逐条代码核实 §4.2/§15.5/§17/§19/§21.3/§22.4，5条标记已完成(DONE)修正为已核实真实状态；②basic_info MCP 批量失败→丢失灰卡（`campaign_fetcher.py:215-237`，不进 LLM 防误淘汰）；③`has_config` 改为 ERP 批次判定（`decision.py:75`，修 state DB strategy_config 缺行→空壳 A 态）；④§19 定时分析不采信 config acos/预算→已解决(state DB override 路径替代，config 表两列是死列但不影响功能)；⑤§17 ②Tab4 方向卡→已解决(ERP direction_recommend_detail 表路径)；⑥§15.5 新增活动预算回算→已实现；⑦clear_analysis_session 成功路径已清，失败路径仍未清（有12h TTL兜底）*
-*最后更新：2026-07-06
+*最后更新：2026-07-07
 *v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端已上线 chenv31 2026-06-24，batchBar进topbar高风险未做）*
 *v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；已上线 chenv31 2026-06-24）*
 *v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。已上线 chenv31 2026-06-24）*
