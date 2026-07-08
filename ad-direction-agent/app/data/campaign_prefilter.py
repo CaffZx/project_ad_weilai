@@ -25,17 +25,23 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
 
     注意: budget=$1 的活动不在此排除 -- 留给 LLM 按 KB 规则判断淘汰保护条件。
     """
-    # Step 1: 按 campaign_id 统计 ① 去重关键词数 ② 各子ASIN关联行数（用于选代表子ASIN）
+    # Step 1: 按 campaign_id 统计 ① 去重投放关键词数（排除否定词）② 各子ASIN关联行数
     #         改用 campaign_id 而非 campaign_name：id 是数字主键，跨工具稳定。
+    #         否定词（negativeExact/negativePhrase）不计入多词判定——广泛活动常有同词根否词，
+    #         若把否词算进去会导致误判为"多关键词活动"。
+    def _is_negative_match(mt: str) -> bool:
+        return "negative" in (mt or "").lower()
+
     cid_kw_count: dict[str, set] = {}
     cid_asin_rows: dict[str, Counter] = {}
     cid_name: dict[str, str] = {}  # cid → name（取首次出现的名称）
     for r in raw:
         cid = str(r.get("campaign_id") or "")
         kw = str(r.get("keyword_text") or "")
+        mt = str(r.get("关键词匹配类型") or r.get("keyword_match_type") or "")
         ca = str(r.get("child_asin") or "")
         name = str(r.get("campaign_name") or "")
-        if cid and kw:
+        if cid and kw and not _is_negative_match(mt):
             cid_kw_count.setdefault(cid, set()).add(kw)
         if cid and ca:
             cid_asin_rows.setdefault(cid, Counter())[ca] += 1
