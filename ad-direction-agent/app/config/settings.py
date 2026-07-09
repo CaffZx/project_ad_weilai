@@ -142,10 +142,13 @@ class Settings(BaseSettings):
 
     # 预算回算 LLM agent (KB23): 把 3 组推荐值的产出方式从规则引擎换成 LLM；
     # 失败/超时/校验不过 → 回落 campaign_budget_summary.build_summary (规则兜底)。
-    campaign_budget_agent_enabled: bool = True   # 默认开;关闭则纯走 60/20/20 规则引擎
+    campaign_budget_agent_enabled: bool = True   # 默认开;关闭则纯走规则引擎兜底
     campaign_budget_agent_timeout: int = 240     # 强档(pro+思考)慢,仿 synthesis 至少 240s
     # KB23 parent_allowed_net_increase (父 ASIN 本轮允许净增多少): 无数据源,占位 0,运维可调。
     campaign_parent_allowed_net_increase: float = 0.0
+    # ★ ad_portfolio_list MCP 接入（2026-07-09）：拉取真实组合预算替换虚构 60/20/20。
+    # 失败回退 settings 的 share_* 兜底值。关掉此开关即纯走旧路径。
+    campaign_portfolio_fetch_enabled: bool = True
 
     # Campaign 新增活动分析 (KB 16, 独立并行分析线)
     campaign_new_enabled: bool = True         # 总开关 (关闭退化到无新增建议)

@@ -534,7 +534,7 @@ def _build_campaign_overview_prompt() -> str:
 
 # ── Campaign 预算回算 Agent Prompt（KB23）────────────────────────────────────
 
-_BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下方知识库（KB23 广告组合与预算分配规则），把父 ASIN 的【可分配预算池】分配到 **3 个活跃组合**（精准主力组 / 精准测试组 / 自动广泛组）的预算约束值，并守恒到预算池。
+_BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下方知识库（KB23 广告组合与预算分配规则），对 3 个活跃组合（精准主力组 / 精准测试组 / 自动广泛组）的预算约束值做二次分配。
 
 重要：输出中文，JSON key 用英文。这里分配的是**组合层预算约束值**（控制层 cap），不是组内活动预算之和。
 
@@ -542,35 +542,42 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
 {kb_content}
 
 ## 输入说明（数值已由代码算好，禁止重算）
-- `parent`：`budget_pool`（本轮 3 活跃组**可分配总额** = 父目标 + 允许净增）、`parent_target_daily_budget`、`base_shares_pct`（兜底基础占比，通常 60/20/20）、`low_bid_retention_release`、`priority_context`（产品定位/淡旺季/是否含 ranking 推词）。
-- `groups[]`：每组 `base_constraint`（= 父目标×基础占比，**分配起点**）、`base_share_pct`、`group_requested_delta`（组内活动想加/减多少，**需求信号**，不是要你累加的绝对预算）、`new_requested_delta`（其中来自本轮**新建活动**的需求，current=0 全是净增）、组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断；`is_new` 标记新建活动，其 natural_rank/acos 暂无数据）。
-  - **新建活动权衡（KB §3.1B）**：`new_requested_delta` 大不代表必须把该组（通常是精准测试组）整体加到 $5——**不得为新活动稀释推词预算**；新活动缺自然位/ACOS 字段时按小预算观察，不据此大幅向测试组倾斜。
-- `low_bid_group`：低价捡漏组，**固定 $1、不参与分配**，仅展示释放金额。
+- `parent`：
+  - `budget_pool` = 父目标 + 允许净增（**绝对硬顶**，3 组 proposed 之和不得超此值）
+  - `available_for_increase` = 淘汰释放 + 允许净增（**增量额度**，本轮正增长合计不得超此值）
+  - `low_bid_retention_release`、`priority_context`（产品定位/淡旺季/是否含 ranking 推词）
+- `groups[]`：
+  - `current_group_budget` = 该组合在 Amazon 的**真实当前预算**（来自 portfolio MCP；若为 0 则该组之前不存在，可从 0 起建）
+  - `group_requested_delta` = 组内活动**想加/减多少**（净需求信号，不是绝对预算）
+  - `new_requested_delta` = 其中来自本轮**新建活动**的需求（current=0 全是净增）
+  - `campaigns[]`：组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断）
+  - **新建活动权衡（KB §3.1B）**：`new_requested_delta` 大不代表必须把该组预算加到满——不得为新活动稀释推词预算。
+- `low_bid_group`：低价捡漏组，固定 $1、不参与分配。
 
-## 你的任务（把 budget_pool 分给 3 组）
-1. 起点 = 各组 `base_constraint`（父目标×基础占比）。
-2. 按 KB §7 调整占比：
-   - 数据健康、无强护栏 → 接近基础占比；
-   - 命中优先级（产品定位 P0/P1 或 含 ranking 推词 或 旺季）→ 向精准主力组倾斜（§7.2 加权精神）；
-   - 用 `group_requested_delta`（需求）+ §3.1A（组内自然流量优先：搜索量大 / 自然位高 / ACOS 达标的活动所在组优先）决定往哪个组倾斜。
-3. 每组给 `proposed_group_budget`，并在 `reason` 里用运营可读中文说明为什么这么分。
+## 你的任务
+1. 起点 = 各组 `current_group_budget`（真实 portfolio 预算）。
+2. 各组 `proposed_group_budget` = current + 你的调整量。
+3. 正调整量合计 ≤ `available_for_increase`（淘汰释放 + 允许净增）。
+4. 按 KB §7 决定倾斜方向（数据健康→稳定；P0/P1/ranking/旺季→向主力组倾斜），结合 §3.1A 自然流量优先级。
+5. 每组在 `reason` 里用运营可读中文说明为什么这么分。
 
 ## 硬性约束（违反将被拒绝回落规则引擎）
-- **3 组 `proposed_group_budget` 之和必须 ≈ `budget_pool`（守恒，不得超）** —— 父目标对组合约束的硬顶（KB §1：防整体超父目标）。
-- 各组 `proposed_group_budget` ≥ 0。
-- **低价捡漏组不得出现在 budget_groups 里**，固定 $1 由代码补（KB GROUP-004）。
+- 3 组 `proposed_group_budget` 之和 ≤ `budget_pool`（父目标硬顶）
+- 本轮正增长合计（Σ max(0, proposed - current)）≤ `available_for_increase`
+- 各组 `proposed_group_budget` ≥ 0
+- **低价捡漏组不得出现在 budget_groups 里**（KB GROUP-004）
 
 ## 输出格式（纯 JSON，不含 markdown 代码块标记）
 {
   "allocation_method": "base | proportional | weighted_main",
   "parent": {
-    "proposed_total_group_budget": <≈budget_pool>,
+    "proposed_total_group_budget": <3组之和>,
     "explanation": "为什么这么分：倾斜了哪个组、依据什么（需求/优先级/自然流量）。"
   },
   "budget_groups": [
-    {"group": "精准主力组", "base_constraint": <num>, "proposed_group_budget": <num>, "reason": "..."},
-    {"group": "精准测试组", "base_constraint": <num>, "proposed_group_budget": <num>, "reason": "..."},
-    {"group": "自动广泛组", "base_constraint": <num>, "proposed_group_budget": <num>, "reason": "..."}
+    {"group": "精准主力组", "current_group_budget": <num>, "proposed_group_budget": <num>, "reason": "..."},
+    {"group": "精准测试组", "current_group_budget": <num>, "proposed_group_budget": <num>, "reason": "..."},
+    {"group": "自动广泛组", "current_group_budget": <num>, "proposed_group_budget": <num>, "reason": "..."}
   ]
 }
 """

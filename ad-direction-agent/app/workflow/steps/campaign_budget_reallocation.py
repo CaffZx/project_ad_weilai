@@ -95,38 +95,48 @@ def aggregate(
     *,
     search_volume_map: dict[str, int] | None = None,
     new_campaigns: list[NewCampaignItem] | None = None,
+    portfolio_data: dict[str, dict] | None = None,
 ) -> dict:
-    """预聚合 LLM 输入包（约束维度）。current_group_budget 兜底 = 父目标×占比。
+    """预聚合 LLM 输入包。
 
-    新增活动（KB23 §5.1）：current=0 的纯净增需求，加进所属组 group_requested_delta
-    软信号 + 单列 new_requested_delta，供 LLM 按 §3.1B 权衡（不扩 pool、不撑大父预算，
-    在固定池内挤占别组=存量消耗）。
+    组合预算来源优先级：ad_portfolio_list MCP 真实值 > 父目标×60/20/20 兜底。
+    新增活动（KB23 §5.1）：current=0 的纯净增需求。
     """
     sv_map = search_volume_map or {}
     unit_by_key = {cu.campaign_key: cu for cu in all_units}
     parent_target = _f(ctx.daily_budget) if ctx.daily_budget is not None else None
     parent_allowed = _f(settings.campaign_parent_allowed_net_increase)
 
+    # ── 组合预算：优先 MCP 真实 portfolio；MCP 全失败(fetch 返回 {})才走 60/20/20 兜底 ──
+    pf = portfolio_data or {}
+    pf_ok = len(pf) > 0   # fetch 成功（即使各组 budget=0），区别于整体 MCP 失败
     shares = {
         PORTFOLIO_MAIN: settings.campaign_portfolio_share_main,
         PORTFOLIO_TEST: settings.campaign_portfolio_share_test,
         PORTFOLIO_BROAD: settings.campaign_portfolio_share_broad,
     }
     share_sum = sum(shares.values()) or 100
+    constraint_basis = "fallback_share_60_20_20"
 
-    groups: dict[str, dict] = {
-        g: {
+    groups: dict[str, dict] = {}
+    for g in _ACTIVE_GROUPS:
+        if pf_ok:
+            # MCP 成功：按真实值，缺组/0 就是 0（不虚构）
+            current_group_budget = _f((pf.get(g) or {}).get("budget")) or 0.0
+            constraint_basis = "portfolio"
+        else:
+            # MCP 整体失败：父目标 × 占比兜底
+            current_group_budget = (round(parent_target * shares[g] / share_sum, 2)
+                                    if parent_target else 0.0)
+        groups[g] = {
             "group": g,
-            "base_share_pct": round(shares[g] * 100 / share_sum, 1),
-            # 兜底基线 = 父目标 × 占比（查不到真实组合预算时）
-            "base_constraint": (round(parent_target * shares[g] / share_sum, 2)
-                                if parent_target else None),
-            "group_requested_delta": 0.0,   # 组内活动想加/减多少（需求信号，非绝对预算）
-            "new_requested_delta": 0.0,     # 其中来自本轮新建活动的需求（current=0 净增，KB23 §5.1）
+            "current_group_budget": round(current_group_budget, 2),
+            "constraint_source": constraint_basis if current_group_budget > 0 else "none",
+            "group_requested_delta": 0.0,
+            "new_requested_delta": 0.0,
             "campaigns": [],
         }
-        for g in _ACTIVE_GROUPS
-    }
+
     low_bid_release = 0.0
     low_bid_moved = 0
 
@@ -154,9 +164,6 @@ def aggregate(
             "search_volume": sv_map.get((item.keyword_text or "").strip().lower()),
         })
 
-    # 新增活动（KB23 §5.1）：current=0 → 整笔 proposed 是净增需求，进所属组软信号。
-    # 字段缺口：NewCampaignItem 无 natural_rank/acos（在 Candidate 上，未透传）→ None；
-    # search_volume 从 sv_map 按词回查（KB §3.1A 缺字段时 LLM 应小预算观察，不据此大幅倾斜）。
     for nc in (new_campaigns or []):
         grp = _group_of_new(nc)
         if grp not in _ACTIVE_GROUPS:
@@ -181,7 +188,12 @@ def aggregate(
         groups[g]["group_requested_delta"] = round(groups[g]["group_requested_delta"], 2)
         groups[g]["new_requested_delta"] = round(groups[g]["new_requested_delta"], 2)
 
+    # ★ 3 活跃组全为零（不区分是否含低价捡漏）→ 跳过回算 LLM
+    all_active_zero = all(groups[g]["current_group_budget"] <= 0 for g in _ACTIVE_GROUPS)
+
     pool = round((parent_target or 0.0) + parent_allowed, 2)
+    # 本轮可用于覆盖正增长的最大额度（含淘汰释放）
+    available_for_increase = round(low_bid_release + parent_allowed, 2)
     purposes = ctx.ad_purposes or []
     directions = ctx.ad_directions or []
     return {
@@ -190,11 +202,11 @@ def aggregate(
             "parent_target_daily_budget": parent_target,
             "target_budget_source": ctx.daily_budget_source or "",
             "parent_allowed_net_increase": parent_allowed,
-            # 本轮 3 活跃组可分配总额（守恒目标）；低价捡漏 $1 单列
             "budget_pool": pool,
+            "available_for_increase": available_for_increase,
             "low_bid_retention_release": round(low_bid_release, 2),
-            "constraint_basis": "fallback_share_60_20_20" if parent_target is not None else "no_target",
-            "base_shares_pct": {g: round(shares[g] * 100 / share_sum, 1) for g in _ACTIVE_GROUPS},
+            "constraint_basis": constraint_basis,
+            "all_active_zero": all_active_zero,
             "priority_context": {
                 "product_level": ctx.product_level,
                 "season_stage": ctx.season_stage,
@@ -215,12 +227,16 @@ def aggregate(
 
 
 def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
-    """守恒(Σproposed ≤ 池) + GROUP-004。不过则调用方回落规则引擎。"""
+    """守恒(Σproposed ≤ budget_pool) + GROUP-004 + 增量约束。"""
     if not isinstance(agent_out, dict):
         return False, "agent 输出非 dict"
     bg = agent_out.get("budget_groups")
     if not isinstance(bg, list) or not bg:
         return False, "缺 budget_groups"
+
+    parent = agg.get("parent", {})
+    pool = _f(parent.get("budget_pool"))
+    available = _f(parent.get("available_for_increase"))
 
     by_name: dict = {}
     for g in bg:
@@ -230,8 +246,8 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
             return False, "低价捡漏组不得出现在 agent 分配中 (GROUP-004)"
         by_name[g.get("group")] = g
 
-    pool = _f(agg.get("parent", {}).get("budget_pool"))
     total = 0.0
+    increase_used = 0.0
     for name in _ACTIVE_GROUPS:
         g = by_name.get(name)
         if g is None:
@@ -243,15 +259,19 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
         if v < -_TOL:
             return False, f"{name} proposed_group_budget 为负"
         total += max(0.0, v)
+        # 增量约束：正增长合计不得超过可用额度
+        cur = _f(g.get("current_group_budget"))
+        increase_used += max(0.0, v - cur)
 
-    # 守恒/父目标硬顶：3 组约束之和不得超可分配池（=父目标+允许净增）
     if pool > 0 and total > pool + _TOL:
-        return False, f"3 组约束合计 {round(total, 2)} 超可分配池 {pool}（守恒/父目标硬顶）"
+        return False, f"3 组约束合计 {round(total, 2)} 超 budget_pool {pool}（父目标硬顶）"
+    if available >= 0 and increase_used > available + _TOL:
+        return False, f"正增长合计 {round(increase_used, 2)} 超 available_for_increase {available}"
     return True, ""
 
 
 def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> dict:
-    """映射成与 build_summary 同形契约 + 富字段。前端 portfolio_constraints 零改。"""
+    """映射成与 build_summary 同形契约。前端 portfolio_constraints 零改。"""
     parent = agg.get("parent", {})
     by_name = {g.get("group"): g for g in agent_out.get("budget_groups", []) if isinstance(g, dict)}
 
@@ -272,6 +292,7 @@ def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> d
             "parent_target_daily_budget": parent.get("parent_target_daily_budget"),
             "parent_allowed_net_increase": parent.get("parent_allowed_net_increase"),
             "budget_pool": parent.get("budget_pool"),
+            "available_for_increase": parent.get("available_for_increase"),
             "low_bid_retention_release": parent.get("low_bid_retention_release"),
             "constraint_basis": parent.get("constraint_basis"),
             "proposed_total_group_budget": proposed_total,

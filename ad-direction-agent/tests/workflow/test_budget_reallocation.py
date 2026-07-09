@@ -62,17 +62,17 @@ def parent_allowed_10():
     settings.campaign_parent_allowed_net_increase = old
 
 
-def test_aggregate_base_constraint_anchors_on_parent_target():
-    # 默认 parent_allowed=0 → pool = 父目标 140；base_constraint = 140×60/20/20
+def test_aggregate_fallback_constraint_anchors_on_parent_target():
+    # 无 portfolio_data → 回退 parent_target×60/20/20 兜底
     agg = aggregate(_adjustments(), [], _ctx(140.0))
     p = agg["parent"]
     assert p["budget_pool"] == 140.0
     assert p["constraint_basis"] == "fallback_share_60_20_20"
+    assert p["available_for_increase"] == 20.0  # low_bid_release=20 + allowed=0
     by = {g["group"]: g for g in agg["groups"]}
-    assert by[PORTFOLIO_MAIN]["base_constraint"] == 84.0     # 140×0.6
-    assert by[PORTFOLIO_TEST]["base_constraint"] == 28.0     # 140×0.2
-    assert by[PORTFOLIO_BROAD]["base_constraint"] == 28.0
-    # delta 只作需求信号（不累加成绝对预算）
+    assert by[PORTFOLIO_MAIN]["current_group_budget"] == 84.0     # 140×0.6
+    assert by[PORTFOLIO_TEST]["current_group_budget"] == 28.0     # 140×0.2
+    assert by[PORTFOLIO_BROAD]["current_group_budget"] == 28.0
     assert by[PORTFOLIO_MAIN]["group_requested_delta"] == 20.0
     assert by[PORTFOLIO_TEST]["group_requested_delta"] == 3.0
     assert by[PORTFOLIO_BROAD]["group_requested_delta"] == 7.0
@@ -99,15 +99,14 @@ def test_search_volume_and_acos_join():
     assert next(g for g in agg2["groups"] if g["group"] == PORTFOLIO_MAIN)["campaigns"][0]["search_volume"] is None
 
 
-def _agent_out(main=90.0, test=25.0, broad=25.0):
-    # 守恒到 pool=140（默认），向主力倾斜
+def _agent_out(main=90.0, test=25.0, broad=25.0, *, cur_main=84.0, cur_test=28.0, cur_broad=28.0):
     return {
         "allocation_method": "weighted_main",
         "parent": {"proposed_total_group_budget": main + test + broad, "explanation": "向主力倾斜"},
         "budget_groups": [
-            {"group": PORTFOLIO_MAIN, "base_constraint": 84, "proposed_group_budget": main, "reason": "x"},
-            {"group": PORTFOLIO_TEST, "base_constraint": 28, "proposed_group_budget": test, "reason": "x"},
-            {"group": PORTFOLIO_BROAD, "base_constraint": 28, "proposed_group_budget": broad, "reason": "x"},
+            {"group": PORTFOLIO_MAIN, "current_group_budget": cur_main, "proposed_group_budget": main, "reason": "x"},
+            {"group": PORTFOLIO_TEST, "current_group_budget": cur_test, "proposed_group_budget": test, "reason": "x"},
+            {"group": PORTFOLIO_BROAD, "current_group_budget": cur_broad, "proposed_group_budget": broad, "reason": "x"},
         ],
     }
 

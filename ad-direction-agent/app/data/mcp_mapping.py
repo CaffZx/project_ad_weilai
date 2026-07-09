@@ -178,6 +178,7 @@ CAMPAIGN_TOOLS = [
     "ad_campaign_product_report",       # + start_date, end_date
     "ad_campaign_placement_report",     # + start_date, end_date (懒加载)
     "ad_campaign_search_term_report",   # + start_date, end_date (懒加载)
+    "ad_portfolio_list",                # parent_asin → 广告组合预算 (2026-07-09)
 ]
 
 
@@ -192,6 +193,7 @@ def build_campaign_tool_args(
     campaign_id_list: str = "",
     parent_asin: str = "",
     parent_seller_sku: str = "",
+    qryFixedPortfolio: bool | None = None,   # ad_portfolio_list 专用
 ) -> dict:
     """构建 campaign 级 MCP 入参。
 
@@ -200,11 +202,16 @@ def build_campaign_tool_args(
     ad_campaign_basic_info_v2 支持批量：campaign_id_list 不为空时替代 campaign_name
     （逗号分隔，上限 20）。
     ad_campaign_basic_info (V1) 保留兼容，使用 campaign_name_list。
-    ad_campaign_list 使用 parent_asin / parent_seller_sku。
+    ad_campaign_list / ad_portfolio_list 使用 parent_asin / parent_seller_sku。
     """
     if tool_name == "ad_campaign_list":
         base = {"shop_account": shop_account, "parent_asin": parent_asin,
                 "parent_seller_sku": parent_seller_sku}
+    elif tool_name == "ad_portfolio_list":
+        base = {"shop_account": shop_account, "parent_asin": parent_asin,
+                "parent_seller_sku": parent_seller_sku}
+        if qryFixedPortfolio is not None:
+            base["qryFixedPortfolio"] = qryFixedPortfolio
     elif tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
     elif tool_name == "ad_campaign_basic_info" and campaign_name_list:

@@ -360,6 +360,20 @@ async def _analyze_campaigns_impl(
                     data_unavailable=True,
                 )
 
+        # ★ 拉取广告组合真实预算（fail-open：MCP 失败 → None → 回退 60/20/20 兜底）
+        portfolio_data: dict | None = None
+        try:
+            portfolio_data = await fetcher.fetch_portfolio_list(
+                parent_asin,
+                parent_seller_sku=(campaign_data.parent_seller_sku
+                                   if campaign_data and campaign_data.parent_seller_sku else ""),
+                shop_account=getattr(fetcher, "_last_shop_account", "") or "",
+            )
+            if portfolio_data:
+                _t("DONE fetch_portfolio")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("fetch_portfolio_list 异常 [%s]: %s (回退 60/20/20)", parent_asin, e)
+
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
@@ -786,7 +800,8 @@ async def _analyze_campaigns_impl(
 
         def _fallback(reason: str = "", source: str = "rule_fallback") -> dict | None:
             try:
-                bs = build_summary(adjustments=adjustments, all_units=llm_campaigns, ctx=strategy_context)
+                bs = build_summary(adjustments=adjustments, all_units=llm_campaigns,
+                                   ctx=strategy_context, portfolio_data=portfolio_data)
                 if bs is not None:
                     bs["source"] = source
                 if reason:
@@ -801,7 +816,15 @@ async def _analyze_campaigns_impl(
             return _fallback(source="rule")          # agent 关 / 无调整 → 规则引擎（正常路径，无 warning）
         try:
             agg = bra.aggregate(adjustments, llm_campaigns, strategy_context,
-                                search_volume_map=flow_sv_map, new_campaigns=new_campaigns)
+                                search_volume_map=flow_sv_map, new_campaigns=new_campaigns,
+                                portfolio_data=portfolio_data)
+            # ★ 3 活跃组全为零 → 跳过回算 LLM，直接以 portfolio 真实值（或 $0）兜底
+            if agg.get("parent", {}).get("all_active_zero"):
+                warnings_list.append(
+                    "未查询到组合信息，请检查本产品是否完成组合创建初始化！"
+                )
+                return _fallback(source="portfolio_all_zero")
+
             agent_out = await reasoner.recommend_budget_reallocation(
                 parent_asin, agg, temperature=temperature,
             )

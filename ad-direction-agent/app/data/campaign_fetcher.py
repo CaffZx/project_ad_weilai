@@ -13,6 +13,12 @@ from app.data.mcp_adapter import McpAdapter
 from app.data.mcp_db_context import McpDbContext, _coerce_int, resolve_mcp_context_from_mcp
 from app.data.mcp_mapping import make_date_window
 from app.models.campaign import CampaignData, CampaignPerf, CampaignUnit
+from app.workflow.steps.campaign_portfolio import (
+    PORTFOLIO_BROAD,
+    PORTFOLIO_ELIMINATE,
+    PORTFOLIO_MAIN,
+    PORTFOLIO_TEST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -797,6 +803,92 @@ class CampaignFetcher:
         except Exception as e:
             logger.warning("fetch_suggested_bids 失败 [%s]: %s (非阻塞)", parent_asin, e)
         return {}
+
+    # ── 广告组合预算拉取 (ad_portfolio_list, 2026-07-09) ──
+
+    _PORTFOLIO_GROUP_KEYWORDS: tuple[str, ...] = (
+        PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE,
+    )
+
+    async def fetch_portfolio_list(
+        self,
+        parent_asin: str,
+        parent_seller_sku: str,
+        shop_account: str,
+    ) -> dict[str, dict]:
+        """拉取广告组合真实预算（qryFixedPortfolio=true，仅 4 类固定组合）。
+
+        返回 {group_type: {"budget": float, "portfolio_id": str}}
+        未匹配的组合 → budget=0；整体 MCP 失败 → 返回空 dict。
+        """
+        if not (settings.campaign_portfolio_fetch_enabled and shop_account):
+            return {}
+        try:
+            res = await self._mcp().campaign_call_tool(
+                "ad_portfolio_list", "", shop_account,
+                parent_asin=parent_asin, parent_seller_sku=parent_seller_sku,
+                qryFixedPortfolio=True,
+                timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
+            )
+        except Exception as e:
+            logger.warning("ad_portfolio_list 调用失败 [%s]: %s (回退 60/20/20)", parent_asin, e)
+            return {}
+        if not res.ok:
+            logger.warning("ad_portfolio_list 返回失败 [%s]: %s (回退 60/20/20)", parent_asin, res.error)
+            return {}
+
+        rows = _as_rows(res.value)
+        if not rows:
+            logger.warning("ad_portfolio_list 返回空行 [%s]，回退 60/20/20", parent_asin)
+            return {}
+
+        # 按 4 关键词模糊匹配：「精准测试组」in 「B0xxx-精准测试组」→ ✅
+        grouped: dict[str, list[dict]] = {g: [] for g in self._PORTFOLIO_GROUP_KEYWORDS}
+        for row in rows:
+            name = str(row.get("广告组合名称") or "").strip()
+            if not name:
+                continue
+            matched: str | None = None
+            for keyword in self._PORTFOLIO_GROUP_KEYWORDS:
+                if keyword in name:
+                    if matched is not None:
+                        logger.warning(
+                            "portfolio 行 [%s] 同时匹配 [%s] 和 [%s]，取首次命中 [%s]",
+                            name, matched, keyword, matched,
+                        )
+                    else:
+                        matched = keyword
+            if matched is None:
+                logger.warning("portfolio 行 [%s] 未能匹配任何组合类型，已跳过", name)
+                continue
+            grouped[matched].append(row)
+
+        result: dict[str, dict] = {}
+        for group, matches in grouped.items():
+            if not matches:
+                logger.warning("组合 [%s] 未匹配到 portfolio，预算按 $0 处理", group)
+                result[group] = {"budget": 0.0, "portfolio_id": ""}
+                continue
+            if len(matches) > 1:
+                ids = [str(m.get("广告组合id") or "") for m in matches]
+                logger.warning(
+                    "组合 [%s] 匹配到 %d 个 portfolio (%s)，预算已汇总",
+                    group, len(matches), ", ".join(ids),
+                )
+            total_budget = sum(
+                _to_float(m.get("广告组合预算")) or 0.0 for m in matches
+            )
+            pid = str(matches[0].get("广告组合id") or "")
+            result[group] = {"budget": round(total_budget, 2), "portfolio_id": pid}
+
+        logger.info(
+            "ad_portfolio_list [%s]: %d/%d 组命中 budgets=%s",
+            parent_asin,
+            sum(1 for v in result.values() if v["budget"] > 0),
+            len(result),
+            {g: v["budget"] for g, v in result.items()},
+        )
+        return result
 
     async def _fetch_keyword_ranks(
         self,
