@@ -411,8 +411,30 @@ async def _analyze_campaigns_impl(
         logger.info("Campaign 预过滤 [%s]: 跳过 %d 个疑似已淘汰活动 (budget≈$1, bid≈$0.2)",
                      parent_asin, len(skipped_eliminated))
 
+    # ── 淘汰池表同步 helper（discovery 入池 + 手动复评离池），fail-open ──
+    # 两处调用：①全预过滤 early return 前  ②正常路径复评前
+    # 单一定义防止逻辑漂移。
+    async def _sync_pool_entries_if_needed() -> None:
+        if not (settings.campaign_restart_enabled and pool_units):
+            return
+        _shop = getattr(fetcher, "_last_shop_account", "") or ""
+        _live = list((campaign_data.campaigns if campaign_data else []) or [])
+        try:
+            from app.persistence.erp_writer.repository import _get_repository
+            await asyncio.to_thread(
+                _get_repository().sync_pool_entries,
+                parent_asin, _live, _shop,
+                (campaign_data.parent_seller_sku if campaign_data else None),
+                (campaign_data.shop_id if campaign_data else None),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("sync_pool_entries 失败 [%s]: %s (fail-open)", parent_asin, e)
+
     total = len(llm_campaigns)
     if total == 0:
+        # 全部活动已被预过滤 → 无 LLM 分析可跑，但仍须同步淘汰池表，
+        # 保证 discovery 入池路径记录这批活动的淘汰状态（否则 KB21§7 复评永不可达）。
+        await _sync_pool_entries_if_needed()
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
             shop_id=campaign_data.shop_id,
@@ -680,22 +702,11 @@ async def _analyze_campaigns_impl(
     #   流程：① 分析后双向同步池表(discovery 入池 + 手动复评离池)→ ② 读最新在池记录 → ③ 复评。
     #   fail-open：ERP 库不通 → sync/读 失败 → 不复评，不连累主分析。
     if settings.campaign_restart_enabled and pool_units:
-        shop_account = getattr(fetcher, "_last_shop_account", "") or ""
         from app.persistence.erp_writer.repository import _get_repository
         repo = _get_repository()
 
-        # ① 分析后双向同步池表（用全部 live 活动 vs 池表记录）
-        all_live = list((campaign_data.campaigns if campaign_data else []) or [])
-        try:
-            await asyncio.to_thread(
-                repo.sync_pool_entries,
-                parent_asin, all_live, shop_account,
-                (campaign_data.parent_seller_sku if campaign_data else None),
-                (campaign_data.shop_id if campaign_data else None),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("sync_pool_entries 失败 [%s]: %s (fail-open)", parent_asin, e)
-            warnings_list.append(f"淘汰池表同步失败: {type(e).__name__}: {e}")
+        # ① 分析后双向同步池表（discovery 入池 + 手动复评离池）
+        await _sync_pool_entries_if_needed()
 
         # ② 读最新在池记录（覆盖上层传入的 elimination_entry_dates 旧快照）
         entry_dates: dict = {}

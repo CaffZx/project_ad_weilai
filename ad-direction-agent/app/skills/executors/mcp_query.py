@@ -142,6 +142,10 @@ class McpQuerySkillExecutor:
             days=days,
         )
 
+        # 注入产品标题供新增扩词流作相关性锚点（KB28 §2），复用 context 阶段已解析的 product_name，
+        # 零额外 MCP 调用。与 McpAdapter.fetch_asin_data 同逻辑。
+        data.title = (db_ctx.product_name if db_ctx and db_ctx.product_name else "")
+
         data = finalize_mcp_asin_data(
             data, payload_map, missing_fields, meta_ids, partial_failures,
         )
