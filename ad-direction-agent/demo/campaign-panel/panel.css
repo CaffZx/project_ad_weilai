@@ -31,7 +31,7 @@
 .camp-sticky-controls {
   position: sticky; top: 0; z-index: 20;
   background: var(--camp-bg);
-  margin: 0 -16px; padding: 12px 16px 6px;
+  margin: 0 -16px; padding: 6px 16px 6px;
   box-shadow: 0 4px 6px -4px rgba(0,0,0,.12);
 }
 
@@ -122,6 +122,23 @@
 }
 .camp-filter-btn:hover { background: #F3F4F6; }
 .camp-filter-btn.active { background: var(--camp-primary); color: white; border-color: var(--camp-primary); }
+.camp-density-toggle {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--camp-border);
+  border-radius: 6px; overflow: hidden; background: #fff;
+  margin-left: auto;
+}
+.camp-density-toggle button {
+  border: 0; border-right: 1px solid var(--camp-border);
+  background: transparent; color: var(--camp-muted-fg);
+  font-size: 11px; padding: 4px 9px; cursor: pointer;
+}
+.camp-density-toggle button:last-child { border-right: 0; }
+.camp-density-toggle button:hover:not(.active) { background: #F3F4F6; color: var(--camp-foreground); }
+.camp-density-toggle button.active {
+  background: var(--camp-primary);
+  color: #fff;
+}
 
 /* ── 活动卡片 ── */
 .camp-adjustment-card {
@@ -131,6 +148,14 @@
   background: var(--camp-card-bg); border-radius: var(--camp-radius-card);
   border-top: 1px solid var(--camp-border); border-right: 1px solid var(--camp-border); border-bottom: 1px solid var(--camp-border);
   position: relative;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.camp-adjustment-card:not(.skipped) { cursor: pointer; }
+.camp-adjustment-card.selected {
+  background: #EFF6FF;
+  box-shadow: inset 3px 0 0 rgba(59,130,246,.55),
+              0 0 0 1px rgba(59,130,246,.2),
+              0 2px 8px rgba(59,130,246,.08);
 }
 .camp-adjustment-card.eliminate { border-left-color: #DC2626; }
 .camp-adjustment-card.adjust    { border-left-color: #F59E0B; }
@@ -140,9 +165,41 @@
 .camp-adjustment-card.skipped   { border-left-color: #9CA3AF; opacity: 0.85; background: #F9FAFB; }
 
 .camp-adjustment-card .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.camp-adjustment-card .meta { font-size: 12px; color: var(--camp-muted-fg); margin-top: 4px; }
+.camp-adjustment-card .meta {
+  display: flex; flex-wrap: wrap; gap: 3px 5px; align-items: center;
+  font-size: 12px; color: var(--camp-muted-fg); margin-top: 4px; line-height: 1.6;
+}
+
+/* meta chip — 卡片 meta 行彩色标签 */
+.camp-meta-chip {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 10px;
+  font-size: 11px; line-height: 1.5;
+  background: #F1F5F9; color: #475569;
+  border: 1px solid #E2E8F0;
+  max-width: 100%;
+}
+.camp-meta-chip b {
+  font-weight: 600; color: #0F172A; margin-left: 2px;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; display: inline-block; vertical-align: bottom;
+}
+.camp-meta-asin  { background: #F8FAFC; color: #475569; }
+.camp-meta-asin b { color: #334155; }
+.camp-meta-match { background: #EFF6FF; color: #1E40AF; border-color: #BFDBFE; font-weight: 600; }
+.camp-meta-kw    { background: #ECFDF5; color: #065F46; border-color: #A7F3D0; }
+.camp-meta-kw b  { color: #064E3B; }
+.camp-meta-class { background: #FDF4FF; color: #86198F; border-color: #F5D0FE; }
+.camp-meta-rule  { background: #FAF5FF; color: #6B21A8; border-color: #E9D5FF; }
+.camp-meta-rule b  { color: #581C87; }
+.camp-meta-rule code { background: transparent; font-family: inherit; font-weight: inherit; padding: 0; color: inherit; }
+.camp-meta-audit { background: #FFFBEB; color: #92400E; border-color: #FDE68A; }
+.camp-meta-audit b { color: #78350F; }
+.camp-meta-rank  { background: #F0F9FF; color: #075985; border-color: #BAE6FD; }
+.camp-meta-warn  { background: #FEF2F2; color: #991B1B; border-color: #FECACA; font-weight: 500; }
+.camp-meta-misc  { background: #F1F5F9; color: #475569; }
 .camp-adjustment-card .values {
-  display: grid; grid-template-columns: 1fr; gap: 2px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 2px 10px;
   margin-top: 6px; font-size: 13px;
 }
 .camp-adjustment-card .reason {
@@ -156,6 +213,21 @@
   position: absolute; top: 8px; right: 12px;
   font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600;
 }
+.camp-density-compact .camp-adjustment-card {
+  padding: 8px 10px;
+  margin-bottom: 5px;
+  gap: 8px;
+}
+.camp-density-compact .camp-adjustment-card .head { gap: 5px; }
+.camp-density-compact .camp-adjustment-card .head strong { font-size: 13px; }
+.camp-density-compact .camp-adjustment-card .meta,
+.camp-density-compact .camp-adjustment-card .reason { font-size: 11px; }
+.camp-density-compact .camp-adjustment-card .values {
+  font-size: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+.camp-density-compact .camp-adjustment-card .detail { display: none; }
+.camp-density-comfy .camp-adjustment-card { padding: 12px 14px; }
 
 /* ── badge ── */
 .camp-badge {
@@ -296,6 +368,30 @@
   display: flex; justify-content: flex-end; gap: 10px;
 }
 .camp-modal-note { font-size: 11px; color: var(--camp-muted-fg); margin-top: 10px; line-height: 1.5; }
+.camp-confirm-detail { display: flex; flex-direction: column; gap: 10px; }
+.camp-confirm-warn {
+  padding: 8px 10px; border-radius: 6px;
+  background: #FEF2F2; color: #991B1B;
+  border: 1px solid #FECACA; font-size: 12px;
+}
+.camp-confirm-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12px; table-layout: fixed;
+}
+.camp-confirm-table th,
+.camp-confirm-table td {
+  border: 1px solid var(--camp-border);
+  padding: 7px 8px; vertical-align: top;
+  text-align: left;
+}
+.camp-confirm-table th {
+  background: var(--camp-surface, #F1F5F9);
+  font-weight: 600; color: var(--camp-foreground);
+}
+.camp-confirm-table td:first-child {
+  max-width: 180px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .camp-realloc-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .camp-realloc-table th, .camp-realloc-table td {
   border: 1px solid var(--camp-border); padding: 8px 10px; text-align: center;
@@ -328,7 +424,7 @@
   border-bottom: 2px solid var(--camp-border);
 }
 .camp-ctab-btn {
-  padding: 7px 18px; font-size: 13px; font-weight: 500;
+  padding: 4px 12px; font-size: 12.5px; font-weight: 500;
   background: transparent; border: none; cursor: pointer;
   color: var(--camp-muted-fg); border-bottom: 2px solid transparent;
   margin-bottom: -2px; transition: all 0.12s ease;
@@ -403,11 +499,79 @@
 @media (max-width: 900px) { #camp-list.camp-2col { columns: 1; } }
 
 /* ── tab 栏右侧「折叠筛选栏」按钮 ── */
-#camp-tabs { display: flex; align-items: center; gap: 4px; }
+#camp-tabs { display: flex; align-items: center; gap: 4px; padding: 0; margin: 0 0 4px; min-height: 26px; }
+.camp-tab-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .camp-ctab-fold {
-  margin-left: auto; font-size: 12px; line-height: 1.2;
+  font-size: 12px; line-height: 1.2;
   color: var(--camp-muted-fg); background: none;
   border: 1px solid var(--camp-border); border-radius: 8px;
   padding: 3px 10px; cursor: pointer; white-space: nowrap;
 }
 .camp-ctab-fold:hover { color: var(--camp-foreground); border-color: var(--camp-primary); }
+
+/* Native migration of codex_ux_patch visual polish modules */
+.camp-root.camp-tab5-space #camp-list { min-height: 55vh; }
+.camp-root.camp-tab5-space .camp-sticky-controls { padding-top: 8px; padding-bottom: 4px; }
+.camp-card { transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+.camp-card:hover { border-color: #CBD5E1; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
+button[data-action="camp-batch-approve"] {
+  background: #1D4ED8 !important; color: #fff !important; border-color: #1D4ED8 !important;
+}
+button[data-action="camp-batch-approve"]:hover { background: #1E40AF !important; }
+button[data-action="camp-batch-reject"] {
+  background: #FEF2F2 !important; color: #991B1B !important; border-color: #FCA5A5 !important;
+}
+.camp-portfolio-pill {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px; min-width: 170px; border-radius: 8px;
+}
+.camp-portfolio-pill.active {
+  background: #ECFDF5; color: #065F46; border-color: #34D399;
+  box-shadow: inset 0 0 0 1px rgba(16,185,129,.28);
+}
+.camp-portfolio-pill .pp-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camp-portfolio-pill .pp-amount { justify-self: end; white-space: nowrap; }
+.camp-portfolio-pill .pp-budget { grid-column: 1 / -1; }
+.camp-meta-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 6px; border-radius: 9999px;
+  background: #F1F5F9; color: #475569;
+  border: 1px solid #E2E8F0;
+  font-size: 11px; line-height: 1.45;
+}
+.camp-meta-chip.asin { background: #EFF6FF; color: #1D4ED8; border-color: #BFDBFE; }
+.camp-meta-chip.match { background: #F0FDFA; color: #0F766E; border-color: #99F6E4; }
+.camp-meta-chip.keyword { background: #FDF2F8; color: #BE185D; border-color: #FBCFE8; }
+.camp-meta-chip.rule { background: #FFFBEB; color: #B45309; border-color: #FDE68A; }
+.camp-meta-asn, .camp-meta-asin { background: #EFF6FF; color: #1D4ED8; border-color: #BFDBFE; }
+.camp-meta-match { background: #F0FDFA; color: #0F766E; border-color: #99F6E4; }
+.camp-meta-kw { background: #FDF2F8; color: #BE185D; border-color: #FBCFE8; }
+.camp-meta-rule, .camp-meta-warn { background: #FFFBEB; color: #B45309; border-color: #FDE68A; }
+.camp-filter-flash,
+#camp-filters select.camp-filter-flash,
+#camp-filters input.camp-filter-flash {
+  animation: campFilterFlash .6s ease-out;
+}
+.camp-btn-pulse {
+  position: relative; overflow: hidden;
+  box-shadow: 0 0 0 3px rgba(37,99,235,.14);
+}
+.camp-btn-pulse::after {
+  content: ""; position: absolute; inset: 0;
+  background: rgba(255,255,255,.32);
+  transform: translateX(-100%);
+  animation: campBtnSweep .7s ease-out;
+}
+.camp-batch-flash { animation: campBatchFlash .8s ease-out; }
+@keyframes campFilterFlash {
+  0% { box-shadow: 0 0 0 0 rgba(37,99,235,.34); }
+  100% { box-shadow: 0 0 0 8px rgba(37,99,235,0); }
+}
+@keyframes campBtnSweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@keyframes campBatchFlash {
+  0%,100% { background: #fff; }
+  35% { background: #EFF6FF; border-color: #93C5FD; }
+}

@@ -14,6 +14,7 @@ export function createCampaignState() {
     _currentRunId: '',
     _reviewState: {},
     _selection: new Set(),
+    _detailUserToggled: new Set(),   // 用户手动展开/收起的卡片，密度切换不覆盖
     _budgetSummary: null,
     _portfolioFilter: '',
     _processFilter: '',
@@ -23,6 +24,7 @@ export function createCampaignState() {
     _synthesisGroups: [],
     _synthesisSpecials: [],
     _activeTab: 'detail',
+    _density: _loadDensity(),
   };
 
   // 外部 render 函数引用（由 panel.js 注入）
@@ -30,6 +32,23 @@ export function createCampaignState() {
   function _reRender() { if (_render) _render(state); }
 
   state.setRenderer = (fn) => { _render = fn; };
+
+  function _loadDensity() {
+    try {
+      const v = localStorage.getItem('camp_density');
+      return ['compact', 'comfy', 'detailed'].includes(v) ? v : 'compact';
+    } catch (_) {
+      return 'compact';
+    }
+  }
+
+  state.toggleDensity = function (mode) {
+    if (!['compact', 'comfy', 'detailed'].includes(mode)) return;
+    state._density = mode;
+    state._detailUserToggled.clear();   // 密度切换是用户主动意图，重置所有手动标记
+    try { localStorage.setItem('camp_density', mode); } catch (_) {}
+    _reRender();
+  };
 
   // ── 审核态 localStorage ──
   function _reviewStorageKey() {
@@ -99,6 +118,10 @@ export function createCampaignState() {
   state.clearSelection = function () {
     state._selection.clear();
     _reRender();
+  };
+
+  state._selectedItems = function () {
+    return state._campaignItems.filter(it => state._selection.has(it.item_id));
   };
 
   // ── 组合筛选 ──
@@ -175,6 +198,7 @@ export function createCampaignState() {
           kind,
           title: '确认同意并下发所选调整',
           msg: '将直接通过ERP对亚马逊广告进行调整，不可撤销，是否确认',
+          items: state._selectedItems(),
         };
       } else {
         state._confirm = {

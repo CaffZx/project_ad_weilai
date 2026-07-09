@@ -55,7 +55,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           </div>
 
           <!-- 策略总览 -->
-          <div id="camp-overview" class="camp-card hidden" style="margin-bottom:12px;">
+          <div id="camp-overview" class="camp-card hidden" style="margin-bottom:4px;">
             <div class="camp-card-title">策略总览（执行总纲）</div>
             <div id="camp-overview-body"></div>
           </div>
@@ -71,7 +71,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           </div>
 
           <!-- 预算汇总 -->
-          <div id="camp-budget-summary" style="margin-bottom:8px;" class="hidden"></div>
+          <div id="camp-budget-summary" style="margin-bottom:4px;" class="hidden"></div>
 
           <!-- 始终可见的操作控制区（明细/汇总 + 筛选 + 组合气泡 + 批量栏）：sticky 钉顶，卡片列表在其下独立滚动 -->
           <div class="camp-sticky-controls">

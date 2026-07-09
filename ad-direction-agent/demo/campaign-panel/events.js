@@ -1,116 +1,135 @@
 /**
  * campaign-panel/events.js
- * 事件委托 — 在 #camp-root 上挂一组监听器，通过 [data-action] 分发。
- *
- * 验证：主看板和 campaign_test.html 均无 data-action 属性，无命名冲突。
+ * Event delegation for the campaign panel root.
  */
 
 import { toggleDetail } from './render.js';
 
-/**
- * 挂载事件委托，返回 cleanup 函数。
- */
 export function mountEventDelegation(rootEl, state) {
   if (!rootEl) return () => {};
 
-  // dispatch 表
-  function dispatch(action, data, el, st) {
+  function dispatch(action, data, el, state) {
     switch (action) {
       case 'camp-switch-tab':
-        st._activeTab = data.tab;
+        state._activeTab = data.tab;
         break;
       case 'camp-toggle-portfolio':
-        st.togglePortfolioFilter(data.portfolio);
+        state.togglePortfolioFilter(data.portfolio);
         return;
       case 'camp-set-process':
-        st.setProcessFilter(data.process, el);
+        state.setProcessFilter(data.process, el);
         return;
       case 'camp-toggle-select': {
         const cb = el;
-        if (cb && cb.dataset && cb.dataset.key) st.toggleSelection(cb.dataset.key);
+        if (cb && cb.dataset && cb.dataset.key) state.toggleSelection(cb.dataset.key);
         return;
       }
-      case 'camp-toggle-detail':
+      case 'camp-toggle-detail': {
+        // 记录用户手动操作，密度切换不再覆盖此卡
+        const card = el.closest('.camp-adjustment-card');
+        const key = card && card.dataset.key;
+        if (key) state._detailUserToggled.add(key);
         toggleDetail(el);
         return;
+      }
       case 'camp-select-all':
-        st.selectAllVisible();
+        state.selectAllVisible();
         return;
       case 'camp-clear-selection':
-        st.clearSelection();
+        state.clearSelection();
         return;
       case 'camp-batch-approve':
-        st.askConfirm('approve');
+        state.askConfirm('approve');
         return;
       case 'camp-batch-reject':
-        st.askConfirm('reject');
+        state.askConfirm('reject');
         return;
       case 'camp-confirm-ok':
-        st.runConfirm();
+        state.runConfirm();
         return;
       case 'camp-confirm-cancel':
-        st.cancelConfirm();
+        state.cancelConfirm();
         return;
       case 'camp-select-group':
-        st.selectGroup(parseInt(data.groupIndex));
+        state.selectGroup(parseInt(data.groupIndex, 10));
         return;
       case 'camp-jump-special':
-        st.jumpToSpecial(parseInt(data.specialIndex));
+        state.jumpToSpecial(parseInt(data.specialIndex, 10));
         return;
       case 'camp-jump-group-member':
-        st.jumpToGroupMember(parseInt(data.groupIndex), parseInt(data.keyIndex));
+        state.jumpToGroupMember(parseInt(data.groupIndex, 10), parseInt(data.keyIndex, 10));
         return;
       case 'camp-open-realloc':
-        st.openRealloc();
+        state.openRealloc();
         return;
       case 'camp-realloc-save':
-        st.saveRealloc();
+        state.saveRealloc();
         return;
       case 'camp-realloc-cancel':
-        st.closeRealloc();
+        state.closeRealloc();
         return;
       case 'camp-exec-all':
-        st.askConfirm('exec');
+        state.askConfirm('exec');
         return;
       case 'camp-reset-all':
-        st.resetConstraints();
+        state.resetConstraints();
         return;
       case 'camp-toggle-controls':
         try {
           const cur = localStorage.getItem('camp_controls_collapsed') === '1';
           localStorage.setItem('camp_controls_collapsed', cur ? '0' : '1');
-        } catch (e) { /* localStorage 不可用则忽略 */ }
-        break;  // 落到下方 applyFilters() 触发重渲染
+        } catch (e) {
+          // Ignore unavailable localStorage.
+        }
+        break;
+      case 'camp-toggle-density':
+        state.toggleDensity(data.density);
+        return;
       default:
         break;
     }
-    // 需要重渲染的 action 在此统一触发
-    st.applyFilters();
+
+    state.applyFilters();
   }
 
-  // click 委托（覆盖大部分交互）
   function onClick(e) {
     const el = e.target.closest('[data-action]');
-    if (!el) return;
-    dispatch(el.dataset.action, el.dataset, el, state);
+    if (el) {
+      dispatch(el.dataset.action, el.dataset, el, state);
+      return;
+    }
+
+    // 用户正在选中文字（拖拽复制）→ 不触发勾选
+    const sel = window.getSelection();
+    if (sel && sel.toString().trim().length > 0) return;
+
+    const card = e.target.closest('.camp-adjustment-card');
+    if (!card) return;
+    if (e.target.closest('button, a, input, select, textarea, .review-badge, .detail')) return;
+    const cb = card.querySelector('input[type="checkbox"][data-key]');
+    if (!cb || cb.disabled) return;
+    cb.click();
+    e.preventDefault();
+    e.stopPropagation();
   }
 
-  // change 委托（筛选下拉 + 卡片 checkbox）
   function onChange(e) {
     const t = e.target;
     if (t.matches('#camp-filter-action, #camp-filter-status, #camp-filter-match')) {
+      t.classList.remove('camp-filter-flash');
+      void t.offsetWidth;
+      t.classList.add('camp-filter-flash');
+      setTimeout(() => t.classList.remove('camp-filter-flash'), 650);
       state.applyFilters();
     }
   }
 
-  // input 委托（搜索）
   function onInput(e) {
     if (e.target.matches('#camp-search')) {
       state.applyFilters();
     }
   }
 
-  // keydown 委托（回算修改弹窗内 Enter 保存）
   function onKeyDown(e) {
     if (e.target.matches('.camp-realloc-input') && e.key === 'Enter') {
       e.preventDefault();

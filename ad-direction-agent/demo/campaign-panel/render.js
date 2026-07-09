@@ -108,6 +108,12 @@ function _badgeKlass(action) {
 function _fullRender(state) {
   const vm = state;
   const { mode } = vm;
+  const root = document.querySelector('.camp-root');
+  if (root) {
+    root.classList.remove('camp-density-compact', 'camp-density-comfy', 'camp-density-detailed');
+    root.classList.add(`camp-density-${state._density || 'compact'}`);
+    root.classList.add('camp-tab5-space');
+  }
 
   // sanity 校验未通过警示（sanity 失败照常落库，仅警示不阻断执行）
   _renderSanityNotice(vm);
@@ -143,6 +149,8 @@ function _fullRender(state) {
     _renderPortfolioFilterPills(state);
     _renderBatchToolbar(state);
     _renderCards(state);
+    // 密度模式联动详情区（跳过用户手动操作过的卡片）
+    _syncDensityDetails(state);
     // 折叠：隐藏筛选器 + 广告组合栏（执行工具栏 camp-batch-toolbar 保持常驻）
     if (_controlsCollapsed()) {
       _hide('camp-filters');
@@ -240,11 +248,20 @@ function _renderTabButtons(state) {
   if (!tabs) return;
   const warnN = (state.warnings || []).length;
   const collapsed = _controlsCollapsed();
+  const density = state._density || 'compact';
   tabs.innerHTML = `
     <button class="camp-ctab-btn ${state._activeTab === 'detail' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="detail">明细</button>
     <button class="camp-ctab-btn ${state._activeTab === 'summary' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="summary">汇总</button>
     <button class="camp-ctab-btn ${state._activeTab === 'warnings' ? 'active' : ''}" data-action="camp-switch-tab" data-tab="warnings">告警${warnN ? ` (${warnN})` : ''}</button>
-    ${state._activeTab === 'detail' ? `<button class="camp-ctab-fold" data-action="camp-toggle-controls" title="折叠/展开 筛选器与广告组合栏（执行工具栏保持常驻）">${collapsed ? '▸ 展开筛选栏' : '▾ 折叠筛选栏'}</button>` : ''}
+    ${state._activeTab === 'detail' ? `
+    <span class="camp-tab-right">
+      <span class="camp-density-toggle" title="调整卡片密度">
+        <button type="button" class="${density === 'compact' ? 'active' : ''}" data-action="camp-toggle-density" data-density="compact">紧凑</button>
+        <button type="button" class="${density === 'comfy' ? 'active' : ''}" data-action="camp-toggle-density" data-density="comfy">舒适</button>
+        <button type="button" class="${density === 'detailed' ? 'active' : ''}" data-action="camp-toggle-density" data-density="detailed">详细</button>
+      </span>
+      <button class="camp-ctab-fold" data-action="camp-toggle-controls" title="折叠/展开 筛选器与广告组合栏（执行工具栏保持常驻）">${collapsed ? '▸ 展开筛选栏' : '▾ 折叠筛选栏'}</button>
+    </span>` : ''}
   `;
 }
 
@@ -257,9 +274,59 @@ function _renderBatchToolbar(state) {
   _$('camp-batch-count').textContent = `已选 ${cnt} / ${total}`;
 }
 
+// ── 密度联动详情区（对齐补丁 codex-ux:tab5-density）──
+function _syncDensityDetails(state) {
+  const mode = state._density;
+  if (!mode || mode === 'comfy') return;  // 舒适模式不动
+  _$('camp-list').querySelectorAll('.camp-adjustment-card').forEach(card => {
+    const key = card.dataset.key;
+    // 用户手动操作过 → 密度切换不覆盖
+    if (key && state._detailUserToggled.has(key)) {
+      card.dataset.codexDetailUser = '1';
+      return;
+    }
+    const detail = card.querySelector('.detail');
+    const btn = card.querySelector('[data-action="camp-toggle-detail"]');
+    if (!detail) return;
+    if (mode === 'compact') {
+      if (!detail.classList.contains('hidden')) {
+        detail.classList.add('hidden');
+        detail.style.display = 'none';
+        if (btn) btn.textContent = '展开详情';
+      }
+    } else if (mode === 'detailed') {
+      if (detail.classList.contains('hidden')) {
+        detail.classList.remove('hidden');
+        detail.style.display = 'block';
+        if (btn) btn.textContent = '收起详情';
+      }
+    }
+  });
+}
+
 // ── 卡片列表 ──
 // 卡片数达到此阈值才切两列瀑布（低于则单列满宽，避免筛选后仅剩 1 张时半宽孤卡）
 const _TWO_COL_MIN = 2;
+
+function _renderMetaChips(adj) {
+  const chips = [];
+  if (adj.child_asin) chips.push(['asin', '× ' + _esc(adj.child_asin)]);
+  if (adj.match_type) chips.push(['match', _esc(adj.match_type)]);
+  if (adj.keyword_text) chips.push(['kw', '关键词: <b>' + _esc(adj.keyword_text) + '</b>']);
+  if (adj.keyword_class) chips.push(['class', _esc(adj.keyword_class)]);
+  if (adj.match_type === 'EXACT' && adj.natural_rank != null) {
+    chips.push(['rank', '自然排名: <b>第' + adj.natural_rank + '位</b>' + _rankArrow(adj.rank_change)]);
+  } else if (adj.match_type === 'EXACT' && adj.near_natural_rank != null) {
+    chips.push(['warn', '⚠ 已掉榜(上次第' + adj.near_natural_rank + '位)']);
+  }
+  if (adj.is_core) chips.push(['warn', '⚠ 核心词']);
+  if (adj.triggered_rule) chips.push(['rule', '触发规则: <b>' + _esc(adj.triggered_rule) + '</b>']);
+  if (adj.review_level) chips.push(['audit', '审核: <b>' + _esc(adj.review_level) + '</b>']);
+  return chips.map(([cls, html]) =>
+    '<span class="camp-meta-chip camp-meta-' + cls + '">' + html + '</span>'
+  ).join('');
+}
+
 function _renderCards(state) {
   const items = state._filteredItems;
   const el = _$('camp-list');
@@ -280,12 +347,7 @@ function _renderCards(state) {
               <span class="camp-badge camp-badge-skipped">预过滤</span>
               <strong style="word-break:break-all;">${_esc(adj.campaign_name || '?')}</strong>
             </div>
-            <div class="meta">
-              × ${_esc(adj.child_asin || '?')}
-              | ${_esc(adj.match_type || '?')}
-              | 关键词: ${_esc(adj.keyword_text || '?')}
-              ${adj.keyword_count ? '| 词数: ' + adj.keyword_count : ''}
-            </div>
+            <div class="meta">${_renderMetaChips(adj)}</div>
             <div class="text-sm muted" style="margin-top:6px;">
               过滤原因：${_esc(adj.reason || '')}
             </div>
@@ -324,6 +386,7 @@ function _renderCards(state) {
     const checkboxHtml = interactive
       ? `<div class="card-checkbox"><input type="checkbox" data-key="${_esc(adj.item_id)}" ${state._selection.has(adj.item_id) ? 'checked' : ''} data-action="camp-toggle-select"></div>`
       : '';
+    const selected = state._selection.has(adj.item_id) ? ' selected' : '';
 
     // values 行
     let vals = '';
@@ -351,7 +414,7 @@ function _renderCards(state) {
     }
 
     return `
-      <div class="camp-adjustment-card ${klass}" data-key="${_esc(adj.item_id)}">
+      <div class="camp-adjustment-card ${klass}${selected}" data-key="${_esc(adj.item_id)}">
         ${checkboxHtml}
         <div style="flex:1;min-width:0;">
           ${reviewBadge}
@@ -360,19 +423,7 @@ function _renderCards(state) {
             <span class="camp-badge camp-badge-${confKlass}">${_esc(adj.confidence || 'medium')}</span>
             <strong style="word-break:break-all;">${_esc(adj.campaign_name || '?')}</strong>
           </div>
-          <div class="meta">
-            × ${_esc(adj.child_asin || '?')}
-            | ${_esc(adj.match_type || '?')}
-            | 关键词: ${_esc(adj.keyword_text || '?')}
-            ${adj.keyword_class ? '| ' + _esc(adj.keyword_class) : ''}
-            ${adj.match_type === 'EXACT' && adj.natural_rank != null
-              ? '| 自然排名: 第' + adj.natural_rank + '位' + _rankArrow(adj.rank_change) : ''}
-            ${adj.match_type === 'EXACT' && adj.natural_rank == null && adj.near_natural_rank != null
-              ? '| <span style="color:#D97706;">⚠ 已掉榜(上次第' + adj.near_natural_rank + '位)</span>' : ''}
-            ${adj.is_core ? '| <span style="color:#DC2626;">⚠ 核心词</span>' : ''}
-            ${adj.triggered_rule ? '| 触发规则: <code>' + _esc(adj.triggered_rule) + '</code>' : ''}
-            ${adj.review_level ? '| 审核: ' + _esc(adj.review_level) : ''}
-          </div>
+          <div class="meta">${_renderMetaChips(adj)}</div>
           <div class="values">${vals}</div>
           ${placementBrief}
           <div class="reason" style="white-space:pre-wrap;">${_esc(fullReason)}</div>
@@ -670,21 +721,58 @@ function _renderReallocModal(state) {
 
 // ── 执行前确认弹窗（同意/不同意/回算执行）──
 // 渲染于独立挂载点 camp-confirm-mount（与回算弹窗互不覆盖）。仅底部「取消/确认」有 data-action。
+function _renderConfirmItems(items) {
+  if (!items || !items.length) return '';
+  const rows = items.map(it => {
+    const placements = (it.placement_adjustments || [])
+      .filter(p => !p.is_declaration)
+      .map(p => {
+        const from = p.current_pct != null ? `${p.current_pct}%` : '-';
+        const to = p.proposed_pct != null ? `${p.proposed_pct}%` : from;
+        return `${_esc(p.placement || '?')}: ${from} -> ${to}`;
+      }).join('<br>');
+    const budget = (it.current_budget != null || it.proposed_budget != null)
+      ? `${_fmtMoney(it.current_budget)} -> ${_fmtMoney(it.proposed_budget)}`
+      : '-';
+    const bid = (it.current_bid != null || it.proposed_bid != null)
+      ? `${_fmtMoney(it.current_bid)} -> ${_fmtMoney(it.proposed_bid)}`
+      : '-';
+    return `<tr>
+      <td title="${_esc(it.campaign_name || '')}">${_esc(it.campaign_name || '-')}</td>
+      <td>${_esc(it.keyword_text || '-')}</td>
+      <td>${_actionLabel(it.action)}</td>
+      <td>${budget}</td>
+      <td>${bid}</td>
+      <td>${placements || '-'}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="camp-confirm-detail">
+      <div class="camp-confirm-warn">确认执行以下调整后，将通过 ERP/MCP 下发到亚马逊广告。</div>
+      <table class="camp-confirm-table">
+        <thead><tr><th>活动</th><th>关键词</th><th>动作</th><th>预算</th><th>出价</th><th>广告位</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 function _renderConfirmModal(state) {
   const mount = _$('camp-confirm-mount');
   if (!mount) return;
   const c = state._confirm;
   if (!c) { mount.innerHTML = ''; return; }
+  const detail = c.kind === 'approve' ? _renderConfirmItems(c.items || state._confirm.items) : '';
   mount.innerHTML = `
     <div class="camp-modal-overlay">
-      <div class="camp-modal" style="width:min(420px,92vw)">
-        <div class="camp-modal-header">${_esc(c.title || '请确认')}</div>
+      <div class="camp-modal" style="width:${c.kind === 'approve' ? 'min(820px,94vw)' : 'min(420px,92vw)'}">
+        <div class="camp-modal-header">${c.kind === 'approve' ? '确认执行以下调整' : _esc(c.title || '请确认')}</div>
         <div class="camp-modal-body">
           <div class="text-sm" style="line-height:1.6;color:var(--camp-foreground);">${_esc(c.msg || '')}</div>
+          ${detail}
         </div>
         <div class="camp-modal-footer">
           <button class="pp-act" data-action="camp-confirm-cancel">取消</button>
-          <button class="pp-act primary" data-action="camp-confirm-ok">确认</button>
+          <button class="pp-act primary" data-action="camp-confirm-ok">${c.kind === 'approve' ? '确认执行' : '确认'}</button>
         </div>
       </div>
     </div>`;
