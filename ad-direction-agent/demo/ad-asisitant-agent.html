@@ -2322,7 +2322,7 @@ function restoreManualInputs(snapshot) {
 // 消费前拦截：运行执行层分析前，有未保存字段则拦下
 function guardUnsavedBeforeRun() {
   const d = Object.keys(_dirty).filter(k => _dirty[k]).map(k => _FIELD_CN[k]);
-  if (d.length) { alert('有未保存的修改：' + d.join('、') + '\n请先保存或放弃后，再运行执行层分析。'); return false; }
+  if (d.length) { showToast('⚠ 有未保存的修改：' + d.join('、') + ' — 请先保存或放弃后，再运行执行层分析。', 'warn', 4000); return false; }
   return true;
 }
 function resetSaveTags() {
