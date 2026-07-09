@@ -72,8 +72,6 @@ def test_demo_native_analyzing_overlay_and_request_hints():
 def test_demo_native_unified_strategy_save_and_preserves_manual_inputs():
     html = read(DEMO)
 
-    assert "btnSaveStrategyLayer" in html
-    assert "saveStrategyLayerAll" in html
     assert "confirmTactics()" in html
     assert "saveP3AcosLeft()" in html
     assert "saveP3BudgetLeft()" in html

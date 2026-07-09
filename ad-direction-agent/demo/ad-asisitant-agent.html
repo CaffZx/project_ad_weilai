@@ -2072,7 +2072,7 @@ async function loadAll(skipContextRefresh = false) {
   // 广告方向与 ACOS/预算同一开关进入可编辑态（统一切换，不再单独挂 loadExecution）；
   // 先用固定 4 方向预填下拉，loadExecution 拿到评分后再替换为带分数选项。
   hide('leftDirections'); show('leftDirectionsEdit');
-  { const _ldo = $('leftDirectionsOptions'); if (_ldo) { _ldo.innerHTML = _dirFallbackOptsHtml(); updateMultiTags('directions'); } }
+  { const _ldo = $('leftDirectionsOptions'); if (_ldo) { _ldo.innerHTML = _dirFallbackOptsHtml(); updateMultiTags('directions', { fromUser: false }); } }
   $('sec1Done').textContent = '已保存';
   $('sec2Done').textContent = '已保存';
   activeTab = null;
@@ -2314,7 +2314,7 @@ function restoreManualInputs(snapshot) {
     qsa('input[data-dim="directions"]').forEach(cb => {
       cb.checked = snapshot.directions.includes(cb.value);
     });
-    updateMultiTags('directions');
+    updateMultiTags('directions', { fromUser: false });
     recomputeDirectionsDirty();
   }
 }
@@ -3278,7 +3278,7 @@ async function loadExecution() {
   if (_optsEl) {
     _optsEl.innerHTML = optsHtml;
     restoreManualInputs(manualSnapshot);
-    updateMultiTags('directions');
+    updateMultiTags('directions', { fromUser: false });
   }
 
   if (data && data.recommendation_summary) {
@@ -3440,7 +3440,7 @@ function toggleMultiDropdown(btn) {
   if (!isOpen) { panel.classList.remove('hidden'); btn.classList.add('open'); }
 }
 
-function updateMultiTags(dim) {
+function updateMultiTags(dim, { fromUser = true } = {}) {
   const container = document.getElementById('mtags_'+dim);
   if (!container) return;
   const checked = container.closest('[style*="position:relative"]')?.querySelectorAll(`input[data-dim="${dim}"]:checked`);
@@ -3451,8 +3451,8 @@ function updateMultiTags(dim) {
       `<span class="md-tag">${cb.dataset.label || cb.value}<span class="md-tag-remove" onclick="event.stopPropagation();uncheckTag('${dim}','${cb.value}')">&times;</span></span>`
     ).join('');
   }
-  // 防呆脏检测（值变即翻黄）
-  if (dim === 'directions') { _manualTouched.directions = true; recomputeDirectionsDirty(); }
+  // 防呆脏检测（值变即翻黄）；程序初始化/恢复快照时传 fromUser:false 不标手动
+  if (dim === 'directions') { if (fromUser) _manualTouched.directions = true; recomputeDirectionsDirty(); }
   else if (dim === 'ad_purposes' || dim === 'target_keyword_strategy') recomputeTacticsDirty();
 }
 

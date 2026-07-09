@@ -226,7 +226,7 @@
   font-size: 12px;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
-.camp-density-compact .camp-adjustment-card .detail { display: none; }
+
 .camp-density-comfy .camp-adjustment-card { padding: 12px 14px; }
 
 /* ── badge ── */
