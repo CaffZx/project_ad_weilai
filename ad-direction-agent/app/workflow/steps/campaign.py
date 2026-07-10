@@ -649,34 +649,7 @@ async def _analyze_campaigns_impl(
             return f"已掉榜（上次自然排名第{cu.near_natural_rank}位）"
         return ""
 
-    for item in adjustments:
-        cu = unit_by_key.get(item.campaign_key)
-        if cu is None:
-            continue
-        item.campaign_id = cu.campaign_id
-        item.keyword_id = cu.keyword_id
-        item.seller_sku = cu.seller_sku
-        # current_* 以代码可信源（CampaignUnit）为准：current_budget 与 current_bid
-        # 均来自 MCP ad_campaign_basic_info（关键词BID），均为后台真值。
-        # LLM 在 JSON 回填的 current_* 可能抄错，不予采信（proposed_* 仍用 LLM 产出）。
-        # 修正后，_resolve_budget_conflicts 末尾的终态 _normalize_action 会据真值重派生 action。
-        item.current_budget = cu.current_budget
-        item.current_bid = cu.current_bid
-        item.days_online = cu.days_online
-        # 7d 指标快照回填 → card.perf_json（淘汰卡借此存淘汰前花费，KB21§7 情况二复评读取）
-        item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
-        # 自然排名回填 + 证据行（仅精准；evidence 经 card.evidence 落库，快照轨零改可见）
-        item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
-        item.natural_rank = cu.natural_rank
-        item.near_natural_rank = cu.near_natural_rank
-        item.rank_change = cu.rank_change
-        if cu.match_type == "EXACT":
-            _ln = _rank_evidence_line(cu)
-            if _ln and _ln not in item.evidence:
-                item.evidence.append(_ln)
-        # 终态组合分类挪到预算冲突裁决之后（§7b），按 proposed 定组（KB23 §3.1B/§3.5/§3.7）；
-        # 此处 proposed 尚未定稿，故不在 loop 内分类。
-        # portfolio_or_group 维持空(KB 18/21 原字段,数据层未拉,留空待后续)
+    _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line)
 
     # 6c. 复评保护回填：取池表最近 N 天内离池（= 被复评捞回）的 campaign_id 集合，
     #     算 days_since_reactivation，供 _resolve_budget_conflicts 防淘汰↔复评抖动。
@@ -691,15 +664,140 @@ async def _analyze_campaigns_impl(
         cid = (item.campaign_id or "").strip()
         item.days_since_reactivation = recent_reactivated.get(cid, -1)
 
-    # 7. 预算冲突裁决
-    budget_warnings = _resolve_budget_conflicts(
-        adjustments,
-        product_stage=strategy_context.product_stage,
-        inventory_days=strategy_context.inventory_days,
-        refund_rate=strategy_context.refund_rate,
-        rating=strategy_context.rating,
-    )
-    warnings_list.extend(budget_warnings)
+    # 7. 护栏 + R3/R4 重试编排
+    #    任意护栏修正都会按 campaign_key 带真实告警回灌给 LLM；R4 后不再 R5，由最终护栏兜底。
+    retry_rounds = ((3, "R3"), (4, "R4"))
+    for round_number, round_label in retry_rounds:
+        guardrail_pass, budget_warnings = _apply_campaign_guardrails(
+            adjustments,
+            product_stage=strategy_context.product_stage,
+            inventory_days=strategy_context.inventory_days,
+            refund_rate=strategy_context.refund_rate,
+            rating=strategy_context.rating,
+        )
+        warnings_list.extend(budget_warnings)
+
+        alerts = _build_guardrail_alerts(guardrail_pass)
+        failed_keys = set(alerts)
+        if not failed_keys:
+            logger.info(
+                "Guardrail %s pass [%s]: corrections=%d rules=%s",
+                round_label, parent_asin, guardrail_pass.corrections,
+                _guardrail_rule_counts(guardrail_pass),
+            )
+            break
+        logger.info(
+            "Guardrail %s blocked [%s]: corrections=%d failed=%d/%d rules=%s snapshot=%s",
+            round_label, parent_asin, guardrail_pass.corrections, len(failed_keys), len(adjustments),
+            _guardrail_rule_counts(guardrail_pass), _guardrail_snapshot(adjustments, failed_keys),
+        )
+
+        retry_source = []
+        for s in (exact_summaries + broad_summaries):
+            if s.get("campaign_key") in failed_keys:
+                retry_source.append(dict(s))
+        if not retry_source:
+            logger.warning(
+                "Guardrail %s retry skipped [%s]: no source summaries for failed_keys=%s",
+                round_label, parent_asin, sorted(failed_keys),
+            )
+            break
+
+        exact_retry = [s for s in retry_source if (s.get("match_type") or "").upper() == "EXACT"]
+        broad_retry = [s for s in retry_source if (s.get("match_type") or "").upper() != "EXACT"]
+        logger.info(
+            "Guardrail %s retry source [%s]: exact=%d broad=%d missing_source=%s",
+            round_label, parent_asin, len(exact_retry), len(broad_retry),
+            sorted(failed_keys - {s.get("campaign_key") for s in retry_source}),
+        )
+        alert_text = _GUARDRAIL_RETRY_INSTRUCTION.format(
+            failed_count=len(failed_keys),
+            total_count=len(adjustments),
+        )
+        retry_items: list[CampaignAdjustmentItem] = []
+
+        for retry_summaries, task_type_name, retry_sem in (
+            (exact_retry, "exact", exact_sem),
+            (broad_retry, "broad", broad_sem),
+        ):
+            if not retry_summaries:
+                continue
+            _inject_alerts_to_summaries(retry_summaries, alerts)
+            ctx_dict["_guardrail_instruction"] = alert_text
+            try:
+                results = await _run_round(
+                    reasoner, parent_asin,
+                    _build_batches(retry_summaries, settings.campaign_batch_size, seed=round_number),
+                    ctx_dict, temperature, retry_sem, round_number,
+                    task_type=task_type_name,
+                )
+                returned_keys: set[str] = set()
+                for br in results:
+                    retry_items.extend(br.items)
+                    returned_keys.update(item.campaign_key for item in br.items)
+                expected_keys = {s.get("campaign_key") for s in retry_summaries}
+                logger.info(
+                    "Guardrail %s retry result [%s|%s]: batches=%s items=%d returned=%s missing=%s extra=%s",
+                    round_label, parent_asin, task_type_name, _round_stats(results), len(retry_items),
+                    sorted(returned_keys), sorted(expected_keys - returned_keys),
+                    sorted(returned_keys - expected_keys),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Guardrail %s retry failed [%s|%s]: %s", round_label, parent_asin, task_type_name, e)
+            finally:
+                ctx_dict.pop("_guardrail_instruction", None)
+
+        if not retry_items:
+            logger.warning(
+                "Guardrail %s retry stopped [%s]: no retry items returned for failed_keys=%s",
+                round_label, parent_asin, sorted(failed_keys),
+            )
+            break
+
+        replacement_by_key = {
+            item.campaign_key: item
+            for item in retry_items
+            if item.campaign_key in failed_keys
+        }
+        if not replacement_by_key:
+            logger.warning(
+                "Guardrail %s retry stopped [%s]: no replacement matched failed_keys=%s returned_keys=%s",
+                round_label, parent_asin, sorted(failed_keys),
+                sorted(item.campaign_key for item in retry_items),
+            )
+            break
+        logger.info(
+            "Guardrail %s retry replacement [%s]: replaced=%d summary=%s",
+            round_label, parent_asin, len(replacement_by_key),
+            _guardrail_replacement_summary(adjustments, replacement_by_key),
+        )
+        for idx, item in enumerate(adjustments):
+            replacement = replacement_by_key.get(item.campaign_key)
+            if replacement is not None:
+                adjustments[idx] = replacement
+        _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line)
+        _backfill_placement_pcts(adjustments, unit_by_key)
+        for item in adjustments:
+            cid = (item.campaign_id or "").strip()
+            item.days_since_reactivation = recent_reactivated.get(cid, -1)
+        logger.info(
+            "Guardrail %s retry [%s]: exact=%d broad=%d retried, %d corrections",
+            round_label, parent_asin, len(exact_retry), len(broad_retry), guardrail_pass.corrections,
+        )
+    else:
+        guardrail_pass, budget_warnings = _apply_campaign_guardrails(
+            adjustments,
+            product_stage=strategy_context.product_stage,
+            inventory_days=strategy_context.inventory_days,
+            refund_rate=strategy_context.refund_rate,
+            rating=strategy_context.rating,
+        )
+        warnings_list.extend(budget_warnings)
+        logger.warning(
+            "Guardrail final fallback after R4 [%s]: corrections=%d rules=%s snapshot=%s",
+            parent_asin, guardrail_pass.corrections, _guardrail_rule_counts(guardrail_pass),
+            _guardrail_snapshot(adjustments, set(_build_guardrail_alerts(guardrail_pass))),
+        )
 
     # 7b. 终态组合分类（KB23 §3.1B/§3.5/§3.7：升降组按【本轮建议预算 proposed】跨 $5 阈值判）。
     # 必须在预算冲突裁决后（proposed 已定稿）、gather 之前（回算 _group_of 读 ai_portfolio_class）。
@@ -1745,6 +1843,33 @@ def _merge_to_adjustments(
     return items
 
 
+def _backfill_campaign_adjustment_context(
+    adjustments: list[CampaignAdjustmentItem],
+    unit_by_key: dict[str, CampaignUnit],
+    keyword_class_map: dict[str, str],
+    rank_evidence_line,
+) -> None:
+    for item in adjustments:
+        cu = unit_by_key.get(item.campaign_key)
+        if cu is None:
+            continue
+        item.campaign_id = cu.campaign_id
+        item.keyword_id = cu.keyword_id
+        item.seller_sku = cu.seller_sku
+        item.current_budget = cu.current_budget
+        item.current_bid = cu.current_bid
+        item.days_online = cu.days_online
+        item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
+        item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
+        item.natural_rank = cu.natural_rank
+        item.near_natural_rank = cu.near_natural_rank
+        item.rank_change = cu.rank_change
+        if cu.match_type == "EXACT":
+            line = rank_evidence_line(cu)
+            if line and line not in item.evidence:
+                item.evidence.append(line)
+
+
 # ── 懒加载 enrichment ────────────────────────────────────────────────────────
 
 
@@ -2038,7 +2163,109 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
     return changed
 
 
-def _resolve_budget_conflicts(
+# ── 护栏重试编排 ──────────────────────────────────────────────────────────
+
+
+_GUARDRAIL_RETRY_INSTRUCTION = """## 内部护栏反馈
+以下「⚠️ 护栏告警」仅用于本轮复判，不要写入 reason/evidence，不要向运营解释护栏或规则编号。
+
+护栏不是要求一律 keep。请只修正被指出的违规部分，仍需根据活动事实做该做的调整：
+该淘汰就淘汰，该小调就小调，该限制幅度就限制幅度，该修正调整方向就修正。
+未被告警指出的调整维度，不要因为有护栏反馈而自动改成维持。
+
+共 {failed_count}/{total_count} 个活动触发护栏。请基于每条活动下方的告警重新判定。
+"""
+
+
+def _build_guardrail_alerts(
+    guardrail_pass,
+) -> dict[str, str]:
+    """护栏拦截结果 → {campaign_key: 告警文本}，用于注入 R3/R4 prompt。"""
+    grouped: dict[str, list[str]] = {}
+    for r in guardrail_pass.results:
+        if not r.corrected:
+            continue
+        key = getattr(r, "campaign_key", "") or ""
+        if not key:
+            continue
+        instruction = getattr(r, "retry_instruction", "") or r.message
+        grouped.setdefault(key, []).append(instruction)
+    return {key: "\n".join(messages) for key, messages in grouped.items()}
+
+
+def _inject_alerts_to_summaries(
+    campaign_summaries: list[dict], alerts: dict[str, str],
+) -> list[dict]:
+    """为被拦截的活动注入护栏告警行。"""
+    for s in campaign_summaries:
+        ckey = s.get("campaign_key", "")
+        if ckey in alerts:
+            s["_guardrail_alert"] = alerts[ckey]
+    return campaign_summaries
+
+
+def _guardrail_rule_counts(guardrail_pass) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in guardrail_pass.results:
+        if not getattr(r, "corrected", False):
+            continue
+        rule_id = getattr(r, "rule_id", "") or "UNKNOWN"
+        counts[rule_id] = counts.get(rule_id, 0) + 1
+    return counts
+
+
+def _transition_text(current, proposed) -> str:
+    def _fmt(value) -> str:
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+    return f"{_fmt(current)}->{_fmt(proposed)}"
+
+
+def _guardrail_snapshot(
+    adjustments: list[CampaignAdjustmentItem],
+    keys: set[str],
+) -> list[dict]:
+    wanted = set(keys)
+    out: list[dict] = []
+    for item in adjustments:
+        if item.campaign_key not in wanted:
+            continue
+        out.append({
+            "key": item.campaign_key,
+            "name": item.campaign_name,
+            "action": item.action,
+            "bid": _transition_text(item.current_bid, item.proposed_bid),
+            "budget": _transition_text(item.current_budget, item.proposed_budget),
+        })
+    return out
+
+
+def _guardrail_replacement_summary(
+    old_items: list[CampaignAdjustmentItem],
+    replacement_by_key: dict[str, CampaignAdjustmentItem],
+) -> list[dict]:
+    out: list[dict] = []
+    for old in old_items:
+        new = replacement_by_key.get(old.campaign_key)
+        if new is None:
+            continue
+        out.append({
+            "key": old.campaign_key,
+            "name": old.campaign_name,
+            "action": f"{old.action}->{new.action}",
+            "bid": f"{_transition_text(old.current_bid, old.proposed_bid)} to "
+                   f"{_transition_text(new.current_bid, new.proposed_bid)}",
+            "budget": f"{_transition_text(old.current_budget, old.proposed_budget)} to "
+                      f"{_transition_text(new.current_budget, new.proposed_budget)}",
+        })
+    return out
+
+
+# ── 预算冲突裁决 ────────────────────────────────────────────────────────────
+
+
+def _apply_campaign_guardrails(
     adjustments: list[CampaignAdjustmentItem],
     total_budget_limit: float | None = None,
     *,
@@ -2046,10 +2273,8 @@ def _resolve_budget_conflicts(
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
-) -> list[str]:
-    """护栏后处理：调用 campaign_guardrails.apply_all() 执行全部确定性规则，
-    然后做终态 action 归一 + 总预算上限截断。
-    """
+):
+    from app.workflow.steps.campaign_guardrails import GuardrailResult
     from app.workflow.steps.campaign_guardrails import apply_all as _apply_guardrails
 
     gp = _apply_guardrails(
@@ -2063,13 +2288,23 @@ def _resolve_budget_conflicts(
     if gp.corrections > 0:
         logger.info("Guardrails: 护栏修正 %d 条 (共 %d 条)", gp.corrections, len(adjustments))
 
-    # Bid 绝对上限 (KB 19 §10) —— 非 guardrails 内置（$3.0 仅限精准，广泛无硬上限）
+    # Bid 绝对上限兜底。P9 已覆盖常规路径；这里保留旧接口的最终防线。
     for adj in adjustments:
         if adj.proposed_bid is not None and adj.proposed_bid > 3.0:
-            warnings.append(
-                f"[{adj.campaign_name}] Bid ${adj.proposed_bid} 超过上限 $3.00，已截断"
-            )
+            original = adj.proposed_bid
             adj.proposed_bid = 3.0
+            message = f"[{adj.campaign_name}] Bid ${original} 超过上限 $3.00，已截断"
+            warnings.append(message)
+            gp.add(GuardrailResult(
+                rule_id="FINAL_BID_CAP",
+                corrected=True,
+                campaign_key=getattr(adj, "campaign_key", ""),
+                message=message,
+                retry_instruction=(
+                    f"[{adj.campaign_name}] bid 不得超过 $3.00。可在上限内重新给值，"
+                    "或按活动事实选择维持/其他调整。"
+                ),
+            ))
 
     # 终态 action 归一: _conservative 可能把 proposed 改回 current,
     # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变。
@@ -2084,15 +2319,14 @@ def _resolve_budget_conflicts(
 
     # 总预算上限检查 (如果有外部输入)
     if total_budget_limit is not None:
-        total_proposed = sum(
-            (a.proposed_budget or 0) for a in adjustments
-        )
+        total_proposed = sum((a.proposed_budget or 0) for a in adjustments)
         if total_proposed > total_budget_limit:
             overflow = total_proposed - total_budget_limit
-            warnings.append(
+            message = (
                 f"总预算 ${total_proposed:.2f} 超出上限 ${total_budget_limit:.2f}，"
                 f"溢出 ${overflow:.2f}"
             )
+            warnings.append(message)
             for adj in reversed(adjustments):
                 if overflow <= 0:
                     break
@@ -2100,7 +2334,40 @@ def _resolve_budget_conflicts(
                     cut = min(overflow, adj.proposed_budget - 1)
                     adj.proposed_budget -= cut
                     overflow -= cut
+                    gp.add(GuardrailResult(
+                        rule_id="FINAL_TOTAL_BUDGET_CAP",
+                        corrected=True,
+                        campaign_key=getattr(adj, "campaign_key", ""),
+                        message=message,
+                        retry_instruction=(
+                            f"[{adj.campaign_name}] 总预算已超过上限，请在总预算约束内重新评估预算值。"
+                            "可优先压缩边际较弱活动，也可按事实维持或下调。"
+                        ),
+                    ))
 
+    return gp, warnings
+
+
+def _resolve_budget_conflicts(
+    adjustments: list[CampaignAdjustmentItem],
+    total_budget_limit: float | None = None,
+    *,
+    product_stage: str = "",
+    inventory_days: float | None = None,
+    refund_rate: float | None = None,
+    rating: float | None = None,
+) -> list[str]:
+    """护栏后处理：调用 campaign_guardrails.apply_all() 执行全部确定性规则，
+    然后做终态 action 归一 + 总预算上限截断。
+    """
+    _, warnings = _apply_campaign_guardrails(
+        adjustments,
+        total_budget_limit,
+        product_stage=product_stage,
+        inventory_days=inventory_days,
+        refund_rate=refund_rate,
+        rating=rating,
+    )
     return warnings
 
 

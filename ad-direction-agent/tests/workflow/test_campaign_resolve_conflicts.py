@@ -1,10 +1,13 @@
-"""_resolve_budget_conflicts 淘汰保护（KB 21 §2）单测。
+"""_resolve_budget_conflicts 护栏优先级单测。
 
-验证三种保护条件 OR：
+当前优先级：
+  P3 硬淘汰（无单且 bid≤$0.10 或 budget≤$1）高于 P1 样本不足。
+  P1 只拦 LLM 对样本不足活动的非硬淘汰误判。
+  P2 复评保护仍高于 P3。
+
+样本不足条件：
   1. 上线 ≤3 天（新活动样本不足）
   2. 测试期 + 上线 <14 天（测试期样本保护）
-  3. 复评后 ≤3 天（防淘汰↔复评抖动 / days_since_reactivation）
-命中任一 → 不强制淘汰，LLM 误判淘汰时强制修正为 keep。
 """
 
 import os
@@ -32,29 +35,30 @@ def _item(name="c1", action="keep", current_budget=1.0, current_bid=0.20,
     )
 
 
-# ── 新活动保护：强制淘汰豁免 ──────────────────────────────────────
+# ── 新活动样本不足：P3 硬淘汰优先 ────────────────────────────────
 
-def test_new_campaign_low_budget_not_force_eliminated():
-    """新活动上线 2 天、预算=$1，LLM 判 keep → 不强制淘汰（KB 21 §2 保护）。"""
+def test_new_campaign_low_budget_force_eliminated_by_p3():
+    """新活动上线 2 天、预算=$1，LLM 判 keep → P3 硬淘汰优先。"""
     item = _item(days_online=2, current_budget=1.0, current_bid=0.50, action="keep")
     warnings = _resolve_budget_conflicts([item])
-    assert item.action == "keep"  # 没被翻成 eliminate，核心断言
+    assert item.action == "eliminate_to_low_bid_pool"
+    assert any("强制淘汰" in w for w in warnings)
 
 
-def test_new_campaign_low_bid_not_force_eliminated():
-    """新活动上线 2 天、bid=$0.05，LLM 判 adjust_bid → 不强制淘汰。"""
+def test_new_campaign_low_bid_force_eliminated_by_p3():
+    """新活动上线 2 天、bid=$0.05，LLM 判 adjust_bid → P3 硬淘汰优先。"""
     item = _item(days_online=2, current_budget=5.0, current_bid=0.05,
                  proposed_bid=0.10, action="adjust_bid")
     warnings = _resolve_budget_conflicts([item])
-    assert item.action == "adjust_bid"
-    assert item.proposed_bid == 0.10  # LLM 原建议保留
+    assert item.action == "eliminate_to_low_bid_pool"
+    assert any("强制淘汰" in w for w in warnings)
 
 
-def test_new_campaign_boundary_3_days_protected():
-    """上线恰好 3 天 → 仍受保护（≤3）。"""
+def test_new_campaign_boundary_3_days_force_eliminated_when_budget_touch_floor():
+    """上线恰好 3 天但预算触底 → P3 硬淘汰优先。"""
     item = _item(days_online=3, current_budget=1.0, current_bid=0.50, action="keep")
     _resolve_budget_conflicts([item])
-    assert item.action == "keep"
+    assert item.action == "eliminate_to_low_bid_pool"
 
 
 def test_new_campaign_boundary_4_days_not_protected():
@@ -90,14 +94,14 @@ def test_new_campaign_llm_misjudge_eliminate_corrected_to_keep():
     assert "强制修正为 keep" in warnings[0]
 
 
-def test_new_campaign_llm_misjudge_eliminate_with_low_budget():
-    """新活动上线 1 天、预算=$1，LLM 也误判 eliminate → 修正为 keep（不应淘汰）。"""
+def test_new_campaign_llm_misjudge_eliminate_with_low_budget_force_eliminated():
+    """新活动上线 1 天、预算=$1，LLM 判 eliminate → P3 硬淘汰优先。"""
     item = _item(days_online=1, current_budget=1.0, current_bid=0.50,
                  proposed_budget=1.0, proposed_bid=0.20,
                  action="eliminate_to_low_bid_pool")
     _resolve_budget_conflicts([item])
-    assert item.action == "keep"
-    assert item.proposed_budget == 1.0   # 回退 current（就是 $1，但 action 已改 keep）
+    assert item.action == "eliminate_to_low_bid_pool"
+    assert item.proposed_budget == 1.0
 
 
 # ── 旧活动 / 未知天数：强制淘汰照常 ──────────────────────────────
@@ -149,8 +153,8 @@ def test_new_campaign_keep_unchanged():
 
 # ── 批量混合场景 ──────────────────────────────────────────────────
 
-def test_mixed_batch_new_and_old():
-    """批量：新活动被保护，旧活动照常淘汰。"""
+def test_mixed_batch_hard_eliminate_and_sample_protect():
+    """批量：触底活动按 P3 淘汰，非触底样本不足误淘汰由 P1 修正。"""
     new1 = _item("new1", days_online=2, current_budget=1.0, current_bid=0.50, action="keep")
     old1 = _item("old1", days_online=30, current_budget=1.0, current_bid=0.50, action="keep")
     new2 = _item("new2", days_online=1, current_budget=5.0, current_bid=0.50,
@@ -159,19 +163,22 @@ def test_mixed_batch_new_and_old():
 
     warnings = _resolve_budget_conflicts([new1, old1, new2])
 
-    assert new1.action == "keep"                    # 保护豁免
-    assert old1.action == "eliminate_to_low_bid_pool"  # 照常淘汰
-    assert new2.action == "keep"                    # LLM 误判修正
-    assert len(warnings) == 1  # 仅 new2 产生 warning
+    assert new1.action == "eliminate_to_low_bid_pool"  # P3 硬淘汰
+    assert old1.action == "eliminate_to_low_bid_pool"  # P3 硬淘汰
+    assert new2.action == "keep"                      # 非触底，P1 修正
+    assert len(warnings) == 3  # new1/old1 P3 强制淘汰 + new2 样本保护均需生成护栏告警
+    assert any("new2" in w for w in warnings)
+    assert any("new1" in w for w in warnings)
+    assert any("old1" in w for w in warnings)
 
 
 # ── 测试期保护（product_stage=测试期 + days_online < 14）──────────
 
-def test_testing_stage_under_14_days_protected():
-    """测试期活动上线 10 天、预算=$1 → 不强制淘汰（KB 21 §2 测试期样本保护）。"""
+def test_testing_stage_under_14_days_force_eliminated_when_budget_touch_floor():
+    """测试期活动上线 10 天、预算=$1 → P3 硬淘汰优先。"""
     item = _item(days_online=10, current_budget=1.0, current_bid=0.50, action="keep")
     _resolve_budget_conflicts([item], product_stage="测试期")
-    assert item.action == "keep"
+    assert item.action == "eliminate_to_low_bid_pool"
 
 
 def test_testing_stage_llm_misjudge_corrected():
@@ -265,8 +272,8 @@ def test_never_reactivated_not_protected():
 # ── 三条件同时覆盖的混合场景 ──────────────────────────────────────
 
 @pytest.mark.parametrize("days_online,days_since_react,stage,expected_action", [
-    (2, -1, "", "keep"),           # 新活动 ≤3 天
-    (10, -1, "测试期", "keep"),     # 测试期 <14 天
+    (2, -1, "", "eliminate_to_low_bid_pool"),           # 新活动但预算触底 → P3
+    (10, -1, "测试期", "eliminate_to_low_bid_pool"),     # 测试期但预算触底 → P3
     (30, 2, "", "keep"),           # 复评后 ≤3 天
     (4, -1, "", "eliminate_to_low_bid_pool"),  # 都不满足 → 强制淘汰
     (30, 4, "推进期", "eliminate_to_low_bid_pool"),  # 都不满足

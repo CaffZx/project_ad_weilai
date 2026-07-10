@@ -61,6 +61,8 @@ class GuardrailResult:
     rule_id: str          # "P0_CORE_PROTECT"
     corrected: bool
     message: str
+    retry_instruction: str = ""
+    campaign_key: str = ""
     original_action: str = ""
     new_action: str = ""
 
@@ -92,14 +94,14 @@ def apply_all(
     # 第一轮：保护类（禁止淘汰）—— P0-P2
     for item in adjustments:
         _p0_core_protect(item, gp)
-        _p1_new_campaign_protect(item, gp)
+        _p1_new_campaign_protect(item, gp, product_stage=product_stage)
         _p2_reactivation_protect(item, gp)
 
     # 第二轮：裁决类 —— P3-P10
     for item in adjustments:
-        _p3_force_eliminate(item, gp)
-        _p4_elimination_fill(item, gp)
+        _p3_force_eliminate(item, gp, product_stage=product_stage)
         _p5_protection_reversal(item, gp)
+        _p4_elimination_fill(item, gp)
         _p6_budget_cap(item, gp)
         _p7_budget_low_spend(item, gp)
         _p8_bid_amplitude(item, gp)
@@ -119,36 +121,38 @@ def _p0_core_protect(item, gp: GuardrailPass) -> None:
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P0_CORE_PROTECT", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         original_action="eliminate_to_low_bid_pool", new_action="keep",
         message=f"[{item.campaign_name}] 核心词受保护，已强制修正为 keep",
+        retry_instruction=(
+            f"[{item.campaign_name}] 核心词不得淘汰。若当前表现偏弱，可结合活动事实评估小幅降 bid、"
+            "降预算、调整广告位或维持观察。"
+        ),
     ))
 
 
-def _p1_new_campaign_protect(item, gp: GuardrailPass) -> None:
+def _p1_new_campaign_protect(item, gp: GuardrailPass, *, product_stage: str = "") -> None:
     """新活动/样本不足保护：上线≤3天 OR 7d花费<$5 OR 7d点击<10 → 禁止淘汰 (KB21§2 / KB17 §1.2)。"""
-    days = getattr(item, "days_online", -1)
-    perf = getattr(item, "perf_7d", {}) or {}
-    cost = float(perf.get("cost") or 0)
-    clicks = int(perf.get("clicks") or 0)
-
     if item.action != "eliminate_to_low_bid_pool":
         return
-    sample_insufficient = (days >= 0 and days <= 3) or cost < 5 or clicks < 10
+    # P3 硬淘汰优先级高于 P1。触底场景不在 P1 写"禁止淘汰"告警，交给 P3/P4 处理。
+    if _p3_should_force_eliminate(item):
+        return
+    sample_insufficient, reasons = _sample_insufficient(item, product_stage=product_stage)
     if not sample_insufficient:
         return
 
-    reasons = []
-    if days >= 0 and days <= 3:
-        reasons.append(f"上线仅{days}天")
-    if cost < 5:
-        reasons.append(f"7d花费${cost:.1f}<$5")
-    if clicks < 10:
-        reasons.append(f"7d点击{clicks}<10")
+    # 仅禁淘汰，不改非淘汰调整；若 LLM 已判淘汰，则强制恢复到 keep 基准态。
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P1_SAMPLE_INSUFFICIENT", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         original_action="eliminate_to_low_bid_pool", new_action="keep",
-        message=f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})，已强制修正为 keep (KB17 §1.2)",
+        message=f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})，受样本保护，禁止淘汰，已强制修正为 keep (KB17 §1.2)",
+        retry_instruction=(
+            f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})时不得直接淘汰；若同时命中无订单且 bid/预算触底，"
+            "按硬淘汰判断。其他情况下，可结合事实评估小幅 bid、预算、广告位调整或维持。"
+        ),
     ))
 
 
@@ -160,12 +164,17 @@ def _p2_reactivation_protect(item, gp: GuardrailPass) -> None:
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P2_REACTIVATION_PROTECT", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         original_action="eliminate_to_low_bid_pool", new_action="keep",
         message=f"[{item.campaign_name}] 复评后仅 {days} 天，等同新活动保护，已修正为 keep",
+        retry_instruction=(
+            f"[{item.campaign_name}] 复评后仅 {days} 天，短期内不得再次淘汰。若表现仍弱，"
+            "可结合事实评估轻量收敛 bid、预算或维持观察，避免进出池抖动。"
+        ),
     ))
 
 
-def _p3_force_eliminate(item, gp: GuardrailPass) -> None:
+def _p3_force_eliminate(item, gp: GuardrailPass, *, product_stage: str = "") -> None:
     """硬淘汰触发 (OR)：无出单 且 (bid ≤ $0.10 或 budget ≤ LOW_BUDGET_MAX) → 强制淘汰。
 
     有出单的活动即使 bid/预算触底也不强制淘汰（可能仍在产出，留给 LLM 判断）。
@@ -173,16 +182,18 @@ def _p3_force_eliminate(item, gp: GuardrailPass) -> None:
     P0-P2 已保护的不会被触达（action 已变 keep）。
     """
     if item.action == "eliminate_to_low_bid_pool":
-        return
+        return  # 已是淘汰，无需再判
     perf = getattr(item, "perf_7d", {}) or {}
     has_orders = int(perf.get("orders") or 0) > 0
     if has_orders:
         return  # 有出单，不强制淘汰
-    should_eliminate = (
-        (item.current_bid is not None and item.current_bid <= LOW_BID_MIN)
-        or (item.current_budget is not None and item.current_budget <= LOW_BUDGET_MAX)
-    )
-    if not should_eliminate:
+    # 仅 P0(核心词) 和 P2(复评保护) 高于 P3；P1(样本不足) 不拦 P3 硬淘汰
+    if getattr(item, "is_core", False):
+        return
+    days_since_reactivation = getattr(item, "days_since_reactivation", -1)
+    if days_since_reactivation >= 0 and days_since_reactivation <= 3:
+        return
+    if not _p3_should_force_eliminate(item):
         return
     item.action = "eliminate_to_low_bid_pool"
     item.proposed_budget = 1.0
@@ -198,9 +209,14 @@ def _p3_force_eliminate(item, gp: GuardrailPass) -> None:
     item.negative_keywords = []
     gp.add(GuardrailResult(
         rule_id="P3_FORCE_ELIMINATE", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         new_action="eliminate_to_low_bid_pool",
         message=(f"[{item.campaign_name}] bid=${item.current_bid}/"
                  f"budget=${item.current_budget} 已达淘汰阈值，强制淘汰 → bid=${item.proposed_bid:.2f}"),
+        retry_instruction=(
+            f"[{item.campaign_name}] 无订单且 bid=${item.current_bid}/budget=${item.current_budget} 已触及淘汰阈值，"
+            "应进入低价捡漏/淘汰判断，不要仅因样本不足改回 keep。"
+        ),
     ))
 
 
@@ -216,7 +232,7 @@ def _p4_elimination_fill(item, gp: GuardrailPass) -> None:
     if item.proposed_budget != 1.0:
         item.proposed_budget = 1.0; changed = True
     cbid = item.current_bid or 0
-    pbid = item.proposed_bid or 0
+    pbid = item.proposed_bid if item.proposed_bid is not None else LOW_BID_MAX
     target = max(LOW_BID_MIN, min(cbid, pbid, LOW_BID_MAX))
     if item.proposed_bid != target:
         item.proposed_bid = target; changed = True
@@ -227,14 +243,37 @@ def _p4_elimination_fill(item, gp: GuardrailPass) -> None:
     if changed:
         gp.add(GuardrailResult(
             rule_id="P4_ELIMINATION_FILL", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
             message=f"[{item.campaign_name}] 淘汰值已补齐为 $1.00/${item.proposed_bid:.2f}",
+            retry_instruction=(
+                f"[{item.campaign_name}] 若判断为淘汰，预算应为 $1.00，bid 应落在低价捡漏区间，"
+                "且不应附带广告位加价或否词调整。"
+            ),
         ))
 
 
 def _p5_protection_reversal(item, gp: GuardrailPass) -> None:
-    """淘汰保护反修正：受 P0-P2 保护的活动被 LLM/兜底误判淘汰 → 强制改 keep。"""
-    # P0-P2 已经把受保护的活动改成 keep 了；此处处理 P3 兜底把受保护但非 eliminate 的活动强行变淘汰的场景
-    pass  # 此规则已在 P0-P2 的 force_keep 中处理，P3 自然跳过 keep 活动
+    """淘汰保护反修正：绝对保护项（核心词/复评≤3天）若被误判淘汰 → 强制改回 keep。
+
+    P0(核心词) 和 P2(复评保护) 高于 P3，P1(样本不足) 低于 P3。
+    此处兜底处理：若 P3 之后的规则链把受保护项又变成淘汰，则在 P5 阶段拉回。
+    """
+    if item.action != "eliminate_to_low_bid_pool":
+        return
+    core = getattr(item, "is_core", False)
+    react = getattr(item, "days_since_reactivation", -1)
+    if core or (react >= 0 and react <= 3):
+        _force_keep(item)
+        gp.add(GuardrailResult(
+            rule_id="P5_PROTECTION_REVERSAL", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
+            original_action="eliminate_to_low_bid_pool", new_action="keep",
+            message=f"[{item.campaign_name}] 受{'核心词' if core else '复评'}保护，已强制修正回 keep",
+            retry_instruction=(
+                f"[{item.campaign_name}] 受{'核心词' if core else '复评'}保护，不得淘汰。"
+                "可结合事实重新评估轻量调整或维持。"
+            ),
+        ))
 
 
 def _p6_budget_cap(item, gp: GuardrailPass) -> None:
@@ -243,7 +282,12 @@ def _p6_budget_cap(item, gp: GuardrailPass) -> None:
         item.proposed_budget = BUDGET_CAP
         gp.add(GuardrailResult(
             rule_id="P6_BUDGET_CAP", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
             message=f"[{item.campaign_name}] proposed_budget > ${BUDGET_CAP:.0f}，已截断",
+            retry_instruction=(
+                f"[{item.campaign_name}] 日预算不得超过 ${BUDGET_CAP:.0f}。如仍需加预算，"
+                "请在上限内给出合规值；也可按事实选择维持或下调。"
+            ),
         ))
 
 
@@ -256,14 +300,22 @@ def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
     if item.proposed_budget <= item.current_budget:
         return
     perf = getattr(item, "perf_7d", {}) or {}
-    spend = float(perf.get("cost") or perf.get("spend") or 0)
+    spend_raw = perf.get("cost", perf.get("spend"))
+    if spend_raw is None:
+        return
+    spend = float(spend_raw or 0)
     if spend >= (item.current_budget or 0) * 0.5:
         return
     item.proposed_budget = item.current_budget
     gp.add(GuardrailResult(
         rule_id="P7_BUDGET_LOW_SPEND", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         message=(f"[{item.campaign_name}] 7d 花费 ${spend:.1f} < "
                  f"日预算 ${item.current_budget:.0f} × 50%，禁加预算"),
+        retry_instruction=(
+            f"[{item.campaign_name}] 7d 花费 ${spend:.1f} 低于当前日预算 ${item.current_budget:.0f} 的 50%，"
+            "不应上调预算。可结合事实评估维持预算、下调预算、调整 bid 或广告位。"
+        ),
     ))
 
 
@@ -277,6 +329,8 @@ def _p8_bid_amplitude(item, gp: GuardrailPass) -> None:
     if change <= 0.5:
         return
     perf = getattr(item, "perf_7d", {}) or {}
+    if "clicks" not in perf:
+        return
     clicks = int(perf.get("clicks") or 0)
     if clicks >= 10:
         return
@@ -286,8 +340,13 @@ def _p8_bid_amplitude(item, gp: GuardrailPass) -> None:
     item.proposed_bid = max(0.20, capped)
     gp.add(GuardrailResult(
         rule_id="P8_BID_AMPLITUDE", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         message=(f"[{item.campaign_name}] Bid 变动 {change:.0%} > 50% 且 clicks={clicks} < 10，"
                  f"已收敛: ${original:.2f} → ${item.proposed_bid:.2f}"),
+        retry_instruction=(
+            f"[{item.campaign_name}] clicks={clicks} 的样本下 bid 变动 {change:.0%} 偏大。"
+            "可保留原调整方向，但幅度应更收敛；若事实支持，也可维持。"
+        ),
     ))
 
 
@@ -298,7 +357,12 @@ def _p9_bid_cap(item, gp: GuardrailPass) -> None:
         item.proposed_bid = BID_HARD_CAP
         gp.add(GuardrailResult(
             rule_id="P9_BID_CAP", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
             message=f"[{item.campaign_name}] proposed_bid=${original:.2f} > ${BID_HARD_CAP:.0f}，已截断",
+            retry_instruction=(
+                f"[{item.campaign_name}] bid 不得超过 ${BID_HARD_CAP:.0f}。如仍需加 bid，"
+                "请在上限内重新给值；否则按事实选择维持或其他调整。"
+            ),
         ))
 
 
@@ -335,13 +399,21 @@ def _p10_placement_block(
         act = str(plc.get("action", "")).strip()
         if pos in ("头部", "TOS", "TOP_OF_SEARCH") and act not in ("维持", "", None):
             plc["action"] = "维持"
+            # 同步 proposed_pct 回到 current_pct，避免 action=维持 但百分比仍显示加价
+            if "current_pct" in plc:
+                plc["proposed_pct"] = plc["current_pct"]
             plc["evidence"] = f"{plc.get('evidence', '')} [阻断: {'; '.join(blocks)}]".strip()
             changed = True
 
     if changed:
         gp.add(GuardrailResult(
             rule_id="P10_PLACEMENT_BLOCK", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
             message=f"[{item.campaign_name}] TOS 加价被阻断: {'; '.join(blocks)} (KB15 §3.2)",
+            retry_instruction=(
+                f"[{item.campaign_name}] 因 {'; '.join(blocks)}，不得上调头部 TOS 加价。"
+                "这不代表商品位、其他位、bid 或预算必须维持；请按各自数据继续判断。"
+            ),
         ))
 
 
@@ -354,7 +426,12 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
     if not (days >= 0 and days <= 3):
         return
     if item.action == "eliminate_to_low_bid_pool":
-        return
+        return  # P4 已处理淘汰值
+    if item.action == "keep" and getattr(item, "days_online", -1) <= 3:
+        # P1 只改了 action=keep，没动 proposed 值 → 仍须检查降幅
+        pass
+    elif item.action == "keep":
+        return  # 非新活动且已 keep，无需振幅检查
     if item.proposed_bid is None or item.current_bid is None or item.current_bid == 0:
         return
     drop = item.current_bid - item.proposed_bid
@@ -367,7 +444,12 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
     item.proposed_bid = round(item.current_bid - max_drop, 2)
     gp.add(GuardrailResult(
         rule_id="P11_NEW_CAMPAIGN_BID", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
         message=f"[{item.campaign_name}] 上线仅{days}天，Bid降幅从${drop:.2f}收窄至${max_drop:.2f}（KB15 §1.3）",
+        retry_instruction=(
+            f"[{item.campaign_name}] 上线仅 {days} 天，bid 不应大幅下调。若确需降 bid，"
+            f"可收敛到不超过 ${max_drop:.2f} 的降幅；也可按事实选择维持或其他轻量调整。"
+        ),
     ))
 
 
@@ -382,3 +464,28 @@ def _force_keep(item) -> None:
         item.direction = {}
     item.placement_adjustments = []
     item.negative_keywords = []
+
+
+def _sample_insufficient(item, *, product_stage: str = "") -> tuple[bool, list[str]]:
+    days = getattr(item, "days_online", -1)
+    perf = getattr(item, "perf_7d", {}) or {}
+
+    reasons: list[str] = []
+    if days >= 0 and days <= 3:
+        reasons.append(f"上线仅 {days} 天")
+    if "测试" in (product_stage or "") and days >= 0 and days < 14:
+        reasons.append(f"测试期且上线仅 {days} 天")
+    if "cost" in perf and float(perf.get("cost") or 0) < 5:
+        cost = float(perf.get("cost") or 0)
+        reasons.append(f"7d花费${cost:.1f}<$5")
+    if "clicks" in perf and int(perf.get("clicks") or 0) < 10:
+        clicks = int(perf.get("clicks") or 0)
+        reasons.append(f"7d点击{clicks}<10")
+    return bool(reasons), reasons
+
+
+def _p3_should_force_eliminate(item) -> bool:
+    return (
+        (item.current_bid is not None and item.current_bid <= LOW_BID_MIN)
+        or (item.current_budget is not None and item.current_budget <= LOW_BUDGET_MAX)
+    )

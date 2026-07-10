@@ -1638,6 +1638,10 @@ class LLMReasoner:
         if flags:
             ctx_parts.append(f"  - ⚠️ 注意事项: {'; '.join(flags)}")
         ctx_parts.append("")
+        guardrail_instruction = (strategy_context.get("_guardrail_instruction") or "").strip()
+        if guardrail_instruction:
+            ctx_parts.append(guardrail_instruction)
+            ctx_parts.append("")
 
         # 构建活动列表
         camp_parts = ["## 活动列表 (逐活动分析)"]
@@ -1648,6 +1652,9 @@ class LLMReasoner:
             cid = f"C{i + 1}"
             cid_map[cid] = s
             camp_parts.append(f"\n### 活动 {cid}: {s.get('campaign_name', '?')}")
+            alert = s.get("_guardrail_alert")
+            if alert:
+                camp_parts.append(f"  ⚠️ 护栏告警（内部复判材料，不得写入 reason/evidence）: {alert}")
             camp_parts.append(f"  - 句柄 cid: {cid}（输出 JSON 的 cid 字段须原样回填此值）")
             camp_parts.append(f"  - 关键词: {s.get('keyword_text', '')}")
             camp_parts.append(f"  - 匹配类型: {s.get('match_type', '')}")
