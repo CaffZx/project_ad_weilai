@@ -572,7 +572,7 @@ async def analyze_new_campaigns(
             kc1 = str(o1.get("keyword_class", "")).strip().lower()
             kc2 = str(o2.get("keyword_class", "")).strip().lower()
             if kc1 == kc2 and kc1:
-                keyword_class, conf, review = kc1, "high", "AUTO_BATCHABLE"
+                keyword_class, conf, review = kc1, "high", "AUTO_APPROVED"
             else:
                 keyword_class, conf, review = (kc1 or kc2), "low", "MANUAL_REVIEW"
             relevance_tier = _conservative_tier(o1.get("relevance_tier"), o2.get("relevance_tier"))

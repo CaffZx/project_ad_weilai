@@ -4,7 +4,7 @@
 输出 reactivate 的 CampaignAdjustmentItem[]，复用既有 adjustment → pending → 落库 → 渲染链。
 
 KB 21 §7：
-  情况一 REACTIVATE_BUDGET_ONLY        — 在池窗口出单 ≥1 → 预算 $1→$3，Bid $0.20 不变，AUTO_BATCHABLE
+  情况一 REACTIVATE_BUDGET_ONLY        — 在池窗口出单 ≥1 → 预算 $1→$3，Bid $0.20 不变，AUTO_APPROVED
   情况二 REACTIVATE_WITH_CALIBRATED_BID — 在池窗口 0 单 且 淘汰前7d花费 >$15 → 预算 $1→$3，
                                           Bid=min(0.5, 父ASIN精准30d均CPC)，MANUAL_REVIEW
   否则（0 单且花费≤$15或未知，或无淘汰记录，或不足 N 天）→ 不产出，留灰卡
@@ -104,7 +104,7 @@ def analyze_eliminated_restart(
             item = _build_item(
                 cu, action=REACTIVATE_BUDGET_ONLY, scene="REACTIVATE_BUDGET_ONLY",
                 proposed_budget=budget, proposed_bid=bid_floor,
-                review_level="AUTO_BATCHABLE", confidence="high",
+                review_level="AUTO_APPROVED", confidence="high",
                 reason=(f"复评·情况一：入池 {days_in_elim} 天，近 {window} 天在低价捡漏组"
                         f"（$0.20/$1）仍出单 {orders} 单，词有基础信号 → 恢复日预算至 ${budget:.0f}，"
                         f"Bid 维持 $0.20（数据不足，不提价）。"),
