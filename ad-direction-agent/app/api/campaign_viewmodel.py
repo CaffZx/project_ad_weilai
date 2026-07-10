@@ -46,6 +46,17 @@ def _conf_klass(confidence: str) -> str:
 # ── DB 快照 → ViewModel（21 表反向 mapper，实时轨 + 快照轨共用） ──────────────────
 
 from app.workflow.steps.campaign_portfolio import GROUP_CODE_TO_LABEL as _GROUP_CODE_TO_LABEL
+
+# 审核等级 → 中文标签（前端展示用）
+_REVIEW_LEVEL_LABELS = {
+    "AUTO_APPROVED": "可直接执行",
+    "MANUAL_REVIEW": "需人工审核",
+    "HIGH_RISK_REVIEW": "高风险审核",
+    "BLOCKED": "应阻断执行",
+    # 兼容旧枚举值
+    "AUTO_BATCHABLE": "可直接执行",
+    "SENIOR_APPROVAL": "高风险审核",
+}
 _PLACEMENT_CODE_TO_ZH = {
     "TOP_OF_SEARCH": "头部",
     "REST_OF_SEARCH": "其他",
@@ -187,7 +198,7 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             "negative_keywords": negative_keywords,
             "ai_portfolio_class": _GROUP_CODE_TO_LABEL.get(grp_code, grp_code),
             "triggered_rule": card.get("trigger_rule") or "",
-            "review_level": card.get("review_level") or "",
+            "review_level": _REVIEW_LEVEL_LABELS.get(card.get("review_level") or "", card.get("review_level") or ""),
             "is_core": bool(card.get("is_core")),
             "action_klass": "skipped" if is_pref else _action_klass(action),
             "conf_klass": _conf_klass(card.get("confidence_level") or ""),
