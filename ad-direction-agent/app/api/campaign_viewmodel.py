@@ -45,12 +45,7 @@ def _conf_klass(confidence: str) -> str:
 
 # ── DB 快照 → ViewModel（21 表反向 mapper，实时轨 + 快照轨共用） ──────────────────
 
-_GROUP_CODE_TO_LABEL = {
-    "exact_core_group": "精准主力组",
-    "exact_testing_group": "精准测试组",
-    "auto_broad_group": "自动广泛组",
-    "low_bid_retention_group": "低价捡漏组",
-}
+from app.workflow.steps.campaign_portfolio import GROUP_CODE_TO_LABEL as _GROUP_CODE_TO_LABEL
 _PLACEMENT_CODE_TO_ZH = {
     "TOP_OF_SEARCH": "头部",
     "REST_OF_SEARCH": "其他",

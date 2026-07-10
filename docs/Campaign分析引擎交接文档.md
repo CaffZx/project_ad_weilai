@@ -1,8 +1,8 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-07（版本日志见文末，最新 v3.12：扩词相关性锚点 product_name 接线 §24）
+> **最后更新**: 2026-07-10（版本日志见文末，最新 v3.13：ad_portfolio_list MCP 接入 + 前端 UX 全面升级）
 > **版本**: v2.0
-> **分支**: chenv3.1
+> **分支**: chenv3.2
 
 ---
 
@@ -49,6 +49,7 @@ parent_asin
   ├─ MCP basic_info + product_report 并行 → 回落 Doris
   ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN")
   ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
+  ├─ ★拉取组合预算 (ad_portfolio_list MCP, fail-open → 回退 60/20/20 兜底, 2026-07-09 新增)
   ├─ ★三股并行 (strategic_overview 后, 共享 ctx_dict/posture_brief, return_exceptions 隔离):
   │   ├─ 精准流: EXACT, 预取 placement → _EXACT_PROMPT → 分批投票
   │   ├─ 广泛流: BROAD+PHRASE+AUTO, 预取 search_term → _BROAD_PROMPT → 分批投票
@@ -58,7 +59,8 @@ parent_asin
   ├─ Budget 冲突裁决 + ★终态 action 二次归一
   ├─ ★预过滤可见化: 淘汰池/多词活动打 __prefiltered, 合并 excluded → 前端灰卡 (§9.3)
   ├─ Sanity check (仅低置信项，≤10/批，并行)
-  ├─ ★组合预算汇总 (campaign_budget_summary.py: 3 组约束分配)
+  ├─ ★组合预算汇总 (campaign_budget_summary.py: 优先 MCP 真实值 > 60/20/20 兜底)
+  ├─ ★组合预算回算 (campaign_budget_reallocation.py: 起点=current_group_budget, 增量约束)
   └─ AI 汇总合成 (按共同原因分组叙事) — 2026-06-08 已恢复 (§7.1)
 ```
 
@@ -73,6 +75,7 @@ parent_asin
 | R3 tiebreaker | 仅在 R1+R2 分歧时触发，从未真触发（B0B7S3PWWB 全部一致） |
 | Sanity 仅校验低置信 | 高/中置信跳过，节省 LLM 调用 |
 | 策略上下文注入 | 每批 LLM 看到产品阶段/广告目的/目标ACOS/毛利率等 12 个字段 |
+| 组合预算来源 | ★ v3.13: ad_portfolio_list MCP 拉取真实 portfolio 预算（按 4 关键词模糊匹配），fail-open 回退 60/20/20 兜底；KB23 回算起点=current_group_budget |
 
 ### 2.3 置信度划分
 
@@ -102,23 +105,25 @@ parent_asin
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | 2138 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度 |
-| `app/llm/reasoner.py` | 2112 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt） |
+| `app/workflow/steps/campaign.py` | 2283 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传 |
+| `app/llm/reasoner.py` | 2142 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt） |
 | `app/models/campaign.py` | 269 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
-| `app/data/campaign_fetcher.py` | 869 | 数据编排器：Doris上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords`） |
+| `app/data/campaign_fetcher.py` | 1159 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算） |
 | `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
 | `app/api/campaign.py` | 566 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
-| `app/config/settings.py` | 295 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier) |
-| `demo/campaign_test.html` | 1464 | 调试前端 (含组合筛选气泡 + 预算约束卡) |
+| `app/config/settings.py` | 280 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关) |
+| `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
 | `app/llm/kb_loader.py` | 232 | KB 加载器。**2026-06-24 起 `campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset 并做节级切片**（精准=`18:1,3 17:1,2,3,4,5,7 15:1,2,3,4 19:1,2,3,4,5,6,9 22:0,2 21`；广泛=`...15:1,2,4 19:1,2,3,4,6,7,8 22:0,3...`）。另有 `campaign_overview`/`budget_reallocation` 两个 campaign 级 preset。**早期文档写的单一 `campaign_adjustment`(18/19/21/22 或 18/17/15/19/22/21) 均已过时** |
+| `app/data/mcp_adapter.py` | 531 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点 |
+| `app/data/mcp_mapping.py` | 230 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09) |
 | `app/workflow/steps/campaign_portfolio.py` | 126 | ★组合分类器：4 类 deterministic (淘汰→广泛/自动→测试/新增→主推) |
-| `app/workflow/steps/campaign_budget_summary.py` | 95 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，淘汰不参与约束 |
+| `app/workflow/steps/campaign_budget_summary.py` | 103 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
 | `app/workflow/steps/campaign_new.py` | 624 | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9/§22/§24) |
-| `app/workflow/steps/campaign_budget_reallocation.py` | 283 | ★组合预算回算（KB23）：闸控读 `parent_allowed_net_increase`（值仍占位，§17 ③） |
+| `app/workflow/steps/campaign_budget_reallocation.py` | 304 | ★组合预算回算（KB23）：优先 MCP portfolio 真实值 > 60/20/20 兜底；`available_for_increase` 增量约束；validate 加正增长额度校验 |
 | `app/workflow/steps/portfolio_execution.py` | 206 | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
 | `app/workflow/steps/advert_execution.py` | 324 | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表） |
-| `demo/campaign-panel/` | ~2165 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
+| `demo/campaign-panel/` | ~2292 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托 + 密度切换 + 卡片点选 + 确认详情表)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
 
 ### 3.2 关键配置项（settings.py）
 
@@ -141,6 +146,9 @@ campaign_portfolio_share_main: int = 60    # 主推约束占比
 campaign_portfolio_share_test: int = 20    # 测试/新增约束占比
 campaign_portfolio_share_broad: int = 20   # 广泛/自动约束占比
 # 淘汰组不参与约束概念(KB 21 §6 每活动 $1)
+
+# ★ ad_portfolio_list MCP 接入（2026-07-09）
+campaign_portfolio_fetch_enabled: bool = True  # 拉取真实组合预算替换 60/20/20；关闭则纯走旧 share 兜底
 
 # LLM
 llm_timeout: int = 75               # httpx read 超时（秒）
@@ -273,6 +281,13 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-01 | **MCP 字段映射补全** | `_MCP_CAMPAIGN_KEY_MAP` 加 `关键词ID`/`广告活动ID`/`子ASIN`/`子卖家SKU` 新别名，修复 `关键词D`→`关键词ID` MCP 改名导致 keyword_id 全部丢失 |
 | 07-01 | **ACOS 百分数归一** | `normalize_ad_summary`/`normalize_ad_keywords` 的 `acos`/`ctr`/`cvr` 从 `_float`→`_pct`（×100），修复数据监控 ACOS 显示 0.几 的 bug |
 | 07-01 | **汇总 LLM 临时禁用** | `_SYNTHESIS_ENABLED = False`，临时跳过 campaign synthesis 调用 |
+| 07-09 | **多词活动判定排除否定词** | `campaign_prefilter.py:_is_multi_keyword_campaign`：广泛活动（BROAD/PHRASE/AUTO）额外检查关键词总数，扣除否定关键词数后判定，避免自带大量否词的广泛活动被误判为多关键词而跳过分析 |
+| 07-09 | **池同步 helper 提取** | `campaign.py:_sync_pool_entries_if_needed` 内嵌函数：全预过滤 early return 前和正常路径复评前共用同一份 discovery 入池+手动复评离池逻辑，消除两份代码漂移风险。同时全预过滤后无 LLM 分析可跑时仍调用同步，保证 KB21§7 复评路径不断 |
+| 07-09 | **扩词相关性锚点补线** | `mcp_query.py`：`McpQuerySkillExecutor` 把 `db_ctx.product_name` 注入 `data.title`，供新增扩词流作相关性锚点（KB28 §2），复用 context 阶段已解析值，零额外 MCP 调用 |
+| 07-09 | **★ ad_portfolio_list MCP 接入** | `campaign_fetcher.fetch_portfolio_list`：拉取 4 组真实组合预算（按关键词模糊匹配），fail-open 回退 60/20/20 兜底。`campaign_budget_reallocation.aggregate` 优先 MCP 真实值作 `current_group_budget`，新增 `available_for_increase` 增量约束；`validate` 加正增长额度校验。`campaign_budget_summary.build_summary` 优先 MCP 真实值。`reasoner` KB23 prompt 重写——起点从 base_constraint 改为 current_group_budget。`settings` 新增 `campaign_portfolio_fetch_enabled` 开关。`mcp_adapter`/`mcp_mapping` 接线 `ad_portfolio_list` 工具含 `qryFixedPortfolio` |
+| 07-10 | **前端 UX 全面升级** | ①侧栏折叠持久化（localStorage + 切换按钮）②全局 Toast 替换 alert ③MCP 网关 502/503/504 快速降级兜底（40s 超时返 degraded result）④请求加载提示（底部浮层）⑤Campaign 分析遮罩含放弃确认（60s 自动消失）⑥P3 手动输入防 AI 刷新覆盖（`preserveManualInputs`/`restoreManualInputs`/`_allowAiOverwriteOnce`）⑦`updateMultiTags` 程序调用不标手动（`fromUser:false`）⑧按钮脉冲/筛选器闪烁/batchBar 切换动效 ⑨版本号 v3.1→v2 |
+| 07-10 | **campaign-panel 前端重构** | ①卡片密度三档切换（紧凑/舒适/详细）localStorage 持久化 + `_syncDensityDetails` JS 联动详情区 ②meta 行彩色 chips（`_renderMetaChips`）替换旧管道文本 ③卡片 body 点击勾选（文字拖选保护）④选中卡片高亮（蓝色左边框+背景）⑤确认执行弹窗表格详情（活动/关键词/动作/预算/出价/广告位）⑥密度切换不覆盖用户手动操作过的卡片（`_detailUserToggled`）⑦筛选器/按钮动效（`camp-filter-flash`/`camp-btn-pulse`/`camp-batch-flash`） |
+| 07-10 | **清理 demo 旧数据** | 删除 `demo/campaign_sample.json`（4995 行旧样本）、`demo/campaign_test.html`（1464 行旧调试页）、`docs/README.md`（过时文档索引）、`scripts/synthesis_output.txt`（旧样本输出）；新增 `demo/codex_ux_patch.js`、`tests/test_demo_ux_migration.py`、`docs/superpowers/` 计划文档 |
 
 ---
 
@@ -307,7 +322,8 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 |------|------|
 | action 归一化 | LLM 只给淘汰判据 (`eliminate_to_low_bid_pool`),其余 action 由代码从 proposed vs current 差值 derive |
 | 组合分类顺序 | 低价捡漏组 → 自动广泛组 → 精准测试组 → 精准主力组(命中即止)。精准组按 **KB23 §3.1 纯预算 $5 分界**(≥$5 主力 / <$5 测试),**不再用 days_online 判新建**。枚举名 2026-06-05 已改(详见 §3.4) |
-| 淘汰组不参与预算约束 | KB 21 §6 每活动固定 $1,与运营策略预算无关。3 组占比(60/20/20)之和 = 100% = 总约束 |
+| 淘汰组不参与预算约束 | KB 21 §6 每活动固定 $1,与运营策略预算无关。3 组预算来源：★ v3.13 起优先 MCP ad_portfolio_list 真实值，失败回退 settings 60/20/20 兜底 |
+| 组合预算回算 | ★ v3.13: KB23 回算起点从 base_constraint 改为 current_group_budget（portfolio 真实值）；新增 available_for_increase 增量约束（淘汰释放+允许净增）；validate 校验正增长合计不超可用额度 |
 | meta_filter 优化 | ASIN data 只拉 META_AD_PRODUCT,砍掉 Campaign 用不到的 6 个 META(natural_rankings/flow_keywords 等 150s 慢查询) |
 | 空 CampaignData 不入 Redis | 防 MCP/Doris 临时失败毒化缓存(30min 空窗口) |
 
@@ -362,7 +378,8 @@ Campaign timing [ASIN] +Xs: DONE fetch_campaigns     # 数据拉取耗时
 Campaign timing [ASIN] +Xs: split: exact=N broad=M   # 分流统计
 Campaign timing [ASIN] +Xs: DONE exact+broad streams # LLM 分析耗时
 Campaign timing [ASIN] +Xs: DONE sanity_check        # Sanity 耗时
-Campaign timing [ASIN] +Xs: DONE budget_summary      # 预算汇总耗时(新增)
+Campaign timing [ASIN] +Xs: DONE fetch_portfolio     # 组合预算拉取耗时(v3.13 新增)
+Campaign timing [ASIN] +Xs: DONE budget_summary      # 预算汇总耗时
 Campaign timing [ASIN] +Xs: DONE total               # 总耗时
 Campaign batch LLM 成功 [ASIN], N items              # 单批 LLM 完成
 Sanity check [ASIN]: 低置信 N/M 条 → K 批            # Sanity 触发
@@ -880,7 +897,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 |---|------|----------|------|
 | ① | `is_core` 硬编码 False | ❌ 仍未实现 | campaign.py:1118 `is_core=False`，2026-07-04 核实未变 |
 | ② | Tab4 方向对象未落 state | ✅ **已解决（ERP 路径替代）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回 → snapshot 可显示，无需走 state DB |
-| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 闸控已接但值=0.0 占位；GROUP-009 未做 | settings.py:148 `campaign_parent_allowed_net_increase=0.0`，2026-07-04 核实未改 |
+| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 闸控已接但值=0.0 占位；GROUP-009 未做。★ v3.13 组合预算源已从虚构 60/20/20 升级为 MCP ad_portfolio_list 真实值，但 parent_allowed_net_increase 仍为 0.0（净增无源） | settings.py:148 `campaign_parent_allowed_net_increase=0.0`，2026-07-10 核实仍为 0.0 |
 | ④ | P4 定时调度（APScheduler） | ✅ cron 已上线替代 | `crontab` → `batch_via_api.py`，定时目标达成 |
 | ⑤ | 新增活动预算接入组合回算 | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 整笔 proposed 入组 delta |
 | ⑥ | 5 类触发场景仅展示标签 | 🟡 **设计决策**，非待办 | `campaign_new.py:6` 明确仅标签、不做门禁 |
@@ -1236,12 +1253,14 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.13: ad_portfolio_list MCP 接入 + 前端 UX 全面升级（2026-07-09/10，本地未部署服务器）*
+
 *v3.12: 扩词相关性锚点 product_name 接线（2026-07-07，已部署 chenv31）—— 新增扩词流 LLM 判词相关性依赖 `asin_data.title` 作锚点，但 v3.2 切除 Doris 后该字段恒为 None（listing_basic_info_v2 normalizer 不提取 title，parent_listing_detail 的 product_name 只到 McpDbContext 就断了）。修复：`mcp_adapter._resolve_context` 把 `McpDbContext.product_name` 缓存到实例变量，`fetch_asin_data` 注入 `data.title`。零额外 MCP 调用（parent_listing_detail 本就在 context 阶段已调过）。1 文件 +5 行。*
 *v3.11: 复评生产库确证 + pending execute_time 回写 §27（2026-07-06，本地未部署）—— ①生产库确认旧 logic 曾生效(B0B7S3PWWB 有 77 条 CONFIRMED ELIMINATE)；②执行钩子补 `update_pending_execute_status('SUCCESS')` 回写 execute_time,discovery 路径可读到真实入池时间不再寄望 NOW()；③sync_pool_entries discovery 入池日改用 `COALESCE(execute_time,confirm_time)` > NOW() 两级回落；④复评 badge/card 边框改克莱因蓝 #2563EB；⑤护栏测试补全(44 passed) + 文档同步*
 *v3.10: 淘汰复评全链路 + 护栏 + 统计 §27（2026-07-06，本地未部署服务器）—— ①建表 `t_advert_agent_pool_entry`+双向 sync+ON DUPLICATE KEY 防复淘汰 + `parent_sku/shop_id/keyword_text` 全透传；②执行钩子接入 `submit_execution_direct/submit_execution` 真跑后(ELIMINATE→upsert source=execution / REACTIVATE_*→mark_pool_exit，async_batch MCP 整批成功才写)；③淘汰护栏三条件(`days_online≤3`/测试期`<14`/`days_since_reactivation≤3` 防淘汰↔复评抖动)，`product_stage` 从 strategy_context 透传；④`days_since_reactivation` 新模型字段+`get_recently_reactivated` 查池表 exit_date 反算；⑤reactivate_* 映射为 REACTIVATE 类别 +`to_reactivate` 独立桶 +ERP summary 加列 reactivate_count + 前端「新增/复评」合并展示位；⑥删死代码 `get_elimination_entry_dates`；⑦`load_pending_by_card_ids` SELECT 补 perf_json/trigger_rule。待部署服务器。*
 *v3.9: 原淘汰复评初版(2026-07-05，已废弃) — 建表 state 库 + pool_entry_repository 独立文件 + sync 双向同步；v3.10 迁回 ERP 库并补全钩子/护栏/统计*
 *v3.8: 待办全量核实+文档更新（2026-07-04，已上线 chenv31）—— ①逐条代码核实 §4.2/§15.5/§17/§19/§21.3/§22.4，5条标记已完成(DONE)修正为已核实真实状态；②basic_info MCP 批量失败→丢失灰卡（`campaign_fetcher.py:215-237`，不进 LLM 防误淘汰）；③`has_config` 改为 ERP 批次判定（`decision.py:75`，修 state DB strategy_config 缺行→空壳 A 态）；④§19 定时分析不采信 config acos/预算→已解决(state DB override 路径替代，config 表两列是死列但不影响功能)；⑤§17 ②Tab4 方向卡→已解决(ERP direction_recommend_detail 表路径)；⑥§15.5 新增活动预算回算→已实现；⑦clear_analysis_session 成功路径已清，失败路径仍未清（有12h TTL兜底）*
-*最后更新：2026-07-07
+*最后更新：2026-07-10
 *v3.5: 前端三项优化 §25 —— ①A态空壳引导(新ASIN未配置时左侧仅基础信息+右侧批次栏+中心引导,renderEmptyStateA,「新建分析事件」成完整流程唯一入口)②执行结果toast常驻可关闭(sticky+右上角×)+发请求前即时提示+轻量toast 1800→2400ms③告警气泡→常驻tab(暂无告警空态)+筛选器padding 8→6px;均纯前端已上线 chenv31 2026-06-24，batchBar进topbar高风险未做）*
 *v3.4: 新增词"总扩大词/泛词"根因修复 §24 —— ①选词改长尾优先(词数多优先,搜索量降为tiebreak,治"长尾进LLM前被截")②prompt 属性级相关性(短裙≠中长裙)+词型偏好(审慎大词,按阶段)③去 category/brand 注入(品类太粗引品类级误匹配,推翻§22的brand/category锚点)；已上线 chenv31 2026-06-24）*
 *v3.3: 修复**阶段上限>40永不生效** bug §20.4 —— 补 §20 测试时发现 `min(阶段,层级)` 把清货期60/测试期50 被非长尾层级40永久封顶；运营确认阶段优先、层级仅 fallback（长尾P3清货期亦到60%）；改 `recommender.compute_target_acos_band`+toml注释，由 test_target_acos_band 18 例钉死。已上线 chenv31 2026-06-24）*

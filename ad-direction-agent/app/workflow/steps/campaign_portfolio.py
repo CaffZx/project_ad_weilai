@@ -1,41 +1,41 @@
-"""Campaign 组合(Portfolio)分类器 — AI 自造 4 类逻辑分类。
+"""Campaign 组合(Portfolio)分类器 — 4 组逻辑分类，映射至亚马逊后台真实 Portfolio。
 
-⚠️ 与亚马逊后台 Portfolio 实体无关 (那是 KB 18/21 portfolio_or_group 字段的原意,
-   当前数据层未拉取,该字段留空)。本模块产出的是逻辑分类标签,只用于前端汇总展示
-   与运营筛选,不写回 Amazon API。
-
-⚠️ "测试/新增"组是【活动层面】的测试 — 即"新建活动还在跑数据的阶段",
-   与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
-
-判定优先级 (命中即止) - 2026-06-04 对齐 KB23 §3.1:
-  1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 低价捡漏档 (bid≤$0.21 或 预算≤$1.01)
-  2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
-  3. 测试/新增 — EXACT AND current_budget < $5 (KB23 精准测试组)
-  4. 主推      — EXACT AND current_budget ≥ $5 (KB23 精准主力组)
-
-为什么把广泛/自动提前到测试/新增之前?
-  - 广泛/自动 是按 match_type 的硬归类 (业务上"测词广告"),
-    一个 BROAD 活动即使小预算,本质仍是测词,不归精准测试组
-  - 测试/新增 这层口径限定为 EXACT 流的小预算(<$5)活动;
-    精准且预算达 $5 视为已进入主推承接 (KB23 §3.1)
-
-数据来源:
-  - current_budget : MCP basic_info → Doris 回落 (主推/测试分界 $5)
-  - current_bid    : MCP ad_campaign_basic_info「关键词BID」(淘汰池判定用)
-  - match_type     : Doris 上下文
-  - llm_action     : 本批 LLM 输出 (合并后才有)
-  注: days_online 不再参与分类 (改前用 14 天判"新建", 现按 KB23 §3.1 纯预算阈值 $5)
-
-依据:
-  - KB 21 §6   : 淘汰池固定 $1.00 / $0.20
-  - KB 23 §3.1 : 精准主力组 = EXACT 且预算≥$5; 精准测试组 = EXACT 且预算<$5
+分类结果通过 _match_portfolio() 匹配后台真实组合名 → 取 portfolioId，
+由 advert_execution / portfolio_execution 在创建/修改活动时下发 Amazon API。
+预算回算侧 fetch_portfolio_list() 读取真实组合预算作为回算基准。
 """
+
+# ⚠️ "测试/新增"组是【活动层面】的测试 — 即"新建活动还在跑数据的阶段",
+#    与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
+
+# 判定优先级 (命中即止) - 2026-06-04 对齐 KB23 §3.1:
+#   1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 低价捡漏档 (bid≤$0.21 或 预算≤$1.01)
+#   2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
+#   3. 测试/新增 — EXACT AND current_budget < $5 (KB23 精准测试组)
+#   4. 主推      — EXACT AND current_budget ≥ $5 (KB23 精准主力组)
+
+# 为什么把广泛/自动提前到测试/新增之前?
+#   - 广泛/自动 是按 match_type 的硬归类 (业务上"测词广告"),
+#     一个 BROAD 活动即使小预算,本质仍是测词,不归精准测试组
+#   - 测试/新增 这层口径限定为 EXACT 流的小预算(<$5)活动;
+#     精准且预算达 $5 视为已进入主推承接 (KB23 §3.1)
+#
+# 数据来源:
+#   - current_budget : MCP basic_info → Doris 回落 (主推/测试分界 $5)
+#   - current_bid    : MCP ad_campaign_basic_info「关键词BID」(淘汰池判定用)
+#   - match_type     : Doris 上下文
+#   - llm_action     : 本批 LLM 输出 (合并后才有)
+#   注: days_online 不再参与分类 (改前用 14 天判"新建", 现按 KB23 §3.1 纯预算阈值 $5)
+#
+# 依据:
+#   - KB 21 §6   : 淘汰池固定 $1.00 / $0.20
+#   - KB 23 §3.1 : 精准主力组 = EXACT 且预算≥$5; 精准测试组 = EXACT 且预算<$5
 
 from __future__ import annotations
 
 from app.models.campaign import CampaignUnit
 
-# 组合标签常量 (中文 — 前端直接显示)；ERP 英文码映射见 erp_writer/text_utils._CAMPAIGN_GROUP_TYPE_MAP
+# 组合标签常量 (中文 — 前端直接显示)；归一化映射表，其他文件从此 import 避免漂移。
 # 2026-06-04 改名：主推→精准主力组 / 广泛自动→自动广泛组 / 测试新增→精准测试组 / 淘汰→低价捡漏组
 PORTFOLIO_MAIN = "精准主力组"
 PORTFOLIO_BROAD = "自动广泛组"
@@ -44,43 +44,26 @@ PORTFOLIO_ELIMINATE = "低价捡漏组"
 
 ALL_PORTFOLIOS = (PORTFOLIO_MAIN, PORTFOLIO_BROAD, PORTFOLIO_TEST, PORTFOLIO_ELIMINATE)
 
-# 低价捡漏判定阈值 (KB 21 §6)。⚠ 淘汰是【多环节】流程，各环节判据【有意不同】，勿"对齐"成同一阈值：
-#   · 预过滤 (campaign.py / is_strictly_in_low_bid_pool)：AND —— bid ≤ LOW_BID_MAX(0.21) 且 预算 ≤ LOW_BUDGET_MAX(1.01)
-#     判"确实已淘汰执行"(两维都触底)，剔除不分析。
-#   · 归组 / 强制修正 (_is_in_elimination_pool / campaign.py 兜底)：OR —— bid ≤ 0.10 或 预算 ≤ 1.01
-#     单凭出价归组门槛更严($0.10)；bid∈(0.10,0.21] 且预算正常【不】单凭 bid 归组 (运营确认 2026-06-24)。
-#   下列两常量仅供【预过滤(AND)】路径；OR 路径 bid 阈值是 0.10(独立口径)，勿改成 LOW_BID_MAX。
-LOW_BID_MAX = 0.21
-LOW_BUDGET_MAX = 1.01
+# DB 码 ↔ 中文标签双向映射（归一化唯一来源，campaign_viewmodel / text_utils 从此 import）
+GROUP_CODE_TO_LABEL = {
+    "exact_core_group": PORTFOLIO_MAIN,
+    "exact_testing_group": PORTFOLIO_TEST,
+    "auto_broad_group": PORTFOLIO_BROAD,
+    "low_bid_retention_group": PORTFOLIO_ELIMINATE,
+}
+GROUP_LABEL_TO_CODE = {v: k for k, v in GROUP_CODE_TO_LABEL.items()}
+
+# 低价捡漏判定阈值 + pool 谓词 —— 归一化至 campaign_guardrails.py，此处 re-export 保兼容。
+from app.workflow.steps.campaign_guardrails import (
+    LOW_BID_MIN, LOW_BID_MAX, LOW_BUDGET_MAX,
+    is_strictly_in_low_bid_pool, _is_in_elimination_pool,
+)
 
 # 精准主力 / 精准测试分界:活动预算 ≥ $5 入主推, < $5 入测试 (KB23 §3.1)
 _MAIN_BUDGET_MIN = 5.0
 
 # 广泛流匹配类型 (与 campaign.py 分流口径一致)
 _BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
-
-
-def _is_in_elimination_pool(unit: CampaignUnit) -> bool:
-    """归组淘汰判定 (OR)：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 归低价捡漏组（KB 21 §6）。
-
-    ⚠ bid 阈值 $0.10 是【归组路径】独立口径，非预过滤(AND)的 LOW_BID_MAX($0.21)；
-      bid∈(0.10,0.21] 且预算正常不单凭 bid 归组（运营确认 2026-06-24）。下方 `b <= 0.1` 勿改成 0.21。
-    """
-    b, bg = unit.current_bid, unit.current_budget
-    return (b is not None and b <= 0.1) or (bg is not None and bg <= LOW_BUDGET_MAX)
-
-
-def is_strictly_in_low_bid_pool(bid: float | None, budget: float | None) -> bool:
-    """严格在池：bid ≤ LOW_BID_MAX 且 budget ≤ LOW_BUDGET_MAX（双双到底 = 已完全淘汰执行）。
-
-    与 _is_in_elimination_pool（OR，归组/强制淘汰用）区分：本谓词用 AND，
-    供预过滤剔除（campaign.py）与淘汰复评（campaign_restart.py）判"确实已入池执行"，
-    单一真相源，避免阈值/逻辑漂移（KB 21 §6）。
-    """
-    return (
-        bid is not None and bid <= LOW_BID_MAX
-        and budget is not None and budget <= LOW_BUDGET_MAX
-    )
 
 
 def _is_exact_testing(unit: CampaignUnit, effective_budget: float | None = None) -> bool:
@@ -112,7 +95,7 @@ def classify(
                     仅作用于 EXACT 主力↔测试,淘汰/广泛分支不受影响。
     """
     # 1. 淘汰 (LLM 标记 OR 已在淘汰池 $1/$0.20) —— 读 current,不受 effective_budget 影响
-    if llm_action == "eliminate_to_low_bid_pool" or _is_in_elimination_pool(unit):
+    if llm_action == "eliminate_to_low_bid_pool" or _is_in_elimination_pool(unit.current_bid, unit.current_budget):
         return PORTFOLIO_ELIMINATE
     mt = (unit.match_type or "").upper()
     # 2. 广泛 / 自动 (BROAD/PHRASE/AUTO) —— 业务上"测词广告",硬归类

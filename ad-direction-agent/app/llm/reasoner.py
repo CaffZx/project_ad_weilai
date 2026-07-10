@@ -276,15 +276,11 @@ _CAMPAIGN_EXACT_PROMPT = (
   "campaign_adjustments": [
     {
       "cid": "C3（原样回填输入中该活动的句柄，用于代码定位活动）",
-      "child_asin": "B0XXXXXX",
-      "keyword_text": "关键词",
-      "match_type": "EXACT",
       "action": "eliminate_to_low_bid_pool",
       "direction": {"bid": "down", "budget": "down"},
       "triggered_rule": "NO_CVR_HIGH_SPEND",
       "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
-      "current_budget": 15.0, "proposed_budget": 1.0,
-      "current_bid": 0.85, "proposed_bid": 0.20,
+      "proposed_budget": 1.0, "proposed_bid": 0.20,
       "evidence": ["7天花费$18.5", "7天订单0，CVR=0%"],
       "placement_adjustments": [
         {"placement": "头部", "action": "小涨", "evidence": "ACOS 25% 低于目标 30%，有花费有出单"}
@@ -303,7 +299,7 @@ _CAMPAIGN_EXACT_PROMPT = (
 - **真实出价复合评估**：某广告位的真实出价 = Bid×(1+该位加价比例)，并非基础 Bid。当你同时调整 `proposed_bid` 与某广告位 `action` 时，两者会叠加放大/抵消该位的真实出价。给广告位 action 前必须以「当前真实出价」为基准评估复合后的真实出价变动幅度，勿只看加价比例步长；若复合后真实出价变动过大（如 >30%）而证据不足，应下调 action 档位（大涨→小涨/维持）或收敛 proposed_bid，并在 evidence 说明
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
+- **硬规则（最高优先）**：当前 Bid ≤ $0.20 或 当前日预算 ≤ $1.00 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
 - action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
 - 必须输出 triggered_rule（如 NO_CVR_HIGH_SPEND）和 evidence
 
@@ -334,15 +330,11 @@ _CAMPAIGN_BROAD_PROMPT = (
   "campaign_adjustments": [
     {
       "cid": "C3（原样回填输入中该活动的句柄，用于代码定位活动）",
-      "child_asin": "B0XXXXXX",
-      "keyword_text": "关键词",
-      "match_type": "BROAD",
       "action": "eliminate_to_low_bid_pool",
       "direction": {"bid": "down", "budget": "down"},
       "triggered_rule": "IRRELEVANT_NO_IMPROVEMENT",
       "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
-      "current_budget": 10.0, "proposed_budget": 8.0,
-      "current_bid": 0.50, "proposed_bid": 0.40,
+      "proposed_budget": 8.0, "proposed_bid": 0.40,
       "evidence": ["7天花费$12.0", "否词5个后搜索词质量仍差"],
       "negative_keywords": [
         {"keyword": "wedding dress", "clicks_7d": 12, "orders_7d": 0, "reason": "无转化高点击"}
@@ -360,7 +352,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 - 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.21 或 当前日预算 ≤ $1.01 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
+- **硬规则（最高优先）**：当前 Bid ≤ $0.20 或 当前日预算 ≤ $1.00 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
 - action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
 - 必须输出 triggered_rule（如 IRRELEVANT_NO_IMPROVEMENT）和 evidence
 
@@ -1657,7 +1649,6 @@ class LLMReasoner:
             cid_map[cid] = s
             camp_parts.append(f"\n### 活动 {cid}: {s.get('campaign_name', '?')}")
             camp_parts.append(f"  - 句柄 cid: {cid}（输出 JSON 的 cid 字段须原样回填此值）")
-            camp_parts.append(f"  - 子ASIN: {s.get('child_asin', '')}")
             camp_parts.append(f"  - 关键词: {s.get('keyword_text', '')}")
             camp_parts.append(f"  - 匹配类型: {s.get('match_type', '')}")
             camp_parts.append(f"  - 活动类型: {s.get('campaign_type', '')}")
@@ -1891,35 +1882,46 @@ class LLMReasoner:
             {"role": "system", "content": _build_new_campaign_prompt()},
             {"role": "user", "content": user_message},
         ]
-        try:
-            raw = await self.client.chat(
-                messages=messages,
-                temperature=temperature,
-                response_format={"type": "json_object"},
-                max_tokens=4096,
-                timeout_override=timeout_override,
-                label="new_campaign",
-            )
-            parsed = self._parse_json(raw)
-            if not isinstance(parsed, dict):
-                return {"parsed": {}, "raw_output": raw, "success": False,
-                        "error": "解析结果非 dict", "temperature": temperature}
-            # 文风清洗 reason/evidence（复用 batch 流相同处理）
-            for it in parsed.get("new_campaigns", []) or []:
-                if isinstance(it, dict):
-                    it["reason"] = humanize_ops_text(self._sanitize_ops_text(it.get("reason", "")))
-                    it["evidence"] = [
-                        humanize_ops_text(self._sanitize_ops_text(e))
-                        for e in (it.get("evidence", []) or [])
-                    ]
-            logger.info("Campaign new LLM 成功 [%s], %d items",
-                        asin, len(parsed.get("new_campaigns", []) or []))
-            return {"parsed": parsed, "raw_output": raw, "success": True,
-                    "error": "", "temperature": temperature}
-        except Exception as e:
-            logger.warning("recommend_new_campaigns 异常 [%s]: %s", asin, e)
-            return {"parsed": {}, "raw_output": "", "success": False,
-                    "error": f"{type(e).__name__}: {e}", "temperature": temperature}
+        import json as _json
+
+        last_error = ""
+        for attempt in (1, 2):
+            try:
+                raw = await self.client.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    response_format={"type": "json_object"},
+                    max_tokens=8192,   # 40 候选词 + KB prompt 输出长 JSON，4096 偏紧易截断
+                    timeout_override=timeout_override,
+                    label="new_campaign",
+                )
+                parsed = self._parse_json(raw)
+                if not isinstance(parsed, dict):
+                    raise ValueError("解析结果非 dict")
+                # 文风清洗 reason/evidence（复用 batch 流相同处理）
+                for it in parsed.get("new_campaigns", []) or []:
+                    if isinstance(it, dict):
+                        it["reason"] = humanize_ops_text(self._sanitize_ops_text(it.get("reason", "")))
+                        it["evidence"] = [
+                            humanize_ops_text(self._sanitize_ops_text(e))
+                            for e in (it.get("evidence", []) or [])
+                        ]
+                logger.info("Campaign new LLM 成功 [%s] attempt=%d items=%d",
+                            asin, attempt, len(parsed.get("new_campaigns", []) or []))
+                return {"parsed": parsed, "raw_output": raw, "success": True,
+                        "error": "", "temperature": temperature}
+            except _json.JSONDecodeError as e:
+                last_error = f"{type(e).__name__}: {e}"
+                if attempt == 1:
+                    logger.warning("Campaign new JSON 解析失败 [%s] attempt=1，重试一次: %s", asin, last_error)
+                else:
+                    logger.warning("Campaign new JSON 解析失败 [%s] attempt=2，放弃: %s", asin, last_error)
+            except Exception as e:
+                logger.warning("recommend_new_campaigns 异常 [%s]: %s", asin, e)
+                return {"parsed": {}, "raw_output": "", "success": False,
+                        "error": f"{type(e).__name__}: {e}", "temperature": temperature}
+        return {"parsed": {}, "raw_output": "", "success": False,
+                "error": last_error, "temperature": temperature}
 
     # ── Campaign 策略总览(执行总纲) ──────────────────────────────────────────
     async def recommend_campaign_overview(

@@ -117,18 +117,15 @@ _DIRECTION_ID_TO_ERP = {
 
 _LEVEL_TO_SCORE = {"推荐": 80, "可选": 50, "不推荐": 20, "high": 80, "medium": 50, "low": 20}
 
+from app.workflow.steps.campaign_portfolio import GROUP_LABEL_TO_CODE, GROUP_CODE_TO_LABEL
+
 # t_advert_agent_modify_suggest_card.campaign_group_type (Java: campaignGroupType)
+# 现行映射从 campaign_portfolio 归一化来源派生，避免漂移；仅遗留兼容键在此维护。
 _CAMPAIGN_GROUP_TYPE_MAP = {
-    # 现行中文标签 → ERP 码
-    "精准主力组": "exact_core_group",
-    "精准测试组": "exact_testing_group",
-    "自动广泛组": "auto_broad_group",
-    "低价捡漏组": "low_bid_retention_group",
+    # 现行中文标签 → ERP 码（归一化来源）
+    **GROUP_LABEL_TO_CODE,
     # 现行 ERP 码（透传）
-    "exact_core_group": "exact_core_group",
-    "exact_testing_group": "exact_testing_group",
-    "auto_broad_group": "auto_broad_group",
-    "low_bid_retention_group": "low_bid_retention_group",
+    **{code: code for code in GROUP_CODE_TO_LABEL},
     # 遗留中文标签（历史 JSON / 旧分析结果）
     "主推": "exact_core_group",
     "广泛/自动": "auto_broad_group",

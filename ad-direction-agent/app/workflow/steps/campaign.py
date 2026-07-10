@@ -401,7 +401,7 @@ async def _analyze_campaigns_impl(
     # 3. LLM 分析前预过滤
     # 3a. 批量词活动：一个活动名下多个关键词，本期暂不处理
     #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.py:61-68)
-    # 3b. 疑似已淘汰活动：Bid ≤ $0.21 且 预算 ≤ $1.01（两者都到底=已入淘汰池，KB 21 §6）
+    # 3b. 疑似已淘汰活动：Bid ≤ $0.20 且 预算 ≤ $1.00（两者都到底=已入淘汰池，KB 21 §6）
     #     → 本期暂时过滤不做重复分析（仅满足其一的活动放行 LLM，由低价捡漏强制淘汰兜底）
     llm_campaigns: list[CampaignUnit] = []
     skipped_eliminated: list[dict] = []
@@ -415,7 +415,7 @@ async def _analyze_campaigns_impl(
                 "child_asin": cu.child_asin,
                 "match_type": cu.match_type,
                 "keyword_text": cu.keyword_text,
-                "reason": "已入淘汰池（出价≤$0.21 且 预算≤$1），请到ERP手动修改",
+                "reason": "已入淘汰池（出价≤$0.20 且 预算≤$1），请到ERP手动修改",
                 "__prefiltered": True,   # 前端按此渲染为灰色不可操作的预过滤卡（无悬停警告）
             })
             continue
@@ -692,7 +692,13 @@ async def _analyze_campaigns_impl(
         item.days_since_reactivation = recent_reactivated.get(cid, -1)
 
     # 7. 预算冲突裁决
-    budget_warnings = _resolve_budget_conflicts(adjustments, product_stage=strategy_context.product_stage)
+    budget_warnings = _resolve_budget_conflicts(
+        adjustments,
+        product_stage=strategy_context.product_stage,
+        inventory_days=strategy_context.inventory_days,
+        refund_rate=strategy_context.refund_rate,
+        rating=strategy_context.rating,
+    )
     warnings_list.extend(budget_warnings)
 
     # 7b. 终态组合分类（KB23 §3.1B/§3.5/§3.7：升降组按【本轮建议预算 proposed】跨 $5 阈值判）。
@@ -1052,8 +1058,8 @@ def build_campaign_strategy_context(
     if asin_data.rating is not None and asin_data.rating < 3.8:
         flags.append(f"评分 {asin_data.rating} (<3.8，阻断 TOS 广告位上调)")
 
-    if asin_data.refund_rate is not None and asin_data.refund_rate >= 25:
-        flags.append(f"退货率 {asin_data.refund_rate:.1f}% (≥25%，阻断 TOS 广告位上调)")
+    if asin_data.refund_rate is not None and asin_data.refund_rate >= 30:
+        flags.append(f"退货率 {asin_data.refund_rate:.1f}% (≥30%，阻断 TOS 广告位上调)")
 
     discount = long_term.get("discount_rate")
     if discount is not None:
@@ -2037,93 +2043,28 @@ def _resolve_budget_conflicts(
     total_budget_limit: float | None = None,
     *,
     product_stage: str = "",
+    inventory_days: float | None = None,
+    refund_rate: float | None = None,
+    rating: float | None = None,
 ) -> list[str]:
-    """预算冲突后处理：按优先级依次执行，超总预算上限时截断不缩放。
-
-    当前无总预算上限来源，仅做防御性检查：
-    - 单个活动日预算 ≤ $200 (KB 19 §10 上限)
-    - 淘汰活动预算固定 $1.00 / Bid 固定 $0.20 (KB 21 §4)
-    - 淘汰保护 (KB 21 §2)：上线 ≤3 天 / 测试期且上线 <14 天 → LLM 误判淘汰则反修正为 keep
+    """护栏后处理：调用 campaign_guardrails.apply_all() 执行全部确定性规则，
+    然后做终态 action 归一 + 总预算上限截断。
     """
-    warnings: list[str] = []
+    from app.workflow.steps.campaign_guardrails import apply_all as _apply_guardrails
 
+    gp = _apply_guardrails(
+        adjustments,
+        product_stage=product_stage,
+        inventory_days=inventory_days,
+        refund_rate=refund_rate,
+        rating=rating,
+    )
+    warnings: list[str] = [r.message for r in gp.results if r.corrected]
+    if gp.corrections > 0:
+        logger.info("Guardrails: 护栏修正 %d 条 (共 %d 条)", gp.corrections, len(adjustments))
+
+    # Bid 绝对上限 (KB 19 §10) —— 非 guardrails 内置（$3.0 仅限精准，广泛无硬上限）
     for adj in adjustments:
-        # KB 21 §2 淘汰保护：
-        #   上线 ≤3 天 → 样本不足 / 测试期且上线 <14 天 → 受样本保护
-        #   复评后 ≤3 天 → 等同新增活动保护，防止 LLM 在复评后马上又判淘汰（淘汰↔复评抖动）
-        days_online = adj.days_online                       # 活动在亚马逊上线天数，-1=未知
-        days_since_react = adj.days_since_reactivation      # 距最近复评离池天数，-1=从未复评
-        elimination_protected = (
-            (days_online >= 0 and days_online <= 3)
-            or (product_stage == "测试期" and days_online >= 0 and days_online < 14)
-            or (days_since_react >= 0 and days_since_react <= 3)
-        )
-
-        # 低价捡漏强制淘汰（rule 2 兜底）：当前 bid ≤ $0.10 或 预算 ≤ $1.01 → 强制 eliminate。
-        # （归组/强制修正用 OR + bid 0.10，独立于预过滤 AND 的 LOW_BID_MAX 0.21；见 campaign_portfolio 阈值注释）
-        # LLM 不听话（该淘汰却 adjust、或 proposed 又调高）时由此翻正；翻正后下方淘汰硬校验
-        # 会无条件把 proposed 修正到 $1.00/$0.20，分类侧据 action/_is_in_elimination_pool 归低价捡漏组。
-        # ★淘汰保护豁免：受保护活动不触发强制淘汰，防止新活动/测试期活动被误杀。
-        if not elimination_protected and adj.action != "eliminate_to_low_bid_pool" and (
-            (adj.current_bid is not None and adj.current_bid <= 0.1)
-            or (adj.current_budget is not None and adj.current_budget <= LOW_BUDGET_MAX)
-        ):
-            adj.action = "eliminate_to_low_bid_pool"
-
-        # 淘汰执行值硬校验 / 淘汰保护反修正
-        if adj.action == "eliminate_to_low_bid_pool":
-            if elimination_protected:
-                # LLM 误判淘汰 or 兜底漏网 → 强制修正为 keep（KB 21 §2）
-                if days_since_react >= 0:
-                    reason = f"复评后仅 {days_since_react} 天，等同新增活动受样本保护"
-                elif days_online <= 3:
-                    reason = f"上线仅 {days_online} 天，样本不足"
-                else:
-                    reason = f"测试期且上线仅 {days_online} 天，受样本保护"
-                warnings.append(
-                    f"[{adj.campaign_name}] {reason}（KB 21 §2），已强制修正为 keep"
-                )
-                adj.action = "keep"
-                adj.proposed_budget = adj.current_budget
-                adj.proposed_bid = adj.current_bid
-                adj.direction = {}
-                if adj.placement_adjustments:
-                    adj.placement_adjustments = []
-                if adj.negative_keywords:
-                    adj.negative_keywords = []
-            else:
-                # 正常淘汰：无条件填充 $1.00/$0.20
-                # （LLM 听话留 None 时也要补齐，避免前端淘汰活动出价/预算空白）
-                expected_budget = 1.0
-                expected_bid = 0.20
-                if adj.proposed_budget != expected_budget:
-                    if adj.proposed_budget is not None:
-                        warnings.append(
-                            f"[{adj.campaign_name}] 淘汰活动 proposed_budget=${adj.proposed_budget} "
-                            f"(应为 ${expected_budget})，已强制修正"
-                        )
-                    adj.proposed_budget = expected_budget
-                if adj.proposed_bid != expected_bid:
-                    if adj.proposed_bid is not None:
-                        warnings.append(
-                            f"[{adj.campaign_name}] 淘汰活动 proposed_bid=${adj.proposed_bid} "
-                            f"(应为 ${expected_bid})，已强制修正"
-                        )
-                    adj.proposed_bid = expected_bid
-                # 淘汰活动不应携带广告位/否词调整（前端展示无意义），清空
-                if adj.placement_adjustments:
-                    adj.placement_adjustments = []
-                if adj.negative_keywords:
-                    adj.negative_keywords = []
-
-        # 日预算上限 (KB 19 §10)
-        if adj.proposed_budget is not None and adj.proposed_budget > 200:
-            warnings.append(
-                f"[{adj.campaign_name}] 日预算 ${adj.proposed_budget} 超过上限 $200，已截断"
-            )
-            adj.proposed_budget = 200.0
-
-        # Bid 绝对上限 (KB 19 §10)
         if adj.proposed_bid is not None and adj.proposed_bid > 3.0:
             warnings.append(
                 f"[{adj.campaign_name}] Bid ${adj.proposed_bid} 超过上限 $3.00，已截断"
@@ -2131,7 +2072,7 @@ def _resolve_budget_conflicts(
             adj.proposed_bid = 3.0
 
     # 终态 action 归一: _conservative 可能把 proposed 改回 current,
-    # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变 (上面 if 已 continue)。
+    # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变。
     re_normalized = 0
     for adj in adjustments:
         if adj.action == "eliminate_to_low_bid_pool":
@@ -2147,13 +2088,11 @@ def _resolve_budget_conflicts(
             (a.proposed_budget or 0) for a in adjustments
         )
         if total_proposed > total_budget_limit:
-            # 按优先级截断：keep > adjust > eliminate
             overflow = total_proposed - total_budget_limit
             warnings.append(
                 f"总预算 ${total_proposed:.2f} 超出上限 ${total_budget_limit:.2f}，"
                 f"溢出 ${overflow:.2f}"
             )
-            # 从低优先级开始截断
             for adj in reversed(adjustments):
                 if overflow <= 0:
                     break
