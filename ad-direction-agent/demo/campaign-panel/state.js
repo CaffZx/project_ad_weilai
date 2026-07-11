@@ -293,11 +293,11 @@ export function createCampaignState() {
           const byGroup = {};
           for (const e of moveErrors) {
             const key = `${e.group}\x00${e.reason}`;
-            if (!byGroup[key]) byGroup[key] = { group: e.group, reason: e.reason, count: 0 };
-            byGroup[key].count++;
+            if (!byGroup[key]) byGroup[key] = { group: e.group, reason: e.reason, names: [] };
+            byGroup[key].names.push(e.campaign_name || e.campaign_id || '未知活动');
           }
           const lines = Object.values(byGroup).map(g =>
-            `${g.group}${g.reason}，已跳过 ${g.count} 个活动，不阻塞预算和bid修改。`
+            `${g.group}${g.reason}，已跳过 ${g.names.length} 个活动，不阻塞预算和bid修改。活动：${g.names.join('; ')}`
           );
           _toast(lines.join('\n'), {sticky: true});
         }

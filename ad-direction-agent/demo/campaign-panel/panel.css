@@ -465,6 +465,7 @@
   /* 固定宽度居中：不再用 80vw（会左缘伸进左侧 sidebar 压住策略层）；
      窄屏用 max-width 兜底防溢出 */
   width: 420px; max-width: calc(100vw - 32px); box-sizing: border-box;
+  overflow-wrap: anywhere; user-select: text;
 }
 .camp-toast.show { opacity: .95; }
 /* 执行结果常驻提示：可交互 + 右上角留出关闭按钮空间 */

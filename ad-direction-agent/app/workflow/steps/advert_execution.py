@@ -145,7 +145,7 @@ async def _resolve_create_portfolios(
         cid = str(call.get("_card_id") or "")
         zh = unmap_campaign_group_type(call.get("_group_type"))
         pf, _ = _match_portfolio(zh, portfolios) if zh else (None, 0)
-        pid = _pf_field(pf, "portfolioId", "id", "portfolio_id") if pf else None
+        pid = _pf_field(pf, "portfolioId") if pf else None
         if pid:
             call["portfolioId"] = str(pid)
         else:
@@ -212,7 +212,7 @@ async def _resolve_modify_portfolios(
             no_pid.append(vo)
             continue
         pf, match_count = _match_portfolio(zh, portfolios)
-        pid = _pf_field(pf, "portfolioId", "id", "portfolio_id") if pf else None
+        pid = _pf_field(pf, "portfolioId") if pf else None
         if pid:
             vo.pop("campaignGroupType", None)
             by_pid.setdefault(str(pid), []).append(vo)

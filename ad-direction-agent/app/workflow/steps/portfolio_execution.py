@@ -48,15 +48,12 @@ def _pf_field(pf: dict | None, *names: str) -> Any:
 
 
 def _normalize_portfolio_list(res: Any) -> list[dict]:
-    """query_portfolio_list 返回归一化为 list[dict]（容错信封包裹）。"""
+    """query_portfolio_list 返回必须为 list[dict]。非预期格式直接报错，不猜测信封。"""
     if isinstance(res, list):
         return [x for x in res if isinstance(x, dict)]
-    if isinstance(res, dict):
-        for key in ("data", "list", "portfolioList", "portfolios", "records"):
-            v = res.get(key)
-            if isinstance(v, list):
-                return [x for x in v if isinstance(x, dict)]
-    return []
+    raise ValueError(
+        f"query_portfolio_list 返回格式异常，期望 list，实际 {type(res).__name__}"
+    )
 
 
 def _match_portfolio(group_name: str, portfolios: list[dict]) -> tuple[dict | None, int]:
@@ -69,7 +66,7 @@ def _match_portfolio(group_name: str, portfolios: list[dict]) -> tuple[dict | No
     g = (group_name or "").strip()
     matches: list[dict] = []
     for pf in portfolios:
-        nm = str(_pf_field(pf, "portfolioName", "name", "title", "portfolio_name") or "").strip()
+        nm = str(_pf_field(pf, "portfolioName", "name", "portfolio_name") or "").strip()
         if g and nm and g in nm:
             matches.append(pf)
     if len(matches) == 1:
@@ -131,7 +128,7 @@ async def execute_portfolio_budget(
             warnings.append(f"组合列表查询失败：{query_err}")
         for gname, new_budget in overrides.items():
             pf, _ = _match_portfolio(gname, portfolios)
-            pid = _pf_field(pf, "portfolioId", "id", "portfolio_id")
+            pid = _pf_field(pf, "portfolioId")
             old_budget = _num(_pf_field(pf, "portfolioBudget", "budget", "dailyBudget"))
             op: dict[str, Any] = {
                 "portfolio_name": gname,
