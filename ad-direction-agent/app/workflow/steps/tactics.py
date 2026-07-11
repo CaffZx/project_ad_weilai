@@ -163,7 +163,7 @@ async def _run_purpose_and_cache(
     return recommendations, reasoning, merged_kws
 
 
-async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7) -> TacticsOptionsResponse:
+async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days: int = 7) -> TacticsOptionsResponse:
     """返回策略选项
 
     首次访问（无 keyword_analysis 缓存）：调用 purpose-agent LLM，产出推荐 + 关键词分类
@@ -345,6 +345,70 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
         **status,
     )
 
+
+async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7) -> TacticsOptionsResponse:
+    """Return tactics options from long-term config and existing cache only."""
+    long_term = ctx.state.get_long_term_config(asin)
+    strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
+    strategy_context = StrategyConfirmRequest(
+        asin=asin,
+        product_level=long_term.get("product_level", ""),
+        product_stage=long_term.get("product_stage", ""),
+        season_stage=long_term.get("season_stage", ""),
+    ) if strategy_saved else None
+
+    wf = ctx.state.get_workflow_state(asin)
+    cached_score_recs = _derive_ad_purposes_from_scores(wf, days)
+    recommendations = {
+        "ad_purposes": cached_score_recs if cached_score_recs else long_term.get("ad_purposes", []),
+        "target_keyword_strategy": long_term.get("target_keyword_strategy", []),
+    }
+
+    layer_config = settings.layer_options_config or {}
+    tactics_cfg = layer_config.get("tactics", {})
+    dimensions = []
+    for dim_key in ("ad_purposes", "target_keyword_strategy"):
+        dim_cfg = tactics_cfg.get(dim_key, {})
+        dimensions.append(TacticsDimension(
+            id=dim_key,
+            label=dim_cfg.get("label", dim_key),
+            description=dim_cfg.get("description", ""),
+            options=dim_cfg.get("options", []),
+            selection_type=dim_cfg.get("selection_type", "multi_select"),
+            recommendations=recommendations.get(dim_key, []),
+            recommendation_reason="",
+        ))
+
+    ts = wf.get("target_scores") or []
+    if isinstance(ts, dict):
+        ts = ts.get(str(days), [])
+    elif not isinstance(ts, list):
+        ts = []
+    ka = wf.get("keyword_analysis") or []
+    if isinstance(ka, dict):
+        ka = ka.get(str(days), [])
+    elif not isinstance(ka, list):
+        ka = []
+
+    current = ctx.state.get_long_term_config(asin)
+    return TacticsOptionsResponse(
+        asin=asin,
+        dimensions=dimensions,
+        strategy_context=strategy_context,
+        current_selection={
+            "ad_purposes": current.get("ad_purposes"),
+            "target_keyword_strategy": current.get("target_keyword_strategy"),
+        } if current else None,
+        target_scores=ts,
+        keyword_analysis=ka,
+        scoring_error="",
+        llm_status="ok",
+        data_completeness={},
+        partial_failures=[],
+        data_freshness="fresh",
+    )
+
+
 async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days: int = 7) -> dict:
     """强制 AI 重新推荐策略选项（不保存，仅返回推荐结果）
 
@@ -483,4 +547,3 @@ async def run_confirm_tactics(ctx: WorkflowContext, req: TacticsConfirmRequest) 
     )
 
 # ── Layer 1.3 诊断层 ─────────────────────────────────
-

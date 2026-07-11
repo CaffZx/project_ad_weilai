@@ -710,10 +710,7 @@ async def _analyze_campaigns_impl(
             round_label, parent_asin, len(exact_retry), len(broad_retry),
             sorted(failed_keys - {s.get("campaign_key") for s in retry_source}),
         )
-        alert_text = _GUARDRAIL_RETRY_INSTRUCTION.format(
-            failed_count=len(failed_keys),
-            total_count=len(adjustments),
-        )
+        alert_text = _GUARDRAIL_RETRY_INSTRUCTION
         retry_items: list[CampaignAdjustmentItem] = []
 
         for retry_summaries, task_type_name, retry_sem in (
@@ -2172,8 +2169,6 @@ _GUARDRAIL_RETRY_INSTRUCTION = """## 内部护栏反馈
 护栏不是要求一律 keep。请只修正被指出的违规部分，仍需根据活动事实做该做的调整：
 该淘汰就淘汰，该小调就小调，该限制幅度就限制幅度，该修正调整方向就修正。
 未被告警指出的调整维度，不要因为有护栏反馈而自动改成维持。
-
-共 {failed_count}/{total_count} 个活动触发护栏。请基于每条活动下方的告警重新判定。
 """
 
 

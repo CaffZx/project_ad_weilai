@@ -252,6 +252,15 @@ def test_p7_allows_budget_increase_when_enough_spend():
     assert not any(r.rule_id == "P7_BUDGET_LOW_SPEND" for r in gp.results)
 
 
+def test_p7_blocks_budget_increase_when_7d_total_spend_but_daily_utilization_low():
+    item = _make_item(action="adjust_budget",
+                       current_budget=58.60, proposed_budget=80.0,
+                       perf_7d={"cost": 151.80, "clicks": 20, "orders": 5})
+    gp = apply_all([item])
+    assert any(r.rule_id == "P7_BUDGET_LOW_SPEND" for r in gp.results)
+    assert item.proposed_budget == item.current_budget
+
+
 def test_p7_ignores_eliminate():
     """P1 先保护（样本不足→keep）后，不再叠加预算调整护栏。"""
     item = _make_item(action="eliminate_to_low_bid_pool",

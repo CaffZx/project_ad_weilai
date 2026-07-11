@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-10（版本日志见文末，最新 v3.14：护栏独立模块 + 组合映射归一化 + prompt 瘦身）
+> **最后更新**: 2026-07-10（版本日志见文末，最新 v3.15：护栏优先级重构 + R3/R4 LLM 重试编排）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -105,13 +105,14 @@ parent_asin
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | 2073 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；护栏委托 guardrails |
-| `app/workflow/steps/campaign_guardrails.py` | 384 | ★护栏独立模块（v3.14 新增）：`apply_all()` 统一入口，含淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏；阈值常量+谓词为 portfolio 侧唯一来源 |
-| `app/llm/reasoner.py` | 2148 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt） |
+| `app/workflow/steps/campaign.py` | 2489 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；护栏委托 guardrails + R3/R4 重试编排 |
+| `app/workflow/steps/campaign_guardrails.py` | 491 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 11 条规则含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
+| `app/llm/reasoner.py` | 2151 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt）；护栏告警注入 |
 | `app/models/campaign.py` | 269 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
 | `app/data/campaign_fetcher.py` | 1159 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算） |
 | `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
 | `app/api/campaign.py` | 566 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
+| `app/api/campaign_viewmodel.py` | 297 | DB 快照→ViewModel 反向 mapper；审核等级转中文标签（`_REVIEW_LEVEL_LABELS`），兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL` |
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
 | `app/config/settings.py` | 280 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关) |
 | `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
@@ -290,6 +291,9 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-10 | **campaign-panel 前端重构** | ①卡片密度三档切换（紧凑/舒适/详细）localStorage 持久化 + `_syncDensityDetails` JS 联动详情区 ②meta 行彩色 chips（`_renderMetaChips`）替换旧管道文本 ③卡片 body 点击勾选（文字拖选保护）④选中卡片高亮（蓝色左边框+背景）⑤确认执行弹窗表格详情（活动/关键词/动作/预算/出价/广告位）⑥密度切换不覆盖用户手动操作过的卡片（`_detailUserToggled`）⑦筛选器/按钮动效（`camp-filter-flash`/`camp-btn-pulse`/`camp-batch-flash`） |
 | 07-10 | **清理 demo 旧数据** | 删除 `demo/campaign_sample.json`（4995 行旧样本）、`demo/campaign_test.html`（1464 行旧调试页）、`docs/README.md`（过时文档索引）、`scripts/synthesis_output.txt`（旧样本输出）；新增 `demo/codex_ux_patch.js`、`tests/test_demo_ux_migration.py`、`docs/superpowers/` 计划文档 |
 | 07-10 | **护栏独立模块 + 组合映射归一化** | ★ `campaign_guardrails.py`（新，384 行）：从 `_resolve_budget_conflicts` 提取全部护栏逻辑为 `apply_all()`，含淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏；阈值常量+谓词为 `campaign_portfolio` 侧单一真相源。`campaign_portfolio.py`：新增 `GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE` 双向映射；`campaign_viewmodel.py`/`text_utils.py` 删除本地硬编码映射改为 import。`campaign.py`：`_resolve_budget_conflicts` 委托给 guardrails，新增 `inventory_days`/`refund_rate`/`rating` 参数。`reasoner.py`：精准/广泛 prompt 示例输出删 child_asin/keyword_text/match_type/current_budget/current_bid（cid 句柄已回填）；`recommend_new_campaigns` 加 JSONDecodeError 重试+max_tokens 4096→8192。阈值修正：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率阻断 25%→30% |
+| 07-10 | **KB 阈值同步 + 审核等级统一** | 全部 17 个执行规则 KB 文件阈值对齐：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率 25%→30%。`campaign_new.py`/`campaign_restart.py`：`AUTO_BATCHABLE`→`AUTO_APPROVED`（与 ERP pending 表消费端约定统一） |
+| 07-10 | **审核等级中文标签** | `campaign_viewmodel.py`：新增 `_REVIEW_LEVEL_LABELS` 映射（`AUTO_APPROVED`→可直接执行、`MANUAL_REVIEW`→需人工审核、`HIGH_RISK_REVIEW`→高风险审核、`BLOCKED`→应阻断执行）；兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL`；`from_db_snapshot` 的 `review_level` 输出中文标签 |
+| 07-10 | **★ 护栏优先级重构 + R3/R4 LLM 重试编排** | `campaign_guardrails.py`：全部 11 条规则新增 `retry_instruction`+`campaign_key` 字段；P3 硬淘汰（无单且 bid≤$0.10/budget≤$1）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3；P4/P7/P8/P10/P11 修复边界 bug；提取 `_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词。`campaign.py`：R3/R4 重试编排循环——护栏拦截后按 campaign_key 带告警回灌 LLM 重判，最多 R3→R4 两轮，R4 后不再 R5，最终护栏兜底；`_apply_campaign_guardrails` 返回 `(GuardrailPass, warnings)`；`_backfill_campaign_adjustment_context` 提取复用。`reasoner.py`：`_guardrail_instruction` 注入批次提示 + `_guardrail_alert` 注入单活动告警。新增 `test_campaign_guardrails.py`(497行) + `test_campaign_guardrail_retry.py`(210行)；`test_campaign_resolve_conflicts.py` 更新 P3>P1 预期。6 files +1206/-111。 |
 
 ---
 
@@ -1255,6 +1259,8 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.15: 护栏优先级重构 + R3/R4 LLM 重试编排（2026-07-10，本地未部署服务器）—— ①P3 硬淘汰（无单且触底）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3 ②R3/R4 重试编排：护栏拦截后带 retry_instruction 回灌 LLM 重判，最多两轮，最终护栏兜底 ③全部 11 条护栏规则新增 retry_instruction/campaign_key 字段 ④KB 阈值全线对齐 + AUTO_BATCHABLE→AUTO_APPROVED ⑤campaign_viewmodel 审核等级转中文标签。6+17+1 files +1298/-184。*
+
 *v3.14: 护栏独立模块 + 组合映射归一化 + prompt 瘦身（2026-07-10，本地未部署服务器）—— ①`campaign_guardrails.py` 新模块：`apply_all()` 统一护栏入口，从 `_resolve_budget_conflicts` 提取淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏，阈值常量+谓词为 `campaign_portfolio` 侧唯一来源 ②`campaign_portfolio.py` 新增 `GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE` 双向映射作为归一化来源；`campaign_viewmodel.py`/`text_utils.py` 删除本地硬编码映射改 import，消除三处漂移 ③`campaign.py`：`_resolve_budget_conflicts` 委托 guardrails，新增 inventory_days/refund_rate/rating 参数 ④`reasoner.py`：精准/广泛 prompt 示例输出删冗余字段（cid 句柄已回填）；`recommend_new_campaigns` JSONDecodeError 重试 2 次+max_tokens 8192 ⑤阈值修正：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率阻断 25%→30%。7 files +546/-227。*
 
 *v3.13: ad_portfolio_list MCP 接入 + 前端 UX 全面升级（2026-07-09/10，本地未部署服务器）*

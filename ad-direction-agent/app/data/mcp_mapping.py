@@ -77,7 +77,19 @@ def _ad_common(ctx: McpContext) -> dict:
 
 # 每次 ASIN 数据拉取必调的基础工具（上下文解析前提）。
 # 原定义在 mcp_tool_fallback.py（已随 Doris 切除删除），此处为唯一真源。
-BOOTSTRAP_TOOLS: frozenset[str] = frozenset({"listing_basic_info_v2", "parent_listing_stock_summary", "ad_campaign_product_keyword_list"})
+BASIC_BOOTSTRAP_TOOLS: frozenset[str] = frozenset({
+    "listing_basic_info_v2",
+    "parent_listing_stock_summary",
+})
+CAMPAIGN_KEYWORD_BOOTSTRAP_TOOLS: frozenset[str] = frozenset({
+    "ad_campaign_product_keyword_list",
+})
+BOOTSTRAP_TOOLS: frozenset[str] = BASIC_BOOTSTRAP_TOOLS | CAMPAIGN_KEYWORD_BOOTSTRAP_TOOLS
+_CAMPAIGN_KEYWORD_META_IDS: frozenset[str] = frozenset({
+    "META_KW_AD",
+    "META_KW_COMPETITOR_RANK",
+    "META_KW_SUB_ASIN_RANK",
+})
 
 META_TO_MCP_TOOLS: dict[str, list[str]] = {
     # 2026-06-30: ad_keyword_report MCP 工具已下线（服务端拆分），Doris 回落已切除。
@@ -93,6 +105,21 @@ META_TO_MCP_TOOLS: dict[str, list[str]] = {
     "META_AD_SEARCH_TERM": ["ad_search_term_report"],
     "META_TREND": ["product_sales"],
 }
+
+
+def bootstrap_tools_for_meta(meta_filter: list[str] | None) -> frozenset[str]:
+    """Return bootstrap tools needed by a meta-filtered fetch.
+
+    Full fetches keep the legacy bootstrap set. Product/dashboard fetches should
+    not pull campaign keyword context unless a keyword-ranking meta explicitly
+    needs it.
+    """
+    if not meta_filter:
+        return BOOTSTRAP_TOOLS
+    meta_ids = set(meta_filter)
+    if meta_ids & _CAMPAIGN_KEYWORD_META_IDS:
+        return BOOTSTRAP_TOOLS
+    return BASIC_BOOTSTRAP_TOOLS
 
 
 TOOL_ARG_BUILDERS: dict[str, ArgBuilder] = {

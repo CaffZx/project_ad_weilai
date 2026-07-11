@@ -111,31 +111,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
 
     # 关键词监控表 — 合并 AI 分类结果
     wf = ctx.state.get_workflow_state(asin)
-    strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
     ka_raw = wf.get("keyword_analysis")
-    ka_current = ka_raw.get(str(days)) if isinstance(ka_raw, dict) else ka_raw
-    if not ka_current and strategy_saved and not is_llm_blocked(
-        evaluate_completeness("tactics", data)
-    ):
-        # 回访已有策略的 ASIN 时，独立获取关键词 AI 分类
-        try:
-            from app.llm.purpose_adapter import recommend_tactics_from_purpose
-            rec = await recommend_tactics_from_purpose(
-                data=data,
-                position=long_term.get("product_level", "常规产品 (P2)"),
-                stage=long_term.get("product_stage", "推进期"),
-                season=long_term.get("season_stage", "淡季"),
-                days=days,
-            )
-            if "error" not in rec:
-                if isinstance(ka_raw, dict):
-                    ka_raw[str(days)] = rec.get("keyword_analysis", [])
-                else:
-                    ka_raw = {str(days): rec.get("keyword_analysis", [])}
-                wf["keyword_analysis"] = ka_raw
-                ctx.state.set_workflow_state(asin, wf)
-        except Exception as e:
-            logger.warning("诊断层关键词 AI 分类失败 [%s]: %s", asin, e)
     ai_kw_map = {}
     ka_final = ka_raw.get(str(days)) if isinstance(ka_raw, dict) else ka_raw
     for ak in (ka_final or []):
@@ -188,4 +164,3 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
     )
 
 # ── Layer 1.4 执行层 ─────────────────────────────────
-

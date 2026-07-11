@@ -40,19 +40,20 @@ from app.workflow.helpers import (
     _kw_to_ai_summary,
     _kw_trend_priority,
 )
+from app.workflow.meta_filters import get_meta_filter
 
 logger = logging.getLogger(__name__)
 
 FETCH_TIMEOUT = 35
 LLM_TIMEOUT = 60
+DASHBOARD_LIGHT_META_FILTER = get_meta_filter("dashboard_light")
 
 async def run_get_strategy_options(ctx: WorkflowContext, asin: str, days: int = 7) -> StrategyOptionsResponse:
-    """返回三维度选项（静态配置，无 DB 查询）
+    """返回三维度选项（纯静态配置，无 MCP/DB 查询）。
 
-    数据预加载在后台触发，不阻塞用户操作。
+    不再预加载全量 MCP 数据——各 Tab 打开时按需拉取、走 Redis 缓存。
     """
-    # 后台预加载数据（用户选战略时数据已在加载）
-    await ctx.preload_data(asin, days=days)
+    await ctx.preload_data(asin, days=days, meta_filter=DASHBOARD_LIGHT_META_FILTER)
 
     layer_config = settings.layer_options_config or {}
     strategy_cfg = layer_config.get("strategy", {})

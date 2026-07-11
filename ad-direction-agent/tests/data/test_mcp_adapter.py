@@ -5,17 +5,34 @@ from unittest.mock import patch
 
 from app.data.mcp_adapter import McpAdapter
 from app.data.mcp_db_context import McpDbContext
+from app.data.mcp_mapping import bootstrap_tools_for_meta
 
 
 class _FakeInvoker:
     def __init__(self, payloads: dict[str, object], fail_tools: set[str] | None = None):
         self.payloads = payloads
         self.fail_tools = fail_tools or set()
+        self.calls: list[str] = []
 
     async def call_tool(self, tool_name: str, arguments: dict):
+        self.calls.append(tool_name)
         if tool_name in self.fail_tools:
             raise RuntimeError(f"tool failed: {tool_name}")
         return self.payloads.get(tool_name, [])
+
+
+def test_bootstrap_tools_for_product_filter_excludes_campaign_keywords():
+    tools = bootstrap_tools_for_meta(["META_AD_PRODUCT", "META_TREND"])
+
+    assert "listing_basic_info_v2" in tools
+    assert "parent_listing_stock_summary" in tools
+    assert "ad_campaign_product_keyword_list" not in tools
+
+
+def test_bootstrap_tools_for_keyword_filter_includes_campaign_keywords():
+    tools = bootstrap_tools_for_meta(["META_AD_PRODUCT", "META_KW_COMPETITOR_RANK"])
+
+    assert "ad_campaign_product_keyword_list" in tools
 
 
 @pytest.mark.asyncio
@@ -133,3 +150,28 @@ async def test_mcp_adapter_natural_order_ratio_from_daily_trend_rows():
         data = await adapter.fetch_asin_data("B0TEST", meta_filter=["META_TREND", "META_AD_PRODUCT"])
     assert data.natural_order_ratio is not None
     assert abs(data.natural_order_ratio - 75.0) < 0.1
+
+
+@pytest.mark.asyncio
+async def test_mcp_adapter_light_product_filter_skips_campaign_keyword_bootstrap():
+    payloads = {
+        "listing_basic_info_v2": [{"parent_seller_sku": "PARENT-SKU"}],
+        "parent_listing_stock_summary": [{"FBA可售库存": 20}],
+        "ad_product_report": [{"花费": 10, "销售额": 40, "点击量": 5, "曝光量": 100, "广告订单量": 2}],
+        "product_sales": [{"全部单量": 10, "广告单量": 3, "全部销售额": 200, "广告花费": 10, "日期": "05-18"}],
+    }
+    invoker = _FakeInvoker(payloads)
+    adapter = McpAdapter(invoker=invoker)
+    _ctx = McpDbContext(
+        parent_asin="B0TEST",
+        parent_seller_sku="PARENT-SKU",
+        shop_account="shop_us",
+    )
+
+    with patch("app.data.mcp_adapter.resolve_mcp_context_from_mcp", return_value=_ctx):
+        data = await adapter.fetch_asin_data("B0TEST", meta_filter=["META_AD_PRODUCT", "META_TREND"])
+
+    assert data.asin == "B0TEST"
+    assert "ad_campaign_product_keyword_list" not in invoker.calls
+    assert "keyword_child_asins" not in invoker.calls
+    assert "flow_keywords" not in invoker.calls

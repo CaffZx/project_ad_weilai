@@ -6,6 +6,11 @@ from app.config.settings import settings
 
 
 DEFAULT_META_FILTERS: dict[str, list[str]] = {
+    # Tab2 dashboard preload: product-level metrics/trend only, no keyword/campaign tools
+    "dashboard_light": [
+        "META_AD_PRODUCT",
+        "META_TREND",
+    ],
     # purpose-agent and tactics keyword panel
     "tactics": [
         "META_AD_PRODUCT",

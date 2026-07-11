@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     meta_filter_p3: list[str] = [
         "META_AD_PRODUCT", "META_KW_AD", "META_FLOW_KEYWORD", "META_TREND", "META_COMPETITOR",
     ]
+    meta_filter_dashboard_light: list[str] = [
+        "META_AD_PRODUCT", "META_TREND",
+    ]
 
     # 长期状态：json | mysql
     state_backend: str = "mysql"

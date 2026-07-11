@@ -67,6 +67,9 @@ def test_guardrail_retry_instruction_is_internal_and_not_keep_only():
     assert "不要写入 reason/evidence" in _GUARDRAIL_RETRY_INSTRUCTION
     assert "不是要求一律 keep" in _GUARDRAIL_RETRY_INSTRUCTION
     assert "该淘汰就淘汰" in _GUARDRAIL_RETRY_INSTRUCTION
+    assert "个活动触发护栏" not in _GUARDRAIL_RETRY_INSTRUCTION
+    assert "failed_count" not in _GUARDRAIL_RETRY_INSTRUCTION
+    assert "total_count" not in _GUARDRAIL_RETRY_INSTRUCTION
     assert "解释你如何遵守护栏" not in _GUARDRAIL_RETRY_INSTRUCTION
 
 
