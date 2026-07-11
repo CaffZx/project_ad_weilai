@@ -287,6 +287,20 @@ export function createCampaignState() {
         } else {
           throw new Error((errs[0]) || body.error || '全部下发失败');
         }
+        // 挪组失败告警：按 group+reason 去重，不阻塞预算/bid
+        const moveErrors = body.move_errors || [];
+        if (moveErrors.length > 0) {
+          const byGroup = {};
+          for (const e of moveErrors) {
+            const key = `${e.group}\x00${e.reason}`;
+            if (!byGroup[key]) byGroup[key] = { group: e.group, reason: e.reason, count: 0 };
+            byGroup[key].count++;
+          }
+          const lines = Object.values(byGroup).map(g =>
+            `${g.group}${g.reason}，已跳过 ${g.count} 个活动，不阻塞预算和bid修改。`
+          );
+          _toast(lines.join('\n'), {sticky: true});
+        }
       } else {
         // reject：原写库链路
         if (body.ok === false) {
@@ -489,7 +503,12 @@ export function createCampaignState() {
       el.classList.add('sticky');
       el.innerHTML = '';
       const span = document.createElement('span');
-      span.textContent = text;
+      const lines = text.split('\n');
+      span.textContent = lines[0];
+      for (let i = 1; i < lines.length; i++) {
+        span.appendChild(document.createElement('br'));
+        span.appendChild(document.createTextNode(lines[i]));
+      }
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'camp-toast-close';

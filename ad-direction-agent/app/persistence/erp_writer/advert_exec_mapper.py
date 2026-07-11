@@ -73,6 +73,7 @@ class ExecPlan:
     negative_calls: list[dict] = field(default_factory=list)   # agent_create_negative_keywords
     ops: list[dict] = field(default_factory=list)              # 逐项操作 → 写 *_record + 回写 pending
     warnings: list[str] = field(default_factory=list)
+    move_errors: list[dict] = field(default_factory=list)      # 挪组失败详情 → 前端弹窗
 
     def is_empty(self) -> bool:
         return not (self.params_vo_list or self.create_calls or self.negative_calls)

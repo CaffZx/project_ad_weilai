@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-10（版本日志见文末，最新 v3.15：护栏优先级重构 + R3/R4 LLM 重试编排）
+> **最后更新**: 2026-07-11（版本日志见文末，最新 v3.16：秒开优化 + meta_filter 分级缓存）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -114,11 +114,11 @@ parent_asin
 | `app/api/campaign.py` | 566 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
 | `app/api/campaign_viewmodel.py` | 297 | DB 快照→ViewModel 反向 mapper；审核等级转中文标签（`_REVIEW_LEVEL_LABELS`），兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL` |
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
-| `app/config/settings.py` | 280 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关) |
+| `app/config/settings.py` | 283 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关 + `meta_filter_dashboard_light`) |
 | `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
 | `app/llm/kb_loader.py` | 232 | KB 加载器。**2026-06-24 起 `campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset 并做节级切片**（精准=`18:1,3 17:1,2,3,4,5,7 15:1,2,3,4 19:1,2,3,4,5,6,9 22:0,2 21`；广泛=`...15:1,2,4 19:1,2,3,4,6,7,8 22:0,3...`）。另有 `campaign_overview`/`budget_reallocation` 两个 campaign 级 preset。**早期文档写的单一 `campaign_adjustment`(18/19/21/22 或 18/17/15/19/22/21) 均已过时** |
-| `app/data/mcp_adapter.py` | 531 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点 |
-| `app/data/mcp_mapping.py` | 230 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09) |
+| `app/data/mcp_adapter.py` | 536 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点；meta_filter 透传 |
+| `app/data/mcp_mapping.py` | 258 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09)；`bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap |
 | `app/workflow/steps/campaign_portfolio.py` | 103 | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
 | `app/workflow/steps/campaign_budget_summary.py` | 103 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
 | `app/workflow/steps/campaign_new.py` | 624 | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9/§22/§24) |
@@ -294,6 +294,8 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-10 | **KB 阈值同步 + 审核等级统一** | 全部 17 个执行规则 KB 文件阈值对齐：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率 25%→30%。`campaign_new.py`/`campaign_restart.py`：`AUTO_BATCHABLE`→`AUTO_APPROVED`（与 ERP pending 表消费端约定统一） |
 | 07-10 | **审核等级中文标签** | `campaign_viewmodel.py`：新增 `_REVIEW_LEVEL_LABELS` 映射（`AUTO_APPROVED`→可直接执行、`MANUAL_REVIEW`→需人工审核、`HIGH_RISK_REVIEW`→高风险审核、`BLOCKED`→应阻断执行）；兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL`；`from_db_snapshot` 的 `review_level` 输出中文标签 |
 | 07-10 | **★ 护栏优先级重构 + R3/R4 LLM 重试编排** | `campaign_guardrails.py`：全部 11 条规则新增 `retry_instruction`+`campaign_key` 字段；P3 硬淘汰（无单且 bid≤$0.10/budget≤$1）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3；P4/P7/P8/P10/P11 修复边界 bug；提取 `_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词。`campaign.py`：R3/R4 重试编排循环——护栏拦截后按 campaign_key 带告警回灌 LLM 重判，最多 R3→R4 两轮，R4 后不再 R5，最终护栏兜底；`_apply_campaign_guardrails` 返回 `(GuardrailPass, warnings)`；`_backfill_campaign_adjustment_context` 提取复用。`reasoner.py`：`_guardrail_instruction` 注入批次提示 + `_guardrail_alert` 注入单活动告警。新增 `test_campaign_guardrails.py`(497行) + `test_campaign_guardrail_retry.py`(210行)；`test_campaign_resolve_conflicts.py` 更新 P3>P1 预期。6 files +1206/-111。 |
+| 07-11 | **★ 秒开优化：策略层轻量化 + meta_filter 分级缓存** | `tactics.py`：`run_get_tactics_options` 替换为纯缓存+长期配置读取版本，零 MCP/LLM 调用（旧版保存为 `_run_get_tactics_options_legacy`）。`diagnosis.py`：删除关键词 AI 分类自动回访逻辑（25行），避免缓存 miss 时触发重量级 MCP 拉取。`workflow_orchestrator.py`：缓存 key 加入 `meta_filter` 维度（`_data_task_key`），不同 filter 组合独立缓存不互串。`mcp_mapping.py`：BOOTSTRAP_TOOLS 拆为 `BASIC_BOOTSTRAP_TOOLS` + `CAMPAIGN_KEYWORD_BOOTSTRAP_TOOLS`；新增 `bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap。`settings.py`：新增 `meta_filter_dashboard_light` = [META_AD_PRODUCT, META_TREND]。新增 `test_lightweight_loading.py`(116行) + MCP 诊断文档 2 篇。18 files +466/-64。 |
+| 07-11 | **护栏告警仅用 retry_instruction** | `_build_guardrail_alerts` 不再回落 `message`（含规则编号的内部消息不应灌入 LLM prompt），`retry_instruction` 为空时直接跳过。test 补空值断言。2 files +25/-4。 |
 
 ---
 
@@ -1259,6 +1261,8 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.16: 秒开优化 + meta_filter 分级缓存（2026-07-11，本地未部署服务器）—— ①策略层轻量化：`run_get_tactics_options` 零 MCP/LLM 纯缓存读取，删除 diagnosis 自动回访逻辑 ②缓存 key 加入 meta_filter 维度 ③BOOTSTRAP_TOOLS 分级 + bootstrap_tools_for_meta() 按需跳过 campaign keyword 拉取 ④`_build_guardrail_alerts` 仅用 retry_instruction 不回落 message。18+2 files +491/-68。*
+
 *v3.15: 护栏优先级重构 + R3/R4 LLM 重试编排（2026-07-10，本地未部署服务器）—— ①P3 硬淘汰（无单且触底）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3 ②R3/R4 重试编排：护栏拦截后带 retry_instruction 回灌 LLM 重判，最多两轮，最终护栏兜底 ③全部 11 条护栏规则新增 retry_instruction/campaign_key 字段 ④KB 阈值全线对齐 + AUTO_BATCHABLE→AUTO_APPROVED ⑤campaign_viewmodel 审核等级转中文标签。6+17+1 files +1298/-184。*
 
 *v3.14: 护栏独立模块 + 组合映射归一化 + prompt 瘦身（2026-07-10，本地未部署服务器）—— ①`campaign_guardrails.py` 新模块：`apply_all()` 统一护栏入口，从 `_resolve_budget_conflicts` 提取淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏，阈值常量+谓词为 `campaign_portfolio` 侧唯一来源 ②`campaign_portfolio.py` 新增 `GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE` 双向映射作为归一化来源；`campaign_viewmodel.py`/`text_utils.py` 删除本地硬编码映射改 import，消除三处漂移 ③`campaign.py`：`_resolve_budget_conflicts` 委托 guardrails，新增 inventory_days/refund_rate/rating 参数 ④`reasoner.py`：精准/广泛 prompt 示例输出删冗余字段（cid 句柄已回填）；`recommend_new_campaigns` JSONDecodeError 重试 2 次+max_tokens 8192 ⑤阈值修正：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率阻断 25%→30%。7 files +546/-227。*

@@ -59,28 +59,28 @@ def _normalize_portfolio_list(res: Any) -> list[dict]:
     return []
 
 
-def _match_portfolio(group_name: str, portfolios: list[dict]) -> dict | None:
-    """组合分组名(精准主力组…) → MCP portfolio。仅子串包含匹配，必须唯一。
+def _match_portfolio(group_name: str, portfolios: list[dict]) -> tuple[dict | None, int]:
+    """组合分组名(精准主力组…) → (MCP portfolio, 匹配数)。仅子串包含匹配，必须唯一。
 
-    - 0 个匹配 → None
-    - ≥2 个匹配 → None（ambiguous，记 warning）
-    - 恰好 1 个 → 返回该 portfolio
+    - 恰好 1 个 → (portfolio, 1)
+    - 0 个     → (None, 0)
+    - ≥2 个   → (None, match_count)  — ambiguous
     """
     g = (group_name or "").strip()
     matches: list[dict] = []
     for pf in portfolios:
         nm = str(_pf_field(pf, "portfolioName", "name", "title", "portfolio_name") or "").strip()
-        if g and nm and (g in nm or nm in g):
+        if g and nm and g in nm:
             matches.append(pf)
     if len(matches) == 1:
-        return matches[0]
+        return matches[0], 1
     if len(matches) >= 2:
         logger.warning(
             "portfolio 子串匹配不唯一 [%s]: 命中 %d 个 (%s)，跳过",
             g, len(matches),
             ", ".join(str(_pf_field(m, "portfolioName", "name")) for m in matches[:5]),
         )
-    return None
+    return None, len(matches)
 
 
 async def execute_portfolio_budget(
@@ -130,7 +130,7 @@ async def execute_portfolio_budget(
         if query_err:
             warnings.append(f"组合列表查询失败：{query_err}")
         for gname, new_budget in overrides.items():
-            pf = _match_portfolio(gname, portfolios)
+            pf, _ = _match_portfolio(gname, portfolios)
             pid = _pf_field(pf, "portfolioId", "id", "portfolio_id")
             old_budget = _num(_pf_field(pf, "portfolioBudget", "budget", "dailyBudget"))
             op: dict[str, Any] = {

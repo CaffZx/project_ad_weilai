@@ -500,6 +500,7 @@ async def campaign_confirm(req: CampaignConfirmRequest):
         "skipped": reject_result.get("skipped", 0),
         "task_ids": approve_result.get("task_ids") or [],
         "errors": approve_result.get("errors") or [],
+        "move_errors": approve_result.get("move_errors") or [],
     }
 
 
