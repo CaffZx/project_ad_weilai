@@ -2183,7 +2183,9 @@ def _build_guardrail_alerts(
         key = getattr(r, "campaign_key", "") or ""
         if not key:
             continue
-        instruction = getattr(r, "retry_instruction", "") or r.message
+        instruction = (getattr(r, "retry_instruction", "") or "").strip()
+        if not instruction:
+            continue
         grouped.setdefault(key, []).append(instruction)
     return {key: "\n".join(messages) for key, messages in grouped.items()}
 

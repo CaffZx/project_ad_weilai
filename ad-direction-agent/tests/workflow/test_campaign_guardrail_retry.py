@@ -20,29 +20,48 @@ def test_build_guardrail_alerts_groups_messages_by_campaign_key():
         campaign_key="campaign-a x asin",
         corrected=True,
         message="[same name] budget capped",
+        retry_instruction="[same name] budget must stay within cap",
     ))
     gp.add(GuardrailResult(
         rule_id="P9_BID_CAP",
         campaign_key="campaign-a x asin",
         corrected=True,
         message="[same name] bid capped",
+        retry_instruction="[same name] bid must stay within cap",
     ))
     gp.add(GuardrailResult(
         rule_id="P10_PLACEMENT_BLOCK",
         campaign_key="campaign-b x asin",
         corrected=True,
         message="[same name] placement blocked",
+        retry_instruction="[same name] placement increase is not supported",
     ))
 
     alerts = _build_guardrail_alerts(gp)
 
     assert set(alerts) == {"campaign-a x asin", "campaign-b x asin"}
-    assert "[same name] budget capped" in alerts["campaign-a x asin"]
-    assert "[same name] bid capped" in alerts["campaign-a x asin"]
+    assert "[same name] budget must stay within cap" in alerts["campaign-a x asin"]
+    assert "[same name] bid must stay within cap" in alerts["campaign-a x asin"]
+    assert "[same name] budget capped" not in alerts["campaign-a x asin"]
+    assert "[same name] bid capped" not in alerts["campaign-a x asin"]
     assert "P6_BUDGET_CAP" not in alerts["campaign-a x asin"]
     assert "P9_BID_CAP" not in alerts["campaign-a x asin"]
     assert "placement blocked" not in alerts["campaign-a x asin"]
-    assert alerts["campaign-b x asin"] == "[same name] placement blocked"
+    assert alerts["campaign-b x asin"] == "[same name] placement increase is not supported"
+
+
+def test_build_guardrail_alerts_does_not_fallback_to_message():
+    gp = GuardrailPass()
+    gp.add(GuardrailResult(
+        rule_id="P6_BUDGET_CAP",
+        campaign_key="campaign-a x asin",
+        corrected=True,
+        message="[campaign-a] proposed_budget 已被截断",
+    ))
+
+    alerts = _build_guardrail_alerts(gp)
+
+    assert alerts == {}
 
 
 def test_build_guardrail_alerts_prefers_retry_instruction():
