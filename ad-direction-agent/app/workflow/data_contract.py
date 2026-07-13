@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from app.config.settings import settings
 from app.models.asin_data import ASINData
 
 ModuleId = Literal["tactics", "execution", "p3", "report", "campaign"]
@@ -82,13 +81,6 @@ class CompletenessVerdict:
 
 
 def get_module_contract(module: ModuleId) -> dict[str, list[str]]:
-    override = getattr(settings, f"data_contract_{module}", None)
-    if isinstance(override, dict) and override.get("required"):
-        return {
-            "required": list(override.get("required", [])),
-            "important": list(override.get("important", [])),
-            "optional": list(override.get("optional", [])),
-        }
     return DEFAULT_MODULE_CONTRACTS.get(module, DEFAULT_MODULE_CONTRACTS["execution"])
 
 

@@ -110,6 +110,8 @@ class ASINData(BaseModel):
     asin: str
     sku: Optional[str] = None
     parent_asin: Optional[str] = None
+    shop_id: Optional[int] = None
+    parent_seller_sku: Optional[str] = None
 
     # 产品基本信息
     days_since_launch: Optional[int] = None

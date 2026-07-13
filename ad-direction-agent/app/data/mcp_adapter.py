@@ -191,6 +191,7 @@ class McpAdapter(DataSourceAdapter):
             site_code=db_ctx.site_code,
             start_date=start_date,
             end_date=end_date,
+            shop_id=db_ctx.shop_id,
         )
         listing_res = await self._call_tool("listing_basic_info_v2", build_tool_args("listing_basic_info_v2", base_ctx))
         if listing_res.ok:
@@ -205,6 +206,7 @@ class McpAdapter(DataSourceAdapter):
                 site_code=db_ctx.site_code,
                 start_date=start_date,
                 end_date=end_date,
+                shop_id=db_ctx.shop_id,
             )
         return base_ctx
 
@@ -330,7 +332,9 @@ class McpAdapter(DataSourceAdapter):
 
         data = ASINData(asin=asin)
         data.sku = listing.get("seller_sku") or ctx.parent_seller_sku
-        data.parent_asin = asin
+        data.parent_asin = ctx.parent_asin or asin
+        data.shop_id = ctx.shop_id
+        data.parent_seller_sku = ctx.parent_seller_sku
         data.price = listing.get("product_price")
         data.rating = listing.get("star_level")
         data.review_count = listing.get("comment_num")

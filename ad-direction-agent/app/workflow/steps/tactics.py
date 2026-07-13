@@ -103,6 +103,18 @@ def _build_fallback_target_scores() -> list:
     ]
 
 
+def _attach_data_identity(payload: dict, data: ASINData | None) -> dict:
+    if not data:
+        return payload
+    shop_id = getattr(data, "shop_id", None)
+    parent_seller_sku = getattr(data, "parent_seller_sku", None)
+    if shop_id:
+        payload["shop_id"] = shop_id
+    if parent_seller_sku:
+        payload["parent_seller_sku"] = parent_seller_sku
+    return payload
+
+
 async def _run_purpose_and_cache(
     ctx: WorkflowContext,
     asin: str,
@@ -159,6 +171,7 @@ async def _run_purpose_and_cache(
         ts = {}
     ts[str(days)] = new_scores
     wf["target_scores"] = ts
+    _attach_data_identity(wf, data)
     ctx.state.set_workflow_state(asin, wf)
     return recommendations, reasoning, merged_kws
 
@@ -237,6 +250,7 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
                             ts_dict = {}
                         ts_dict[str(days)] = _build_fallback_target_scores()
                         wf["target_scores"] = ts_dict
+                        _attach_data_identity(wf, data)
                         ctx.state.set_workflow_state(asin, wf)
                     recommendations = {
                         "ad_purposes": long_term.get("ad_purposes", []),
@@ -261,6 +275,7 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
                     wf["keyword_analysis"][str(days)] = merged_kws
                 else:
                     wf["keyword_analysis"] = {str(days): merged_kws}
+                _attach_data_identity(wf, data)
                 ctx.state.set_workflow_state(asin, wf)
                 # 侧边栏 AI 推荐标签从评分推导，与评分卡片保持一致
                 rec_from_scores = _derive_ad_purposes_from_scores(wf, days)
@@ -295,6 +310,7 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
                         ts_dict = {}
                     ts_dict[str(days)] = _build_fallback_target_scores()
                     wf["target_scores"] = ts_dict
+                    _attach_data_identity(wf, data)
                     ctx.state.set_workflow_state(asin, wf)
 
     dimensions = []
@@ -520,6 +536,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
         ts = {}
     ts[str(days)] = new_scores
     wf["target_scores"] = ts
+    _attach_data_identity(wf, data)
     ctx.state.set_workflow_state(asin, wf)
 
     return {
@@ -534,11 +551,18 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
 
 async def run_confirm_tactics(ctx: WorkflowContext, req: TacticsConfirmRequest) -> TacticsConfirmResponse:
     config = {
+        "shop_id": req.shop_id,
+        "parent_seller_sku": req.parent_seller_sku,
         "ad_purposes": [p.value for p in req.ad_purposes],
         "target_keyword_strategy": [k.value for k in req.target_keyword_strategy],
     }
     ctx.state.set_long_term_config(req.asin, config)
-    ctx.state.advance_layer(req.asin, "diagnosis")
+    ctx.state.advance_layer(
+        req.asin,
+        "diagnosis",
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
 
     return TacticsConfirmResponse(
         asin=req.asin,

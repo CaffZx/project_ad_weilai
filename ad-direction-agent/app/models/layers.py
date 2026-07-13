@@ -9,7 +9,7 @@ Layer 1.4 执行层 — 广告方向（多选，有AI推荐，不持久化）
 import re
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 # ── 枚举定义 ────────────────────────────────────────────────
@@ -157,6 +157,17 @@ class TacticsDimension(BaseModel):
     recommendation_reason: str = ""
 
 
+class ProductIdentityMixin(BaseModel):
+    shop_id: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("shop_id", "_shopId", "shopId"),
+    )
+    parent_seller_sku: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_seller_sku", "_parentSellerSku", "parentSellerSku"),
+    )
+
+
 # ── Layer 1.1 战略层 请求/响应 ─────────────────────────────
 
 
@@ -172,7 +183,7 @@ class StrategyOptionsResponse(BaseModel):
     data_freshness: str = "fresh"
 
 
-class StrategyConfirmRequest(BaseModel):
+class StrategyConfirmRequest(ProductIdentityMixin):
     """POST 确认战略层选择"""
     asin: str
     product_level: ProductLevel
@@ -206,7 +217,7 @@ class TacticsOptionsResponse(BaseModel):
     data_freshness: str = "fresh"
 
 
-class TacticsConfirmRequest(BaseModel):
+class TacticsConfirmRequest(ProductIdentityMixin):
     """POST 确认策略层选择"""
     asin: str
     ad_purposes: list[AdPurpose]
@@ -269,7 +280,7 @@ class ExecutionOptionsResponse(BaseModel):
     data_freshness: str = "fresh"
 
 
-class ExecutionSelectRequest(BaseModel):
+class ExecutionSelectRequest(ProductIdentityMixin):
     """POST 确认执行层选择"""
     asin: str
     selected_directions: list[str]
@@ -285,7 +296,7 @@ class ExecutionSelectResponse(BaseModel):
 # ── P3 上游推荐 — 目标 ACOS ──────────────────────────────────
 
 
-class TargetAcosRequest(BaseModel):
+class TargetAcosRequest(ProductIdentityMixin):
     """目标 ACOS 推荐请求"""
     asin: str
     days: int = 7
@@ -309,7 +320,7 @@ class TargetAcosRecommendation(BaseModel):
     manual_override: bool = False  # 运营手动设定值时返回 True
 
 
-class TargetAcosOverrideRequest(BaseModel):
+class TargetAcosOverrideRequest(ProductIdentityMixin):
     """运营手动设定目标 ACOS"""
     asin: str
     value: int  # 5, 10, 15, ..., 35, 40
@@ -318,7 +329,7 @@ class TargetAcosOverrideRequest(BaseModel):
 # ── P3 上游推荐 — 预算 & Bid ──────────────────────────────────
 
 
-class BudgetBidRequest(BaseModel):
+class BudgetBidRequest(ProductIdentityMixin):
     """预算/Bid 推荐请求"""
     asin: str
     days: int = 7
@@ -342,7 +353,7 @@ class BudgetBidRecommendation(BaseModel):
     confidence: str = "medium"  # high / medium / low
 
 
-class BudgetOverrideRequest(BaseModel):
+class BudgetOverrideRequest(ProductIdentityMixin):
     """运营手动设定日预算"""
     asin: str
     value: float  # 日预算金额（USD）
@@ -351,7 +362,7 @@ class BudgetOverrideRequest(BaseModel):
 # ── P3 统一推荐（LLM驱动）───────────────────────────────────
 
 
-class UnifiedRecommendRequest(BaseModel):
+class UnifiedRecommendRequest(ProductIdentityMixin):
     """P3 统一推荐请求"""
     asin: str
     refresh: bool = False  # True = 跳过缓存，强制 LLM
@@ -427,7 +438,7 @@ class LongTermConfigResponse(BaseModel):
     last_modified: str = ""
 
 
-class LongTermConfigUpdateRequest(BaseModel):
+class LongTermConfigUpdateRequest(ProductIdentityMixin):
     """手动更新长期配置"""
     product_level: ProductLevel | None = None
     product_stage: ProductStage | None = None

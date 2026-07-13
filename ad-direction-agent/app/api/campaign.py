@@ -37,6 +37,16 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+async def _clear_execution_started(state, asin: str) -> None:
+    if state and hasattr(state, "clear_analysis_execution_started") and asin:
+        try:
+            ok = await asyncio.to_thread(state.clear_analysis_execution_started, asin)
+            if ok is False:
+                logger.warning("清执行层分析启动标记未成功 [%s]", asin)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("清执行层分析启动标记失败 [%s]: %s", asin, e)
+
+
 async def _maybe_push_erp(
     result: CampaignAnalysisResult,
     *,
@@ -143,8 +153,26 @@ async def campaign_viewmodel(req: dict):
     消两 mapper 漂移债。红线：执行层无落库记录禁止展示可执行——落库/回读失败
     一律明确报错（_failure_vm），不内存兜底。
     """
+    asin = str(req.get("asin", "")).strip()
+    state = get_state_manager() if asin else None
+    sess = state.get_analysis_session(asin) if state else None
+    run_id = str(req.get("run_id") or (sess or {}).get("run_id") or "").strip()
+    if state and run_id and hasattr(state, "mark_analysis_execution_started"):
+        await asyncio.to_thread(
+            state.mark_analysis_execution_started,
+            asin,
+            run_id,
+            shop_id=req.get("_shopId") or req.get("shopId") or req.get("shop_id"),
+            parent_seller_sku=(
+                req.get("_parentSellerSku")
+                or req.get("parentSellerSku")
+                or req.get("parent_seller_sku")
+            ),
+        )
+
     result, extra = await _do_analyze(req)
     if extra is None:                       # 分析本身失败（超时/异常/缺 asin）
+        await _clear_execution_started(state, asin)
         return _failure_vm(result)
 
     # 实时轨强制落库（本路径落库是硬约束，不看请求的 write_erp 位）。
@@ -162,6 +190,7 @@ async def campaign_viewmodel(req: dict):
     )
     decision_id = erp.get("decision_id")
     if not erp.get("ok") or not decision_id:
+        await _clear_execution_started(extra.get("state"), extra["asin"])
         reason = erp.get("error") or erp.get("skipped") or "未知原因"
         vm = _failure_vm(result, extra_warnings=[f"执行层落库失败，无法操作：{reason}"])
         vm["erp_write"] = erp
@@ -174,6 +203,7 @@ async def campaign_viewmodel(req: dict):
         logger.exception("read_snapshot 回读失败 [%s] %s", decision_id, e)
         snap = None
     if not snap:
+        await _clear_execution_started(extra.get("state"), extra["asin"])
         vm = _failure_vm(
             result,
             extra_warnings=[f"落库成功但快照回读失败（decision_id={decision_id}）"],

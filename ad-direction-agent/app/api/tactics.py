@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_workflow_orchestrator
+from app.api.product_identity import require_product_identity
 from app.core.workflow_orchestrator import WorkflowOrchestrator
 from app.models.layers import (
     TacticsOptionsResponse,
@@ -41,4 +42,5 @@ async def tactics_confirm(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """确认策略层选择，持久化为长期默认配置"""
+    require_product_identity(req)
     return await orchestrator.confirm_tactics(req)

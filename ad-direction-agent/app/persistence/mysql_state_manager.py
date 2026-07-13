@@ -18,6 +18,49 @@ logger = logging.getLogger(__name__)
 BASE_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 
+_IDENTITY_TABLES = (
+    "strategy_config",
+    "tactics_config",
+    "acos_override",
+    "budget_override",
+    "adjustment_history",
+    "p3_recommendation",
+    "keyword_analysis",
+    "target_scores",
+    "workflow_meta",
+    "feedback",
+    "analysis_session",
+)
+
+
+def _coerce_shop_id(value) -> int | None:
+    try:
+        shop_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return shop_id if shop_id > 0 else None
+
+
+def _coerce_parent_seller_sku(value) -> str | None:
+    sku = str(value or "").strip()
+    return sku or None
+
+
+def _identity_from_mapping(data: dict | None) -> tuple[int | None, str | None]:
+    data = data or {}
+    shop_id = _coerce_shop_id(
+        data.get("shop_id")
+        or data.get("_shopId")
+        or data.get("shopId")
+    )
+    parent_seller_sku = _coerce_parent_seller_sku(
+        data.get("parent_seller_sku")
+        or data.get("_parentSellerSku")
+        or data.get("parentSellerSku")
+    )
+    return shop_id, parent_seller_sku
+
+
 class MySQLStateManager:
     """ASIN 级长期配置与 AI 结果（MySQL）。"""
 
@@ -87,6 +130,40 @@ class MySQLStateManager:
                     s = stmt.strip()
                     if s and not s.startswith("--"):
                         cur.execute(s)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                      FROM INFORMATION_SCHEMA.COLUMNS
+                     WHERE TABLE_SCHEMA=%s
+                       AND TABLE_NAME='analysis_session'
+                       AND COLUMN_NAME='execution_started_at'
+                    """,
+                    (settings.state_db_database,),
+                )
+                row = cur.fetchone() or {}
+                if not int(row.get("cnt") or 0):
+                    cur.execute(
+                        "ALTER TABLE analysis_session "
+                        "ADD COLUMN execution_started_at DATETIME(6) NULL"
+                    )
+                for table in _IDENTITY_TABLES:
+                    cur.execute(
+                        """
+                        SELECT COLUMN_NAME
+                          FROM INFORMATION_SCHEMA.COLUMNS
+                         WHERE TABLE_SCHEMA=%s
+                           AND TABLE_NAME=%s
+                           AND COLUMN_NAME IN ('shop_id', 'parent_seller_sku')
+                        """,
+                        (settings.state_db_database, table),
+                    )
+                    existing_cols = {r.get("COLUMN_NAME") for r in (cur.fetchall() or [])}
+                    if "shop_id" not in existing_cols:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN shop_id BIGINT NULL")
+                    if "parent_seller_sku" not in existing_cols:
+                        cur.execute(
+                            f"ALTER TABLE {table} ADD COLUMN parent_seller_sku VARCHAR(128) NULL"
+                        )
             conn.commit()
             self._schema_ready = True
             logger.info("MySQL state schema ensured")
@@ -178,6 +255,7 @@ class MySQLStateManager:
                 logger.error("schema ensure failed: %s", e)
                 return False
             now = self._now()
+            shop_id, parent_seller_sku = _identity_from_mapping(config)
             try:
                 if any(k in config for k in ("product_level", "product_stage", "season_stage")):
                     existing = self.get_long_term_config(asin)
@@ -185,22 +263,35 @@ class MySQLStateManager:
                     ps = config.get("product_stage", existing.get("product_stage"))
                     ss = config.get("season_stage", existing.get("season_stage"))
                     self._execute(
-                        "INSERT INTO strategy_config (asin, product_level, product_stage, season_stage, updated_at) "
-                        "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "INSERT INTO strategy_config "
+                        "(asin, shop_id, parent_seller_sku, product_level, product_stage, season_stage, updated_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                        "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                         "product_level=VALUES(product_level), product_stage=VALUES(product_stage), "
                         "season_stage=VALUES(season_stage), updated_at=VALUES(updated_at)",
-                        (asin, pl, ps, ss, now),
+                        (asin, shop_id, parent_seller_sku, pl, ps, ss, now),
                     )
                 if "ad_purposes" in config or "target_keyword_strategy" in config:
                     existing = self.get_long_term_config(asin)
                     ap = config.get("ad_purposes", existing.get("ad_purposes", []))
                     kt = config.get("target_keyword_strategy", existing.get("target_keyword_strategy", []))
                     self._execute(
-                        "INSERT INTO tactics_config (asin, ad_purposes, target_keyword_strategy, updated_at) "
-                        "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "INSERT INTO tactics_config "
+                        "(asin, shop_id, parent_seller_sku, ad_purposes, target_keyword_strategy, updated_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                        "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                         "ad_purposes=VALUES(ad_purposes), target_keyword_strategy=VALUES(target_keyword_strategy), "
                         "updated_at=VALUES(updated_at)",
-                        (asin, json.dumps(ap, ensure_ascii=False), json.dumps(kt, ensure_ascii=False), now),
+                        (
+                            asin,
+                            shop_id,
+                            parent_seller_sku,
+                            json.dumps(ap, ensure_ascii=False),
+                            json.dumps(kt, ensure_ascii=False),
+                            now,
+                        ),
                     )
                 if "daily_budget_override" in config:
                     val = config["daily_budget_override"]
@@ -209,10 +300,13 @@ class MySQLStateManager:
                     else:
                         exp = self._next_5am_utc()
                         self._execute(
-                            "INSERT INTO budget_override (asin, value, created_at, expires_at) "
-                            "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "INSERT INTO budget_override "
+                            "(asin, shop_id, parent_seller_sku, value, created_at, expires_at) "
+                            "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                            "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                             "value=VALUES(value), created_at=VALUES(created_at), expires_at=VALUES(expires_at)",
-                            (asin, float(val), now, exp),
+                            (asin, shop_id, parent_seller_sku, float(val), now, exp),
                         )
                 return True
             except Exception as e:  # noqa: BLE001
@@ -288,13 +382,19 @@ class MySQLStateManager:
                 layer = state.get("current_layer", "strategy")
                 lc = state.get("layers_completed", [])
                 ex = state.get("execution")
+                shop_id, parent_seller_sku = _identity_from_mapping(state)
                 self._execute(
-                    "INSERT INTO workflow_meta (asin, current_layer, layers_completed, execution_selection, updated_at) "
-                    "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "INSERT INTO workflow_meta "
+                    "(asin, shop_id, parent_seller_sku, current_layer, layers_completed, execution_selection, updated_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                     "current_layer=VALUES(current_layer), layers_completed=VALUES(layers_completed), "
                     "execution_selection=VALUES(execution_selection), updated_at=VALUES(updated_at)",
                     (
                         asin,
+                        shop_id,
+                        parent_seller_sku,
                         layer,
                         json.dumps(lc, ensure_ascii=False),
                         json.dumps(ex, ensure_ascii=False) if ex else None,
@@ -306,41 +406,59 @@ class MySQLStateManager:
                     for days_key, payload in ka.items():
                         days = int(days_key)
                         self._execute(
-                            "INSERT INTO keyword_analysis (asin, days, payload, updated_at) "
-                            "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "INSERT INTO keyword_analysis "
+                            "(asin, shop_id, parent_seller_sku, days, payload, updated_at) "
+                            "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                            "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                             "payload=VALUES(payload), updated_at=VALUES(updated_at)",
-                            (asin, days, json.dumps(payload, ensure_ascii=False), now),
+                            (asin, shop_id, parent_seller_sku, days, json.dumps(payload, ensure_ascii=False), now),
                         )
                 elif isinstance(ka, list):
                     self._execute(
-                        "INSERT INTO keyword_analysis (asin, days, payload, updated_at) "
-                        "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "INSERT INTO keyword_analysis "
+                        "(asin, shop_id, parent_seller_sku, days, payload, updated_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                        "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                         "payload=VALUES(payload), updated_at=VALUES(updated_at)",
-                        (asin, 7, json.dumps(ka, ensure_ascii=False), now),
+                        (asin, shop_id, parent_seller_sku, 7, json.dumps(ka, ensure_ascii=False), now),
                     )
                 ts = state.get("target_scores")
                 if isinstance(ts, dict):
                     for days_key, payload in ts.items():
                         days = int(days_key)
                         self._execute(
-                            "INSERT INTO target_scores (asin, days, payload, updated_at) "
-                            "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "INSERT INTO target_scores "
+                            "(asin, shop_id, parent_seller_sku, days, payload, updated_at) "
+                            "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                            "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                            "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                             "payload=VALUES(payload), updated_at=VALUES(updated_at)",
-                            (asin, days, json.dumps(payload, ensure_ascii=False), now),
+                            (asin, shop_id, parent_seller_sku, days, json.dumps(payload, ensure_ascii=False), now),
                         )
                 elif isinstance(ts, list) and ts:
                     self._execute(
-                        "INSERT INTO target_scores (asin, days, payload, updated_at) "
-                        "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "INSERT INTO target_scores "
+                        "(asin, shop_id, parent_seller_sku, days, payload, updated_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                        "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                         "payload=VALUES(payload), updated_at=VALUES(updated_at)",
-                        (asin, 7, json.dumps(ts, ensure_ascii=False), now),
+                        (asin, shop_id, parent_seller_sku, 7, json.dumps(ts, ensure_ascii=False), now),
                     )
                 return True
             except Exception as e:  # noqa: BLE001
                 logger.error("写入工作流状态失败 [%s]: %s", asin, e)
                 return False
 
-    def advance_layer(self, asin: str, layer: str) -> bool:
+    def advance_layer(
+        self,
+        asin: str,
+        layer: str,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         with self._get_lock(asin):
             state = self.get_workflow_state(asin)
             completed = state.get("layers_completed", [])
@@ -349,12 +467,26 @@ class MySQLStateManager:
                 completed.append(current)
             state["layers_completed"] = completed
             state["current_layer"] = layer
+            if shop_id:
+                state["shop_id"] = shop_id
+            if parent_seller_sku:
+                state["parent_seller_sku"] = parent_seller_sku
             return self.set_workflow_state(asin, state)
 
-    def save_execution(self, asin: str, selection: dict) -> bool:
+    def save_execution(
+        self,
+        asin: str,
+        selection: dict,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         with self._get_lock(asin):
             state = self.get_workflow_state(asin)
             state["execution"] = selection
+            if shop_id:
+                state["shop_id"] = shop_id
+            if parent_seller_sku:
+                state["parent_seller_sku"] = parent_seller_sku
             return self.set_workflow_state(asin, state)
 
     def get_adjustment_history(self, asin: str, days: int = 7) -> list[dict]:
@@ -390,19 +522,26 @@ class MySQLStateManager:
                 return []
 
     def record_adjustment(self, asin: str, target_acos: int | None = None,
-                          daily_budget: float | None = None) -> bool:
+                          daily_budget: float | None = None,
+                          shop_id: int | None = None,
+                          parent_seller_sku: str | None = None) -> bool:
         with self._get_lock(asin):
             try:
                 self.ensure_schema()
                 today = datetime.now(timezone.utc).date()
                 now = self._now()
+                shop_id = _coerce_shop_id(shop_id)
+                parent_seller_sku = _coerce_parent_seller_sku(parent_seller_sku)
                 self._execute(
-                    "INSERT INTO adjustment_history (asin, record_date, target_acos, daily_budget, operated_at) "
-                    "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "INSERT INTO adjustment_history "
+                    "(asin, shop_id, parent_seller_sku, record_date, target_acos, daily_budget, operated_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                     "target_acos=COALESCE(VALUES(target_acos), target_acos), "
                     "daily_budget=COALESCE(VALUES(daily_budget), daily_budget), "
                     "operated_at=VALUES(operated_at)",
-                    (asin, today, target_acos, daily_budget, now),
+                    (asin, shop_id, parent_seller_sku, today, target_acos, daily_budget, now),
                 )
                 cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date()
                 self._execute(
@@ -454,11 +593,15 @@ class MySQLStateManager:
                 result["created_at"] = now.isoformat()
                 result["expires_at"] = exp.isoformat()
                 result["from_cache"] = False
+                shop_id, parent_seller_sku = _identity_from_mapping(result)
                 self._execute(
-                    "INSERT INTO p3_recommendation (asin, payload, created_at, expires_at) "
-                    "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "INSERT INTO p3_recommendation "
+                    "(asin, shop_id, parent_seller_sku, payload, created_at, expires_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                     "payload=VALUES(payload), created_at=VALUES(created_at), expires_at=VALUES(expires_at)",
-                    (asin, json.dumps(result, ensure_ascii=False), now, exp),
+                    (asin, shop_id, parent_seller_sku, json.dumps(result, ensure_ascii=False), now, exp),
                 )
                 return True
             except Exception as e:  # noqa: BLE001
@@ -484,17 +627,28 @@ class MySQLStateManager:
                 logger.warning("读取目标ACOS覆盖失败 [%s]: %s", asin, e)
                 return None
 
-    def set_target_acos_override(self, asin: str, value: int) -> bool:
+    def set_target_acos_override(
+        self,
+        asin: str,
+        value: int,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         with self._get_lock(asin):
             try:
                 self.ensure_schema()
                 now = self._now()
                 exp = self._next_5am_utc()
+                shop_id = _coerce_shop_id(shop_id)
+                parent_seller_sku = _coerce_parent_seller_sku(parent_seller_sku)
                 self._execute(
-                    "INSERT INTO acos_override (asin, value, created_at, expires_at) "
-                    "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "INSERT INTO acos_override "
+                    "(asin, shop_id, parent_seller_sku, value, created_at, expires_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                     "value=VALUES(value), created_at=VALUES(created_at), expires_at=VALUES(expires_at)",
-                    (asin, value, now, exp),
+                    (asin, shop_id, parent_seller_sku, value, now, exp),
                 )
                 return True
             except Exception as e:  # noqa: BLE001
@@ -526,38 +680,97 @@ class MySQLStateManager:
         try:
             self.ensure_schema()
             row = self._execute(
-                "SELECT run_id, started_at FROM analysis_session WHERE asin=%s", (asin,), "one"
+                "SELECT run_id, started_at, execution_started_at FROM analysis_session WHERE asin=%s", (asin,), "one"
             )
             if not row or not row.get("run_id"):
                 return None
             st = row.get("started_at")
+            ex_st = row.get("execution_started_at")
             # MySQL datetime 列读出来是 naive；self._now() 是 aware UTC
             # （set_analysis_session 写入时也是 _now() 的 UTC 值），
             # 比较时显式补 tzinfo，避免 "can't subtract offset-naive and offset-aware datetimes"。
             if st and st.tzinfo is None:
                 st = st.replace(tzinfo=timezone.utc)
+            if ex_st and ex_st.tzinfo is None:
+                ex_st = ex_st.replace(tzinfo=timezone.utc)
             # TTL 12h：超期自动清，防止运营执行权永久冻结
             if st and (self._now() - st).total_seconds() > 12 * 3600:
                 self.clear_analysis_session(asin)
                 return None
             return {"run_id": row["run_id"],
-                    "started_at": st.isoformat() if hasattr(st, "isoformat") else st}
+                    "started_at": st.isoformat() if hasattr(st, "isoformat") else st,
+                    "execution_started_at": ex_st.isoformat() if hasattr(ex_st, "isoformat") else ex_st}
         except Exception as e:  # noqa: BLE001
             logger.warning("读取分析事件标记失败 [%s]: %s", asin, e)
             return None
 
-    def set_analysis_session(self, asin: str, run_id: str) -> bool:
+    def set_analysis_session(
+        self,
+        asin: str,
+        run_id: str,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         with self._get_lock(asin):
             try:
                 self.ensure_schema()
+                shop_id = _coerce_shop_id(shop_id)
+                parent_seller_sku = _coerce_parent_seller_sku(parent_seller_sku)
                 self._execute(
-                    "INSERT INTO analysis_session (asin, run_id, started_at) VALUES (%s,%s,%s) "
-                    "ON DUPLICATE KEY UPDATE run_id=VALUES(run_id), started_at=VALUES(started_at)",
-                    (asin, run_id, self._now()),
+                    "INSERT INTO analysis_session "
+                    "(asin, shop_id, parent_seller_sku, run_id, started_at) "
+                    "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
+                    "run_id=VALUES(run_id), started_at=VALUES(started_at)",
+                    (asin, shop_id, parent_seller_sku, run_id, self._now()),
                 )
                 return True
             except Exception as e:  # noqa: BLE001
                 logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
+                return False
+
+    def mark_analysis_execution_started(
+        self,
+        asin: str,
+        run_id: str,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                shop_id = _coerce_shop_id(shop_id)
+                parent_seller_sku = _coerce_parent_seller_sku(parent_seller_sku)
+                conn = pymysql.connect(**self._connect_kwargs())
+                try:
+                    with conn.cursor() as cur:
+                        affected = cur.execute(
+                            "UPDATE analysis_session SET execution_started_at=%s, "
+                            "shop_id=COALESCE(%s, shop_id), "
+                            "parent_seller_sku=COALESCE(%s, parent_seller_sku) "
+                            "WHERE asin=%s AND run_id=%s",
+                            (self._now(), shop_id, parent_seller_sku, asin, run_id),
+                        )
+                    conn.commit()
+                    return bool(affected)
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.error("写入执行层分析启动标记失败 [%s]: %s", asin, e)
+                return False
+
+    def clear_analysis_execution_started(self, asin: str) -> bool:
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute(
+                    "UPDATE analysis_session SET execution_started_at=NULL WHERE asin=%s",
+                    (asin,),
+                )
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("清除执行层分析启动标记失败 [%s]: %s", asin, e)
                 return False
 
     def clear_analysis_session(self, asin: str) -> bool:
@@ -575,17 +788,23 @@ class MySQLStateManager:
             try:
                 self.ensure_schema()
                 payload = submission.model_dump()
+                shop_id, parent_seller_sku = _identity_from_mapping(payload)
                 submitted = payload.get("submitted_at")
                 if submitted and isinstance(submitted, str):
                     submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
                 else:
                     submitted_dt = self._now()
                 self._execute(
-                    "INSERT INTO feedback (id, asin, payload, submitted_at) VALUES (%s,%s,%s,%s) "
-                    "ON DUPLICATE KEY UPDATE payload=VALUES(payload), submitted_at=VALUES(submitted_at)",
+                    "INSERT INTO feedback (id, asin, shop_id, parent_seller_sku, payload, submitted_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
+                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
+                    "payload=VALUES(payload), submitted_at=VALUES(submitted_at)",
                     (
                         submission.id,
                         asin,
+                        shop_id,
+                        parent_seller_sku,
                         json.dumps(payload, ensure_ascii=False),
                         submitted_dt,
                     ),

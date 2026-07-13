@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
+from app.api.product_identity import require_product_identity_dict
 from app.config.settings import settings
 from app.persistence.state_factory import get_state_manager
 
@@ -49,6 +50,7 @@ async def decision_context(asin: str = "", shopId: str = ""):
         state = get_state_manager()
         sess = state.get_analysis_session(asin)
         in_progress = sess.get("run_id") if sess else None
+        execution_started_at = sess.get("execution_started_at") if sess else None
 
         # 2. ERP DB 已完成批次列表（容错: DB 不通不崩）
         #    has_config 以 ERP 历史记录为准：有已完成批次即视为已配置（与 state 库无关）。
@@ -66,6 +68,8 @@ async def decision_context(asin: str = "", shopId: str = ""):
             return {
                 "has_config": False,
                 "in_progress": in_progress,
+                "execution_started_at": execution_started_at,
+                "execution_running": bool(execution_started_at),
                 "latest_completed_id": None,
                 "latest_completed_updated_at": None,
                 "batches": [],
@@ -87,6 +91,8 @@ async def decision_context(asin: str = "", shopId: str = ""):
         return {
             "has_config": has_config,
             "in_progress": in_progress,
+            "execution_started_at": execution_started_at,
+            "execution_running": bool(execution_started_at),
             "latest_completed_id": latest_id,
             "latest_completed_updated_at": latest_updated,
             "batches": batches,
@@ -114,8 +120,19 @@ async def new_decision_event(req: dict):
     if not asin:
         return {"ok": False, "error": "asin 必填"}
 
+    require_product_identity_dict(req)
     state = get_state_manager()
     analysis_mode = str(req.get("analysis_mode", "REALTIME")).upper() or "REALTIME"
+    shop_id = req.get("_shopId") or req.get("shopId") or req.get("shop_id")
+    parent_seller_sku = (
+        req.get("_parentSellerSku")
+        or req.get("parentSellerSku")
+        or req.get("parent_seller_sku")
+    )
+    if hasattr(state, "clear_analysis_execution_started"):
+        ok = state.clear_analysis_execution_started(asin)
+        if ok is False:
+            logger.warning("清执行层分析启动标记未成功 [%s]", asin)
 
     # 幂等:已有进行中事件则复用
     existing = state.get_analysis_session(asin)
@@ -125,7 +142,12 @@ async def new_decision_event(req: dict):
                 "analysis_mode": analysis_mode, "reused": True}
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    if not state.set_analysis_session(asin, run_id):
+    if not state.set_analysis_session(
+        asin,
+        run_id,
+        shop_id=shop_id,
+        parent_seller_sku=parent_seller_sku,
+    ):
         return {"ok": False, "error": "标记进行中事件失败"}
 
     # 清 p3 缓存 + 广告方向；acos/预算 override 保留继承（保存覆盖/取消覆盖删除），保留 1-2
@@ -136,6 +158,10 @@ async def new_decision_event(req: dict):
         execution = dict(wf.get("execution") or {})
         execution["selected_directions"] = None
         wf["execution"] = execution
+        if shop_id:
+            wf["shop_id"] = shop_id
+        if parent_seller_sku:
+            wf["parent_seller_sku"] = parent_seller_sku
         state.set_workflow_state(asin, wf)
     except Exception as e:
         logger.warning("清 3-4 失败 [%s]: %s (非阻塞)", asin, e)
@@ -154,7 +180,8 @@ async def cancel_decision_event(req: dict):
     if not asin:
         return {"ok": False, "error": "asin 必填"}
     try:
-        get_state_manager().clear_analysis_session(asin)
+        state = get_state_manager()
+        state.clear_analysis_session(asin)
     except Exception as e:
         logger.exception("清进行中事件失败 [%s]: %s", asin, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}

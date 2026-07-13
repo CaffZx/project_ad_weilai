@@ -56,13 +56,9 @@ class ValidationEngine:
                 result = await rule.execute(**kwargs)
                 if result is not None:
                     items.append(enrich_validation_item(result))
-            except Exception as e:
-                logger.exception("规则 [%s] 执行异常: %s", rule.rule_id, e)
-                items.append(enrich_validation_item(ValidationItem(
-                    rule_id=rule.rule_id,
-                    level="confirmed",
-                    message=f"该项检查暂时无法完成，已跳过：{e}",
-                )))
+            except Exception:
+                logger.exception("规则 [%s] 执行异常，中止校验", rule.rule_id)
+                raise
 
         # 补充数据完整性信息
         completeness = DataCompleteness(

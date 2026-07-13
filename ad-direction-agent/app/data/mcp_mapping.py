@@ -22,6 +22,7 @@ class McpContext:
     site_code: str
     start_date: str
     end_date: str
+    shop_id: int | None = None
 
 
 ArgBuilder = Callable[[McpContext], dict]
@@ -102,7 +103,13 @@ META_TO_MCP_TOOLS: dict[str, list[str]] = {
     "META_FLOW_KEYWORD": ["flow_keywords"],
     "META_AD_PRODUCT": ["ad_product_report"],
     "META_AD_PLACEMENT": ["ad_placement_report"],
-    "META_AD_SEARCH_TERM": ["ad_search_term_report"],
+    # 2026-07-12 临时停调：ad_search_term_report 拉回的 payload 无任何下游消费者——
+    #   assemble_from_payloads 不解析它（无 normalizer），字段不进 ASINData，纯浪费一次 MCP 调用。
+    #   置空即在所有路径停止拉取（full fetch 默认全 meta + acos_crisis 场景 + optimize_acos 方向）。
+    #   下游本就拿不到该数据，停调零行为影响。
+    #   恢复：改回 ["ad_search_term_report"]（arg-builder 见 TOOL_ARG_BUILDERS:143、
+    #   validate.py:15 反查表均保留，未删）。
+    "META_AD_SEARCH_TERM": [],  # was ["ad_search_term_report"]
     "META_TREND": ["product_sales"],
 }
 

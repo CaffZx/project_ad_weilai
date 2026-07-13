@@ -626,6 +626,7 @@ class CampaignFetcher:
             site_code=site_code,
             start_date=start_date,
             end_date=end_date,
+            shop_id=self._last_shop_id or None,
         )
         flow_args = build_tool_args("flow_keywords", ctx)
         own_args = build_tool_args("own_keyword_flow", ctx)
@@ -914,6 +915,7 @@ class CampaignFetcher:
             site_code=site_code,
             start_date=start_date,
             end_date=end_date,
+            shop_id=self._last_shop_id or None,
         )
         child_args = build_tool_args("keyword_child_asins", ctx)
         own_args = build_tool_args("own_keyword_flow", ctx)

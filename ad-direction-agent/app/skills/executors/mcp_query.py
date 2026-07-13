@@ -63,6 +63,7 @@ class McpQuerySkillExecutor:
             site_code=db_ctx.site_code,
             start_date=start_date,
             end_date=end_date,
+            shop_id=db_ctx.shop_id,
         )
 
         meta_ids = meta_filter or list(META_TO_MCP_TOOLS.keys())

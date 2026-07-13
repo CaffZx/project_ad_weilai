@@ -117,7 +117,13 @@ class StateManager:
                 logger.error("写入工作流状态失败 [%s]: %s", asin, e)
                 return False
 
-    def advance_layer(self, asin: str, layer: str) -> bool:
+    def advance_layer(
+        self,
+        asin: str,
+        layer: str,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         """将工作流推进到指定层"""
         with self._get_lock(asin):
             state = self.get_workflow_state(asin)
@@ -127,13 +133,27 @@ class StateManager:
                 completed.append(current)
             state["layers_completed"] = completed
             state["current_layer"] = layer
+            if shop_id:
+                state["shop_id"] = shop_id
+            if parent_seller_sku:
+                state["parent_seller_sku"] = parent_seller_sku
             return self.set_workflow_state(asin, state)
 
-    def save_execution(self, asin: str, selection: dict) -> bool:
+    def save_execution(
+        self,
+        asin: str,
+        selection: dict,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         """保存执行层选择到工作流状态"""
         with self._get_lock(asin):
             state = self.get_workflow_state(asin)
             state["execution"] = selection
+            if shop_id:
+                state["shop_id"] = shop_id
+            if parent_seller_sku:
+                state["parent_seller_sku"] = parent_seller_sku
             return self.set_workflow_state(asin, state)
 
     # ── 调整历史 ─────────────────────────────────────────
@@ -169,7 +189,9 @@ class StateManager:
                 return []
 
     def record_adjustment(self, asin: str, target_acos: int | None = None,
-                          daily_budget: float | None = None) -> bool:
+                          daily_budget: float | None = None,
+                          shop_id: int | None = None,
+                          parent_seller_sku: str | None = None) -> bool:
         """记录一次调整。按日期分组，同日多次取最新。自动清理超 7 天。"""
         with self._get_lock(asin):
             from datetime import timedelta
@@ -268,7 +290,13 @@ class StateManager:
                 logger.warning("读取目标ACOS覆盖失败 [%s]: %s", asin, e)
                 return None
 
-    def set_target_acos_override(self, asin: str, value: int) -> bool:
+    def set_target_acos_override(
+        self,
+        asin: str,
+        value: int,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
         """写入目标 ACOS 手动覆盖，过期时间=次日 5:00（北京时间）"""
         with self._get_lock(asin):
             self._ensure_asin_dir(asin)
@@ -344,6 +372,36 @@ class StateManager:
             except OSError as e:
                 logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
                 return False
+
+    def mark_analysis_execution_started(self, asin: str, run_id: str) -> bool:
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return False
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or data.get("run_id") != run_id:
+                    return False
+                data["execution_started_at"] = datetime.now(timezone.utc).isoformat()
+                fp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                return True
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error("写入执行层分析启动标记失败 [%s]: %s", asin, e)
+                return False
+
+    def clear_analysis_execution_started(self, asin: str) -> bool:
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return True
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    data.pop("execution_started_at", None)
+                    fp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            except (json.JSONDecodeError, OSError):
+                pass
+        return True
 
     def clear_analysis_session(self, asin: str) -> bool:
         with self._get_lock(asin):

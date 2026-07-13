@@ -1,6 +1,6 @@
 """反馈收集数据模型"""
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class FeedbackModule(BaseModel):
@@ -17,6 +17,14 @@ class FeedbackSubmission(BaseModel):
     """一条完整的反馈记录"""
     id: str = ""                                   # {timestamp}_{asin}
     parent_asin: str
+    shop_id: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("shop_id", "_shopId", "shopId"),
+    )
+    parent_seller_sku: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("parent_seller_sku", "_parentSellerSku", "parentSellerSku"),
+    )
     session_start: str = ""                        # 前端首次加载的 ISO 时间戳
     submitted_at: str = ""                         # 提交时的 ISO 时间戳
     has_error: bool = False

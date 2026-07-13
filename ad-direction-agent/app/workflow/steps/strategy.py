@@ -122,12 +122,19 @@ async def run_confirm_strategy(ctx: WorkflowContext, req: StrategyConfirmRequest
         )
 
     config = {
+        "shop_id": req.shop_id,
+        "parent_seller_sku": req.parent_seller_sku,
         "product_level": req.product_level,
         "product_stage": req.product_stage,
         "season_stage": req.season_stage,
     }
     ctx.state.set_long_term_config(req.asin, config)
-    ctx.state.advance_layer(req.asin, "tactics")
+    ctx.state.advance_layer(
+        req.asin,
+        "tactics",
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
 
     return StrategyConfirmResponse(
         asin=req.asin,

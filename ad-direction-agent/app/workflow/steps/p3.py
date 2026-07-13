@@ -35,6 +35,7 @@ from app.workflow.data_contract import blocked_message, field_labels
 from app.workflow.data_gate import ensure_data_for_llm, is_llm_blocked
 from app.workflow.data_summary import build_data_summary
 from app.workflow.data_status import data_status_fields
+from app.workflow.steps.tactics import _attach_data_identity
 from app.workflow.helpers import (
     _is_valid_data,
     _rank_trend_label,
@@ -71,10 +72,26 @@ async def run_get_target_acos_recommendation(ctx: WorkflowContext, asin: str, da
     ad_purposes = long_term.get("ad_purposes", []) if long_term else []
     return recommender.recommend(data, ad_purposes)
 
-def run_save_target_acos_override(ctx: WorkflowContext, asin: str, value: int) -> bool:
+def run_save_target_acos_override(
+    ctx: WorkflowContext,
+    asin: str,
+    value: int,
+    shop_id: int | None = None,
+    parent_seller_sku: str | None = None,
+) -> bool:
     """运营手动设定目标 ACOS（次日 5:00 过期），写入调整历史"""
-    ctx.state.record_adjustment(asin, target_acos=value)
-    return ctx.state.set_target_acos_override(asin, value)
+    ctx.state.record_adjustment(
+        asin,
+        target_acos=value,
+        shop_id=shop_id,
+        parent_seller_sku=parent_seller_sku,
+    )
+    return ctx.state.set_target_acos_override(
+        asin,
+        value,
+        shop_id=shop_id,
+        parent_seller_sku=parent_seller_sku,
+    )
 
 def run_clear_target_acos_override(ctx: WorkflowContext, asin: str) -> bool:
     """清除手动设定的目标 ACOS"""
@@ -103,10 +120,28 @@ async def run_get_budget_bid_recommendation(ctx: WorkflowContext, asin: str, day
     season_stage = long_term.get("season_stage", "淡季") if long_term else "淡季"
     return recommender.recommend(data, ad_purposes, season_stage, last_adjustment)
 
-def run_save_budget_override(ctx: WorkflowContext, asin: str, value: float) -> bool:
+def run_save_budget_override(
+    ctx: WorkflowContext,
+    asin: str,
+    value: float,
+    shop_id: int | None = None,
+    parent_seller_sku: str | None = None,
+) -> bool:
     """运营手动设定日预算，写入 long_term_config + 调整历史"""
-    ctx.state.record_adjustment(asin, daily_budget=value)
-    return ctx.state.set_long_term_config(asin, {"daily_budget_override": value})
+    ctx.state.record_adjustment(
+        asin,
+        daily_budget=value,
+        shop_id=shop_id,
+        parent_seller_sku=parent_seller_sku,
+    )
+    return ctx.state.set_long_term_config(
+        asin,
+        {
+            "shop_id": shop_id,
+            "parent_seller_sku": parent_seller_sku,
+            "daily_budget_override": value,
+        },
+    )
 
 def run_clear_budget_override(ctx: WorkflowContext, asin: str) -> bool:
     """清除手动设定的日预算"""
@@ -294,6 +329,7 @@ async def run_get_unified_recommendation(ctx: WorkflowContext, asin: str, refres
             "data_completeness": verdict.to_completeness_dict(),
             **data_status_fields(data),
         }
+        _attach_data_identity(result, data)
         ctx.state.set_p3_recommendation(asin, result)
         return result
     except Exception as e:

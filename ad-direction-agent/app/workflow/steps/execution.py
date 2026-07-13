@@ -178,8 +178,18 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
 
 async def run_confirm_execution(ctx: WorkflowContext, req: ExecutionSelectRequest) -> ExecutionSelectResponse:
     """保存执行层选择到工作流状态（不持久化）"""
-    ctx.state.save_execution(req.asin, req.model_dump())
-    ctx.state.advance_layer(req.asin, "validation")
+    ctx.state.save_execution(
+        req.asin,
+        req.model_dump(),
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
+    ctx.state.advance_layer(
+        req.asin,
+        "validation",
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
 
     return ExecutionSelectResponse(
         asin=req.asin,

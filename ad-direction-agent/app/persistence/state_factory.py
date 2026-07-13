@@ -17,14 +17,11 @@ def get_state_manager():
         return _state_manager
     backend = (settings.state_backend or "json").lower()
     if backend == "mysql":
-        try:
-            from app.persistence.mysql_state_manager import MySQLStateManager
+        from app.persistence.mysql_state_manager import MySQLStateManager
 
-            _state_manager = MySQLStateManager()
-            logger.info("StateManager: MySQL backend")
-            return _state_manager
-        except Exception as e:  # noqa: BLE001
-            logger.warning("MySQL StateManager 不可用，回退 JSON: %s", e)
+        _state_manager = MySQLStateManager()
+        logger.info("StateManager: MySQL backend")
+        return _state_manager
     from app.persistence.state_manager import StateManager
 
     _state_manager = StateManager()

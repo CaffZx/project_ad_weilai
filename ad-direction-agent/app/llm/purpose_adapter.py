@@ -15,64 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def build_metrics_from_asin_data(data, days: int = 7) -> dict:
-    """从 ASINData 构建 purpose agent 需要的 metrics dict
+    """从 ASINData 构建 purpose agent 需要的 metrics dict（复用 field_mapping.asin_data_to_metrics）。"""
+    from app.data.field_mapping import asin_data_to_metrics
 
-    复用 direction-agent 已有的 field_mapping.asin_data_to_metrics，
-    若不可用则手工组装。
-    """
-    try:
-        # 优先使用 direction-agent 已有的转换函数
-        from app.data.field_mapping import asin_data_to_metrics  # type: ignore
-        return asin_data_to_metrics(data, days=days)
-    except (ImportError, AttributeError):
-        pass
-
-    # 手工组装 metrics
-    ad = data.ad_data
-    metrics = {}
-    if ad:
-        metrics["cpc"] = ad.cpc or 0
-        metrics["avg_acos"] = (ad.acos / 100) if ad.acos else 0
-        metrics["ctr"] = (ad.ctr / 100) if ad.ctr else 0
-        metrics["spend"] = ad.spend or 0
-        metrics["sales"] = ad.sales or 0
-    else:
-        metrics["cpc"] = 0
-        metrics["avg_acos"] = 0
-        metrics["ctr"] = 0
-
-    trend_orders = sum(tp.orders or 0 for tp in data.trend) if data.trend else 0
-    trend_ad_orders = sum(tp.ad_orders or 0 for tp in data.trend) if data.trend else 0
-    metrics["total_orders"] = (ad.orders if ad and ad.orders else None) or trend_orders or 0
-    metrics["ad_orders"] = (ad.orders if ad and ad.orders else None) or trend_ad_orders or 0
-    metrics["natural_order_ratio"] = (data.natural_order_ratio / 100) if data.natural_order_ratio else 0
-    metrics["net_cvr"] = (ad.cvr / 100) if ad and ad.cvr else 0
-    metrics["refund_rate"] = (data.refund_rate / 100) if data.refund_rate else 0
-    metrics["avg_star"] = data.rating or 0
-    metrics["avg_price"] = data.price or 0
-    metrics["total_inventory"] = data.signals.inventory_qty if data.signals else 0
-    metrics["avg_nature_rank"] = min(
-        (k.natural_rank for k in data.keywords if k.natural_rank), default=100
-    ) if data.keywords else 100
-    metrics["unit_gross_profit"] = (data.margin * data.price) if data.margin and data.price else 0
-
-    # 关键词列表
-    metrics["top_keywords"] = [
-        {
-            "word": kw.keyword,
-            "rank": kw.natural_rank,
-            "near_rank": kw.near_natural_rank,
-            "spend": kw.spend,
-            "search_rank": kw.search_rank or 0,
-            "sp_rank": kw.sp_rank or 0,
-            "rank_change": kw.rank_change_14d or 0,
-            "rank_change_14d": kw.rank_change_14d or 0,
-            "rank_change_7d": kw.rank_change_7d,
-        }
-        for kw in data.keywords[:20]
-    ]
-
-    return metrics
+    return asin_data_to_metrics(data, days=days)
 
 
 async def recommend_tactics_from_purpose(

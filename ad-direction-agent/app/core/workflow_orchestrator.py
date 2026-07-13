@@ -53,7 +53,7 @@ class WorkflowOrchestrator:
         decision_generator: DecisionPackageGenerator | None = None,
     ):
         self.aggregator = aggregator or DataAggregator()
-        self.recommender = Recommender()
+        self.recommender = recommender or Recommender()
         self.reasoner = reasoner or LLMReasoner()
         self.state = state_manager or get_state_manager()
         self.validator = validation_engine or ValidationEngine()
@@ -75,6 +75,35 @@ class WorkflowOrchestrator:
     def _data_task_key(asin: str, days: int, meta_filter: list[str] | None = None) -> tuple:
         return (asin, days, tuple(sorted(set(meta_filter or []))))
 
+    @staticmethod
+    def _has_product_identity(data: ASINData | None) -> bool:
+        return bool(
+            data
+            and getattr(data, "shop_id", None)
+            and getattr(data, "parent_seller_sku", None)
+        )
+
+    async def _discard_cache_without_identity(
+        self,
+        asin: str,
+        data: ASINData | None,
+        *,
+        days: int,
+        meta_filter: list[str] | None = None,
+    ) -> ASINData | None:
+        if not data:
+            return None
+        if self._has_product_identity(data):
+            return data
+        await asin_data_cache.delete(asin, days, meta_filter=meta_filter)
+        logger.info(
+            "ASIN data cache missing product identity, discarded [%s] days=%s meta_filter=%s",
+            asin,
+            days,
+            meta_filter,
+        )
+        return None
+
     # ── 数据缓存机制 ───────────────────────────────────────
 
     async def _preload_data(
@@ -86,7 +115,14 @@ class WorkflowOrchestrator:
         """后台预加载 ASIN 数据，不阻塞当前请求"""
         key = self._data_task_key(asin, days, meta_filter)
         async with self._cache_lock:
-            if await asin_data_cache.get(asin, days, meta_filter=meta_filter):
+            cached = await asin_data_cache.get(asin, days, meta_filter=meta_filter)
+            cached = await self._discard_cache_without_identity(
+                asin,
+                cached,
+                days=days,
+                meta_filter=meta_filter,
+            )
+            if cached:
                 return
             if key in self._data_tasks:
                 return
@@ -149,11 +185,18 @@ class WorkflowOrchestrator:
         if meta_filter:
             # 1) 本 filter 部分缓存命中
             cached = await asin_data_cache.get(asin, days, meta_filter=meta_filter)
+            cached = await self._discard_cache_without_identity(
+                asin,
+                cached,
+                days=days,
+                meta_filter=meta_filter,
+            )
             if cached:
                 return cached
             # 2) 全量缓存是任意 filter 的超集（strategy/options 后台 preload 写入）→ 直接复用。
             #    仅接受完整全量；partial 全量可能恰好缺本层维度，不冒险复用。
             full = await asin_data_cache.get(asin, days)
+            full = await self._discard_cache_without_identity(asin, full, days=days)
             if full and getattr(full, "data_freshness", None) != "partial":
                 return full
             # 3) miss → 拉本 filter 子集并缓存
@@ -162,6 +205,7 @@ class WorkflowOrchestrator:
             return data
 
         cached = await asin_data_cache.get(asin, days)
+        cached = await self._discard_cache_without_identity(asin, cached, days=days)
         if cached:
             return cached
 
@@ -175,6 +219,7 @@ class WorkflowOrchestrator:
             except Exception:
                 pass
             cached = await asin_data_cache.get(asin, days)
+            cached = await self._discard_cache_without_identity(asin, cached, days=days)
             if cached:
                 return cached
 
@@ -251,8 +296,20 @@ class WorkflowOrchestrator:
             )
         return await p3.run_get_target_acos_recommendation(self._ctx(), asin, days)
 
-    def save_target_acos_override(self, asin: str, value: int) -> bool:
-        return p3.run_save_target_acos_override(self._ctx(), asin, value)
+    def save_target_acos_override(
+        self,
+        asin: str,
+        value: int,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
+        return p3.run_save_target_acos_override(
+            self._ctx(),
+            asin,
+            value,
+            shop_id=shop_id,
+            parent_seller_sku=parent_seller_sku,
+        )
 
     def clear_target_acos_override(self, asin: str) -> bool:
         return p3.run_clear_target_acos_override(self._ctx(), asin)
@@ -262,8 +319,20 @@ class WorkflowOrchestrator:
             return await self._get_bridge().run_endpoint("p3.budget_bid", asin=asin, days=days)
         return await p3.run_get_budget_bid_recommendation(self._ctx(), asin, days)
 
-    def save_budget_override(self, asin: str, value: float) -> bool:
-        return p3.run_save_budget_override(self._ctx(), asin, value)
+    def save_budget_override(
+        self,
+        asin: str,
+        value: float,
+        shop_id: int | None = None,
+        parent_seller_sku: str | None = None,
+    ) -> bool:
+        return p3.run_save_budget_override(
+            self._ctx(),
+            asin,
+            value,
+            shop_id=shop_id,
+            parent_seller_sku=parent_seller_sku,
+        )
 
     def clear_budget_override(self, asin: str) -> bool:
         return p3.run_clear_budget_override(self._ctx(), asin)

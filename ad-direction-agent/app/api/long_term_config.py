@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
+from app.api.product_identity import require_product_identity
 from app.persistence.state_manager import StateManager
 from app.models.layers import LongTermConfigResponse, LongTermConfigUpdateRequest
 
@@ -38,7 +39,11 @@ async def update_config(
     sm: StateManager = Depends(get_state_manager),
 ):
     """手动更新ASIN的长期配置"""
-    updates = {}
+    require_product_identity(req)
+    updates = {
+        "shop_id": req.shop_id,
+        "parent_seller_sku": req.parent_seller_sku,
+    }
     if req.product_level is not None:
         updates["product_level"] = req.product_level
     if req.product_stage is not None:

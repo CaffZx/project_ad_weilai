@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_workflow_orchestrator
+from app.api.product_identity import require_product_identity
 from app.core.workflow_orchestrator import WorkflowOrchestrator
 from app.models.layers import (
     ExecutionOptionsResponse,
@@ -40,6 +41,7 @@ async def execution_select(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """确认执行层方向选择（持久化至 workflow_state，Campaign 分析复用）"""
+    require_product_identity(req)
     return await orchestrator.confirm_execution(req)
 
 
@@ -81,7 +83,13 @@ async def save_target_acos_override(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """运营手动设定目标 ACOS，写入 long_term_config 长期保存"""
-    ok = orchestrator.save_target_acos_override(req.asin, req.value)
+    require_product_identity(req)
+    ok = orchestrator.save_target_acos_override(
+        req.asin,
+        req.value,
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
     return {"asin": req.asin, "saved": ok, "value": req.value}
 
 
@@ -101,7 +109,13 @@ async def save_budget_override(
     orchestrator: WorkflowOrchestrator = Depends(get_workflow_orchestrator),
 ):
     """运营手动设定日预算，写入 long_term_config 长期保存"""
-    ok = orchestrator.save_budget_override(req.asin, req.value)
+    require_product_identity(req)
+    ok = orchestrator.save_budget_override(
+        req.asin,
+        req.value,
+        shop_id=req.shop_id,
+        parent_seller_sku=req.parent_seller_sku,
+    )
     return {"asin": req.asin, "saved": ok, "value": req.value}
 
 

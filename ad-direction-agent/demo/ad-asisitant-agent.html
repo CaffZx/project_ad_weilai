@@ -3824,6 +3824,51 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
   }
 };
 
+window._mountCampaignWaiting = async function({ run_id = '' } = {}) {
+  const root = document.getElementById('campPanelRoot');
+  if (!root || !asin) return;
+  if (window._campaignPanelAPI) {
+    try { window._campaignPanelAPI.unmount(); } catch (_) {}
+    window._campaignPanelAPI = null;
+  }
+  window._campaignRealtimeRunning = true;
+  root.innerHTML = _CAMP_LOADING_HTML;
+  showCampaignAnalysisOverlay();
+  const started = Date.now();
+  const maxWaitMs = 20 * 60 * 1000;
+  try {
+    while (Date.now() - started < maxWaitMs) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      await refreshDecisionContext();
+      const ctx = _decisionContext || {};
+      if (ctx.in_progress && ctx.execution_running) continue;
+      hideCampaignAnalysisOverlay(true);
+      window._campaignRealtimeRunning = false;
+      if (ctx.in_progress) {
+        root.innerHTML = _CAMP_IN_PROGRESS_HTML;
+        applyButtonRenames();
+        const btn = root.querySelector('#campRunRealtimeBtn');
+        if (btn) btn.addEventListener('click', () => window._mountCampaignRealtime({ run_id: ctx.in_progress }));
+        return;
+      }
+      applyBatchBarFromCtx(ctx);
+      await window._mountCampaignBatch({
+        decision_id: ctx.latest_completed_id || '',
+        executable: !!ctx.latest_completed_id,
+      });
+      return;
+    }
+    hideCampaignAnalysisOverlay(true);
+    root.innerHTML = `
+      <div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;">
+        <div style="font-weight:600;color:var(--fg);margin-bottom:6px;">执行层分析仍在后台运行</div>
+        <div>状态同步超时，可稍后刷新页面查看最新批次。</div>
+      </div>`;
+  } finally {
+    window._campaignRealtimeRunning = false;
+  }
+};
+
 const _origSwitchTab = switchTab;
 window.switchTab = async function(tabId) {
   _origSwitchTab(tabId);
@@ -3833,6 +3878,10 @@ window.switchTab = async function(tabId) {
   const ctx = window._decisionContext || {};
   // C 态：有进行中事件 → 执行层无结果，空面板提示（不挂 panel）
   if (ctx.in_progress) {
+    if (ctx.execution_running) {
+      await window._mountCampaignWaiting({ run_id: ctx.in_progress });
+      return;
+    }
     root.innerHTML = _CAMP_IN_PROGRESS_HTML;
     applyButtonRenames();
     const btn = root.querySelector('#campRunRealtimeBtn');
