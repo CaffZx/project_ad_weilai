@@ -97,8 +97,10 @@ def _snapshot_action(card: dict) -> str:
         return "create_campaign"
     if cat == "KEEP":
         return "keep"
-    # 旧数据：淘汰藏在 group_type=low_bid_retention_group
-    if grp == "low_bid_retention_group":
+    if cat == "ADJUST":
+        return "adjust"
+    # 旧数据（suggest_category 为空/NULL）：淘汰藏在 group_type=low_bid_retention_group
+    if not cat and grp == "low_bid_retention_group":
         return "eliminate_to_low_bid_pool"
     return "adjust"
 
