@@ -58,6 +58,12 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
     )
     long_term = ctx.state.get_long_term_config(asin)
 
+    # 运营已保存的方向选择（不从推荐器取值，纯粹读回 state，供前端恢复勾选）
+    wf = ctx.state.get_workflow_state(asin)
+    saved_selections: list[str] = (
+        ((wf or {}).get("execution") or {}).get("selected_directions") or []
+    )
+
     # 将战略/策略字段注入ASINData，供Recommender使用
     if long_term:
         data.product_level = long_term.get("product_level")
@@ -166,6 +172,7 @@ async def run_get_execution_options(ctx: WorkflowContext, asin: str, days: int =
         asin=asin,
         directions=directions,
         recommended_directions=recommended_ids,
+        selected_directions=saved_selections,
         recommendation_summary=exec_reasoning,
         strategy_context=strategy_ctx,
         tactics_context=tactics_ctx,

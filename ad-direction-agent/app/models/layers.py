@@ -270,6 +270,7 @@ class ExecutionOptionsResponse(BaseModel):
     asin: str
     directions: list[ExecutionDirection]
     recommended_directions: list[str] = Field(default_factory=list)
+    selected_directions: list[str] = Field(default_factory=list)  # 运营已保存的方向，供前端恢复勾选
     recommendation_summary: str = ""
     strategy_context: StrategyConfirmRequest | None = None
     tactics_context: TacticsConfirmRequest | None = None

@@ -129,17 +129,17 @@ async def new_decision_event(req: dict):
         or req.get("parentSellerSku")
         or req.get("parent_seller_sku")
     )
-    if hasattr(state, "clear_analysis_execution_started"):
-        ok = state.clear_analysis_execution_started(asin)
-        if ok is False:
-            logger.warning("清执行层分析启动标记未成功 [%s]", asin)
-
     # 幂等:已有进行中事件则复用
     existing = state.get_analysis_session(asin)
     if existing and existing.get("run_id"):
         logger.info("复用现存进行中事件 [%s] run_id=%s", asin, existing["run_id"])
         return {"ok": True, "run_id": existing["run_id"],
                 "analysis_mode": analysis_mode, "reused": True}
+
+    if hasattr(state, "clear_analysis_execution_started"):
+        ok = state.clear_analysis_execution_started(asin)
+        if ok is False:
+            logger.warning("清执行层分析启动标记未成功 [%s]", asin)
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if not state.set_analysis_session(

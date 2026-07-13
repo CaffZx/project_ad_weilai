@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-11（版本日志见文末，最新 v3.16：秒开优化 + meta_filter 分级缓存）
+> **最后更新**: 2026-07-12（版本日志见文末，最新 v3.17：Product Identity 全线注入 + 挪组执行修复）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -296,6 +296,9 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-10 | **★ 护栏优先级重构 + R3/R4 LLM 重试编排** | `campaign_guardrails.py`：全部 11 条规则新增 `retry_instruction`+`campaign_key` 字段；P3 硬淘汰（无单且 bid≤$0.10/budget≤$1）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3；P4/P7/P8/P10/P11 修复边界 bug；提取 `_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词。`campaign.py`：R3/R4 重试编排循环——护栏拦截后按 campaign_key 带告警回灌 LLM 重判，最多 R3→R4 两轮，R4 后不再 R5，最终护栏兜底；`_apply_campaign_guardrails` 返回 `(GuardrailPass, warnings)`；`_backfill_campaign_adjustment_context` 提取复用。`reasoner.py`：`_guardrail_instruction` 注入批次提示 + `_guardrail_alert` 注入单活动告警。新增 `test_campaign_guardrails.py`(497行) + `test_campaign_guardrail_retry.py`(210行)；`test_campaign_resolve_conflicts.py` 更新 P3>P1 预期。6 files +1206/-111。 |
 | 07-11 | **★ 秒开优化：策略层轻量化 + meta_filter 分级缓存** | `tactics.py`：`run_get_tactics_options` 替换为纯缓存+长期配置读取版本，零 MCP/LLM 调用（旧版保存为 `_run_get_tactics_options_legacy`）。`diagnosis.py`：删除关键词 AI 分类自动回访逻辑（25行），避免缓存 miss 时触发重量级 MCP 拉取。`workflow_orchestrator.py`：缓存 key 加入 `meta_filter` 维度（`_data_task_key`），不同 filter 组合独立缓存不互串。`mcp_mapping.py`：BOOTSTRAP_TOOLS 拆为 `BASIC_BOOTSTRAP_TOOLS` + `CAMPAIGN_KEYWORD_BOOTSTRAP_TOOLS`；新增 `bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap。`settings.py`：新增 `meta_filter_dashboard_light` = [META_AD_PRODUCT, META_TREND]。新增 `test_lightweight_loading.py`(116行) + MCP 诊断文档 2 篇。18 files +466/-64。 |
 | 07-11 | **护栏告警仅用 retry_instruction** | `_build_guardrail_alerts` 不再回落 `message`（含规则编号的内部消息不应灌入 LLM prompt），`retry_instruction` 为空时直接跳过。test 补空值断言。2 files +25/-4。 |
+| 07-12 | **挪组 portfolioId 解析重构** | `advert_execution.py`：`_resolve_modify_portfolios` 移回 MCP 调用前执行，按 portfolioId 拆分 paramsVoList，匹配失败写入 `move_errors` 分类（不存在/多个/ID缺失），失败活动移除 campaignGroupType 后其他字段继续下发。`ExecPlan` 新增 `move_errors` 字段，confirm API 透传。`_match_portfolio` 改为单向子串匹配 + 返回 `(match, count)` 元组。`state.js` 前端按 group+reason 去重展示 sticky toast 含具体活动名。6+4+1 files。 |
+| 07-12 | **★ Product Identity 全线注入** | `product_identity.py`(新)：GET/POST 解析 `(asin, shop_id, parent_seller_sku)` 三元组，`require_product_identity_dict` 支持 path-param asin。`layers.py`：`ProductIdentityMixin` 注入 Strategy/Tactics/Execution/P3 全部 Confirm/Select 模型。`workflow_orchestrator`：缓存无 identity 数据自动丢弃重拉。`mysql_state_manager`/`schema.sql`：state DB 加 identity 列+写回。`purpose_adapter`：删 60 行重量级回退逻辑。删除过时交接文档。新增项目知识图谱 16 篇+计划文档+5 个测试。51 files +4669/-247。 |
+| 07-12 | **_snapshot_action 防御加固** | 补 `cat="ADJUST"` 显式映射；淘汰回退判定加 `not cat` 条件，避免 REACTIVATE/ADJUST 卡因 group=low_bid 被误判为淘汰。1 file +4/-2。 |
 
 ---
 
@@ -1261,6 +1264,10 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.17: Product Identity 全线注入 + 挪组执行修复（2026-07-12，本地未部署服务器）—— ①`product_identity.py` 解析 (asin,shop_id,parent_seller_sku) 三元组 ②`ProductIdentityMixin` 注入所有层请求模型 ③缓存无 identity 自动丢弃 ④挪组 portfolioId 解析前移+按 pid 拆请求+失败分类告警 ⑤`_snapshot_action` 补 ADJUST 映射+淘汰判定加固 ⑥知识图谱 16 篇+5 新测试。51+3+1 files +4691/-256。*
+
+最后更新：2026-07-12
+
 *v3.16: 秒开优化 + meta_filter 分级缓存（2026-07-11，本地未部署服务器）—— ①策略层轻量化：`run_get_tactics_options` 零 MCP/LLM 纯缓存读取，删除 diagnosis 自动回访逻辑 ②缓存 key 加入 meta_filter 维度 ③BOOTSTRAP_TOOLS 分级 + bootstrap_tools_for_meta() 按需跳过 campaign keyword 拉取 ④`_build_guardrail_alerts` 仅用 retry_instruction 不回落 message。18+2 files +491/-68。*
 
 *v3.15: 护栏优先级重构 + R3/R4 LLM 重试编排（2026-07-10，本地未部署服务器）—— ①P3 硬淘汰（无单且触底）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3 ②R3/R4 重试编排：护栏拦截后带 retry_instruction 回灌 LLM 重判，最多两轮，最终护栏兜底 ③全部 11 条护栏规则新增 retry_instruction/campaign_key 字段 ④KB 阈值全线对齐 + AUTO_BATCHABLE→AUTO_APPROVED ⑤campaign_viewmodel 审核等级转中文标签。6+17+1 files +1298/-184。*

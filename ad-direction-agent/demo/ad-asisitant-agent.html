@@ -1035,7 +1035,7 @@ async function bootstrapFromContext() {
   await refreshDecisionContext();
   // A/B/C 判定
   const ctx = _decisionContext;
-  if (!ctx.has_config) {
+  if (!ctx.has_config && !ctx.in_progress) {
     // A: 全新 ASIN·未配置·无批次 → 空壳引导（左侧仅基础信息，右侧仅批次栏 + 中心引导）。
     // 强制以「新建分析事件」为完整流程（配置→执行层）的唯一入口，消除"左侧可配但执行层跑不了"的并列困惑。
     renderEmptyStateA();
@@ -3278,6 +3278,14 @@ async function loadExecution() {
   if (_optsEl) {
     _optsEl.innerHTML = optsHtml;
     restoreManualInputs(manualSnapshot);
+    // 页面重载后 _manualTouched 为 false，restoreManualInputs 无法恢复；
+    // 此时从后端 state 里的 selected_directions 兜底，恢复运营已保存方向。
+    const savedDirs = data && data.selected_directions;
+    if (!_manualTouched.directions && savedDirs && savedDirs.length) {
+      qsa('input[data-dim="directions"]').forEach(cb => {
+        cb.checked = savedDirs.includes(cb.value);
+      });
+    }
     updateMultiTags('directions', { fromUser: false });
   }
 
