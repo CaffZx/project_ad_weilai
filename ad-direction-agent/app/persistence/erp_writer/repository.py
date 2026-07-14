@@ -781,7 +781,7 @@ class ErpDualWriterRepository:
                 s.get("estimated_budget_impact"),
                 1 if run.sanity_check_passed else 0,
                 len(base_warnings),
-                "; ".join(base_warnings),
+                "; ".join(base_warnings)[:500],
                 bg.get("main_push_count"),
                 bg.get("main_push_budget"),
                 bg.get("broad_auto_count"),

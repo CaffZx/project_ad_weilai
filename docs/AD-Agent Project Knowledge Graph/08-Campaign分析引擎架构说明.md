@@ -260,59 +260,237 @@ LLM 输出的 action 不是最终真源。`_normalize_action()` 会根据 propos
 
 ## 确定性护栏
 
-`campaign_guardrails.py` 是不依赖 LLM 的硬规则层。
+`campaign_guardrails.py` 是不依赖 LLM 的确定性规则引擎，所有硬规则归一化到这一个文件。
 
-它负责：
+### 在分析链路中的位置
 
-- 核心活动保护。
-- 新活动样本不足保护。
-- 复活动作保护。
-- 无单且 bid/budget 已触底时强制淘汰。
-- 预算上限、低花费、样本量、bid 下限等约束。
-- 新建活动 bid 保护。
-- 输出 `retry_instruction` 和 `campaign_key`，供 R3/R4 重判注入。
+```
+MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并行)
+    ↓
+投票合并(R3 tiebreaker: 仅冲突项) → backfill(context) → backfill(复评保护)
+    ↓
+┌─ 护栏编排 (campaign.py 第 667 行起) ───────────────────────┐
+│                                                             │
+│  护栏执行(_apply_campaign_guardrails)                        │
+│    ↓                                                        │
+│  ├─ corrections==0 → 通过 → 进入终态组合分类、sanity         │
+│  │                                                          │
+│  └─ corrections>0 → 构造告警 → 注入 prompt → R3 重判(精准/广泛分开)│
+│       ↓                                                     │
+│     护栏再次执行                                              │
+│       ├─ corrections==0 → 通过                               │
+│       └─ corrections>0 → R4 重判 → 护栏兜底(不再 R5，强制修正) │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+    ↓
+终态组合分类(§7b) → sanity_check → synthesis → budget_reallocation → ERP落库
+```
 
-护栏不只是过滤器。当前主链路会把护栏告警转成 per-campaign alert 注入 LLM 重判，最多进入 R3/R4 编排；最终仍不合规则走护栏兜底。
+护栏使用 `for retry_rounds((3,”R3”),(4,”R4”)): ... else: _apply_campaign_guardrails()` 结构。R4 后不再有 R5，护栏强制修正作为最终输出。
 
-生效节点和优先级：
+### 数据消费
 
-| 节点 | 代码锚点 | 作用 |
-| --- | --- | --- |
-| LLM 轮次后第一次护栏 | `campaign.py:671` 附近 | 对 R1/R2/R3 产出的建议做确定性修正，产生 rule result |
-| 护栏告警构造 | `campaign.py:680` / `campaign.py:2175` `_build_guardrail_alerts()` | 把违规点转成 LLM 可读的 retry instruction |
-| 重判注入 | `campaign.py:722` / `campaign.py:2193` `_inject_alerts_to_summaries()` | 将 per-campaign alert 注入后续 R3/R4 prompt |
-| 第二次护栏 | `campaign.py:785` 附近 | 重判后仍执行确定性兜底，保证最终输出不越界 |
-| 规则执行顺序 | `campaign_guardrails.py:83` `apply_all()` | 先 P0-P2 保护类，再 P3-P11 裁决/数值类 |
+护栏消费每个 `CampaignAdjustmentItem` 上的以下字段：
 
-低价池口径：
+| 字段 | 来源 | 用途 |
+|------|------|------|
+| `action` | LLM 产出 或 前序护栏修正 | 核心判定（是否淘汰、调整等） |
+| `current_bid` / `current_budget` | MCP `ad_campaign_basic_info_v2`，backfill 填入 | 硬淘汰触发、预算上限、bid 振幅判定 |
+| `proposed_bid` / `proposed_budget` | LLM 产出 | 修正目标值 |
+| `perf_7d` (cost/clicks/orders) | MCP `ad_campaign_product_report`，backfill 填入 | P1 样本不足判定、P3 出单检查、P7 花费检查、P8 点击检查 |
+| `days_online` | MCP `ad_campaign_basic_info_v2` | 新活动判定门槛 |
+| `days_since_reactivation` | 池表 `t_advert_agent_pool_entry`，backfill 填入 | 复评抖动保护 |
+| `is_core` | 关键词分析 `keyword_class_map` | 核心词保护 |
+| `placement_adjustments` | LLM 产出 + backfill | P10 广告位阻断 |
+| `product_stage` | `CampaignStrategyContext` 透传 | 测试期保护判定 |
+| `inventory_days` / `refund_rate` / `rating` | `CampaignStrategyContext` 透传 | P10 阻断条件 |
 
-- 严格预过滤/已在池判定是 AND：`bid <= 0.20` 且 `budget <= 1.00`，见 `campaign_guardrails.py:37` `is_strictly_in_low_bid_pool()`。
-- 归组/强制淘汰触发是 OR：`bid <= 0.10` 或 `budget <= 1.00`，见 `campaign_guardrails.py:48` `_is_in_elimination_pool()` 和 `campaign_guardrails.py:492` `_p3_should_force_eliminate()`。
-- 这两个口径不要混用：AND 更适合“已经低价池/预过滤”，OR 更适合“应该进入低价池/强制淘汰”。
+### 规则优先级和执行顺序
 
-护栏规则全表：
+执行两轮：第一轮保护类（P0-P2），第二轮裁决/数值类（P3-P11）。同一轮内按优先级顺序执行。后执行的规则看到前序规则修正后的值。
 
-| 优先级 | 规则 | 触发条件 | 修正动作 | 边界和后续 |
-| --- | --- | --- | --- | --- |
-| P0 | `P0_CORE_PROTECT` `campaign_guardrails.py:117` | `is_core=True` 且 action 为淘汰 | 强制 keep，清理淘汰相关 proposed 字段 | 最高保护之一；后续 P3 不应再把它淘汰 |
-| P1 | `P1_SAMPLE_INSUFFICIENT` `campaign_guardrails.py:134` | 样本不足且 action 为淘汰；样本不足包括投放天数 <=3、7 天花费 < $5、点击 <10 | 强制 keep | P3 硬淘汰优先级高于 P1；触底场景交给 P3/P4 |
-| P2 | `P2_REACTIVATION_PROTECT` `campaign_guardrails.py:159` | `days_since_reactivation` 在 0..3 且 action 为淘汰 | 强制 keep | 与 P0 同属高优保护，防止刚恢复活动抖动 |
-| P3 | `P3_FORCE_ELIMINATE` `campaign_guardrails.py:177` | 无订单、非核心、非复活保护，且 bid <=0.10 或 budget <=1.00 | 强制 `eliminate_to_low_bid_pool`，budget=1，bid 收敛到 0.10..0.20，清 placement/否定词 | P0/P2 高于 P3；P1 不阻断触底淘汰 |
-| P4 | `P4_ELIMINATION_FILL` `campaign_guardrails.py:223` | action 已为淘汰但淘汰字段不完整或越界 | 补 budget=1，bid=max(0.10,min(current,proposed,0.20))，清 placement/否定词 | 保证 ERP pending 和执行层拿到完整淘汰值 |
-| P5 | `P5_PROTECTION_REVERSAL` `campaign_guardrails.py:255` | 后续链路把核心/复活保护项重新变成淘汰 | 再次强制 keep | 保护类兜底，防止规则链或 LLM 重判反向覆盖 |
-| P6 | `P6_BUDGET_CAP` `campaign_guardrails.py:279` | proposed_budget > 200 | cap 到 200 | 硬上限，避免 LLM 给出异常预算 |
-| P7 | `P7_BUDGET_LOW_SPEND` `campaign_guardrails.py:294` | 非淘汰、预算上调，但近 7 天花费 / 当前预算容量 < 50% | proposed_budget 回到 current_budget | 花不完预算时禁止继续加预算 |
-| P8 | `P8_BID_AMPLITUDE` `campaign_guardrails.py:327` | 非淘汰、bid 变化超过 50%，且 clicks <10 | 将变化收敛到 30%，并保留最低 0.20 | 小样本下限制剧烈 bid 调整 |
-| P9 | `P9_BID_CAP` `campaign_guardrails.py:358` | proposed_bid > 3 | cap 到 3 | bid 硬上限 |
-| P10 | `P10_PLACEMENT_BLOCK` `campaign_guardrails.py:374` | TOS 加价，且库存天数 <15、退货率 >=30% 或评分 <3.8 | placement action 改为维持，proposed_pct=current_pct | 只阻断 TOS 增加，不等同于禁止所有活动调整 |
-| P11 | `P11_NEW_CAMPAIGN_BID` `campaign_guardrails.py:425` | 新活动创建后天数 <=3 且 bid 降幅过大 | 降幅收窄到不超过 current_bid 的 10% 或 $0.05 | P4 已处理淘汰值时跳过；P1 只改 action 不改 proposed 值，所以仍需检查降 bid |
+```
+第一轮（保护类，禁止淘汰）：
+  P0_CORE_PROTECT
+  P1_SAMPLE_INSUFFICIENT
+  P2_REACTIVATION_PROTECT
 
-通过/不通过后的后续：
+第二轮（裁决/数值类）：
+  P3_FORCE_ELIMINATE       ← P0/P2 高于 P3；P1 不阻断 P3
+  P5_PROTECTION_REVERSAL    ← P3 和 P4 之间，保护类兜底
+  P4_ELIMINATION_FILL       ← P5 之后才补淘汰值
+  P6_BUDGET_CAP
+  P7_BUDGET_LOW_SPEND
+  P8_BID_AMPLITUDE
+  P9_BID_CAP
+  P10_PLACEMENT_BLOCK
+  P11_NEW_CAMPAIGN_BID
+```
 
-- 通过护栏：建议继续进入预算冲突裁决、synthesis、ERP 映射和 viewmodel。
-- 被护栏修正：修正后的 item 成为新的事实输出，同时 rule result 进入 warnings/round detail，供前端和开发排查。
-- 需要 LLM 重判：护栏生成 `retry_instruction` 和 `campaign_key`，注入 R3/R4；重判后仍再次执行护栏。
-- 最终仍违规：以确定性护栏修正为准，不允许 LLM 原始输出直接写入 pending。
+### 每个规则的完整说明
+
+**P0 — 核心词禁淘汰** (`_p0_core_protect`)
+
+- 触发：`is_core=True` 且 `action == eliminate_to_low_bid_pool`
+- 动作：`_force_keep(item)` —— action 改 keep，proposed_bid/budget 回退到 current，清空 direction/placement_adjustments/negative_keywords
+- 优先级：最高。P3 显式检查 `is_core` → return，确保不被硬淘汰覆盖
+- KB 依据：KB21 §2 Custom 核心词保护
+- R3/R4 回灌文案：
+  > `[campaign_name] 核心词不得淘汰。若当前表现偏弱，可结合活动事实评估小幅降 bid、`
+  > `降预算、调整广告位或维持观察。`
+
+**P1 — 样本不足保护** (`_p1_new_campaign_protect`)
+
+- 触发：`action == eliminate_to_low_bid_pool` 且样本不足。
+- 样本不足判定（`_sample_insufficient` 共用函数）：`days_online ∈ [0,3]` 或 `perf_7d.cost < $5` 或 `perf_7d.clicks < 10` 或 `product_stage='测试期' 且 days_online < 14`
+- P3 硬淘汰优先级高于 P1：在执行 `_force_keep` 之前先查 `_p3_should_force_eliminate(item)`——若 P3 会强制淘汰，P1 跳过（不写矛盾告警），交给 P3 处理
+- 动作：`_force_keep(item)`。仅禁淘汰，不拦调整——LLM 判 `adjust_bid` 等非淘汰 action 时不触发
+- KB 依据：KB21 §2 / KB17 §1.2 SAMPLE_INSUFFICIENT
+- R3/R4 回灌文案：
+  > `[campaign_name] 样本不足({reasons})时不得直接淘汰；若同时命中无订单且 bid/预算触底，`
+  > `按硬淘汰判断。其他情况下，可结合事实评估小幅 bid、预算、广告位调整或维持。`
+
+**P2 — 复评抖动保护** (`_p2_reactivation_protect`)
+
+- 触发：`days_since_reactivation ∈ [0,3]` 且 `action == eliminate_to_low_bid_pool`
+- 动作：`_force_keep(item)`
+- 优先级：与 P0 同级，高于 P3。P3 显式检查 `days_since_reactivation` → return
+- 说明：防止淘汰 → 复评捞回 → 又被淘汰的死循环
+- R3/R4 回灌文案：
+  > `[campaign_name] 复评后仅 {days} 天，短期内不得再次淘汰。若表现仍弱，`
+  > `可结合事实评估轻量收敛 bid、预算或维持观察，避免进出池抖动。`
+
+**P3 — 硬淘汰触发** (`_p3_force_eliminate`)
+
+- 触发条件（全部同时满足）：
+  1. `action != eliminate_to_low_bid_pool`（不是已经是淘汰）
+  2. `perf_7d.orders == 0`（7 天无出单）
+  3. `is_core == False`（P0 保护优先）
+  4. `days_since_reactivation` 不在 [0,3]（P2 保护优先）
+  5. `_p3_should_force_eliminate()` 返回 True：`current_bid ≤ LOW_BID_MIN($0.10)` 或 `current_budget ≤ LOW_BUDGET_MAX($1.00)`
+- 动作：action 改 `eliminate_to_low_bid_pool`，budget=$1.00，bid 收敛到 [LOW_BID_MIN, LOW_BID_MAX] 区间，清 placement_adjustments/negative_keywords
+- 说明：P1 样本不足不阻断 P3——即使样本不足，无出单且已触底的活动仍应强制淘汰
+- 口径：OR（归组/强制修正用），严于预过滤 AND
+- R3/R4 回灌文案：
+  > `[campaign_name] 无订单且 bid=${current_bid}/budget=${current_budget} 已触及淘汰阈值，`
+  > `应进入低价捡漏/淘汰判断，不要仅因样本不足改回 keep。`
+
+**P4 — 淘汰值填充** (`_p4_elimination_fill`)
+
+- 触发：`action == eliminate_to_low_bid_pool`
+- 动作：budget 补齐到 $1.00；bid 取 `max($0.10, min(current_bid, proposed_bid, $0.20))`；清空 placement_adjustments/negative_keywords
+- 说明：保证 ERP pending 和执行层拿到完整淘汰值。LLM 原始输出或 P3 强制淘汰后都会经过此规则
+- R3/R4 回灌文案：
+  > `[campaign_name] 若判断为淘汰，预算应为 $1.00，bid 应落在低价捡漏区间，`
+  > `且不应附带广告位加价或否词调整。`
+
+**P5 — 淘汰保护反修正** (`_p5_protection_reversal`)
+
+- 触发：`action == eliminate_to_low_bid_pool` 且（`is_core == True` 或 `days_since_reactivation ∈ [0,3]`）
+- 动作：`_force_keep(item)`
+- 说明：防御性兜底。正常情况下 P3 的 early return 已阻止保护项被强制淘汰。若将来规则链变更导致漏网，P5 在 P3 后、P4 前兜底拉回
+- R3/R4 回灌文案：
+  > `[campaign_name] 受{'核心词' if core else '复评'}保护，不得淘汰。`
+  > `可结合事实重新评估轻量调整或维持。`
+
+**P6 — 日预算硬上限** (`_p6_budget_cap`)
+
+- 触发：`proposed_budget > BUDGET_CAP($200)`
+- 动作：截断到 $200
+- KB 依据：KB15 §1.4 / KB19 §10
+- R3/R4 回灌文案：
+  > `[campaign_name] 日预算不得超过 $200。如仍需加预算，`
+  > `请在上限内给出合规值；也可按事实选择维持或下调。`
+
+**P7 — 预算花不完禁加** (`_p7_budget_low_spend`)
+
+- 触发：非淘汰、`proposed_budget > current_budget`、且 `budget_utilization_pct = spend / (current_budget × 7) × 100 < 50%`（近 7 天日均花费不到日预算一半）
+- 动作：`proposed_budget` 封顶回 `current_budget`
+- 说明：当前预算都花不完，加预算无意义。应先提 Bid 或扩词
+- R3/R4 回灌文案：
+  > `[campaign_name] 近 7 天总花费 ${spend}，当前日预算 ${current_budget}，`
+  > `预算利用率 {pct}% 低于 50%，不应上调预算。可结合事实评估维持预算、下调预算、调整 bid 或广告位。`
+
+**P8 — Bid 振幅收敛** (`_p8_bid_amplitude`)
+
+- 触发：非淘汰、`abs(proposed_bid - current_bid)/current_bid > 0.5` 且 `perf_7d.clicks < 10`
+- 动作：收敛到 30% 变动，不低于 $0.20
+- 说明：小样本下 LLM 不宜做剧烈 bid 调整
+- R3/R4 回灌文案：
+  > `[campaign_name] clicks={clicks} 的样本下 bid 变动 {change_pct}% 偏大。`
+  > `可保留原调整方向，但幅度应更收敛；若事实支持，也可维持。`
+
+**P9 — Bid 硬上限** (`_p9_bid_cap`)
+
+- 触发：`proposed_bid > BID_HARD_CAP($3.00)`
+- 动作：截断到 $3.00
+- KB 依据：KB15 §1.4
+- R3/R4 回灌文案：
+  > `[campaign_name] bid 不得超过 $3.00。如仍需加 bid，`
+  > `请在上限内重新给值；否则按事实选择维持或其他调整。`
+
+**P10 — 广告位 TOS 阻断** (`_p10_placement_block`)
+
+- 触发：placement_adjustments 中有 TOS/头部加价（action 非”维持”），且 ASIN 级满足：`inventory_days < 15` 或 `refund_rate >= 30%` 或 `rating < 3.8`
+- 动作：action 改为”维持”，`proposed_pct` 同步回到 `current_pct`
+- 说明：只阻断 TOS 加价，不阻断其他广告位、不影响整体 action。数据来自 `CampaignStrategyContext`，非 activity 级
+- KB 依据：KB15 §3.2
+- R3/R4 回灌文案：
+  > `[campaign_name] 因 {'; '.join(blocks)}，不得上调头部 TOS 加价。`
+  > `这不代表商品位、其他位、bid 或预算必须维持；请按各自数据继续判断。`
+
+**P11 — 新活动禁大降 Bid** (`_p11_new_campaign_bid_protect`)
+
+- 触发：`days_online ∈ [0,3]`、非淘汰、`current_bid - proposed_bid > max_drop`，其中 `max_drop = min(current_bid × 10%, $0.05)`
+- 动作：降幅收窄到 `current_bid - max_drop`
+- 说明：新活动允许小降（≤ $0.05 或 ≤ 10%），阻止大幅降价。淘汰活动由 P4 处理，此规则跳过
+- KB 依据：KB15 §1.3 / KB19 §3
+- R3/R4 回灌文案：
+  > `[campaign_name] 上线仅 {days} 天，bid 不应大幅下调。若确需降 bid，`
+  > `可收敛到不超过 ${max_drop} 的降幅；也可按事实选择维持或其他轻量调整。`
+
+### 输出结构
+
+每个护栏修正都产生 `GuardrailResult`，包含四个字段：
+
+| 字段 | 消费方 | 内容 |
+|------|--------|------|
+| `message` | 运营前端 `warnings_list` | 人可读的拦截说明，如”核心词受保护，已强制修正为 keep” |
+| `retry_instruction` | LLM R3/R4 prompt | 内部复判指令，不包含规则编号/护栏口气，是正向指引而非纯否定 |
+| `campaign_key` | 告警精确注入 | 标识被修正的活动，防止告警混入其他活动 |
+| `rule_id` | 日志/审计 | 如 `P0_CORE_PROTECT` |
+
+`retry_instruction` 和 `message` 分离是为了防止 LLM 看到”已强制修正为 keep”后陷入保守化。`retry_instruction` 是正向指引（如”核心词不得淘汰。若表现偏弱，可评估小幅降 bid、降预算或维持”），不包含规则编号和护栏执行口气。
+
+全局注入 LLM 的指令（`_GUARDRAIL_RETRY_INSTRUCTION`）明确写：”护栏不是要求一律 keep。请只修正被指出的违规部分，仍需根据活动事实做该做的调整：该淘汰就淘汰，该小调就小调。”
+
+### 告警注入机制
+
+1. `_build_guardrail_alerts(guardrail_pass)` 按 `campaign_key` 分组，取每条 Result 的 `retry_instruction` 拼接
+2. `_inject_alerts_to_summaries(retry_summaries, alerts)` 将告警文本写入每个 summary 的 `_guardrail_alert` 字段
+3. `reasoner.py` prompt 构建时检查 `_guardrail_alert`，如有则在活动标题后插入 `⚠️ 护栏告警:` 行
+4. 精准和广泛分流：被拦 item 按 `match_type` 分桶，`EXACT` 走 `task_type=”exact”`，其余走 `task_type=”broad”`
+
+### 低价池阈值（归一化唯一来源）
+
+三个常量定义在 `campaign_guardrails.py`：
+
+| 常量 | 值 | 用途 |
+|------|---|------|
+| `LOW_BID_MIN` | $0.10 | OR 口径归组/强制淘汰 bid 下限 |
+| `LOW_BID_MAX` | $0.20 | AND 口径严格在池判定 bid 上限 |
+| `LOW_BUDGET_MAX` | $1.00 | 两口径共用 budget 上限 |
+
+- `is_strictly_in_low_bid_pool()`：AND —— `bid ≤ LOW_BID_MAX 且 budget ≤ LOW_BUDGET_MAX`。供预过滤剔除 + 复评判”确实已入池执行”。
+- `_is_in_elimination_pool()`：OR —— `bid ≤ LOW_BID_MIN 或 budget ≤ LOW_BUDGET_MAX`。供归组分类 + P3 强制淘汰触发。
+- `_p3_should_force_eliminate()`：OR —— 同上逻辑，但不检查 orders。供 P1 判断”P3 是否会接管”。
+
+`_p3_should_force_eliminate` 只判阈值不判 orders——因为 orders 检查在 P3 主函数内。P1 用它决定是否跳过时，P3 会用 orders 做终判。
+
+### 通过/不通过后的后续
+
+- 通过护栏（corrections=0）：进入终态组合分类(§7b)、sanity check、synthesis、预算回算、ERP 落库
+- 被护栏修正（corrections>0）：修正项进入 `warnings_list`（运营可见），同时 `retry_instruction` 注入 R3/R4。R4 后仍违规则以护栏强制修正版为准落库，不再重试
 
 ## 组合分类和预算
 
