@@ -12,7 +12,7 @@
 
 **项目**：广告方向决策子智能体（Ad Direction Agent），面向亚马逊广告运营的 AI 辅助决策系统。
 
-**数据源**：纯 MCP StarRocks 网关（v3.2 已切除 Doris，`DATA_SOURCE=mcp`，失败返零值不回落）。
+**数据源**：纯 MCP StarRocks 网关（2026-06-30 已切除 Doris，失败返零值不回落）。
 
 **技术栈**：Python 3.13 / FastAPI / PyMySQL / DeepSeek API / Pydantic
 
@@ -21,7 +21,7 @@
 自动化分析和调整所有广告活动（Campaign），核心能力：
 
 - **自动发现**：从 MCP 获取 ASIN 下所有广告活动的维度信息
-- **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
+- **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21/29，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
 - **分流策略**：精准广告（EXACT）和广泛广告（BROAD/PHRASE/AUTO）使用不同的调整维度
 - **多轮投票**：R1+R2 并行 → 投票比对 → R3 tiebreaker（分歧时触发），保证决策可靠性
 - **AI 汇总**：将 N 条单活动建议合成为按共同原因分组的运营叙事
@@ -43,11 +43,12 @@ purpose-agent 负责策略层 LLM 调用（`determine_ad_targets_from_metrics()`
 
 ```
 parent_asin
-  ├─ Doris 上下文查询 → 仅维度字段 (campaign_name/campaign_id/child_asin/keyword_text/match_type/keyword_bid)
+  ├─ MCP 上下文查询 → 维度字段 (campaign_name/campaign_id/child_asin/keyword_text/match_type/keyword_bid)
   ├─ 代码硬过滤 → 排除 non-ENABLED / 无数据 / 多关键词活动
   ├─ Campaign 预过滤 → 排除 budget≈$1 & bid≈$0.2 的疑似已淘汰活动
-  ├─ MCP basic_info + product_report 并行 → 回落 Doris
+  ├─ MCP basic_info + product_report 并行
   ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN")
+  ├─ ★核心词标签注入: 读 ERP 核心词表 → 回填 is_core (v3.18 新增)
   ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
   ├─ ★拉取组合预算 (ad_portfolio_list MCP, fail-open → 回退 60/20/20 兜底, 2026-07-09 新增)
   ├─ ★三股并行 (strategic_overview 后, 共享 ctx_dict/posture_brief, return_exceptions 隔离):
@@ -56,7 +57,7 @@ parent_asin
   │   └─ ★新增活动线: 候选词发现→硬过滤→双轮取交集 (KB16+06, campaign_new.py, 详见 §9)
   ├─ 合并两流结果 + ★组合终分类 (LLM action 补淘汰判定); new_campaigns 独立挂载
   ├─ ★action 归一化 (_normalize_action: proposed vs current 差值 derive 权威 action)
-  ├─ Budget 冲突裁决 + ★终态 action 二次归一
+  ├─ ★护栏裁决 → 冲突修正 + R3/R4 LLM 重试 (campaign_guardrails.py, v3.15)
   ├─ ★预过滤可见化: 淘汰池/多词活动打 __prefiltered, 合并 excluded → 前端灰卡 (§9.3)
   ├─ Sanity check (仅低置信项，≤10/批，并行)
   ├─ ★组合预算汇总 (campaign_budget_summary.py: 优先 MCP 真实值 > 60/20/20 兜底)
@@ -76,6 +77,9 @@ parent_asin
 | Sanity 仅校验低置信 | 高/中置信跳过，节省 LLM 调用 |
 | 策略上下文注入 | 每批 LLM 看到产品阶段/广告目的/目标ACOS/毛利率等 12 个字段 |
 | 组合预算来源 | ★ v3.13: ad_portfolio_list MCP 拉取真实 portfolio 预算（按 4 关键词模糊匹配），fail-open 回退 60/20/20 兜底；KB23 回算起点=current_group_budget |
+| is_core 核心词判定 | ★ v3.18: 离线 LLM 语义判定（KB29），ERP 表落库，campaign 主流程读回填；替代了从 v2.0 起一直硬编码 False 的方案 |
+| 护栏优先级 + R3/R4 重试 | ★ v3.15: P3 硬淘汰 > P1 样本保护；护栏拦截后带 retry_instruction 回灌 LLM 重判，最多 R3→R4 两轮 |
+| Product Identity 注入 | ★ v3.17: 所有层请求模型强制携带 (asin, shop_id, parent_seller_sku)，缓存无 identity 自动丢弃 |
 
 ### 2.3 置信度划分
 
@@ -101,14 +105,14 @@ parent_asin
 
 ### 3.1 核心文件总览
 
-> 行数为 2026-06-26 实测（`wc -l`）。行号易漂移，引用 `file:line` 前请先 Grep 实测。
+> 行数为 2026-07-12 实测（`wc -l`）。行号易漂移，引用 `file:line` 前请先 Grep 实测。
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
 | `app/workflow/steps/campaign.py` | 2489 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；护栏委托 guardrails + R3/R4 重试编排 |
 | `app/workflow/steps/campaign_guardrails.py` | 491 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 11 条规则含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
 | `app/llm/reasoner.py` | 2239 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入 |
-| `app/llm/kb_loader.py` | 234 | KB 加载器。`campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset；**v3.18 新增 `semantic_core` preset（KB29）** |
+| `app/llm/kb_loader.py` | 234 | KB 加载器。preset 全集：`campaign_overview` / `campaign_adjustment_exact`(18/17/15/19/22/21) / `campaign_adjustment_broad`(18/17/15/19/22/21) / `budget_reallocation`(KB23) / `new_campaign`(16/06/08/28) / **`semantic_core`(KB29, v3.18)** |
 | `app/models/campaign.py` | 269 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
 | `app/data/campaign_fetcher.py` | 1159 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算） |
 | `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
@@ -117,7 +121,7 @@ parent_asin
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
 | `app/config/settings.py` | 283 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关 + `meta_filter_dashboard_light`) |
 | `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
-| `app/llm/kb_loader.py` | 232 | KB 加载器。**2026-06-24 起 `campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset 并做节级切片**（精准=`18:1,3 17:1,2,3,4,5,7 15:1,2,3,4 19:1,2,3,4,5,6,9 22:0,2 21`；广泛=`...15:1,2,4 19:1,2,3,4,6,7,8 22:0,3...`）。另有 `campaign_overview`/`budget_reallocation` 两个 campaign 级 preset。**早期文档写的单一 `campaign_adjustment`(18/19/21/22 或 18/17/15/19/22/21) 均已过时** |
+| `app/llm/kb_loader.py` | 234 | KB 加载器。`campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset；v3.18 新增 `semantic_core` preset（KB29） |
 | `app/data/mcp_adapter.py` | 536 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点；meta_filter 透传 |
 | `app/data/mcp_mapping.py` | 258 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09)；`bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap |
 | `app/workflow/steps/campaign_portfolio.py` | 103 | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
@@ -183,10 +187,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | LLM 单次最坏耗时 | = 75 × 3 + 退避 | ~226s | 累计（受外层 wait_for 截断） |
 | LLM 服务级并发闸 | `llm_global_concurrency` | 420 | llm/client.py `chat()` 内信号量（多 worker 时 ÷num_workers） |
 | MCP 工具 | `mcp_tool_timeout` | 1200s | settings.py |
-| Doris 子 ASIN 上限 | `db_child_asin_cap` | 200 | settings.py → db_sql_helpers.py |
 | MCP 上下文解析 | `mcp_context_timeout` | 30s | settings.py |
-| Doris 主 fetch | `db_fetch_timeout` | 180s | settings.py |
-| Doris flow_keywords | `db_flow_keyword_timeout` | 90s | settings.py |
 
 **设计原则**：外层 wait_for 比内层 httpx/DB 自身 timeout 更短，让外层先触发 cancel；内层 timeout 作为兜底保险。MCP tool 1200s 是底层最大，被各级外层 wait_for 截断。
 
@@ -336,7 +337,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | KB 遵循度评分器 | P2 | 消费实验 JSONL。2026-07-04 核实：全工程 0 引用，未实现 |
 | ~~A1 修复~~ | ✅ 已完成 | `_ensure_data` 已支持 meta_filter 按 filter 分 key 缓存（§15.5 确认） |
 
-### 4.3 新增设计决策 (v1.3)
+### 4.3 设计决策汇总
 
 | 决策 | 说明 |
 |------|------|
@@ -345,16 +346,14 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 淘汰组不参与预算约束 | KB 21 §6 每活动固定 $1,与运营策略预算无关。3 组预算来源：★ v3.13 起优先 MCP ad_portfolio_list 真实值，失败回退 settings 60/20/20 兜底 |
 | 组合预算回算 | ★ v3.13: KB23 回算起点从 base_constraint 改为 current_group_budget（portfolio 真实值）；新增 available_for_increase 增量约束（淘汰释放+允许净增）；validate 校验正增长合计不超可用额度 |
 | meta_filter 优化 | ASIN data 只拉 META_AD_PRODUCT,砍掉 Campaign 用不到的 6 个 META(natural_rankings/flow_keywords 等 150s 慢查询) |
-| 空 CampaignData 不入 Redis | 防 MCP/Doris 临时失败毒化缓存(30min 空窗口) |
+| 空 CampaignData 不入 Redis | 防 MCP 临时失败毒化缓存(30min 空窗口) |
 
 ### 4.4 失败路径覆盖矩阵（多层防护后）
 
 | 失败点 | 旧行为 | 新行为 |
 |---|---|---|
 | MCP 上下文挂起 | analyze 永远挂 | 300s timeout → 返回空 CampaignData + warning |
-| Doris MySQL 断连 | 500 + 堆栈 | warning「分析失败: OperationalError」+ 空 result |
 | `aggregator.fetch` 120s 超时 | 500 | warning「数据拉取超时」+ 空 result |
-| Dorisfallback 串行慢查询 | 120s 超时断 | meta_filter 砍掉 6 个 META→<30s,不再触及超时 |
 | LLM 单批挂 60s | 该 batch 失败但其他 OK | 同（既有） |
 | LLM 返回非 dict | AttributeError → 整流崩 | 转单批失败 warning |
 | LLM action 不一致 | 投票阶段分歧增多 | `_normalize_action()` 代码 derive,降低无谓 R3 |
@@ -383,7 +382,7 @@ cd ad-direction-agent
 uvicorn app.main:app --reload --port 8008
 
 # 调试前端
-http://localhost:8008/demo/campaign_test.html
+http://localhost:8008/demo/ad-asisitant-agent.html
 
 # 注意：不要边跑分析边改代码，uvicorn --reload 检测变更会杀进程
 ```
@@ -842,7 +841,7 @@ P1：方向 A 收敛（实时轨落库→读快照+删 to_viewmodel，落库失�
 ### 15.4 Part 6：广告调整 MCP 真实执行接入（`8c6efd0`，详见 [docs/2026-06-15-交接文档.md]）
 confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表 + 回写 pending `execute_status` → 前端「调整记录」表。新增 `advert_mcp_client`/`advert_exec_mapper`(唯一映射点)/`advert_execution`；repo 6 执行方法 + `_audit_int` + `use_tls`；端点现仅存 `/campaign/execute`（原 `execute/status`、`execution-records` 已随 §16.3-④ 前端调用点一并下线）。**默认安全**：`advert_mcp_enabled=false` + `advert_exec_dry_run=true`。真库 dry-run 全链路通；真实写 Amazon「新建活动」链路通仅被 IP 白名单 403 拦；「改已有活动」卡在数仓 campaign_id 调整 MCP 不识别（外部契约待 MCP 团队）。
 
-### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，2026-07-04 重新核实）
+### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，2026-07-12 重新核实）
 
 | 项 | 状态 | 代码锚点 / 说明 |
 |---|---|---|
@@ -851,7 +850,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 | A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成 | `ecc207e` |
 | `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成 | `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` |
 | ~~建议竞价（suggestedBid）MCP 接入~~ → **未实现** | ❌ 原标注已完成但代码核实：`_calc_initial_bid` 仍用 `0.30` 占位，MCP `ad_campaign_basic_info_v2` 不返回建议竞价字段 | campaign_new.py `default_bid=0.30` |
-| **`is_core` 真实数据源** | ❌ 仍硬编码 `False` | campaign.py:1118 `is_core=False`，2026-07-04 核实未变 |
+| **`is_core` 真实数据源** | ✅ **v3.18 已实现** | 核心词管理系统 → LLM 语义判定 → ERP 落库 → campaign 主流程 is_core 回填 |
 | **P4 定时调度器** | ✅ cron 已上线 | `crontab` → `batch_via_api.py`，定时目标达成 |
 | **新增活动预算接入组合回算**（KB23 §5.1） | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 参数已接入，`current=0` → `proposed` 整笔入组 delta |
 | 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | 🟡 **设计决策**：仅展示标签，不作筛选门禁 | `campaign_new.py:6` 注释明确，与历史待办一致 |
@@ -909,13 +908,13 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 ---
 
-## 17. 2026-06-18：待办逐条对代码核实 → 2026-07-04 重新核实
+## 17. 2026-06-18：待办逐条对代码核实 → 2026-07-12 重新核实
 
 > 对照 §4.2 / §9.1 / §12.5 / §15.5 / §16.6 的历史待办，逐条对**当前代码**核实。
 
-| # | 待办 | 实际状态 | 证据（2026-07-04） |
+| # | 待办 | 实际状态 | 证据 |
 |---|------|----------|------|
-| ① | `is_core` 硬编码 False | ❌ 仍未实现 | campaign.py:1118 `is_core=False`，2026-07-04 核实未变 |
+| ① | `is_core` 硬编码 False | ✅ **v3.18 已实现** | 核心词管理系统上线，campaign 主流程 is_core 回填（2026-07-12） |
 | ② | Tab4 方向对象未落 state | ✅ **已解决（ERP 路径替代）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回 → snapshot 可显示，无需走 state DB |
 | ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 闸控已接但值=0.0 占位；GROUP-009 未做。★ v3.13 组合预算源已从虚构 60/20/20 升级为 MCP ad_portfolio_list 真实值，但 parent_allowed_net_increase 仍为 0.0（净增无源） | settings.py:148 `campaign_parent_allowed_net_increase=0.0`，2026-07-10 核实仍为 0.0 |
 | ④ | P4 定时调度（APScheduler） | ✅ cron 已上线替代 | `crontab` → `batch_via_api.py`，定时目标达成 |
@@ -924,9 +923,9 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 | ⑦ | 库存口径 Doris 用 in_stock_num | ✅ 已统一 | 两路径均用 `can_sale_num` |
 | ⑧ | 核心关键词 nature_rank 源头改造 | 🟡 代码在，数据源空 | MCP 返回多数为空，属数据/ETL 侧 |
 
-**结论（2026-07-04）**：
-- **仍未实现（2 条）**：① is_core 硬编码、③ 父目标占位 0.0（GROUP-009 未做）
-- **已解决（5 条）**：② Tab4 ERP 路径 / ④ cron 替代 / ⑤ 新增活动回算 / ⑦ 库存口径 / ⑧ 数据侧问题
+**结论（2026-07-12 重新核实）**：
+- **仍未实现（1 条）**：③ 父目标占位 0.0（GROUP-009 未做；v3.13 portfolio MCP 缓解了预算源问题但 parent_allowed_net_increase 仍为 0.0）
+- **已解决（6 条）**：① is_core(v3.18) / ② Tab4 ERP 路径 / ④ cron 替代 / ⑤ 新增活动回算 / ⑦ 库存口径 / ⑧ 数据侧问题
 - **设计决策非待办（1 条）**：⑥ 触发场景仅标签
 
 ---
