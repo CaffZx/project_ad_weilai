@@ -81,6 +81,8 @@ def classify(
     unit: CampaignUnit,
     llm_action: str | None = None,
     effective_budget: float | None = None,
+    *,
+    perf_7d_orders: int = 0,
 ) -> str:
     """按优先级判定 4 组合归属,返回常量字符串。
 
@@ -93,9 +95,12 @@ def classify(
         effective_budget: 主力↔测试 $5 分界的判定预算。终态分类传 proposed
                     (KB23 §3.1B/§3.5/§3.7 按本轮建议预算升降组);缺省 None → current。
                     仅作用于 EXACT 主力↔测试,淘汰/广泛分支不受影响。
+        perf_7d_orders: 近 7 天订单数。淘汰池 OR 归类须同时满足无出单
+                    (对齐 _p3_force_eliminate 语义),有出单的触底活动不归淘汰。
     """
-    # 1. 淘汰 (LLM 标记 OR 已在淘汰池 $1/$0.20) —— 读 current,不受 effective_budget 影响
-    if llm_action == "eliminate_to_low_bid_pool" or _is_in_elimination_pool(unit.current_bid, unit.current_budget):
+    # 1. 淘汰 (LLM 标记 OR (已在淘汰池 AND 无出单)) —— 读 current,不受 effective_budget 影响
+    in_pool = _is_in_elimination_pool(unit.current_bid, unit.current_budget)
+    if llm_action == "eliminate_to_low_bid_pool" or (in_pool and perf_7d_orders == 0):
         return PORTFOLIO_ELIMINATE
     mt = (unit.match_type or "").upper()
     # 2. 广泛 / 自动 (BROAD/PHRASE/AUTO) —— 业务上"测词广告",硬归类

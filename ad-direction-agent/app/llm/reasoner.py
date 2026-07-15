@@ -2204,7 +2204,7 @@ class LLMReasoner:
         ng = len(agg.get("groups", []))
         logger.info(
             "Campaign budget realloc LLM 入口 [%s] groups=%d available=%s timeout=%ss",
-            asin, ng, agg.get("parent", {}).get("available_reallocation_budget"),
+            asin, ng, agg.get("parent", {}).get("available_for_increase"),
             timeout_override or settings.campaign_budget_agent_timeout,
         )
 

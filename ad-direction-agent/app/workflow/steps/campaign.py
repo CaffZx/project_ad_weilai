@@ -481,7 +481,7 @@ async def _analyze_campaigns_impl(
     #     分析前先填,分析后再用 llm_action 在 adjustments 上补一遍。
     if settings.campaign_portfolio_enabled:
         for cu in llm_campaigns:
-            cu.portfolio = _classify_portfolio(cu)
+            cu.portfolio = _classify_portfolio(cu, perf_7d_orders=cu.perf_7d.orders)
         # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
         for s in skipped_eliminated:
             s["portfolio"] = PORTFOLIO_ELIMINATE
@@ -819,7 +819,7 @@ async def _analyze_campaigns_impl(
             if cu is None:
                 continue
             eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
-            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action, effective_budget=eff)
+            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action, effective_budget=eff, perf_7d_orders=cu.perf_7d.orders)
             cu.portfolio = item.ai_portfolio_class
 
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
