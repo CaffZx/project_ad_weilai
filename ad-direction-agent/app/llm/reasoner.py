@@ -524,6 +524,45 @@ def _build_campaign_overview_prompt() -> str:
     return _CAMPAIGN_OVERVIEW_PROMPT.replace("{kb_content}", kb.build("campaign_overview"))
 
 
+# ── 核心词语义判定 Prompt（KB29 §1-6）────────────────────────────────────────
+
+_SEMANTIC_CORE_PROMPT = """你是亚马逊产品广告专家。给定一个产品的 Listing 信息和若干投放关键词，判断每个词的语义相关性、是否存在语义冲突、是否为语义核心词。
+
+输出中文，JSON key 用英文。
+
+## 业务知识
+{kb_content}
+
+## 判断规则
+
+### 语义冲突（semantic_conflict）：4 种任一命中即 fail
+1. 品类不一致 — 关键词品类 ≠ 产品实际细分品类
+2. 属性不符 — 关键词的款式/结构/功能/人群/场景与 Listing 不符
+3. 变体不属于当前子 ASIN — 关键词的颜色/尺码等不可售
+4. 非产品意图词 — 纯价格/促销/平台活动词，不表达产品本体
+
+### 语义核心（semantic_core）：冲突 pass 的前提下，满足 R1 精确相关
+- R1：关键词直接指向产品细分品类 / 核心属性 / 真实变体 / 核心人群与场景
+
+## 输出格式（纯 JSON，不含 markdown 代码块标记）
+{
+  "keywords": [
+    {
+      "keyword_text": "str",
+      "semantic_conflict": "pass" | "fail",
+      "conflict_reason": "fail 时写原因；pass 时为空",
+      "semantic_core": true | false,
+      "semantic_evidence": ["语义核心的证据描述"]
+    }
+  ]
+}
+"""
+
+
+def _build_semantic_core_prompt() -> str:
+    return _SEMANTIC_CORE_PROMPT.replace("{kb_content}", kb.build("semantic_core"))
+
+
 # ── Campaign 预算回算 Agent Prompt（KB23）────────────────────────────────────
 
 _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下方知识库（KB23 广告组合与预算分配规则），对 3 个活跃组合（精准主力组 / 精准测试组 / 自动广泛组）的预算约束值做二次分配。
@@ -2005,6 +2044,55 @@ class LLMReasoner:
             return out
         except Exception as e:
             logger.warning("Campaign overview 失败 [%s]: %s", asin, e)
+            return {"error": str(e)}
+
+    # ── 核心词语义判定 ──────────────────────────────────────────────────
+    async def recommend_semantic_core(
+        self,
+        parent_asin: str,
+        listing: dict,
+        keywords: list[str],
+        *,
+        temperature: float = 0.3,
+        timeout_override: float | None = None,
+    ) -> dict:
+        """一次 LLM 调用批量判断所有关键词的 semantic_conflict + semantic_core。
+
+        listing: {"title", "bullets_str", "variants_str", "category"}
+        keywords: 关键词文本列表（≤30）
+        返回: {"keywords": [...], "error": ""} 或 {"error": "..."}
+        """
+        from app.config.settings import settings  # noqa: F811
+
+        kw_lines = "\n".join(f"{i+1}. {kw}" for i, kw in enumerate(keywords))
+        product_lines = [
+            f"- 标题: {listing.get('title', '')}",
+            f"- 五点: {listing.get('bullets_str', '')}",
+            f"- 变体: {listing.get('variants_str', '')}",
+            f"- 类目: {listing.get('category', '')}",
+        ]
+        user_message = "## 产品信息\n" + "\n".join(product_lines) + "\n\n## 待判断关键词\n" + kw_lines
+
+        messages = [
+            {"role": "system", "content": _build_semantic_core_prompt()},
+            {"role": "user", "content": user_message},
+        ]
+
+        timeout = max(timeout_override or 0, settings.core_keyword_llm_timeout)
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+                timeout_override=timeout,
+                label="semantic_core",
+            )
+            parsed = self._parse_json(raw)
+            kw_list = parsed.get("keywords", [])
+            return {"keywords": kw_list, "error": ""}
+        except Exception as e:
+            logger.warning("semantic_core LLM 失败 [%s]: %s", parent_asin, e)
             return {"error": str(e)}
 
     # ── Campaign 汇总合成 ──────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 - ERP repository：`ad-direction-agent/app/persistence/erp_writer/repository.py`
 - ERP mapper：`ad-direction-agent/app/persistence/erp_writer/mappers.py`
 - 执行 mapper：`ad-direction-agent/app/persistence/erp_writer/advert_exec_mapper.py`
+- 核心词 DDL：`ad-direction-agent/scripts/erp_db/migrate_core_keyword.sql`
 - 配置：`ad-direction-agent/app/config/settings.py`
 
 ## 代码锚点地图
@@ -31,6 +32,8 @@
 | 待执行读取 | `repository.py:297` `load_confirmed_pending()` | CONFIRMED 且 `execute_status=PENDING` 的 pending |
 | Campaign 落库映射 | `erp_writer/mappers.py:324` `canonicalize_payload()` | `CampaignAnalysisResult` 到 CanonicalRun |
 | 执行映射 | `erp_writer/advert_exec_mapper.py:82` `build_exec_plan()` | pending 到 Advert MCP payload |
+| 核心词批次写入 | `repository.py` `write_core_keyword_task()` | `t_advert_agent_core_keyword_task` + `label` 表 |
+| 核心词标签读取 | `repository.py` `fetch_core_keyword_set()` | 按三元组读最近 DONE 批次的 `is_core=1` 集合 |
 
 ## 数据库定位
 
@@ -89,8 +92,18 @@ State 库：
 | `t_advert_agent_core_keyword_tracking` | 核心关键词跟踪 |
 | `t_advert_agent_ai_suggest` | AI 建议文本、风险提示 |
 | `t_advert_agent_pool_entry` | 低价池/淘汰复评池条目 |
+| `t_advert_agent_core_keyword_task` | 核心词判定批次主表，三元组 `(parent_asin, parent_seller_sku, shop_id)` 为产品标识，`started_at` 取最新 DONE 批次 |
+| `t_advert_agent_core_keyword_label` | 核心词判定明细，每条一行关键词，含 `semantic_conflict`/`semantic_core`/`data_core`/`is_core`/`evidence` 等字段。`is_core=1` 的标签被主 Campaign 流程读取后注入护栏 P0/P3/P5 |
 
 执行记录类表由 ERP 系统自身维护，当前 Python 执行链路多处明确跳过直接写入操作记录表。
+
+### 核心词表设计说明
+
+`t_advert_agent_core_keyword_task` 是批次主表（`task_id` 主键），`t_advert_agent_core_keyword_label` 是明细表（`(task_id, keyword_text)` 唯一键）。两表通过 `task_id` 外键关联。
+
+任务独立于 campaign 分析的 `decision_id`，使用自己的 `task_id`（`ckt_{date}_{hash}`）命名空间。label 表冗余 `parent_seller_sku`/`shop_id`，支持主流程不 JOIN task 表直接按三元组 + `is_core=1` 查询最近 DONE 批次的核心词集合。
+
+旧表 `t_advert_agent_core_keyword_tracking` 仅用于 Tab1 核心关键词监控的历史展示，不与新标签源合并。两套表各自独立。
 
 ## 关键写入模式
 
@@ -119,6 +132,7 @@ State 写入通常是按 ASIN upsert 或按 ASIN+days upsert。
 | Campaign 最新批次 | `t_advert_agent_decision.is_latest` | `repository.py:557` `finalize_batch()` | `/campaign/snapshot`、viewmodel、confirm 门禁 | 同 ASIN 只应一个最新批次 |
 | 用户确认 | card + 三类 pending `confirm_status` | `/campaign/confirm` | `load_confirmed_pending()` | UPDATE 限 `PENDING`，重复确认会 skipped |
 | 执行状态 | 三类 pending `execute_status` | `advert_execution.py` / repository 更新 | viewmodel、执行幂等 | `DRY_RUN` 不等于真实执行 |
+| 核心词标签 | `t_advert_agent_core_keyword_label.is_core` + `t_advert_agent_core_keyword_task.status='DONE'` | 离线 `POST /core-keyword/analyze` | Campaign `_analyze_campaigns_impl()` → `item.is_core` → 护栏 P0/P3/P5 + ERP card `is_core` 列 | 任务状态过滤 RUNNING，防读到半截数据；fail-soft |
 
 ## ERP card/pending 关系
 
@@ -141,10 +155,12 @@ Campaign 分析写 ERP 时，一张前端 card 可以对应多类 pending：
 - State 库不是业务展示库。前端展示 Campaign 卡片时应优先看 ERP 快照/viewmodel。
 - `t_advert_agent_pool_entry` 在代码注释中有 ERP/State 表述交错，维护时要以当前 repository 实际连接和部署配置为准。
 - 定时批量脚本读取 `t_advert_agent_decision_config`，不是从 State 库取 ASIN 列表。
+- `t_advert_agent_core_keyword_tracking`（旧）和 `t_advert_agent_core_keyword_label`（新）不是同一套数据：前者是 per-decision 快照供 Tab1 历史展示，后者是 per-task 持久标签供护栏消费。不要试图"统一两套表"。
 
 ## 更新检查清单
 
-- 新增 ERP 表读写时，补充本篇 ERP 表清单。
+- 新增 ERP 表读写时，补充本篇 ERP 表清单和代码锚点地图。
 - 新增 State 表时，同步更新 `schema.sql`、manager、迁移说明和本篇表格。
+- 修改核心词表结构时，同步更新 DDL 迁移文件、本篇核心词表设计说明段和 `07` 核心词离线判定段。
 - 修改 pending 状态枚举时，同步检查前端、确认接口、执行链路和测试。
 - 修改数据库连接配置时，同步检查 `05-网关连接池信号量与超时设置.md`。

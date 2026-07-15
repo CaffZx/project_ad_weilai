@@ -83,6 +83,8 @@ class KnowledgeBase:
         # Campaign 预算回算 agent: KB23 自包含三层回算算法(§5 增量/§6 二次分配/§7 分配方式
         #   /§3.1A 组内优先级/§9 输出/§10 护栏)。算术由代码预聚合,LLM 只判分配方式+组内排序+解释。
         "budget_reallocation":  ["23"],
+        # 核心词语义判定: KB29 §1-6。不含 §7 输出字段(由 prompt 模板定义)和 §8 数量控制(代码处理)。
+        "semantic_core":        ["29:1,2,3,4,5,6"],
     }
 
     # KB 英文 enum → 项目中文 enum（与 layer_options.toml 对齐）

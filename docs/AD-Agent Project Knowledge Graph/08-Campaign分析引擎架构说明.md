@@ -262,6 +262,8 @@ LLM 输出的 action 不是最终真源。`_normalize_action()` 会根据 propos
 
 `campaign_guardrails.py` 是不依赖 LLM 的确定性规则引擎，所有硬规则归一化到这一个文件。
 
+`is_core` 标签由离线核心词判定系统（见 `07-广告策略推荐工作流引擎架构.md` § 核心词离线判定）生成，存入 ERP `t_advert_agent_core_keyword_label` 表，Campaign 主流程通过 `fetch_core_keyword_set()` 读取后注入 `CampaignAdjustmentItem.is_core` 字段。
+
 ### 在分析链路中的位置
 
 ```

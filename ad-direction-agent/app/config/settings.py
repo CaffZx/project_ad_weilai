@@ -228,6 +228,18 @@ class Settings(BaseSettings):
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
     advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
 
+    # ── 核心词判定（离线，7 天一次）──
+    core_keyword_enabled: bool = True              # 主流程是否读取核心词标签。fail-soft：表空/异常返回空 set，不影响主流程
+    core_keyword_analyze_enabled: bool = False     # 离线 endpoint 是否允许执行核心词分析。默认关，需显式开启后跑批
+    core_keyword_llm_timeout: float = 120.0        # semantic_core LLM 超时（秒）
+    core_keyword_mcp_timeout: float = 420.0        # MCP 拉数总超时（秒）
+
+    # ── Azlisting/ERP 商品信息 MCP（独立于 StarRocks 数据 MCP）──
+    azlisting_mcp_url: str = ""
+    azlisting_mcp_token: str = ""
+    azlisting_mcp_header_name: str = "Authorization"
+    azlisting_mcp_timeout: float = 60.0
+
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None
     _raw_thresholds: dict | None = None

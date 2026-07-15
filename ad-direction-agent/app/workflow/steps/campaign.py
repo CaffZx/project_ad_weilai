@@ -398,6 +398,18 @@ async def _analyze_campaigns_impl(
                             # .lower() 归一:兼容 purpose-agent 大写(Broad)与 KB 拼写(generic)
                             keyword_class_map[kw] = TYPE_MAP.get(st.lower(), st)
 
+    # 2a. 读取离线核心词标签（fail-soft：失败/未启用 → 空 set，不影响主流程）
+    core_keyword_set: set[str] = set()
+    try:
+        from app.persistence.erp_writer.repository import ErpDualWriterRepository
+        core_keyword_set = ErpDualWriterRepository.fetch_core_keyword_set(
+            parent_asin,
+            campaign_data.parent_seller_sku or "",
+            campaign_data.shop_id or 0,
+        )
+    except Exception:
+        logger.debug("core_keyword_set 不可用 [%s]，按空集继续", parent_asin, exc_info=True)
+
     # 3. LLM 分析前预过滤
     # 3a. 批量词活动：一个活动名下多个关键词，本期暂不处理
     #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.py:61-68)
@@ -543,12 +555,12 @@ async def _analyze_campaigns_impl(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
-            overview_gate=overview_gate,
+            overview_gate=overview_gate, core_keyword_set=core_keyword_set,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
-            overview_gate=overview_gate,
+            overview_gate=overview_gate, core_keyword_set=core_keyword_set,
         ),
         (analyze_new_campaigns(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
@@ -649,7 +661,8 @@ async def _analyze_campaigns_impl(
             return f"已掉榜（上次自然排名第{cu.near_natural_rank}位）"
         return ""
 
-    _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line)
+    _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
+                                          core_keyword_set=core_keyword_set)
 
     # 6c. 复评保护回填：取池表最近 N 天内离池（= 被复评捞回）的 campaign_id 集合，
     #     算 days_since_reactivation，供 _resolve_budget_conflicts 防淘汰↔复评抖动。
@@ -772,7 +785,8 @@ async def _analyze_campaigns_impl(
             replacement = replacement_by_key.get(item.campaign_key)
             if replacement is not None:
                 adjustments[idx] = replacement
-        _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line)
+        _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
+                                              core_keyword_set=core_keyword_set)
         _backfill_placement_pcts(adjustments, unit_by_key)
         for item in adjustments:
             cid = (item.campaign_id or "").strip()
@@ -1280,7 +1294,10 @@ async def _analyze_one_stream(
     temperature: float,
     ctx_dict: dict,
     overview_gate: "asyncio.Task | None" = None,
+    *,
+    core_keyword_set: set[str] | None = None,
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
+    _core_set: set[str] = core_keyword_set or set()
     """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1+R2 → 投票 → (R3) → 合并。
 
     返回 (adjustments, rounds_detail, enriched_summaries, skipped_campaigns)。
@@ -1297,7 +1314,7 @@ async def _analyze_one_stream(
             cu,
             target_acos=strategy_context.target_acos,
             keyword_class=keyword_class_map.get(cu.keyword_text, ""),
-            is_core=False,
+            is_core=cu.keyword_text in _core_set,
         )
         for cu in campaigns
     ]
@@ -1845,7 +1862,10 @@ def _backfill_campaign_adjustment_context(
     unit_by_key: dict[str, CampaignUnit],
     keyword_class_map: dict[str, str],
     rank_evidence_line,
+    *,
+    core_keyword_set: set[str] | None = None,
 ) -> None:
+    _core_set: set[str] = core_keyword_set or set()
     for item in adjustments:
         cu = unit_by_key.get(item.campaign_key)
         if cu is None:
@@ -1858,6 +1878,7 @@ def _backfill_campaign_adjustment_context(
         item.days_online = cu.days_online
         item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
         item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
+        item.is_core = cu.keyword_text in _core_set
         item.natural_rank = cu.natural_rank
         item.near_natural_rank = cu.near_natural_rank
         item.rank_change = cu.rank_change

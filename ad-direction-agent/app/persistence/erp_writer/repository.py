@@ -9,6 +9,7 @@ from typing import Any, TYPE_CHECKING
 import pymysql
 from pymysql.cursors import DictCursor
 
+from app.config.settings import settings
 from app.workflow.steps.campaign_portfolio import is_strictly_in_low_bid_pool
 from .erp_display import build_whip_display_fields
 from .models import CanonicalRun, stable_id, warehouse_pending_id
@@ -1925,6 +1926,100 @@ class ErpDualWriterRepository:
                 return out
         finally:
             conn.close()
+
+    # ── 核心词判定落库 ────────────────────────────────────────
+
+    def write_core_keyword_task(self, analysis: dict) -> None:
+        conn = self._connect()
+        try:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            labels = analysis.get("labels") or []
+            source = analysis.get("source_refs")
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_core_keyword_task
+                       (id, parent_asin, parent_seller_sku, shop_id, site_code,
+                        status, total_keyword_count, core_keyword_count,
+                        triggered_by, started_at, finished_at)
+                       VALUES (%s,%s,%s,%s,%s,'DONE',%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                        status='DONE', core_keyword_count=VALUES(core_keyword_count),
+                        finished_at=VALUES(finished_at)""",
+                    (analysis["task_id"], analysis["parent_asin"],
+                     analysis["parent_seller_sku"], analysis["shop_id"],
+                     analysis.get("site_code") or "", len(labels),
+                     analysis["core_keyword_count"],
+                     analysis.get("triggered_by") or "", now, now),
+                )
+                for row in labels:
+                    cur.execute(
+                        """INSERT INTO t_advert_agent_core_keyword_label
+                           (task_id, parent_asin, parent_seller_sku, shop_id,
+                            keyword_text, semantic_conflict, conflict_reason,
+                            semantic_core, semantic_evidence, data_core, data_evidence,
+                            is_core, source_refs)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON DUPLICATE KEY UPDATE
+                            semantic_conflict=VALUES(semantic_conflict),
+                            conflict_reason=VALUES(conflict_reason),
+                            semantic_core=VALUES(semantic_core),
+                            semantic_evidence=VALUES(semantic_evidence),
+                            data_core=VALUES(data_core),
+                            data_evidence=VALUES(data_evidence),
+                            is_core=VALUES(is_core),
+                            source_refs=VALUES(source_refs)""",
+                        (analysis["task_id"], analysis["parent_asin"],
+                         analysis["parent_seller_sku"], analysis["shop_id"],
+                         row["keyword_text"], row["semantic_conflict"],
+                         row.get("conflict_reason") or None,
+                         row["semantic_core"], row.get("semantic_evidence"),
+                         row["data_core"], row.get("data_evidence"),
+                         row["is_core"], source),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def fetch_core_keyword_set(
+        parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> set[str]:
+        if not settings.core_keyword_enabled:
+            return set()
+        repo = _get_repository()
+        conn = repo._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT l.keyword_text
+                       FROM t_advert_agent_core_keyword_label l
+                       JOIN t_advert_agent_core_keyword_task t ON l.task_id = t.id
+                       WHERE l.parent_asin = %s
+                         AND l.parent_seller_sku = %s
+                         AND l.shop_id = %s
+                         AND l.is_core = 1
+                         AND t.status = 'DONE'
+                         AND t.started_at = (
+                             SELECT MAX(started_at)
+                             FROM t_advert_agent_core_keyword_task
+                             WHERE parent_asin = %s
+                               AND parent_seller_sku = %s
+                               AND shop_id = %s
+                               AND status = 'DONE'
+                         )""",
+                    (parent_asin, parent_seller_sku, shop_id,
+                     parent_asin, parent_seller_sku, shop_id),
+                )
+                return {r["keyword_text"] for r in cur.fetchall()}
+        except Exception:
+            logger.warning(
+                "fetch_core_keyword_set 失败 [%s/%s/%s]，按空集继续",
+                parent_asin, parent_seller_sku, shop_id, exc_info=True,
+            )
+            return set()
+        finally:
+            if conn:
+                conn.close()
 
 
 # ── 模块级 repository 单例（决策批次端点复用） ──────────────────────────
