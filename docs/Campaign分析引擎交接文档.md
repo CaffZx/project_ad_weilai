@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-12（版本日志见文末，最新 v3.17：Product Identity 全线注入 + 挪组执行修复）
+> **最后更新**: 2026-07-12（版本日志见文末，最新 v3.18：核心词管理系统 — `is_core` 真实数据源闭环）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -107,7 +107,8 @@ parent_asin
 |------|------|------|
 | `app/workflow/steps/campaign.py` | 2489 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；护栏委托 guardrails + R3/R4 重试编排 |
 | `app/workflow/steps/campaign_guardrails.py` | 491 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 11 条规则含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
-| `app/llm/reasoner.py` | 2151 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()`（含四层工作流全部 prompt）；护栏告警注入 |
+| `app/llm/reasoner.py` | 2239 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入 |
+| `app/llm/kb_loader.py` | 234 | KB 加载器。`campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset；**v3.18 新增 `semantic_core` preset（KB29）** |
 | `app/models/campaign.py` | 269 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
 | `app/data/campaign_fetcher.py` | 1159 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算） |
 | `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
@@ -125,6 +126,12 @@ parent_asin
 | `app/workflow/steps/campaign_budget_reallocation.py` | 304 | ★组合预算回算（KB23）：优先 MCP portfolio 真实值 > 60/20/20 兜底；`available_for_increase` 增量约束；validate 加正增长额度校验 |
 | `app/workflow/steps/portfolio_execution.py` | 206 | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
 | `app/workflow/steps/advert_execution.py` | 324 | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表） |
+| `app/data/core_keyword_fetcher.py` | 414 | ★核心词发现数据编排器（v3.18 新增）：MCP 拉关键词+listing→LLM semantic_core 判定→落库 ERP `t_advert_agent_core_keyword` |
+| `app/workflow/steps/core_keyword.py` | 309 | ★核心词语义判定工作流（v3.18 新增）：数据编排+语义判定+批量落库+主流程 is_core 回填 |
+| `app/api/core_keyword.py` | 62 | ★核心词 API 端点（v3.18 新增）：`POST /core-keyword/analyze` 离线分析，`core_keyword_analyze_enabled` 闸控 |
+| `scripts/erp_db/migrate_core_keyword.sql` | 45 | ★核心词表 DDL（v3.18 新增） |
+| `batch_core_keyword.py` / `batch_core_keyword.sh` | — | ★离线批跑脚本（v3.18 新增） |
+| `tests/workflow/test_core_keyword.py` | 627 | ★核心词全链路单测（v3.18 新增） |
 | `demo/campaign-panel/` | ~2292 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托 + 密度切换 + 卡片点选 + 确认详情表)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
 
 ### 3.2 关键配置项（settings.py）
@@ -299,6 +306,8 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-12 | **挪组 portfolioId 解析重构** | `advert_execution.py`：`_resolve_modify_portfolios` 移回 MCP 调用前执行，按 portfolioId 拆分 paramsVoList，匹配失败写入 `move_errors` 分类（不存在/多个/ID缺失），失败活动移除 campaignGroupType 后其他字段继续下发。`ExecPlan` 新增 `move_errors` 字段，confirm API 透传。`_match_portfolio` 改为单向子串匹配 + 返回 `(match, count)` 元组。`state.js` 前端按 group+reason 去重展示 sticky toast 含具体活动名。6+4+1 files。 |
 | 07-12 | **★ Product Identity 全线注入** | `product_identity.py`(新)：GET/POST 解析 `(asin, shop_id, parent_seller_sku)` 三元组，`require_product_identity_dict` 支持 path-param asin。`layers.py`：`ProductIdentityMixin` 注入 Strategy/Tactics/Execution/P3 全部 Confirm/Select 模型。`workflow_orchestrator`：缓存无 identity 数据自动丢弃重拉。`mysql_state_manager`/`schema.sql`：state DB 加 identity 列+写回。`purpose_adapter`：删 60 行重量级回退逻辑。删除过时交接文档。新增项目知识图谱 16 篇+计划文档+5 个测试。51 files +4669/-247。 |
 | 07-12 | **_snapshot_action 防御加固** | 补 `cat="ADJUST"` 显式映射；淘汰回退判定加 `not cat` 条件，避免 REACTIVATE/ADJUST 卡因 group=low_bid 被误判为淘汰。1 file +4/-2。 |
+| 07-12 | **KB29 核心词定义规则接入** | `kb_loader.py`：KB29 从预留位激活接入 `29-核心词定义规则.md`。`repository.py`：summary warnings 字段截断至 500 字符防超长写入。知识图谱 08 大幅扩充。4 files +375/-46。 |
+| 07-12 | **★ 核心词管理系统（is_core 真实数据源闭环）** | `core_keyword_fetcher.py`(新,414行)：MCP 拉关键词+listing→LLM `recommend_semantic_core()` 判定语义冲突(4种)+R1 精确相关→落库。`core_keyword.py` workflow(新,309行)：数据编排+语义判定+批量落库。`core_keyword.py` API(新,62行)：`POST /core-keyword/analyze` 离线 endpoint，`core_keyword_analyze_enabled` 闸控。`reasoner.py`：新增 `_SEMANTIC_CORE_PROMPT`(KB29 §1-6) + `recommend_semantic_core()`。`campaign.py`：主流程入口读核心词标签注入 `is_core`（填了从 v2.0 起一直硬编码 False 的坑）。`repository.py`：核心词表读/写方法。`settings.py`：`core_keyword_*` 4 项配置 + `azlisting_mcp_*` 独立 MCP 连接。`migrate_core_keyword.sql`(新) + `batch_core_keyword.py/.sh`(新) + `test_core_keyword.py`(新,627行)。18 files +2022/-8。 |
 
 ---
 
@@ -322,7 +331,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | ~~**新增广告活动分析**~~ | ✅ 已完成（2026-06-10/11） | 三股并行独立分析线。**剩余子项**（2026-07-04 核实）：① suggestedBid 数据源仍未接入（bid 占位 $0.30，改 `_calc_initial_bid` 一处即可）；② KEYWORD_PROMOTED_FROM_BROAD 等 5 个触发场景确认仅作展示标签、不做门禁（设计决策，非待办）；③ ~~新增活动预算接入组合回算~~ → ✅ 已实现（`campaign_budget_reallocation.py:160-178`，new_campaigns 整笔 proposed 入组 delta）；④ ERP 写入 → 已通过 `write_full` 统一落库 |
 | ~~DB 落库~~ | ✅ 已完成 | `t_advert_agent_campaign_analysis` + `_adjustment` 表已通过 `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` 全链路落库 |
 | ~~L420 投票 key 同源化~~ | ✅ 已解决（2026-06-26） | 改 cid 句柄方案：LLM 回吐批内 `C1..Cn`，代码 `cid_map` 权威回填 campaign_key（不再依赖 LLM 复现长串）；并补缺轮兜底（单轮/双轮缺失送 R3） |
-| **`is_core` 核心词真实数据源** | P1 | 模型字段已定义、reasoner 已透传至 LLM prompt + synthesis。**写入端仍硬编码 `False`**（campaign.py:1118 `is_core=False`，2026-07-04 核实未变）。需确定数据源（Doris keyword_library / purpose-agent keyword_class / 运营手动标注）并填充真实值 |
+| ~~**`is_core` 核心词真实数据源**~~ | ✅ **v3.18 已实现** | ★核心词管理系统上线：`core_keyword_fetcher` → `recommend_semantic_core()` 语义判定 → ERP 落库 → campaign 主流程 `is_core` 回填。离线 7 天一批，`batch_core_keyword.py` + crontab 定时跑。详见 §3.4 07-12 条目 |
 | ~~`POST /campaign/confirm` 落地~~ | ✅ 已完成 | campaign.py:433 已实现，confirm_decisions 落 ERP pending 表 + 推送 |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL。2026-07-04 核实：全工程 0 引用，未实现 |
 | ~~A1 修复~~ | ✅ 已完成 | `_ensure_data` 已支持 meta_filter 按 filter 分 key 缓存（§15.5 确认） |
@@ -1264,6 +1273,8 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+*v3.18: 核心词管理系统 — is_core 真实数据源闭环（2026-07-12，本地未部署服务器）—— ①核心词发现数据编排器+LLM 语义判定(semantic_conflict 4种+R1 精确相关)→落库 ②campaign 主流程 is_core 回填（填了从 v2.0 起一直硬编码 False 的坑）③KB29 核心词定义规则接入 ④azlisting MCP 独立连接 ⑤离线批跑脚本+DDL。18+4 files +2397/-54。*
+
 *v3.17: Product Identity 全线注入 + 挪组执行修复（2026-07-12，本地未部署服务器）—— ①`product_identity.py` 解析 (asin,shop_id,parent_seller_sku) 三元组 ②`ProductIdentityMixin` 注入所有层请求模型 ③缓存无 identity 自动丢弃 ④挪组 portfolioId 解析前移+按 pid 拆请求+失败分类告警 ⑤`_snapshot_action` 补 ADJUST 映射+淘汰判定加固 ⑥知识图谱 16 篇+5 新测试。51+3+1 files +4691/-256。*
 
 最后更新：2026-07-12

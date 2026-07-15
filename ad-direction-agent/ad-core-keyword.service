@@ -1,0 +1,16 @@
+[Unit]
+Description=AD Agent Core Keyword Analysis Service (8015)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ad_agent_github_chenv31/ad-direction-agent
+Environment="PYTHONPATH=/opt/ad_agent_github_chenv31/ad-direction-agent"
+Environment="CORE_KEYWORD_ANALYZE_ENABLED=true"
+ExecStart=/opt/ad_agent_github_chenv31/ad-direction-agent/.venv/bin/python3.11 -m uvicorn app.start_core_keyword_server:app --host 0.0.0.0 --port 8015 --workers 5 --log-level info
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

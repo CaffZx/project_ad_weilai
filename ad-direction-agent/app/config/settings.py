@@ -230,7 +230,7 @@ class Settings(BaseSettings):
 
     # ── 核心词判定（离线，7 天一次）──
     core_keyword_enabled: bool = True              # 主流程是否读取核心词标签。fail-soft：表空/异常返回空 set，不影响主流程
-    core_keyword_analyze_enabled: bool = False     # 离线 endpoint 是否允许执行核心词分析。默认关，需显式开启后跑批
+    core_keyword_analyze_enabled: bool = True      # 离线 endpoint 是否允许执行核心词分析
     core_keyword_llm_timeout: float = 120.0        # semantic_core LLM 超时（秒）
     core_keyword_mcp_timeout: float = 420.0        # MCP 拉数总超时（秒）
 
