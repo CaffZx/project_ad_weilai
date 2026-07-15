@@ -15,6 +15,8 @@
 - `ad-direction-agent/app/workflow/steps/campaign_restart.py`
 - `ad-direction-agent/app/workflow/steps/advert_execution.py`
 - `ad-direction-agent/app/data/advert_mcp_client.py`
+- `ad-direction-agent/app/data/core_keyword_fetcher.py`
+- `ad-direction-agent/app/workflow/steps/core_keyword.py`
 
 ## 代码锚点地图
 
@@ -28,6 +30,7 @@
 | Campaign discovery | `app/data/campaign_fetcher.py:45`、`:270`、`:316` | `fetch_campaigns()`、`_discover_context_from_mcp()`、`_fetch_campaign_list()` |
 | Campaign 报表 | `campaign_fetcher.py:352`、`:454`、`:501`、`:557` | basic/product/placement/search term |
 | 新增词源 | `campaign_fetcher.py:602`、`:665`、`:759` | flow/own/competitor/suggested bids |
+| 核心词判定 | `app/data/core_keyword_fetcher.py` | CoreKeywordFetcher：6 步 MCP，跨 StarRocks + Azlisting |
 | Advert 执行 | `workflow/steps/advert_execution.py:255`、`advert_exec_mapper.py:82` | `load_confirmed_pending()`、`build_exec_plan()` |
 
 ## 总链路
@@ -206,12 +209,28 @@ Campaign 结果会写入：
 - `extract_task_ids()` 提取异步 task id。
 - 常规执行只读取 `CONFIRMED + execute_status=PENDING` 的 pending，执行后回写状态，保证幂等。
 
+## 阶段 9：核心词离线判定
+
+核心词判定使用 6 个 MCP 工具，跨两个 MCP 服务：
+
+| 步骤 | 工具 | MCP 服务 | 用途 |
+|------|------|---------|------|
+| 1 | `parent_listing_detail` | StarRocks | 获取 shop_account、site_code |
+| 2 | `erp_listing_product_info` | Azlisting | 标题/五点/变体/类目 |
+| 3 | `ad_campaign_product_keyword_list` | StarRocks | 关键词发现 + 多词活动过滤 |
+| 4 | `ad_campaign_product_report` × N | StarRocks | 14 天 cost/orders/acos |
+| 5 | `keyword_child_asins` × N | StarRocks | 自然排名 + 近次排名 |
+| 6 | `flow_keywords` | StarRocks | 搜索量 |
+
+Azlisting 工具由 `CoreKeywordFetcher` 内部持独立 `StreamableHttpMcpInvoker` 调用（endpoint: `azlisting_mcp_url`），不走 `McpAdapter` 全局路由。其余 5 个 StarRocks 工具走 `McpAdapter`。
+
 ## 常见误区
 
 - Campaign discovery 不是只靠 `ad_campaign_list`，还依赖 `ad_campaign_product_keyword_list` 补足活动-商品-关键词关系。
 - 旧文档中出现的工具名如果不在 `mcp_mapping.py` 或 `advert_mcp_client.py` 中，应先查代码再引用。
 - ERP 写入和 Advert MCP 执行是两个阶段；写 pending 不代表已经动真实广告。
 - LLM 超时或护栏失败时，部分链路会 fail-open 或规则兜底，不应直接视为 MCP 失败。
+- Azlisting `erp_listing_product_info` 是核心词判定专用工具，参数为 camelCase（`shopAccount`/`parentAsin`/`parentSellerSku`），与 StarRocks 的 snake_case 不同。
 
 ## 更新检查清单
 
