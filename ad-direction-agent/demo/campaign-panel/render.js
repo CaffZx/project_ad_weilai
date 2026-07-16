@@ -677,10 +677,12 @@ function _renderCoreKeywordModal(state) {
   const typeLabels = { semantic: '语义核心', data: '数据核心', manual: '人工' };
   const formatEvidence = (value) => {
     if (!value) return '';
+    if (Array.isArray(value) && value.length === 0) return '';
     if (typeof value !== 'string') return JSON.stringify(value);
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
+        if (parsed.length === 0) return '';
         return parsed.map(item => {
           if (typeof item === 'string') return item;
           if (item && typeof item === 'object') {

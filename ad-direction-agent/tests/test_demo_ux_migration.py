@@ -86,6 +86,13 @@ def test_core_keyword_management_modal_matches_v3_layout_contract():
     assert ".camp-core-type.manual" in css
 
 
+def test_core_keyword_evidence_formatter_hides_empty_ai_evidence_arrays():
+    render = read(PANEL_RENDER)
+
+    assert "if (Array.isArray(value) && value.length === 0) return '';" in render
+    assert "if (parsed.length === 0) return '';" in render
+
+
 def test_demo_native_analyzing_overlay_and_request_hints():
     html = read(DEMO)
 
