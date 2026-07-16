@@ -537,7 +537,6 @@ button[data-action="camp-batch-reject"] {
 .camp-core-search { flex:1; min-width:0; }
 .camp-core-search input { width:100%; box-sizing:border-box; padding:9px 11px; border:1px solid #CBD5E1; border-radius:8px; background:#fff; color:#172033; font-size:13px; outline:none; }
 .camp-core-search input:focus { border-color:#2563EB; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
-.camp-core-search span { display:block; margin-top:5px; color:#94A3B8; font-size:11px; }
 .camp-core-add-button { flex:0 0 auto; padding:9px 12px; border:1px solid #BFDBFE; border-radius:8px; background:#EFF6FF; color:#1D4ED8; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
 .camp-core-add-button:hover { background:#DBEAFE; border-color:#93C5FD; }
 .camp-core-table-wrap { border:1px solid #E2E8F0; border-radius:10px; overflow:auto; }
@@ -567,7 +566,7 @@ button[data-action="camp-batch-reject"] {
 .camp-core-menu-list button:hover { background:#F1F5F9; color:#0F172A; }
 .camp-core-empty { display:flex; min-height:180px; flex-direction:column; align-items:center; justify-content:center; gap:7px; margin:0 0 14px; border:1px dashed #CBD5E1; border-radius:10px; background:#F8FAFC; color:#475569; text-align:center; }
 .camp-core-empty strong { color:#334155; font-size:14px; }.camp-core-empty span { color:#94A3B8; font-size:12px; }
-.camp-core-footer { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-top:14px; padding:12px 20px; border-top:1px solid #E2E8F0; background:#F8FAFC; color:#64748B; font-size:12px; line-height:1.5; }
+.camp-core-footer { display:flex; align-items:center; justify-content:flex-end; gap:16px; margin-top:14px; padding:12px 20px; border-top:1px solid #E2E8F0; background:#F8FAFC; color:#64748B; font-size:12px; line-height:1.5; }
 .camp-core-footer button { flex:0 0 auto; padding:7px 12px; border:1px solid #CBD5E1; border-radius:7px; background:#fff; color:#334155; font-size:12px; cursor:pointer; }.camp-core-footer button:hover { background:#F1F5F9; }
 @media (max-width:720px) { .camp-core-overlay { padding:10px; }.camp-core-header { align-items:flex-start; flex-wrap:wrap; padding:15px; }.camp-core-count { margin-left:0; }.camp-core-close { margin-left:auto; }.camp-core-body { padding:12px 15px 0; }.camp-core-add { align-items:stretch; flex-direction:column; }.camp-core-add-button { width:100%; }.camp-core-table { min-width:760px; }.camp-core-footer { align-items:flex-start; flex-direction:column; padding:12px 15px; }.camp-core-footer button { width:100%; } }
 .camp-portfolio-pill {

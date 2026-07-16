@@ -86,6 +86,16 @@ def test_core_keyword_management_modal_matches_v3_layout_contract():
     assert ".camp-core-type.manual" in css
 
 
+def test_core_keyword_modal_uses_search_placeholder_without_redundant_tips():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+
+    assert 'placeholder="搜索本轮离线任务词池（选择后默认锁定）"' in render
+    assert "<span>从词池中选择后默认锁定</span>" not in render
+    assert "竖三点始终显示除当前状态外的三种状态" not in render
+    assert "justify-content:flex-end" in css
+
+
 def test_core_keyword_evidence_formatter_hides_empty_ai_evidence_arrays():
     render = read(PANEL_RENDER)
 
