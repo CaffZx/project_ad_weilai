@@ -1979,7 +1979,7 @@ class ErpDualWriterRepository:
         cur.execute(
             """SELECT keyword_text, keyword_norm, state, base_task_id,
                       base_task_finished_at, operator
-               FROM t_advert_agent_core_keyword_policy
+               FROM t_advert_agent_core_keyword_state
                WHERE parent_asin = %s
                  AND parent_seller_sku = %s
                  AND shop_id = %s""",
@@ -2100,7 +2100,7 @@ class ErpDualWriterRepository:
                 if len(effective) > 30:
                     raise ValueError("有效核心词超过 30 条上限")
                 cur.execute(
-                    """INSERT INTO t_advert_agent_core_keyword_policy
+                    """INSERT INTO t_advert_agent_core_keyword_state
                        (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
                         base_task_id,base_task_finished_at,operator)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -2121,7 +2121,7 @@ class ErpDualWriterRepository:
             analysis["parent_asin"], analysis["parent_seller_sku"], analysis["shop_id"],
         )
         cur.execute(
-            """DELETE FROM t_advert_agent_core_keyword_policy
+            """DELETE FROM t_advert_agent_core_keyword_state
                WHERE parent_asin = %s AND parent_seller_sku = %s AND shop_id = %s
                  AND state IN ('ENABLED', 'DISABLED')""",
             identity,
@@ -2134,7 +2134,7 @@ class ErpDualWriterRepository:
             if not keyword_norm:
                 continue
             cur.execute(
-                """INSERT INTO t_advert_agent_core_keyword_policy
+                """INSERT INTO t_advert_agent_core_keyword_state
                    (parent_asin, parent_seller_sku, shop_id, keyword_text, keyword_norm,
                     state, base_task_id, base_task_finished_at, operator)
                    VALUES (%s,%s,%s,%s,%s,'ENABLED',%s,%s,'offline-sync')
@@ -2216,7 +2216,7 @@ class ErpDualWriterRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT keyword_norm
-                       FROM t_advert_agent_core_keyword_policy
+                       FROM t_advert_agent_core_keyword_state
                        WHERE parent_asin = %s
                          AND parent_seller_sku = %s
                          AND shop_id = %s

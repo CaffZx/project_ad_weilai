@@ -1,8 +1,8 @@
--- 核心词人工状态策略表
+-- 核心词人工状态管理表
 -- 迁移日期：2026-07-16
 -- 目标库：erp_agentadvert_chen（ERP 库）
 
-CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_policy (
+CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_state (
     id                    BIGINT       NOT NULL AUTO_INCREMENT,
     parent_asin           VARCHAR(20)  NOT NULL,
     parent_seller_sku     VARCHAR(128) NOT NULL,
