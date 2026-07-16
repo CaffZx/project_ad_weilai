@@ -198,10 +198,10 @@ class CoreKeywordFetcher:
         cid_mt: dict[str, str] = {}
         cid_asin: dict[str, str] = {}
         for r in rows:
-            cid = str(r.get("campaign_id") or r.get("广告活动D") or r.get("广告活动ID") or "").strip()
+            cn = str(r.get("广告活动名称") or r.get("campaign_name") or "").strip()
+            cid = str(r.get("campaign_id") or r.get("广告活动D") or r.get("广告活动ID") or cn).strip()
             kw = str(r.get("关键词") or r.get("keyword_text") or r.get("keyword") or "").strip()
             mt = str(r.get("关键词匹配类型") or r.get("match_type") or "").strip()
-            cn = str(r.get("广告活动名称") or r.get("campaign_name") or "").strip()
             ca = str(r.get("child_asin") or r.get("子SIN") or r.get("子ASIN") or "").strip()
             if not cid or not kw or not cn:
                 continue

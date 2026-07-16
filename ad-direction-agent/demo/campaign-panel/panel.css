@@ -522,6 +522,21 @@ button[data-action="camp-batch-approve"]:hover { background: #1E40AF !important;
 button[data-action="camp-batch-reject"] {
   background: #FEF2F2 !important; color: #991B1B !important; border-color: #FCA5A5 !important;
 }
+.camp-core-keyword-manage { background:#F5F3FF !important; color:#6D28D9 !important; border-color:#C4B5FD !important; }
+.camp-core-modal { width:min(1000px,94vw); max-height:82vh; overflow:auto; }
+.camp-modal-title { display:flex; gap:10px; align-items:center; justify-content:space-between; }
+.camp-modal-title span { font-size:12px; color:var(--camp-muted-fg); font-weight:400; }
+.camp-core-add { display:flex; gap:8px; margin:12px 0; }
+.camp-core-add input { flex:1; min-width:0; }
+.camp-core-table { width:100%; border-collapse:collapse; font-size:12px; }
+.camp-core-table th,.camp-core-table td { padding:8px; border-bottom:1px solid var(--camp-border); vertical-align:top; text-align:left; }
+.camp-core-table td:nth-child(3) { max-width:340px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.camp-core-table details button { display:block; margin:3px 0; width:100%; }
+.camp-core-state { display:inline-block; padding:2px 7px; border-radius:999px; font-size:11px; }
+.camp-core-state.state-LOCKED { color:#6D28D9; background:#F3E8FF; }
+.camp-core-state.state-ENABLED { color:#166534; background:#DCFCE7; }
+.camp-core-state.state-DISABLED { color:#6B7280; background:#F3F4F6; }
+.camp-core-state.state-VETOED { color:#B91C1C; background:#FEE2E2; }
 .camp-portfolio-pill {
   display: grid; grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px 8px; min-width: 170px; border-radius: 8px;

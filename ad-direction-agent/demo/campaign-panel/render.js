@@ -163,6 +163,7 @@ function _fullRender(state) {
   _renderSummaryStats(vm);
   _renderTabButtons(state);
   _renderReallocModal(state);
+  _renderCoreKeywordModal(state);
   _renderConfirmModal(state);
 }
 
@@ -666,6 +667,23 @@ function _renderPortfolioFilterPills(state) {
 
   el.innerHTML = pills + actionsHtml + hint;
   _show('camp-portfolio-pills-row');
+}
+
+function _renderCoreKeywordModal(state) {
+  const mount = _$('camp-modal-mount');
+  if (!mount || !state._coreKeywordManagement) return;
+  const data = state._coreKeywordManagement;
+  const labels = { LOCKED: '锁定', ENABLED: '启用', DISABLED: '未启用', VETOED: '否决' };
+  const rows = (data.rows || []).map(row => {
+    const evidence = [row.semantic_evidence, row.data_evidence, row.manual_reason].filter(Boolean).map(v => typeof v === 'string' ? v : JSON.stringify(v)).join('；');
+    const choices = Object.keys(labels).filter(key => key !== row.state).map(key => `<button data-action="camp-core-keyword-state" data-keyword="${_esc(row.keyword_text)}" data-state="${key}">${labels[key]}</button>`).join('');
+    return `<tr><td>${_esc(row.keyword_text)}</td><td>${(row.types || []).map(_esc).join(' / ')}</td><td>${_esc(evidence || '无可用 AI 证据')}</td><td><span class="camp-core-state state-${row.state}">${labels[row.state] || row.state}</span></td><td><details><summary>⋮</summary>${choices}</details></td></tr>`;
+  }).join('');
+  const options = (data.word_pool || []).map(word => `<option value="${_esc(word)}"></option>`).join('');
+  mount.innerHTML = `<div class="camp-modal-mask"><div class="camp-modal camp-core-modal"><div class="camp-modal-title">核心词管理 <span>当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button data-action="camp-core-keyword-close">×</button></div><div class="camp-core-add"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池"><datalist id="camp-core-keyword-pool">${options}</datalist><button data-action="camp-core-keyword-add">＋ 添加核心词</button></div><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="5">本轮没有可管理的核心词</td></tr>'}</tbody></table></div></div>`;
+  const add = mount.querySelector('[data-action="camp-core-keyword-add"]');
+  const input = mount.querySelector('#camp-core-keyword-input');
+  if (add && input) add.addEventListener('click', () => { add.dataset.keyword = input.value; });
 }
 
 // ── 回算修改弹窗（一次改 3 个活动组；低价捡漏固定 $1 不可改）──
