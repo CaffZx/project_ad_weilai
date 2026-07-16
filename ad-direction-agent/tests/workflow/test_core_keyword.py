@@ -68,6 +68,15 @@ def test_core_keyword_task_version_matches_api_iso_datetime():
     assert core_keyword_task_version("2026-07-16 07:00:00.123456") == "2026-07-16T07:00:00.123456"
 
 
+def test_new_core_keyword_task_id_is_unique_for_each_run():
+    first = CK._new_task_id()
+    second = CK._new_task_id()
+
+    assert first != second
+    assert first.startswith("ckt")
+    assert len(first) == 32
+
+
 def test_core_keyword_server_manual_entry_uses_project_root_as_workdir():
     assert start_core_keyword_server.SCRIPT_DIR == str(start_core_keyword_server.PROJECT_ROOT)
 
@@ -759,7 +768,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
 
     assert result == {"core kw", "other core"}
     assert any("t.status = 'DONE'" in sql for sql in fake_repo.conn.cursor_obj.sqls)
-    assert any("SELECT MAX(started_at)" in sql for sql in fake_repo.conn.cursor_obj.sqls)
+    assert any("ORDER BY started_at DESC, finished_at DESC, id DESC" in sql for sql in fake_repo.conn.cursor_obj.sqls)
     assert fake_repo.conn.cursor_obj.sqls[0]
     assert fake_repo.conn.cursor_obj.params == (
         "B0TEST", "SKU-1", 1622,
@@ -767,7 +776,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
     assert fake_repo.conn.closed is True
 
 
-def test_write_core_keyword_task_replaces_same_day_labels_and_updates_total_count():
+def test_write_core_keyword_task_replaces_retry_labels_and_updates_total_count():
     executed: list[tuple[str, tuple]] = []
 
     class FakeCursor:

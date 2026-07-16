@@ -2169,8 +2169,8 @@ class ErpDualWriterRepository:
                      analysis["core_keyword_count"],
                      analysis.get("triggered_by") or "", now, now),
                 )
-                # task ID 按产品+日期生成，同日重跑会复用 ID；标签必须是本次全量快照，
-                # 不能让已被锁定/否决预过滤的旧词残留在最新任务中。
+                # 同一 task 的落库重试必须保持幂等：label 是本次全量快照，
+                # 不能让一次失败重试前的旧词残留在该 task 中。
                 cur.execute(
                     "DELETE FROM t_advert_agent_core_keyword_label WHERE task_id = %s",
                     (analysis["task_id"],),
@@ -2257,13 +2257,15 @@ class ErpDualWriterRepository:
                          AND l.shop_id = %s
                          AND l.is_core = 1
                          AND t.status = 'DONE'
-                         AND t.started_at = (
-                             SELECT MAX(started_at)
+                         AND t.id = (
+                             SELECT id
                              FROM t_advert_agent_core_keyword_task
                              WHERE parent_asin = %s
                                AND parent_seller_sku = %s
                                AND shop_id = %s
                                AND status = 'DONE'
+                             ORDER BY started_at DESC, finished_at DESC, id DESC
+                             LIMIT 1
                          )""",
                     (parent_asin, parent_seller_sku, shop_id,
                      parent_asin, parent_seller_sku, shop_id),

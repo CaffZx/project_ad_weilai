@@ -7,9 +7,9 @@ MCP 拉数 → data_core(代码) → semantic_core(LLM) → merge → 落 ERP。
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,9 +24,9 @@ from app.llm.reasoner import LLMReasoner, reasoner
 logger = logging.getLogger(__name__)
 
 
-def _stable_id(prefix: str, *parts: str) -> str:
-    raw = "|".join(parts)
-    return prefix + hashlib.sha256(raw.encode()).hexdigest()[:8]
+def _new_task_id() -> str:
+    """每次离线运行唯一；task 表的 VARCHAR(32) 内保留 ckt 前缀。"""
+    return "ckt" + uuid.uuid4().hex[:29]
 
 
 # ── data_core: 纯代码 ────────────────────────────────────────
@@ -232,8 +232,7 @@ async def run_core_keyword_analysis(
     triggered_by: str = "manual",
 ) -> dict[str, Any]:
     """离线核心词判定主入口。返回 {ok, task_id, core_count, ...}。"""
-    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-    task_id = _stable_id("ckt", parent_asin, parent_seller_sku, str(shop_id), date_str)
+    task_id = _new_task_id()
 
     if not settings.core_keyword_analyze_enabled:
         return {"ok": False, "error": "core_keyword_analyze_enabled is False"}
