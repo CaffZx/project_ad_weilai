@@ -126,9 +126,9 @@ async def test_step3_filters_multi_keyword_campaigns_before_data_core():
     fetcher = CoreKeywordFetcher()
     fetcher._starrocks = _FakeStarrocks({
         "ad_campaign_product_keyword_list": [
-            {"广告活动名称": "camp_multi", "关键词": "core dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
-            {"广告活动名称": "camp_multi", "关键词": "summer dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
-            {"广告活动名称": "camp_single", "关键词": "party dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "core dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "summer dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
+            {"campaign_id": "single", "广告活动名称": "camp_single", "关键词": "party dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
         ],
     })
 
@@ -326,9 +326,9 @@ async def test_fetcher_uses_azlisting_and_dedupes_campaign_reports(monkeypatch):
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"广告活动名称": "camp_multi", "关键词": "kw 1", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
-            {"广告活动名称": "camp_multi", "关键词": "kw 2", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
-            {"广告活动名称": "camp_single", "关键词": "kw 3", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "kw 1", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "kw 2", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
+            {"campaign_id": "single", "广告活动名称": "camp_single", "关键词": "kw 3", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
         ],
         "ad_campaign_product_report": [{"花费": 12, "广告订单量": 2, "ACOS": 25}],
         "keyword_child_asins": [{"keyword": "kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
@@ -370,9 +370,9 @@ async def test_fetcher_dedupes_campaign_keywords_before_ranking():
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"campaign_name": "camp_one", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C1"},
-            {"campaign_name": "camp_two", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C2"},
-            {"campaign_name": "camp_three", "keyword": "unique kw", "match_type": "PHRASE", "child_asin": "B0C3"},
+            {"campaign_id": "one", "campaign_name": "camp_one", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C1"},
+            {"campaign_id": "two", "campaign_name": "camp_two", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C2"},
+            {"campaign_id": "three", "campaign_name": "camp_three", "keyword": "unique kw", "match_type": "PHRASE", "child_asin": "B0C3"},
         ],
         "ad_campaign_product_report": [{"cost": 10, "orders": 2, "acos": 25}],
         "keyword_child_asins": [{"keyword": "repeat kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
@@ -406,9 +406,9 @@ async def test_fetcher_excludes_keywords_from_multi_keyword_campaigns():
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"campaign_name": "camp_multi", "keyword": "multi kw one", "match_type": "EXACT", "child_asin": "B0C1"},
-            {"campaign_name": "camp_multi", "keyword": "multi kw two", "match_type": "EXACT", "child_asin": "B0C2"},
-            {"campaign_name": "camp_single", "keyword": "single kw", "match_type": "EXACT", "child_asin": "B0C3"},
+            {"campaign_id": "multi", "campaign_name": "camp_multi", "keyword": "multi kw one", "match_type": "EXACT", "child_asin": "B0C1"},
+            {"campaign_id": "multi", "campaign_name": "camp_multi", "keyword": "multi kw two", "match_type": "EXACT", "child_asin": "B0C2"},
+            {"campaign_id": "single", "campaign_name": "camp_single", "keyword": "single kw", "match_type": "EXACT", "child_asin": "B0C3"},
         ],
         "ad_campaign_product_report": [{"cost": 10, "orders": 2, "acos": 25}],
         "keyword_child_asins": [{"keyword": "single kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
