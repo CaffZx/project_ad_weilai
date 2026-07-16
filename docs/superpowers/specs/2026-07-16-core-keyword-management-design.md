@@ -66,7 +66,7 @@ WHERE t.parent_asin = :parent_asin
 | 状态 | UI 颜色 | 有效 `is_core` | 核心词离线任务 | Campaign LLM |
 |---|---|---:|---|---|
 | `LOCKED` 锁定 | 紫色 | `true` | 跳过该词 | 正常进入，携带 `is_core=true` |
-| `ENABLED` 启用（默认） | 绿色 | 跟随 AI | 正常参与 | 正常进入 |
+| `ENABLED` 启用（默认） | 绿色 | `true`（当前周期） | 正常参与 | 正常进入，携带 `is_core=true` |
 | `DISABLED` 不启用 | 灰色 | `false` | 正常参与下次判定 | 正常进入，携带 `is_core=false` |
 | `VETOED` 否决 | 红色 | `false` | 跳过该词 | 正常进入，携带 `is_core=false` |
 
@@ -78,7 +78,8 @@ WHERE t.parent_asin = :parent_asin
 LOCKED                    -> effective_is_core = true
 VETOED                    -> effective_is_core = false
 DISABLED                  -> effective_is_core = false（仅至下一次成功离线任务）
-ENABLED / 无策略           -> effective_is_core = ai_is_core
+ENABLED                   -> effective_is_core = true（当前周期）
+无策略                     -> effective_is_core = ai_is_core
 ```
 
 `DISABLED` 是临时覆盖。每次成功持久化新的离线任务后，状态表会完成一次轮换：原 `DISABLED` 复位，新的 `label.is_core=1` 统一成为默认 `ENABLED`。新任务不再推荐的词不再属于 AI 基础列表；只有 `LOCKED`、`VETOED` 等人工例外继续保留。
@@ -142,7 +143,7 @@ CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_state (
 2. `list_core_keyword_management(identity)`：以该任务 `is_core=1` 标签作为 AI 基础行，再合并策略表中的人工例外行，生成单列表。
 3. `list_core_keyword_word_pool(identity)`：仅返回该任务**全部** `label.keyword_text`（不限 `is_core`），按 `keyword_norm` 去重；不读取 Campaign 快照、不读取历史任务、不额外调用 MCP。
 4. `upsert_core_keyword_policy(identity, keyword, state, expected_task, operator)`：原子写入状态；写前验证关键词来自当前任务词池，并校验产品三元身份和任务版本。
-5. `resolve_core_keyword_policy(identity)`：先复用现有 AI 基础集合，再叠加策略，返回 `effective_core` 规范化集合。逻辑为 `(ai_base_core ∪ locked) - disabled - vetoed`。
+5. `resolve_core_keyword_policy(identity)`：先复用现有 AI 基础集合，再叠加策略，返回 `effective_core` 规范化集合。逻辑为 `(ai_base_core ∪ enabled ∪ locked) - disabled - vetoed`。
 6. `sync_core_keyword_policies_after_task(identity, new_task)`：在新 task / label 成功写入的同一事务内，保留 `LOCKED`、`VETOED`，清理过期默认行和临时 `DISABLED`，再把本轮 `is_core=1` 标签刷新为 `ENABLED`（但不得覆盖锁定或否决）。
 
 `resolve_core_keyword_policy()` 是 Campaign 和管理接口的唯一状态解析入口，避免各调用点自行拼优先级。
@@ -202,8 +203,8 @@ CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_state (
 服务端规则：
 
 - `expected_task_id` 与 `expected_task_finished_at` 必须匹配当前最新 DONE 任务；不匹配返回 `409`，客户端刷新后重试。
-- 四种状态均记录当前任务版本；`ENABLED` 恢复跟随当前 AI 结果。
-- `LOCKED` 会使有效核心词数增加时，先计算合并后的数量；超过 30 返回业务错误，不写入。
+- 四种状态均记录当前任务版本；`ENABLED` 在当前周期恢复为有效核心词，并在下一次成功离线任务后按新的 AI 结论轮换。
+- `LOCKED` 或 `ENABLED` 会使有效核心词数增加时，先计算合并后的数量；超过 30 返回业务错误，不写入。
 - 不允许自由文本：新增策略时 `keyword_norm` 必须存在于服务端当前词池；对已有的 `LOCKED` / `VETOED` 例外行允许直接切换状态，即使它已被排除而不在当前词池中。
 - 成功后返回该词的最新管理行和新的 `effective_core_count`。
 
@@ -223,7 +224,7 @@ Campaign 不删除、跳过或隐藏任何活动。所有活动仍进入既有 L
 
 - `LOCKED` 词为 `true`，保留 P0 核心词禁淘汰保护。
 - `DISABLED` 和 `VETOED` 词为 `false`，不享受核心词保护。
-- `ENABLED` 跟随 AI 标签。
+- `ENABLED` 词为 `true`；下一次成功离线任务后再由新的 AI 标签决定其是否继续保留。
 
 ### 5.4 核心词离线任务
 
@@ -293,7 +294,7 @@ Campaign 不删除、跳过或隐藏任何活动。所有活动仍进入既有 L
 - 四种状态的解析优先级正确。
 - 每个成功离线任务后，所有临时 `DISABLED` 均复位；本轮 `is_core=1` 标签默认刷新为 `ENABLED`，同日重跑和跨日重跑都覆盖验证。
 - `LOCKED` 与 `VETOED` 跨离线任务持续存在。
-- 锁定 / 添加超过 30 条被拒绝；从锁定切回启用后可重新新增。
+- 锁定 / 启用 / 添加导致超过 30 条时被拒绝；从锁定切回启用后仍计为有效核心词。
 - 词池外关键词被拒绝；词池严格只含最新任务全部 label；人工例外行能返回历史 AI 证据。
 
 ### 核心词离线任务 / Campaign

@@ -18,7 +18,7 @@ def resolve_effective_core_keywords(
         norm = normalize_core_keyword(keyword)
         if not norm:
             continue
-        if state == "LOCKED":
+        if state in {"LOCKED", "ENABLED"}:
             effective.add(norm)
         elif state in {"DISABLED", "VETOED"}:
             effective.discard(norm)

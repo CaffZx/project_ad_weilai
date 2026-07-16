@@ -63,6 +63,15 @@ def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching
     assert result == {"locked kw"}
 
 
+def test_resolve_effective_core_keywords_counts_manual_enabled_keyword():
+    result = resolve_effective_core_keywords(
+        {"ai core"},
+        {"manual enabled": "ENABLED"},
+    )
+
+    assert result == {"ai core", "manual enabled"}
+
+
 def test_management_keeps_manual_enabled_word_in_rows(monkeypatch):
     class FakeCursor:
         def __enter__(self): return self
