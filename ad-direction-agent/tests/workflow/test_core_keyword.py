@@ -11,7 +11,10 @@ from app.data.core_keyword_fetcher import (
 )
 from app.llm.reasoner import LLMReasoner
 from app.models.campaign import CampaignAdjustmentItem, CampaignPerf, CampaignUnit
-from app.persistence.erp_writer.repository import ErpDualWriterRepository
+from app.persistence.erp_writer.repository import (
+    ErpDualWriterRepository,
+    resolve_effective_core_keywords,
+)
 from app.workflow.steps import campaign as campaign_step
 from app.workflow.steps import core_keyword as CK
 
@@ -42,6 +45,59 @@ class _FakeAzlisting:
     async def call_tool(self, tool_name, arguments):
         self.calls.append((tool_name, arguments))
         return self.payload
+
+
+def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching():
+    result = resolve_effective_core_keywords(
+        {"AI Dress", "disabled kw"},
+        {
+            " locked kw ": "LOCKED",
+            "DISABLED KW": "DISABLED",
+            "ai dress": "VETOED",
+        },
+    )
+
+    assert result == {"locked kw"}
+
+
+@pytest.mark.asyncio
+async def test_fetcher_prefilters_locked_and_vetoed_before_perf_and_rank():
+    fetcher = CoreKeywordFetcher()
+    fake_starrocks = _FakeStarrocks({
+        "parent_listing_detail": [{
+            "shop_account": "shop_us",
+            "parent_seller_sku": "SKU-1",
+            "shop_id": 1622,
+            "site_code": "Amazon_US",
+        }],
+        "ad_campaign_product_keyword_list": [
+            {"campaign_id": "1", "广告活动名称": "camp_locked", "关键词": "locked kw", "关键词匹配类型": "EXACT"},
+            {"campaign_id": "2", "广告活动名称": "camp_vetoed", "关键词": "vetoed kw", "关键词匹配类型": "EXACT"},
+            {"campaign_id": "3", "广告活动名称": "camp_enabled", "关键词": "enabled kw", "关键词匹配类型": "EXACT"},
+        ],
+        "ad_campaign_product_report": [{"花费": 10, "广告订单量": 1, "ACOS": 25}],
+        "keyword_child_asins": [{"keyword": "enabled kw", "craw_nature_rank": 12}],
+        "flow_keywords": [],
+    })
+    fetcher._starrocks = fake_starrocks
+    fetcher._azlisting = _FakeAzlisting([])
+
+    result = await fetcher.fetch(
+        "B0TEST", "SKU-1", 1622,
+        excluded_keyword_norms={"locked kw", "vetoed kw"},
+    )
+
+    assert [item.keyword_text for item in result.campaigns] == ["enabled kw"]
+    report_campaigns = [
+        args["campaign_name"] for name, args in fake_starrocks.calls
+        if name == "ad_campaign_product_report"
+    ]
+    ranking_keywords = [
+        args["keyword"] for name, args in fake_starrocks.calls
+        if name == "keyword_child_asins"
+    ]
+    assert report_campaigns == ["camp_enabled"]
+    assert ranking_keywords == ["enabled kw"]
 
 
 @pytest.mark.asyncio
@@ -368,7 +424,7 @@ async def test_offline_analysis_uses_analyze_switch_batches_llm_and_caps_core_ou
     captured_batches: list[list[str]] = []
 
     class FakeFetcher:
-        async def fetch(self, parent_asin, parent_seller_sku, shop_id):
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
             campaigns = [
                 CampaignKeywordItem(
                     campaign_name=f"camp_{i}",
@@ -432,12 +488,66 @@ async def test_offline_analysis_uses_analyze_switch_batches_llm_and_caps_core_ou
 
 
 @pytest.mark.asyncio
+async def test_offline_analysis_passes_locked_and_vetoed_terms_to_fetcher(monkeypatch):
+    old_analyze = settings.core_keyword_analyze_enabled
+    settings.core_keyword_analyze_enabled = True
+    captured: dict[str, set[str]] = {}
+
+    class FakeFetcher:
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
+            captured["excluded"] = excluded_keyword_norms or set()
+            return FetchResult(
+                context=FetchedContext(site_code="Amazon_US"),
+                listing=ListingProductInfo(), campaigns=[], flow_keywords=[],
+            )
+
+    monkeypatch.setattr(CK, "CoreKeywordFetcher", FakeFetcher)
+    monkeypatch.setattr(
+        ErpDualWriterRepository,
+        "fetch_core_keyword_exclusion_set",
+        lambda *args: {"locked kw", "vetoed kw"},
+        raising=False,
+    )
+    try:
+        await CK.run_core_keyword_analysis("B0TEST", "SKU-1", 1622)
+    finally:
+        settings.core_keyword_analyze_enabled = old_analyze
+
+    assert captured["excluded"] == {"locked kw", "vetoed kw"}
+
+
+@pytest.mark.asyncio
+async def test_management_api_returns_repository_management_payload(monkeypatch):
+    payload = {
+        "effective_core_count": 1,
+        "limit": 30,
+        "latest_task": {"id": "ckt-new", "finished_at": "2026-07-16T00:00:00"},
+        "rows": [],
+        "word_pool": ["current core", "current non-core"],
+    }
+
+    class FakeRepository:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def list_core_keyword_management(self, parent_asin, parent_seller_sku, shop_id):
+            assert (parent_asin, parent_seller_sku, shop_id) == ("B0TEST", "SKU-1", 1622)
+            return payload
+
+    monkeypatch.setattr("app.persistence.erp_writer.repository.ErpDualWriterRepository", FakeRepository)
+
+    out = await core_keyword_api.get_core_keyword_management("B0TEST", "SKU-1", 1622)
+
+    assert out == {"ok": True, **payload}
+
+
+@pytest.mark.asyncio
 async def test_offline_analysis_refuses_when_analyze_switch_off(monkeypatch):
     old_analyze = settings.core_keyword_analyze_enabled
     settings.core_keyword_analyze_enabled = False
 
     class FailFetcher:
-        async def fetch(self, parent_asin, parent_seller_sku, shop_id):
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
             raise AssertionError("fetch should not run when analyze switch is off")
 
     monkeypatch.setattr(CK, "CoreKeywordFetcher", FailFetcher)
@@ -576,6 +686,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
     class FakeCursor:
         def __init__(self):
             self.sql = ""
+            self.sqls = []
             self.params = ()
 
         def __enter__(self):
@@ -586,6 +697,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
 
         def execute(self, sql, params):
             self.sql = sql
+            self.sqls.append(sql)
             self.params = params
 
         def fetchall(self):
@@ -618,10 +730,10 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
         settings.core_keyword_enabled = old_enabled
 
     assert result == {"core kw", "other core"}
-    assert "t.status = 'DONE'" in fake_repo.conn.cursor_obj.sql
-    assert "SELECT MAX(started_at)" in fake_repo.conn.cursor_obj.sql
+    assert any("t.status = 'DONE'" in sql for sql in fake_repo.conn.cursor_obj.sqls)
+    assert any("SELECT MAX(started_at)" in sql for sql in fake_repo.conn.cursor_obj.sqls)
+    assert fake_repo.conn.cursor_obj.sqls[0]
     assert fake_repo.conn.cursor_obj.params == (
-        "B0TEST", "SKU-1", 1622,
         "B0TEST", "SKU-1", 1622,
     )
     assert fake_repo.conn.closed is True

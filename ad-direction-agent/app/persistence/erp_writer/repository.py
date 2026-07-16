@@ -10,6 +10,10 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from app.config.settings import settings
+from app.core_keyword_policy import (
+    normalize_core_keyword,
+    resolve_effective_core_keywords,
+)
 from app.workflow.steps.campaign_portfolio import is_strictly_in_low_bid_pool
 from .erp_display import build_whip_display_fields
 from .models import CanonicalRun, stable_id, warehouse_pending_id
@@ -32,6 +36,9 @@ if TYPE_CHECKING:
     from app.models.campaign import CampaignUnit
 
 logger = logging.getLogger(__name__)
+
+
+CORE_KEYWORD_POLICY_STATES = frozenset({"LOCKED", "ENABLED", "DISABLED", "VETOED"})
 
 
 def _audit_int(v: Any) -> int | None:
@@ -1929,6 +1936,207 @@ class ErpDualWriterRepository:
 
     # ── 核心词判定落库 ────────────────────────────────────────
 
+    @staticmethod
+    def _latest_core_keyword_task_cursor(
+        cur, parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> dict[str, Any] | None:
+        cur.execute(
+            """SELECT id, finished_at
+               FROM t_advert_agent_core_keyword_task
+               WHERE parent_asin = %s
+                 AND parent_seller_sku = %s
+                 AND shop_id = %s
+                 AND status = 'DONE'
+               ORDER BY started_at DESC
+               LIMIT 1""",
+            (parent_asin, parent_seller_sku, shop_id),
+        )
+        return cur.fetchone()
+
+    @staticmethod
+    def _core_keyword_labels_cursor(cur, task_id: str) -> list[dict[str, Any]]:
+        cur.execute(
+            """SELECT keyword_text, semantic_core, semantic_evidence,
+                      data_core, data_evidence, is_core
+               FROM t_advert_agent_core_keyword_label
+               WHERE task_id = %s
+               ORDER BY id""",
+            (task_id,),
+        )
+        return list(cur.fetchall())
+
+    @staticmethod
+    def _core_keyword_policies_cursor(
+        cur, parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> list[dict[str, Any]]:
+        cur.execute(
+            """SELECT keyword_text, keyword_norm, state, base_task_id,
+                      base_task_finished_at, operator
+               FROM t_advert_agent_core_keyword_policy
+               WHERE parent_asin = %s
+                 AND parent_seller_sku = %s
+                 AND shop_id = %s""",
+            (parent_asin, parent_seller_sku, shop_id),
+        )
+        return list(cur.fetchall())
+
+    def list_core_keyword_management(
+        self, parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> dict[str, Any]:
+        """返回与 Campaign 当前 AI 基础同源的核心词管理单列表。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                latest = self._latest_core_keyword_task_cursor(
+                    cur, parent_asin, parent_seller_sku, shop_id,
+                )
+                if not latest:
+                    return {
+                        "effective_core_count": 0, "limit": 30,
+                        "latest_task": None, "rows": [], "word_pool": [],
+                    }
+                labels = self._core_keyword_labels_cursor(cur, str(latest["id"]))
+                policies = self._core_keyword_policies_cursor(
+                    cur, parent_asin, parent_seller_sku, shop_id,
+                )
+
+                policy_by_norm = {
+                    normalize_core_keyword(row.get("keyword_norm") or row.get("keyword_text") or ""): row
+                    for row in policies
+                }
+                rows_by_norm: dict[str, dict[str, Any]] = {}
+                for label in labels:
+                    if not label.get("is_core"):
+                        continue
+                    norm = normalize_core_keyword(label.get("keyword_text") or "")
+                    if not norm:
+                        continue
+                    policy = policy_by_norm.get(norm)
+                    types: list[str] = []
+                    if label.get("semantic_core"):
+                        types.append("semantic")
+                    if label.get("data_core"):
+                        types.append("data")
+                    if policy:
+                        types.append("manual")
+                    rows_by_norm[norm] = {
+                        "keyword_text": label["keyword_text"], "types": types,
+                        "semantic_evidence": label.get("semantic_evidence") or [],
+                        "data_evidence": label.get("data_evidence") or [],
+                        "manual_reason": "人工覆盖" if policy else "",
+                        "state": (policy or {}).get("state") or "ENABLED",
+                    }
+
+                for norm, policy in policy_by_norm.items():
+                    if norm in rows_by_norm:
+                        continue
+                    if policy.get("state") == "ENABLED":
+                        continue
+                    rows_by_norm[norm] = {
+                        "keyword_text": policy.get("keyword_text") or norm,
+                        "types": ["manual"], "semantic_evidence": [],
+                        "data_evidence": [], "manual_reason": "人工覆盖",
+                        "state": policy["state"],
+                    }
+
+                effective = resolve_effective_core_keywords(
+                    [label["keyword_text"] for label in labels if label.get("is_core")],
+                    {norm: row.get("state") or "ENABLED" for norm, row in policy_by_norm.items()},
+                )
+                return {
+                    "effective_core_count": len(effective), "limit": 30,
+                    "latest_task": {
+                        "id": latest["id"],
+                        "finished_at": latest.get("finished_at"),
+                    },
+                    "rows": sorted(rows_by_norm.values(), key=lambda row: row["keyword_text"].casefold()),
+                    "word_pool": list(dict.fromkeys(
+                        label["keyword_text"] for label in labels if label.get("keyword_text")
+                    )),
+                }
+        finally:
+            conn.close()
+
+    def upsert_core_keyword_policy(
+        self, parent_asin: str, parent_seller_sku: str, shop_id: int, keyword_text: str,
+        state: str, expected_task_id: str, expected_task_finished_at: str | None,
+        operator: str | None = None,
+    ) -> dict[str, Any]:
+        state = state.upper().strip()
+        if state not in CORE_KEYWORD_POLICY_STATES:
+            raise ValueError("无效核心词状态")
+        keyword_text = keyword_text.strip()
+        keyword_norm = normalize_core_keyword(keyword_text)
+        if not keyword_norm:
+            raise ValueError("核心词不能为空")
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                latest = self._latest_core_keyword_task_cursor(cur, parent_asin, parent_seller_sku, shop_id)
+                if not latest or str(latest["id"]) != expected_task_id:
+                    raise RuntimeError("STALE_TASK")
+                if expected_task_finished_at and str(latest.get("finished_at")) != expected_task_finished_at:
+                    raise RuntimeError("STALE_TASK")
+                labels = self._core_keyword_labels_cursor(cur, str(latest["id"]))
+                policies = self._core_keyword_policies_cursor(cur, parent_asin, parent_seller_sku, shop_id)
+                existing = {normalize_core_keyword(row.get("keyword_norm") or row.get("keyword_text") or ""): row for row in policies}
+                word_pool = {normalize_core_keyword(row.get("keyword_text") or "") for row in labels}
+                if keyword_norm not in word_pool and keyword_norm not in existing:
+                    raise ValueError("核心词不在当前离线任务词池")
+                next_states = {norm: row.get("state") or "ENABLED" for norm, row in existing.items()}
+                next_states[keyword_norm] = state
+                effective = resolve_effective_core_keywords(
+                    [row["keyword_text"] for row in labels if row.get("is_core")], next_states,
+                )
+                if len(effective) > 30:
+                    raise ValueError("有效核心词超过 30 条上限")
+                cur.execute(
+                    """INSERT INTO t_advert_agent_core_keyword_policy
+                       (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
+                        base_task_id,base_task_finished_at,operator)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE keyword_text=VALUES(keyword_text), state=VALUES(state),
+                        base_task_id=VALUES(base_task_id), base_task_finished_at=VALUES(base_task_finished_at),
+                        operator=VALUES(operator)""",
+                    (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
+                     latest["id"],latest.get("finished_at"),operator),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return self.list_core_keyword_management(parent_asin, parent_seller_sku, shop_id)
+
+    def _sync_core_keyword_policies_after_task(self, cur, analysis: dict, now: datetime) -> None:
+        """离线任务成功后轮换默认状态，长期人工锁定/否决不被覆盖。"""
+        identity = (
+            analysis["parent_asin"], analysis["parent_seller_sku"], analysis["shop_id"],
+        )
+        cur.execute(
+            """DELETE FROM t_advert_agent_core_keyword_policy
+               WHERE parent_asin = %s AND parent_seller_sku = %s AND shop_id = %s
+                 AND state IN ('ENABLED', 'DISABLED')""",
+            identity,
+        )
+        for label in analysis.get("labels") or []:
+            if not label.get("is_core"):
+                continue
+            keyword_text = str(label.get("keyword_text") or "").strip()
+            keyword_norm = normalize_core_keyword(keyword_text)
+            if not keyword_norm:
+                continue
+            cur.execute(
+                """INSERT INTO t_advert_agent_core_keyword_policy
+                   (parent_asin, parent_seller_sku, shop_id, keyword_text, keyword_norm,
+                    state, base_task_id, base_task_finished_at, operator)
+                   VALUES (%s,%s,%s,%s,%s,'ENABLED',%s,%s,'offline-sync')
+                   ON DUPLICATE KEY UPDATE
+                    keyword_text=VALUES(keyword_text),
+                    base_task_id=VALUES(base_task_id),
+                    base_task_finished_at=VALUES(base_task_finished_at),
+                    state=IF(state IN ('LOCKED', 'VETOED'), state, 'ENABLED')""",
+                (*identity, keyword_text, keyword_norm, analysis["task_id"], now),
+            )
+
     def write_core_keyword_task(self, analysis: dict) -> None:
         conn = self._connect()
         try:
@@ -1976,9 +2184,43 @@ class ErpDualWriterRepository:
                          row["data_core"], row.get("data_evidence"),
                          row["is_core"], source),
                     )
+                self._sync_core_keyword_policies_after_task(cur, analysis, now)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def fetch_core_keyword_exclusion_set(
+        parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> set[str]:
+        """读取会跳过核心词离线资源调用的人工锁定/否决词。"""
+        repo = _get_repository()
+        conn = repo._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT keyword_norm
+                       FROM t_advert_agent_core_keyword_policy
+                       WHERE parent_asin = %s
+                         AND parent_seller_sku = %s
+                         AND shop_id = %s
+                         AND state IN ('LOCKED', 'VETOED')""",
+                    (parent_asin, parent_seller_sku, shop_id),
+                )
+                return {
+                    normalize_core_keyword(row.get("keyword_norm") or "")
+                    for row in cur.fetchall()
+                    if normalize_core_keyword(row.get("keyword_norm") or "")
+                }
+        except Exception:
+            logger.warning(
+                "fetch_core_keyword_exclusion_set 失败 [%s/%s/%s]，按无排除继续",
+                parent_asin, parent_seller_sku, shop_id, exc_info=True,
+            )
+            return set()
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def fetch_core_keyword_set(
@@ -2010,7 +2252,17 @@ class ErpDualWriterRepository:
                     (parent_asin, parent_seller_sku, shop_id,
                      parent_asin, parent_seller_sku, shop_id),
                 )
-                return {r["keyword_text"] for r in cur.fetchall()}
+                ai_keywords = {r["keyword_text"] for r in cur.fetchall()}
+                policies = ErpDualWriterRepository._core_keyword_policies_cursor(
+                    cur, parent_asin, parent_seller_sku, shop_id,
+                )
+                return resolve_effective_core_keywords(
+                    ai_keywords,
+                    {
+                        normalize_core_keyword(row.get("keyword_norm") or row.get("keyword_text") or ""): row.get("state") or "ENABLED"
+                        for row in policies
+                    },
+                )
         except Exception:
             logger.warning(
                 "fetch_core_keyword_set 失败 [%s/%s/%s]，按空集继续",

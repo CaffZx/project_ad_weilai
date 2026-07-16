@@ -239,8 +239,22 @@ async def run_core_keyword_analysis(
         return {"ok": False, "error": "core_keyword_analyze_enabled is False"}
 
     # 1. MCP 拉数
+    excluded_keyword_norms: set[str] = set()
+    try:
+        from app.persistence.erp_writer.repository import ErpDualWriterRepository
+        excluded_keyword_norms = ErpDualWriterRepository.fetch_core_keyword_exclusion_set(
+            parent_asin, parent_seller_sku, shop_id,
+        )
+    except Exception:
+        logger.warning(
+            "读取核心词离线排除策略失败 [%s/%s/%s]，按无排除继续",
+            parent_asin, parent_seller_sku, shop_id, exc_info=True,
+        )
     fetcher = CoreKeywordFetcher()
-    result = await fetcher.fetch(parent_asin, parent_seller_sku, shop_id)
+    result = await fetcher.fetch(
+        parent_asin, parent_seller_sku, shop_id,
+        excluded_keyword_norms=excluded_keyword_norms,
+    )
     if result.error:
         return {"ok": False, "error": result.error}
 
