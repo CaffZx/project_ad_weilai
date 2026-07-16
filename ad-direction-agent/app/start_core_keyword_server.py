@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_DIR = str(PROJECT_ROOT / "ad-direction-agent")
+SCRIPT_DIR = str(PROJECT_ROOT)
 
 app = FastAPI(title="核心词判定服务")
 
@@ -35,7 +35,7 @@ def main():
     reload_flag = "--reload" if args.reload else ""
     workers_flag = f"--workers {args.workers}"
     cmd = (
-        f"uvicorn start_core_keyword_server:app "
+        f"uvicorn app.start_core_keyword_server:app "
         f"--host {args.host} --port {args.port} "
         f"--log-level info "
         f"{workers_flag} "

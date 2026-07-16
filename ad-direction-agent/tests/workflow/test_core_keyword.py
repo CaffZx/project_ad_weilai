@@ -19,6 +19,7 @@ from app.persistence.erp_writer.repository import (
 )
 from app.workflow.steps import campaign as campaign_step
 from app.workflow.steps import core_keyword as CK
+from app import start_core_keyword_server
 
 
 class _CallResult:
@@ -65,6 +66,10 @@ def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching
 def test_core_keyword_task_version_matches_api_iso_datetime():
     assert core_keyword_task_version("2026-07-16T07:00:00.123456") == "2026-07-16T07:00:00.123456"
     assert core_keyword_task_version("2026-07-16 07:00:00.123456") == "2026-07-16T07:00:00.123456"
+
+
+def test_core_keyword_server_manual_entry_uses_project_root_as_workdir():
+    assert start_core_keyword_server.SCRIPT_DIR == str(start_core_keyword_server.PROJECT_ROOT)
 
 
 @pytest.mark.asyncio
