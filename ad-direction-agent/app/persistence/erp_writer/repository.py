@@ -2090,24 +2090,27 @@ class ErpDualWriterRepository:
                 word_pool = {normalize_core_keyword(row.get("keyword_text") or "") for row in labels}
                 if keyword_norm not in word_pool and keyword_norm not in existing:
                     raise ValueError("核心词不在当前离线任务词池")
-                next_states = {norm: row.get("state") or "ENABLED" for norm, row in existing.items()}
-                next_states[keyword_norm] = state
-                effective = resolve_effective_core_keywords(
-                    [row["keyword_text"] for row in labels if row.get("is_core")], next_states,
-                )
-                if len(effective) > 30:
-                    raise ValueError("有效核心词超过 30 条上限")
-                cur.execute(
-                    """INSERT INTO t_advert_agent_core_keyword_state
-                       (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
-                        base_task_id,base_task_finished_at,operator)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                       ON DUPLICATE KEY UPDATE keyword_text=VALUES(keyword_text), state=VALUES(state),
-                        base_task_id=VALUES(base_task_id), base_task_finished_at=VALUES(base_task_finished_at),
-                        operator=VALUES(operator)""",
-                    (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
-                     latest["id"],latest.get("finished_at"),operator),
-                )
+                current = existing.get(keyword_norm)
+                current_state = (current or {}).get("state") or "ENABLED"
+                if not current or current_state != state:
+                    next_states = {norm: row.get("state") or "ENABLED" for norm, row in existing.items()}
+                    next_states[keyword_norm] = state
+                    effective = resolve_effective_core_keywords(
+                        [row["keyword_text"] for row in labels if row.get("is_core")], next_states,
+                    )
+                    if len(effective) > 30:
+                        raise ValueError("有效核心词超过 30 条上限")
+                    cur.execute(
+                        """INSERT INTO t_advert_agent_core_keyword_state
+                           (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
+                            base_task_id,base_task_finished_at,operator)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON DUPLICATE KEY UPDATE keyword_text=VALUES(keyword_text), state=VALUES(state),
+                            base_task_id=VALUES(base_task_id), base_task_finished_at=VALUES(base_task_finished_at),
+                            operator=VALUES(operator)""",
+                        (parent_asin,parent_seller_sku,shop_id,keyword_text,keyword_norm,state,
+                         latest["id"],latest.get("finished_at"),operator),
+                    )
             conn.commit()
         finally:
             conn.close()

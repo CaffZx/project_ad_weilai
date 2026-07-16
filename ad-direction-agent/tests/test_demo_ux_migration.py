@@ -86,6 +86,21 @@ def test_core_keyword_management_modal_matches_v3_layout_contract():
     assert ".camp-core-type.manual" in css
 
 
+def test_core_keyword_state_changes_have_frontend_inflight_guard():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+    state = read(PANEL_STATE)
+
+    assert "state._coreKeywordPending = state._coreKeywordPending || new Set();" in state
+    assert "if (state._coreKeywordPending.has(key)) return;" in state
+    assert "state._coreKeywordPending.delete(key);" in state
+    assert "const minPendingMs = 800;" in state
+    assert "await new Promise(resolve => setTimeout(resolve, waitMs));" in state
+    assert "camp-core-menu is-pending" in render
+    assert "camp-core-add-button" in render and "disabled" in render
+    assert ".camp-core-menu.is-pending" in css
+
+
 def test_core_keyword_modal_uses_search_placeholder_without_redundant_tips():
     css = read(PANEL_CSS)
     render = read(PANEL_RENDER)

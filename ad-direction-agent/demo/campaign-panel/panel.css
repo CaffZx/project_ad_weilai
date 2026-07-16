@@ -539,6 +539,7 @@ button[data-action="camp-batch-reject"] {
 .camp-core-search input:focus { border-color:#2563EB; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
 .camp-core-add-button { flex:0 0 auto; padding:9px 12px; border:1px solid #BFDBFE; border-radius:8px; background:#EFF6FF; color:#1D4ED8; font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap; }
 .camp-core-add-button:hover { background:#DBEAFE; border-color:#93C5FD; }
+.camp-core-add-button:disabled { cursor:wait; opacity:.55; }
 .camp-core-table-wrap { border:1px solid #E2E8F0; border-radius:10px; overflow:auto; }
 .camp-core-table { width:100%; border-collapse:collapse; font-size:13px; }
 .camp-core-table th { padding:10px 14px; background:#F8FAFC; color:#475569; font-size:12px; font-weight:700; text-align:left; white-space:nowrap; }
@@ -558,6 +559,7 @@ button[data-action="camp-batch-reject"] {
 .camp-core-state.state-VETOED { color:#B91C1C; background:#FEE2E2; }
 .camp-core-action { text-align:center; }
 .camp-core-menu { position:relative; display:inline-block; }
+.camp-core-menu.is-pending { opacity:.55; pointer-events:none; }
 .camp-core-menu summary { list-style:none; width:28px; height:28px; border:1px solid transparent; border-radius:6px; color:#334155; font-size:20px; line-height:22px; cursor:pointer; user-select:none; }
 .camp-core-menu summary::-webkit-details-marker { display:none; }
 .camp-core-menu summary:hover, .camp-core-menu[open] summary { background:#F1F5F9; border-color:#CBD5E1; }

@@ -139,9 +139,21 @@ export function createCampaignState() {
 
   state.closeCoreKeywordManagement = function () { state._coreKeywordManagement = null; _reRender(); };
 
+  state._coreKeywordPending = state._coreKeywordPending || new Set();
+  const _coreKeywordKey = (keyword_text) => String(keyword_text || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
   state.setCoreKeywordState = async function (keyword_text, nextState) {
     const data = state._coreKeywordManagement;
     if (!data || !state._coreKeywordIdentity) return;
+    const key = _coreKeywordKey(keyword_text);
+    if (!key) return;
+    if (state._coreKeywordPending.has(key)) return;
+    const current = (data.rows || []).find(row => _coreKeywordKey(row.keyword_text) === key);
+    if (current && current.state === nextState) return;
+    state._coreKeywordPending.add(key);
+    const minPendingMs = 800;
+    const pendingStartedAt = Date.now();
+    _reRender();
     try {
       const resp = await fetch((window.location.origin || '') + '/api/v1/agent/ad-direction/core-keyword/policy', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -154,6 +166,12 @@ export function createCampaignState() {
       state._coreKeywordManagement = body;
       _reRender();
     } catch (e) { _toast('核心词状态更新失败：' + (e.message || '未知错误')); }
+    finally {
+      const waitMs = Math.max(0, minPendingMs - (Date.now() - pendingStartedAt));
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      state._coreKeywordPending.delete(key);
+      _reRender();
+    }
   };
   state.addCoreKeywordFromPool = function (keyword) { if (keyword) state.setCoreKeywordState(keyword, 'LOCKED'); };
 
