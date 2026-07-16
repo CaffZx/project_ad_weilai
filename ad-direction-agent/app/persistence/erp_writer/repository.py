@@ -2037,8 +2037,6 @@ class ErpDualWriterRepository:
                 for norm, policy in policy_by_norm.items():
                     if norm in rows_by_norm:
                         continue
-                    if policy.get("state") == "ENABLED":
-                        continue
                     rows_by_norm[norm] = {
                         "keyword_text": policy.get("keyword_text") or norm,
                         "types": ["manual"], "semantic_evidence": [],

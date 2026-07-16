@@ -63,6 +63,41 @@ def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching
     assert result == {"locked kw"}
 
 
+def test_management_keeps_manual_enabled_word_in_rows(monkeypatch):
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def close(self): pass
+
+    repo = ErpDualWriterRepository(
+        host="unused", port=0, user="unused", password="unused", database="unused",
+    )
+    monkeypatch.setattr(repo, "_connect", lambda: FakeConn())
+    monkeypatch.setattr(
+        repo, "_latest_core_keyword_task_cursor",
+        lambda *args: {"id": "ckt-current", "finished_at": "2026-07-16 10:00:00"},
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_labels_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "is_core": 0}],
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_policies_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "keyword_norm": "manual keyword", "state": "ENABLED"}],
+    )
+
+    payload = repo.list_core_keyword_management("B0TEST", "SKU-1", 1622)
+
+    assert payload["rows"] == [{
+        "keyword_text": "manual keyword", "types": ["manual"],
+        "semantic_evidence": [], "data_evidence": [],
+        "manual_reason": "人工覆盖", "state": "ENABLED",
+    }]
+
+
 def test_core_keyword_task_version_matches_api_iso_datetime():
     assert core_keyword_task_version("2026-07-16T07:00:00.123456") == "2026-07-16T07:00:00.123456"
     assert core_keyword_task_version("2026-07-16 07:00:00.123456") == "2026-07-16T07:00:00.123456"
