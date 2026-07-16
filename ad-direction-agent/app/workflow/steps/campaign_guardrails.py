@@ -490,6 +490,15 @@ def _sample_insufficient(item, *, product_stage: str = "") -> tuple[bool, list[s
 
 
 def _p3_should_force_eliminate(item) -> bool:
+    """P3 强制淘汰的完整前置条件：无出单 且 (bid ≤ $0.10 或 budget ≤ $1.00)。
+
+    与 _p3_force_eliminate 的调用方守卫保持语义一致——有出单的活动即使 bid/预算触底
+    也可能仍在产出，不应被强制淘汰也不应绕过 P1 样本保护。
+    """
+    perf = getattr(item, "perf_7d", {}) or {}
+    has_orders = int(perf.get("orders") or 0) > 0
+    if has_orders:
+        return False
     return (
         (item.current_bid is not None and item.current_bid <= LOW_BID_MIN)
         or (item.current_budget is not None and item.current_budget <= LOW_BUDGET_MAX)

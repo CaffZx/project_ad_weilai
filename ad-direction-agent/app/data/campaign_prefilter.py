@@ -38,7 +38,7 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
     for r in raw:
         cid = str(r.get("campaign_id") or "")
         kw = str(r.get("keyword_text") or "")
-        mt = str(r.get("关键词匹配类型") or r.get("keyword_match_type") or "")
+        mt = str(r.get("match_type") or r.get("关键词匹配类型") or r.get("keyword_match_type") or "")
         ca = str(r.get("child_asin") or "")
         name = str(r.get("campaign_name") or "")
         if cid and kw and not _is_negative_match(mt):
@@ -57,6 +57,10 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
     for r in raw:
         name = str(r.get("campaign_name") or "")
         cid = str(r.get("campaign_id") or "")
+
+        # 规则 0: 否定词不进入 LLM 分析（否词无 bid/budget 可调，误入会浪费 token 且产生无效分析）
+        if _is_negative_match(str(r.get("match_type") or r.get("关键词匹配类型") or r.get("keyword_match_type") or "")):
+            continue
 
         # 规则 1: 非活跃状态
         # 注意：当前 _fetch_campaign_context SQL 已用 WHERE campaign_status='ENABLED' 过滤，

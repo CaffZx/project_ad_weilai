@@ -1,10 +1,14 @@
 """Campaign 分析数据模型 — 与 ASINData 独立共存，不同的聚合粒度。
 
-campaign_key = "活动名 × 子ASIN"，唯一标识一个广告活动。
-每行 = 一个广告活动的完整画像。
+campaign_key = "活动名 × 子ASIN[#match_type#keyword_id]"，关键词级标识。
+每行 = 一个关键词投放单元的完整画像。
 
-同一个活动可能包含多个关键词，同一个关键词可能被多个活动投放——
-仅靠 child_asin + match_type + keyword 不能区分。
+⚠ 粒度说明：campaign_key 已从活动级改为关键词级（后缀 #match_type#keyword_id），
+以消除同活动同词不同匹配类型（BROAD/PHRASE）的 unit_by_key 碰撞。
+但下游 card / 预算 / 广告位 / 复盘仍按 campaign_id 聚合（一个活动一张 card）。
+同活动多个关键词单元建议合并时，budget/campaign_pending/placements 存在后写覆盖，
+synthesis key_to_card 映射可能漏掉非主 key。
+长期应拆为 campaign_key（活动级） + campaign_unit_key（关键词级），分别用于聚合与定位。
 
 ──────────────────────────────────────────────────────────────────────
 【关键词类型命名规范】(本模块强制，避免与既有 4 个混名概念再撞车)

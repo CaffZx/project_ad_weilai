@@ -1047,6 +1047,8 @@ class ErpDualWriterRepository:
             (run.decision_id,),
         )
 
+        # ⚠ key_to_card 按 c.campaign_key（现为关键词级）映射；card 仅存主 adjustment
+        # 的 campaign_key，synthesis 中引用非主 key 的成员会映射失败被静默跳过。
         key_to_card = {c.campaign_key: c.card_id for c in run.cards if c.campaign_key}
         _cat = {"eliminate_to_low_bid_pool": "ELIMINATE", "keep": "KEEP"}
 

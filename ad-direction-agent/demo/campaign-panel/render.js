@@ -310,7 +310,7 @@ const _TWO_COL_MIN = 2;
 
 function _renderMetaChips(adj) {
   const chips = [];
-  if (adj.child_asin) chips.push(['asin', '× ' + _esc(adj.child_asin)]);
+  if (adj.child_asin) chips.push(['asin', _esc(adj.child_asin)]);
   if (adj.match_type) chips.push(['match', _esc(adj.match_type)]);
   if (adj.keyword_text) chips.push(['kw', '关键词: <b>' + _esc(adj.keyword_text) + '</b>']);
   if (adj.keyword_class) chips.push(['class', _esc(adj.keyword_class)]);

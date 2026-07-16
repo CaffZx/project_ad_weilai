@@ -47,7 +47,7 @@ parent_asin
   ├─ 代码硬过滤 → 排除 non-ENABLED / 无数据 / 多关键词活动
   ├─ Campaign 预过滤 → 排除 budget≈$1 & bid≈$0.2 的疑似已淘汰活动
   ├─ MCP basic_info + product_report 并行
-  ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN")
+  ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN#匹配类型#关键词ID"，关键词级)
   ├─ ★核心词标签注入: 读 ERP 核心词表 → 回填 is_core (v3.18 新增)
   ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
   ├─ ★拉取组合预算 (ad_portfolio_list MCP, fail-open → 回退 60/20/20 兜底, 2026-07-09 新增)
@@ -69,7 +69,7 @@ parent_asin
 
 | 决策 | 说明 |
 |------|------|
-| campaign_key = "活动名 × 子ASIN" | 运营确认的唯一标识，取代 "child_asin\|match_type\|keyword" |
+| campaign_key = "活动名 × 子ASIN#匹配类型#关键词ID"（关键词级，2026-07-16 改） | 关键词投放单元的唯一标识；⚠ 同活动多关键词单元合并时 card 聚合有后写覆盖风险，见 §4.2 待办 |
 | 精准/广泛分流 | 不同匹配类型使用不同 prompt 和调整维度（Placement vs SearchTerm） |
 | 分批大小 = 6 | 每批 6 个活动送入 LLM，平衡覆盖率和输出质量 |
 | R1+R2 并行投票 | 两轮不同随机种子排序 → 比对 action + direction → 一致=high，分歧=low |
@@ -336,6 +336,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | ~~`POST /campaign/confirm` 落地~~ | ✅ 已完成 | campaign.py:433 已实现，confirm_decisions 落 ERP pending 表 + 推送 |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL。2026-07-04 核实：全工程 0 引用，未实现 |
 | ~~A1 修复~~ | ✅ 已完成 | `_ensure_data` 已支持 meta_filter 按 filter 分 key 缓存（§15.5 确认） |
+| **campaign_key 粒度拆分** | P2 | ★2026-07-16：`campaign_key` 已从活动级改为关键词级（含 `#match_type#keyword_id`），消除了同活动同词 BROAD/PHRASE 的 `unit_by_key` 碰撞（A04）。但下游 card/预算/广告位/复盘仍按 `campaign_id` 聚合（一张 card），同活动多关键词单元合并时 `campaign_pending`(预算) 和 `placements_by_type`(广告位) 存在后写覆盖，`synthesis key_to_card` 映射可能漏掉非主 key。长期应拆为 `campaign_key`（活动级，聚合用）+ `campaign_unit_key`（关键词级，回填/定位用）。当前影响面小，代码点位已标 ⚠ 注释。详见 `mappers.py:369-372`, `repository.py:1050-1052`, `campaign_fetcher.py:1003-1007`。 |
 
 ### 4.3 设计决策汇总
 

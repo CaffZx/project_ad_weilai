@@ -999,12 +999,17 @@ class CampaignFetcher:
         days_raw = basic.get("days_online", -1)
         days_online = int(days_raw) if days_raw is not None else -1
         campaign_name = str(ctx.get("campaign_name") or "")
+        kid = str(ctx.get("keyword_id") or "")
 
+        # ⚠ campaign_key 现为关键词级（含 match_type + keyword_id），以消除
+        # 同活动同词 BROAD/PHRASE 的 unit_by_key 碰撞；下游 card/预算/广告位/复盘
+        # 仍按 campaign_id 聚合（一张 card），同活动多关键词单元合并时存在后写覆盖。
+        # 长期应拆为 campaign_key（活动级） + campaign_unit_key（关键词级）。
         return CampaignUnit(
             campaign_name=campaign_name,
-            campaign_key=f"{campaign_name} × {child_asin}",
+            campaign_key=f"{campaign_name} × {child_asin}#{match_type}#{kid}" if kid else f"{campaign_name} × {child_asin}#{match_type}",
             campaign_id=str(ctx.get("campaign_id") or ""),
-            keyword_id=str(ctx.get("keyword_id") or ""),
+            keyword_id=kid,
             child_asin=child_asin,
             seller_sku=str(ctx.get("seller_sku") or ""),
             keyword_text=keyword_text,

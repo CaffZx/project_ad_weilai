@@ -366,6 +366,9 @@ def canonicalize_payload(
             continue
         by_campaign.setdefault(campaign_id, []).append((idx, adj))
 
+    # ⚠ campaign_key 现为关键词级（含 match_type + keyword_id），同一 campaign_id
+    # 可能对应多条 adjustment（BROAD/PHRASE 各自一条）；合并时 campaign_pending(预算)
+    # 和 placements_by_type(广告位) 由最后遍历到的 adjustment 覆盖，需注意冲突。
     for campaign_id, group in by_campaign.items():
         sort_order = min(i for i, _ in group)
         primary_idx, primary_adj = _pick_primary_adjustment(group)
@@ -404,9 +407,9 @@ def canonicalize_payload(
                 seen_kw_pending.add(key)
                 keyword_pending.append(kw)
             if camp_list:
-                campaign_pending = camp_list
+                campaign_pending = camp_list  # ⚠ 同 campaign 多 adjustment 时后写覆盖
             for plc in plc_list:
-                placements_by_type[plc.placement_type] = plc
+                placements_by_type[plc.placement_type] = plc  # ⚠ 同 placement_type 后写覆盖
 
             legacy_content = {
                 "campaign_name": adj.get("campaign_name"),
