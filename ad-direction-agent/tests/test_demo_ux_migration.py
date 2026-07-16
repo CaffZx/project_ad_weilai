@@ -66,9 +66,24 @@ def test_core_keyword_management_never_silently_ignores_a_click():
 def test_core_keyword_management_modal_uses_visible_overlay_and_empty_state():
     render = read(PANEL_RENDER)
 
-    assert '<div class="camp-modal-overlay"><div class="camp-modal camp-core-modal">' in render
+    assert '<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal"' in render
     assert "暂无核心词分析记录" in render
     assert 'data-action="camp-core-keyword-add"' in render
+
+
+def test_core_keyword_management_modal_matches_v3_layout_contract():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+
+    assert 'class="camp-modal-overlay camp-core-overlay"' in render
+    assert 'class="camp-core-header"' in render
+    assert 'class="camp-core-count"' in render
+    assert 'class="camp-core-empty"' in render
+    assert 'class="camp-core-footer"' in render
+    assert ".camp-core-overlay" in css
+    assert ".camp-core-type.semantic" in css
+    assert ".camp-core-type.data" in css
+    assert ".camp-core-type.manual" in css
 
 
 def test_demo_native_analyzing_overlay_and_request_hints():

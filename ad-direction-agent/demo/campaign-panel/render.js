@@ -673,15 +673,38 @@ function _renderCoreKeywordModal(state) {
   const mount = _$('camp-modal-mount');
   if (!mount || !state._coreKeywordManagement) return;
   const data = state._coreKeywordManagement;
-  const labels = { LOCKED: '锁定', ENABLED: '启用', DISABLED: '未启用', VETOED: '否决' };
+  const labels = { LOCKED: '锁定', ENABLED: '默认启用', DISABLED: '未启用', VETOED: '否决' };
+  const typeLabels = { semantic: '语义核心', data: '数据核心', manual: '人工' };
+  const formatEvidence = (value) => {
+    if (!value) return '';
+    if (typeof value !== 'string') return JSON.stringify(value);
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.map(item => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item === 'object') {
+            return [item.condition, item.value, item.threshold].filter(Boolean).join(' · ');
+          }
+          return String(item || '');
+        }).filter(Boolean).join('\n');
+      }
+      return parsed && typeof parsed === 'object' ? JSON.stringify(parsed) : String(parsed || '');
+    } catch (_) {
+      return value;
+    }
+  };
   const rows = (data.rows || []).map(row => {
-    const evidence = [row.semantic_evidence, row.data_evidence, row.manual_reason].filter(Boolean).map(v => typeof v === 'string' ? v : JSON.stringify(v)).join('；');
+    const evidence = [row.semantic_evidence, row.data_evidence, row.manual_reason]
+      .map(formatEvidence).filter(Boolean).join('\n');
+    const types = (row.types || []).map(type => `<span class="camp-core-type ${_esc(type)}">${_esc(typeLabels[type] || type)}</span>`).join('');
     const choices = Object.keys(labels).filter(key => key !== row.state).map(key => `<button data-action="camp-core-keyword-state" data-keyword="${_esc(row.keyword_text)}" data-state="${key}">${labels[key]}</button>`).join('');
-    return `<tr><td>${_esc(row.keyword_text)}</td><td>${(row.types || []).map(_esc).join(' / ')}</td><td>${_esc(evidence || '无可用 AI 证据')}</td><td><span class="camp-core-state state-${row.state}">${labels[row.state] || row.state}</span></td><td><details><summary>⋮</summary>${choices}</details></td></tr>`;
+    return `<tr><td class="camp-core-keyword"><strong>${_esc(row.keyword_text)}</strong></td><td class="camp-core-types">${types || '<span class="camp-core-type manual">人工</span>'}</td><td class="camp-core-reason">${_esc(evidence || '无可用 AI 证据')}</td><td><span class="camp-core-state state-${row.state}">${labels[row.state] || row.state}</span></td><td class="camp-core-action"><details class="camp-core-menu"><summary aria-label="切换核心词状态">⋮</summary><div class="camp-core-menu-list">${choices}</div></details></td></tr>`;
   }).join('');
   const options = (data.word_pool || []).map(word => `<option value="${_esc(word)}"></option>`).join('');
   const emptyState = data.latest_task ? '本轮没有可管理的核心词' : '暂无核心词分析记录';
-  mount.innerHTML = `<div class="camp-modal-overlay"><div class="camp-modal camp-core-modal"><div class="camp-modal-title">核心词管理 <span>当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button data-action="camp-core-keyword-close">×</button></div><div class="camp-core-add"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池"><datalist id="camp-core-keyword-pool">${options}</datalist><button data-action="camp-core-keyword-add">＋ 添加核心词</button></div><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="5">${emptyState}</td></tr>`}</tbody></table></div></div>`;
+  const emptyHtml = `<div class="camp-core-empty"><strong>${emptyState}</strong><span>离线核心词任务完成后，AI 推荐词会自动显示在这里。</span></div>`;
+  mount.innerHTML = `<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal" role="dialog" aria-modal="true" aria-label="核心词管理"><header class="camp-core-header"><div class="camp-core-heading"><h3>核心词管理</h3><p>锁定/否决不会进入核心词离线判定；Campaign LLM 分析仍会照常执行。</p></div><span class="camp-core-count">当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button class="camp-core-close" data-action="camp-core-keyword-close" aria-label="关闭">×</button></header><div class="camp-core-body"><div class="camp-core-add"><div class="camp-core-search"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池"><datalist id="camp-core-keyword-pool">${options}</datalist><span>从词池中选择后默认锁定</span></div><button class="camp-core-add-button" data-action="camp-core-keyword-add">＋ 添加核心词</button></div>${rows ? `<div class="camp-core-table-wrap"><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyHtml}</div><footer class="camp-core-footer"><span>竖三点始终显示除当前状态外的三种状态：锁定 / 启用 / 不启用 / 否决。</span><button data-action="camp-core-keyword-close">关闭</button></footer></section></div>`;
   const add = mount.querySelector('[data-action="camp-core-keyword-add"]');
   const input = mount.querySelector('#camp-core-keyword-input');
   if (add && input) add.addEventListener('click', () => { add.dataset.keyword = input.value; });
