@@ -13,7 +13,7 @@
 ### Task 1: 策略表、归一化和状态解析
 
 **Files:**
-- Create: ad-direction-agent/scripts/erp_db/migrate_core_keyword_policy.sql
+- Create: ad-direction-agent/scripts/erp_db/migrate_core_keyword_state.sql
 - Modify: ad-direction-agent/app/persistence/erp_writer/repository.py
 - Modify: ad-direction-agent/tests/workflow/test_core_keyword.py
 
@@ -46,7 +46,7 @@ Expected: import failure for the missing resolver.
                 effective.discard(norm)
         return effective
 
-DDL uses the product triple plus keyword_norm as the unique key and stores state, task version, operator and timestamps.
+DDL uses the product triple plus keyword_norm as the unique key and stores state, task version, operator and timestamps in t_advert_agent_core_keyword_state.
 
 - [ ] **Step 4: Verify green**
 
@@ -178,4 +178,3 @@ Expected: all new tests pass. Report separately the known baseline fixture failu
 
     git add ad-direction-agent docs/superpowers
     git commit -m "feat: add core keyword policy management"
-

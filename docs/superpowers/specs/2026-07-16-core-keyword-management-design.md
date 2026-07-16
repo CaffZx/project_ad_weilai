@@ -89,10 +89,10 @@ ENABLED / 无策略           -> effective_is_core = ai_is_core
 
 ## 4. 数据库设计
 
-新增迁移文件：`scripts/erp_db/migrate_core_keyword_policy.sql`。
+新增迁移文件：`scripts/erp_db/migrate_core_keyword_state.sql`。
 
 ```sql
-CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_policy (
+CREATE TABLE IF NOT EXISTS t_advert_agent_core_keyword_state (
     id                    BIGINT NOT NULL AUTO_INCREMENT,
 
     parent_asin           VARCHAR(20)  NOT NULL,
@@ -312,7 +312,7 @@ Campaign 不删除、跳过或隐藏任何活动。所有活动仍进入既有 L
 
 ## 9. 实施文件清单
 
-- 新增：`scripts/erp_db/migrate_core_keyword_policy.sql`
+- 新增：`scripts/erp_db/migrate_core_keyword_state.sql`
 - 修改：`app/persistence/erp_writer/repository.py`
 - 修改：`app/api/core_keyword.py`
 - 修改：`app/workflow/steps/core_keyword.py`
