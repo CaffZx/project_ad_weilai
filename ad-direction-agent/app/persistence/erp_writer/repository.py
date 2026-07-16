@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 CORE_KEYWORD_POLICY_STATES = frozenset({"LOCKED", "ENABLED", "DISABLED", "VETOED"})
 
 
+def core_keyword_task_version(value: datetime | str | None) -> str:
+    """统一 DB datetime 与 API ISO datetime，作为管理写入的乐观锁版本。"""
+    if value is None:
+        return ""
+    return str(value).replace(" ", "T", 1)
+
+
 def _audit_int(v: Any) -> int | None:
     """审计列 create_by/editor_by(int) / creator_id/editor_id(bigint) 需数值；
     operator 可能是非数字串（如 'tab5'）→ 返回 None 入 NULL，数字串→int。"""
@@ -2047,7 +2054,7 @@ class ErpDualWriterRepository:
                     "effective_core_count": len(effective), "limit": 30,
                     "latest_task": {
                         "id": latest["id"],
-                        "finished_at": latest.get("finished_at"),
+                        "finished_at": core_keyword_task_version(latest.get("finished_at")),
                     },
                     "rows": sorted(rows_by_norm.values(), key=lambda row: row["keyword_text"].casefold()),
                     "word_pool": list(dict.fromkeys(
@@ -2075,7 +2082,9 @@ class ErpDualWriterRepository:
                 latest = self._latest_core_keyword_task_cursor(cur, parent_asin, parent_seller_sku, shop_id)
                 if not latest or str(latest["id"]) != expected_task_id:
                     raise RuntimeError("STALE_TASK")
-                if expected_task_finished_at and str(latest.get("finished_at")) != expected_task_finished_at:
+                if expected_task_finished_at and core_keyword_task_version(
+                    latest.get("finished_at"),
+                ) != core_keyword_task_version(expected_task_finished_at):
                     raise RuntimeError("STALE_TASK")
                 labels = self._core_keyword_labels_cursor(cur, str(latest["id"]))
                 policies = self._core_keyword_policies_cursor(cur, parent_asin, parent_seller_sku, shop_id)
@@ -2151,13 +2160,20 @@ class ErpDualWriterRepository:
                         triggered_by, started_at, finished_at)
                        VALUES (%s,%s,%s,%s,%s,'DONE',%s,%s,%s,%s,%s)
                        ON DUPLICATE KEY UPDATE
-                        status='DONE', core_keyword_count=VALUES(core_keyword_count),
+                        status='DONE', total_keyword_count=VALUES(total_keyword_count),
+                        core_keyword_count=VALUES(core_keyword_count),
                         finished_at=VALUES(finished_at)""",
                     (analysis["task_id"], analysis["parent_asin"],
                      analysis["parent_seller_sku"], analysis["shop_id"],
                      analysis.get("site_code") or "", len(labels),
                      analysis["core_keyword_count"],
                      analysis.get("triggered_by") or "", now, now),
+                )
+                # task ID 按产品+日期生成，同日重跑会复用 ID；标签必须是本次全量快照，
+                # 不能让已被锁定/否决预过滤的旧词残留在最新任务中。
+                cur.execute(
+                    "DELETE FROM t_advert_agent_core_keyword_label WHERE task_id = %s",
+                    (analysis["task_id"],),
                 )
                 for row in labels:
                     cur.execute(

@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from app.config.settings import settings
 from app.workflow.steps.core_keyword import run_core_keyword_analysis
@@ -63,7 +64,10 @@ async def set_core_keyword_policy(req: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, **payload}
     except RuntimeError as exc:
         if str(exc) == "STALE_TASK":
-            return {"ok": False, "status": 409, "error": "核心词任务已更新，请刷新后重试"}
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "核心词任务已更新，请刷新后重试"},
+            )
         raise
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}

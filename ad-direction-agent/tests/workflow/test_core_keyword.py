@@ -1,4 +1,5 @@
 import pytest
+from fastapi.responses import JSONResponse
 
 from app.config.settings import settings
 from app.api import core_keyword as core_keyword_api
@@ -13,6 +14,7 @@ from app.llm.reasoner import LLMReasoner
 from app.models.campaign import CampaignAdjustmentItem, CampaignPerf, CampaignUnit
 from app.persistence.erp_writer.repository import (
     ErpDualWriterRepository,
+    core_keyword_task_version,
     resolve_effective_core_keywords,
 )
 from app.workflow.steps import campaign as campaign_step
@@ -58,6 +60,11 @@ def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching
     )
 
     assert result == {"locked kw"}
+
+
+def test_core_keyword_task_version_matches_api_iso_datetime():
+    assert core_keyword_task_version("2026-07-16T07:00:00.123456") == "2026-07-16T07:00:00.123456"
+    assert core_keyword_task_version("2026-07-16 07:00:00.123456") == "2026-07-16T07:00:00.123456"
 
 
 @pytest.mark.asyncio
@@ -542,6 +549,22 @@ async def test_management_api_returns_repository_management_payload(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_policy_api_returns_http_409_for_a_stale_task(monkeypatch):
+    class FakeRepository:
+        def __init__(self, **kwargs): pass
+        def upsert_core_keyword_policy(self, *args, **kwargs): raise RuntimeError("STALE_TASK")
+
+    monkeypatch.setattr("app.persistence.erp_writer.repository.ErpDualWriterRepository", FakeRepository)
+    out = await core_keyword_api.set_core_keyword_policy({
+        "parent_asin": "B0TEST", "parent_seller_sku": "SKU-1", "shop_id": 1622,
+        "keyword_text": "core kw", "state": "LOCKED", "expected_task_id": "ckt-old",
+    })
+
+    assert isinstance(out, JSONResponse)
+    assert out.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_offline_analysis_refuses_when_analyze_switch_off(monkeypatch):
     old_analyze = settings.core_keyword_analyze_enabled
     settings.core_keyword_analyze_enabled = False
@@ -737,3 +760,34 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
         "B0TEST", "SKU-1", 1622,
     )
     assert fake_repo.conn.closed is True
+
+
+def test_write_core_keyword_task_replaces_same_day_labels_and_updates_total_count():
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def commit(self): pass
+        def close(self): pass
+
+    repo = object.__new__(ErpDualWriterRepository)
+    repo._connect = lambda: FakeConn()
+    repo._sync_core_keyword_policies_after_task = lambda cur, analysis, now: None
+    repo.write_core_keyword_task({
+        "task_id": "ckt-same-day", "parent_asin": "B0TEST", "parent_seller_sku": "SKU-1",
+        "shop_id": 1622, "site_code": "Amazon_US", "core_keyword_count": 1,
+        "labels": [{
+            "keyword_text": "new core", "semantic_conflict": "pass", "semantic_core": True,
+            "data_core": False, "is_core": True,
+        }],
+    })
+
+    sqls = [sql for sql, _ in executed]
+    assert any("DELETE FROM t_advert_agent_core_keyword_label" in sql for sql in sqls)
+    task_upsert = next(sql for sql in sqls if "INSERT INTO t_advert_agent_core_keyword_task" in sql)
+    assert "total_keyword_count=VALUES(total_keyword_count)" in task_upsert
