@@ -72,5 +72,6 @@ cursor临时文件/
 *.xmind
 .claude/
 .agents/
+.worktrees/
 ad-direction-agent/demo/前端样例展示.7z
 ad-direction-agent/demo/前端样例展示/
