@@ -63,6 +63,14 @@ def test_core_keyword_management_never_silently_ignores_a_click():
     assert "if (!state._coreKeywordIdentity) { _toast('产品身份尚未加载，无法读取核心词'); return; }" in state
 
 
+def test_core_keyword_management_modal_uses_visible_overlay_and_empty_state():
+    render = read(PANEL_RENDER)
+
+    assert '<div class="camp-modal-overlay"><div class="camp-modal camp-core-modal">' in render
+    assert "暂无核心词分析记录" in render
+    assert 'data-action="camp-core-keyword-add"' in render
+
+
 def test_demo_native_analyzing_overlay_and_request_hints():
     html = read(DEMO)
 
