@@ -123,7 +123,8 @@ export function createCampaignState() {
   };
 
   state.openCoreKeywordManagement = async function () {
-    if (!state.executable || !state._coreKeywordIdentity) return;
+    if (!state.executable) { _toast('当前不是最新可执行批次，无法管理核心词'); return; }
+    if (!state._coreKeywordIdentity) { _toast('产品身份尚未加载，无法读取核心词'); return; }
     const p = state._coreKeywordIdentity;
     if (!p.parent_seller_sku || !p.shop_id) { _toast('缺少 ERP 产品身份，无法读取核心词'); return; }
     try {

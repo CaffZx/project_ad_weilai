@@ -56,6 +56,13 @@ def test_approve_confirm_details_are_generated_from_state_items():
     assert "placement_adjustments" in render
 
 
+def test_core_keyword_management_never_silently_ignores_a_click():
+    state = read(PANEL_STATE)
+
+    assert "if (!state.executable) { _toast('当前不是最新可执行批次，无法管理核心词'); return; }" in state
+    assert "if (!state._coreKeywordIdentity) { _toast('产品身份尚未加载，无法读取核心词'); return; }" in state
+
+
 def test_demo_native_analyzing_overlay_and_request_hints():
     html = read(DEMO)
 
