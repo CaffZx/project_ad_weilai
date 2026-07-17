@@ -673,7 +673,7 @@ function _renderCoreKeywordModal(state) {
   const mount = _$('camp-modal-mount');
   if (!mount || !state._coreKeywordManagement) return;
   const data = state._coreKeywordManagement;
-  const labels = { LOCKED: '锁定', ENABLED: '默认启用', DISABLED: '未启用', VETOED: '否决' };
+  const labels = { LOCKED: '锁定', ENABLED: '本周启用', DISABLED: '本周不启用', VETOED: '否决' };
   const typeLabels = { semantic: '语义核心', data: '数据核心', manual: '人工' };
   const pendingKeys = state._coreKeywordPending || new Set();
   const keywordKey = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -713,7 +713,7 @@ function _renderCoreKeywordModal(state) {
   const emptyState = data.latest_task ? '本轮没有可管理的核心词' : '暂无核心词分析记录';
   const emptyHtml = `<div class="camp-core-empty"><strong>${emptyState}</strong><span>离线核心词任务完成后，AI 推荐词会自动显示在这里。</span></div>`;
   const addDisabled = pendingKeys.size ? ' disabled' : '';
-  mount.innerHTML = `<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal" role="dialog" aria-modal="true" aria-label="核心词管理"><header class="camp-core-header"><div class="camp-core-heading"><h3>核心词管理</h3><p>锁定/否决不会进入核心词离线判定；Campaign LLM 分析仍会照常执行。</p></div><span class="camp-core-count">当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button class="camp-core-close" data-action="camp-core-keyword-close" aria-label="关闭">×</button></header><div class="camp-core-body"><div class="camp-core-add"><div class="camp-core-search"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池（选择后默认锁定）"><datalist id="camp-core-keyword-pool">${options}</datalist></div><button class="camp-core-add-button" data-action="camp-core-keyword-add"${addDisabled}>＋ 添加核心词</button></div>${rows ? `<div class="camp-core-table-wrap"><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyHtml}</div><footer class="camp-core-footer"><button data-action="camp-core-keyword-close">关闭</button></footer></section></div>`;
+  mount.innerHTML = `<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal" role="dialog" aria-modal="true" aria-label="核心词管理"><header class="camp-core-header"><div class="camp-core-heading"><h3>核心词管理</h3><p>每周进行一次核心词判定AI分析；被人工锁定/否决的词不会参与到AI对核心词的判定分析；设置本周启用或本周不启用的词将被下一次AI分析结果自动覆盖。</p></div><span class="camp-core-count">当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button class="camp-core-close" data-action="camp-core-keyword-close" aria-label="关闭">×</button></header><div class="camp-core-body"><div class="camp-core-add"><div class="camp-core-search"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池（选择后默认锁定）"><datalist id="camp-core-keyword-pool">${options}</datalist></div><button class="camp-core-add-button" data-action="camp-core-keyword-add"${addDisabled}>＋ 添加核心词</button></div>${rows ? `<div class="camp-core-table-wrap"><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyHtml}</div><footer class="camp-core-footer"><button data-action="camp-core-keyword-close">关闭</button></footer></section></div>`;
   const add = mount.querySelector('[data-action="camp-core-keyword-add"]');
   const input = mount.querySelector('#camp-core-keyword-input');
   if (add && input) add.addEventListener('click', () => { add.dataset.keyword = input.value; });

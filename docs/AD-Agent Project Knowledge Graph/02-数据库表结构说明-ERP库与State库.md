@@ -81,6 +81,7 @@ State 库：
 | `t_advert_agent_core_keyword_label` | 核心词判定明细，每个关键词一行，保存语义/数据证据与最终 `is_core` | 我方 AD-Agent 离线核心词任务 | `repository.py:1932 write_core_keyword_task()` |
 | `t_advert_agent_core_keyword_task` | 核心词判定任务批次及状态统计 | 我方 AD-Agent 离线核心词任务 | `repository.py:1932 write_core_keyword_task()` |
 | `t_advert_agent_core_keyword_tracking` | 旧版按 decision 的核心词监控展示快照 | 我方 AD-Agent（旧链路） | `repository.py:1393 _upsert_core_keywords()` |
+| `t_advert_agent_core_keyword_state` | 核心词人工状态管理（锁定/否决/本周启用/禁用），跨批次持久化，LOCKED/VETOED 不在下次分析中覆盖 | 我方 AD-Agent + 人工运营 | `repository.py:2121 _sync_core_keyword_policies_after_task()`；`repository.py:2067 upsert_core_keyword_policy()` |
 | `t_advert_agent_create_advert_record` | 创建广告活动的调用/结果记录 | ERP 执行系统 | 本项目 `repository.py:397 insert_advert_record()` 明确跳过写入；无项目 INSERT |
 | `t_advert_agent_create_keyword_record` | 创建关键词/否定词的调用/结果记录 | ERP 执行系统 | 本项目不写；创建流程只调用 MCP，未发现 INSERT |
 | `t_advert_agent_data_metrics` | 每个 decision 的 SUMMARY/DAILY 指标快照 | 我方 AD-Agent | `repository.py:1188 _upsert_legacy_metrics()` |
@@ -230,6 +231,32 @@ CREATE TABLE `t_advert_agent_core_keyword_tracking` (
   KEY `idx_decision_id` (`decision_id`) USING BTREE,
   KEY `idx_keyword` (`keyword`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='agent决策核心关键词监控表'
+```
+
+#### `t_advert_agent_core_keyword_state`
+
+- 功能：核心词人工状态管理（锁定/本周启用/本周不启用/否决），跨批次持久化，LOCKED/VETOED 不会被下次离线分析覆盖
+- 写入/维护方：我方 AD-Agent + 人工运营
+- 代码锚点：`repository.py:2121 _sync_core_keyword_policies_after_task()`；`repository.py:2067 upsert_core_keyword_policy()`
+
+```sql
+CREATE TABLE `t_advert_agent_core_keyword_state` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `parent_asin` varchar(20) NOT NULL,
+  `parent_seller_sku` varchar(128) NOT NULL,
+  `shop_id` bigint NOT NULL,
+  `keyword_text` varchar(512) NOT NULL,
+  `keyword_norm` varchar(512) NOT NULL,
+  `state` enum('LOCKED','ENABLED','DISABLED','VETOED') NOT NULL DEFAULT 'ENABLED',
+  `base_task_id` varchar(32) DEFAULT NULL,
+  `base_task_finished_at` datetime(6) DEFAULT NULL,
+  `operator` varchar(64) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_product_keyword` (`parent_asin`,`parent_seller_sku`,`shop_id`,`keyword_norm`),
+  KEY `idx_product_state` (`parent_asin`,`parent_seller_sku`,`shop_id`,`state`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 ```
 
 #### `t_advert_agent_create_advert_record`
@@ -655,6 +682,7 @@ CREATE TABLE `t_advert_agent_modify_campaign_pending` (
 CREATE TABLE `t_advert_agent_modify_campaign_record` (
   `id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `record_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关联主记录ID',
+  `decision_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '决策批次ID',
   `portfolio_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '所属广告组合ID',
   `campaign_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '广告活动ID',
   `risk_check_pass` int DEFAULT NULL COMMENT '风控是否通过（1=通过，0=不通过）',
@@ -745,6 +773,7 @@ CREATE TABLE `t_advert_agent_modify_keyword_pending` (
 CREATE TABLE `t_advert_agent_modify_keyword_record` (
   `id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `record_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关联主记录ID',
+  `decision_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '决策批次ID',
   `campaign_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '所属活动ID',
   `keyword_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关键词ID',
   `keyword_text` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关键词文本',
@@ -834,6 +863,7 @@ Output:
 CREATE TABLE `t_advert_agent_modify_placement_record` (
   `id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL,
   `record_id` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关联主记录ID',
+  `decision_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '决策批次ID',
   `campaign_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '所属活动ID',
   `placement_type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '广告位类型：TOP/PRODUCT_PAGE/REST',
   `risk_check_pass` int DEFAULT NULL COMMENT '风控是否通过（1=通过，0=不通过）',
