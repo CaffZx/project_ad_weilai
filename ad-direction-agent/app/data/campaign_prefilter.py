@@ -1,25 +1,28 @@
 """Campaign 预筛选 — 纯函数，无 I/O。
 
 硬过滤规则（排除不进 LLM）:
-  - 非 ENABLED 状态
-  - 近 7 天完全无数据
+  - 否定词 (match_type 含 negative) — 静默丢弃
   - 多关键词活动 (本期暂不处理，后续迭代启用 suggest_split)
+  - 已入淘汰池 (Bid ≤ $0.20 且 Budget ≤ $1.00) — 不进 LLM
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from typing import TYPE_CHECKING
+
+from app.workflow.steps.campaign_guardrails import is_strictly_in_low_bid_pool
+
+if TYPE_CHECKING:
+    from app.models.campaign import CampaignUnit
 
 
 def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
     """返回 (surviving, excluded)。
 
     硬过滤:
-    1. campaign_status != 'ENABLED' 或 keyword_status != 'ENABLED'
-       → reason="inactive"
-    2. 近 7 天 spend=0 AND clicks=0 AND impressions=0 (完全无数据)
-       → reason="no_recent_data"
-    3. campaign_name 下 COUNT(DISTINCT keyword_text) > 1
+    1. match_type 含 "negative" → 静默丢弃（否词无 bid/budget 可调）
+    2. campaign_name 下 COUNT(DISTINCT keyword_text) > 1
        → reason="multi_keyword_deferred"
        # 本期暂不处理批量关键词活动，后续迭代启用 suggest_split
 
@@ -58,31 +61,11 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
         name = str(r.get("campaign_name") or "")
         cid = str(r.get("campaign_id") or "")
 
-        # 规则 0: 否定词不进入 LLM 分析（否词无 bid/budget 可调，误入会浪费 token 且产生无效分析）
+        # 规则 1: 否定词不进入 LLM 分析（否词无 bid/budget 可调，误入会浪费 token 且产生无效分析）
         if _is_negative_match(str(r.get("match_type") or r.get("关键词匹配类型") or r.get("keyword_match_type") or "")):
             continue
 
-        # 规则 1: 非活跃状态
-        # 注意：当前 _fetch_campaign_context SQL 已用 WHERE campaign_status='ENABLED' 过滤，
-        # 且输出列写死 'ENABLED'，故 raw 不含非 ENABLED 活动 → 本分支为死代码。
-        # 若将来要展示非 ENABLED，需改 SQL（去 WHERE + 取真实 status），届时本分支转活。
-        campaign_status = str(r.get("campaign_status") or "").upper()
-        keyword_status = str(r.get("keyword_status") or "").upper()
-        if campaign_status != "ENABLED" or (keyword_status and keyword_status != "ENABLED"):
-            excluded.append({"campaign_name": name, "reason": "inactive"})
-            continue
-
-        # 规则 2: 近 7 天无数据 — 死代码（同规则1，SQL 的 local_report_time>=7d 已隐式排除；
-        #         且 report 表对零活动无行，无 campaign 主表可 LEFT JOIN，本期不展示该类）。
-        if "spend_7d" in r or "clicks_7d" in r or "impressions_7d" in r:
-            spend_7d = float(r.get("spend_7d") or r.get("cost_7d") or 0)
-            clicks_7d = int(float(r.get("clicks_7d") or 0))
-            impressions_7d = int(float(r.get("impressions_7d") or 0))
-            if spend_7d == 0 and clicks_7d == 0 and impressions_7d == 0:
-                excluded.append({"campaign_name": name, "reason": "no_recent_data"})
-                continue
-
-        # 规则 3: 多关键词活动（本期不进 LLM，前端展示为预过滤卡）
+        # 规则 2: 多关键词活动（本期不进 LLM，前端展示为预过滤卡）
         #   - 折叠：每活动只产 1 条 excluded（raw 按词/子ASIN 多行，否则会 N 条重复）
         #   - 子ASIN：取该活动下关联词条数最多的子ASIN（prefilter 无 perf，"花费最高"不可得）
         #   - keyword_text 硬编码"多关键词活动"
@@ -107,3 +90,37 @@ def filter_campaigns(raw: list[dict]) -> tuple[list[dict], list[dict]]:
         surviving.append(r)
 
     return surviving, excluded
+
+
+def filter_eliminated_pool(
+    units: list[CampaignUnit],
+) -> tuple[list[CampaignUnit], list[dict], list[CampaignUnit]]:
+    """筛选已入淘汰池的活动（Bid ≤ $0.20 且 Budget ≤ $1.00，KB 21 §6）。
+
+    在 CampaignFetcher 组装 CampaignUnit 之后调用（依赖 MCP basic_info 拿到的 current_bid/current_budget）。
+
+    Returns:
+        surviving:  未入池，送入 LLM 分析
+        skipped:    已入池，dict 含 __prefiltered=True 供前端灰卡渲染
+        pool_units: 已入池，保留 CampaignUnit 供 KB21§7 淘汰复评
+    """
+    surviving: list[CampaignUnit] = []
+    skipped: list[dict] = []
+    pool_units: list[CampaignUnit] = []
+
+    for cu in units:
+        if is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
+            pool_units.append(cu)
+            skipped.append({
+                "campaign_key": cu.campaign_key,
+                "campaign_name": cu.campaign_name,
+                "child_asin": cu.child_asin,
+                "match_type": cu.match_type,
+                "keyword_text": cu.keyword_text,
+                "reason": "已入淘汰池（出价≤$0.20 且 预算≤$1），请到ERP手动修改",
+                "__prefiltered": True,
+            })
+        else:
+            surviving.append(cu)
+
+    return surviving, skipped, pool_units

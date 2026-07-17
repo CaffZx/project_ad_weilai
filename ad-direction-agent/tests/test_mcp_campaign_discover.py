@@ -36,7 +36,6 @@ _EXPECTED_NORMALIZED = {
     "keyword_text": "fishnet stockings",
     "match_type": "EXACT",
     "campaign_status": "ENABLED",
-    "keyword_status": "ENABLED",
 }
 
 

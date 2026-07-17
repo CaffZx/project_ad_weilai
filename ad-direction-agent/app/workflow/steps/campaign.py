@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from app.config.settings import settings
 from app.core_keyword_policy import normalize_core_keyword
 from app.data.campaign_fetcher import CampaignFetcher
+from app.data.campaign_prefilter import filter_eliminated_pool
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.steps.campaign_portfolio import (
@@ -413,26 +414,9 @@ async def _analyze_campaigns_impl(
 
     # 3. LLM 分析前预过滤
     # 3a. 批量词活动：一个活动名下多个关键词，本期暂不处理
-    #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.py:61-68)
-    # 3b. 疑似已淘汰活动：Bid ≤ $0.20 且 预算 ≤ $1.00（两者都到底=已入淘汰池，KB 21 §6）
-    #     → 本期暂时过滤不做重复分析（仅满足其一的活动放行 LLM，由低价捡漏强制淘汰兜底）
-    llm_campaigns: list[CampaignUnit] = []
-    skipped_eliminated: list[dict] = []
-    pool_units: list[CampaignUnit] = []   # 严格在池活动（复评候选源，保留 cu 供 KB21§7 复评）
-    for cu in campaign_data.campaigns:
-        if is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
-            pool_units.append(cu)
-            skipped_eliminated.append({
-                "campaign_key": cu.campaign_key,
-                "campaign_name": cu.campaign_name,
-                "child_asin": cu.child_asin,
-                "match_type": cu.match_type,
-                "keyword_text": cu.keyword_text,
-                "reason": "已入淘汰池（出价≤$0.20 且 预算≤$1），请到ERP手动修改",
-                "__prefiltered": True,   # 前端按此渲染为灰色不可操作的预过滤卡（无悬停警告）
-            })
-            continue
-        llm_campaigns.append(cu)
+    #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.filter_campaigns)
+    # 3b. 疑似已淘汰活动：Bid ≤ $0.20 且 预算 ≤ $1.00 → 不进 LLM (campaign_prefilter.filter_eliminated_pool)
+    llm_campaigns, skipped_eliminated, pool_units = filter_eliminated_pool(campaign_data.campaigns)
 
     if skipped_eliminated:
         logger.info("Campaign 预过滤 [%s]: 跳过 %d 个疑似已淘汰活动 (budget≈$1, bid≈$0.2)",
@@ -458,21 +442,115 @@ async def _analyze_campaigns_impl(
             logger.warning("sync_pool_entries 失败 [%s]: %s (fail-open)", parent_asin, e)
 
     total = len(llm_campaigns)
-    if total == 0:
-        # 全部活动已被预过滤 → 无 LLM 分析可跑，但仍须同步淘汰池表，
-        # 保证 discovery 入池路径记录这批活动的淘汰状态（否则 KB21§7 复评永不可达）。
+
+    # ── 预计算值（全预过滤 + 正常路径共用）────────────────────────────
+    existing_kws = {
+        (cu.keyword_text or "").strip().lower()
+        for cu in campaign_data.campaigns if cu.keyword_text
+    }
+    pre_eliminated_count = len(skipped_eliminated)
+    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
+    if not shop_account:
+        from app.config.settings import settings as _ss
+        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
+        if getattr(_ss, "mcp_resolve_context", False):
+            try:
+                from app.data.mcp_adapter import McpAdapter
+                _shop_ctx = await asyncio.wait_for(
+                    resolve_mcp_context_from_mcp(parent_asin, McpAdapter()),
+                    timeout=getattr(_ss, "mcp_context_timeout", 30.0),
+                )
+                shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
+            except Exception:
+                shop_account = ""
+        else:
+            shop_account = ""
+    target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
+
+    # ── 淘汰复评辅助函数（全预过滤 + 正常路径共用）─────────────────────
+    async def _maybe_restart_review() -> tuple[list[CampaignAdjustmentItem], set[str]]:
+        """KB21§7 淘汰复评。返回 (reactivate_items, reactivated_keys)。"""
+        if not (settings.campaign_restart_enabled and pool_units):
+            return [], set()
+        from app.persistence.erp_writer.repository import _get_repository
+        repo = _get_repository()
         await _sync_pool_entries_if_needed()
+        entry_dates: dict = {}
+        try:
+            entry_dates = await asyncio.to_thread(
+                repo.get_active_entries, parent_asin,
+            )
+        except Exception as e:
+            logger.warning("get_active_entries 失败 [%s]: %s (复评跳过)", parent_asin, e)
+        if not entry_dates:
+            return [], set()
+        try:
+            reactivate_items, reactivated_keys = await _run_restart_review(
+                pool_units, entry_dates, fetcher, campaign_data, parent_asin,
+            )
+            if reactivate_items:
+                _t(f"DONE restart_review ({len(reactivate_items)} 复评卡)")
+            return reactivate_items, reactivated_keys
+        except Exception as e:
+            logger.warning("Campaign 复评异常 [%s]: %s (fail-open)", parent_asin, e)
+            warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
+            return [], set()
+
+    warnings_list: list[str] = []
+
+    if total == 0:
+        # ── 全预过滤：无活动可分析，但仍执行复评 + 新增活动分析 ──
+        adjustments: list[CampaignAdjustmentItem] = []
+        skipped = skipped_eliminated + (campaign_data.excluded or [])
+        warnings_list.append("所有活动均在预过滤阶段被排除（疑似全部已淘汰）")
+
+        ri, rk = await _maybe_restart_review()
+        if ri:
+            adjustments.extend(ri)
+            skipped = [s for s in skipped if s.get("campaign_key") not in rk]
+
+        new_campaigns: list = []
+        nc_warnings: list[str] = []
+        if settings.campaign_new_enabled:
+            try:
+                new_campaigns, nc_warnings, _ = await analyze_new_campaigns(
+                    fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
+                    shop_id=campaign_data.shop_id,
+                    parent_seller_sku=campaign_data.parent_seller_sku,
+                    site_code=campaign_data.site_code,
+                    shop_account=shop_account,
+                    existing_keywords=existing_kws,
+                    pre_eliminated_count=pre_eliminated_count,
+                    strategy_context=strategy_context,
+                    ctx_dict={},
+                    temperature=temperature,
+                    target_child_asin=target_child_asin,
+                    days=days,
+                    sem=asyncio.Semaphore(cc),
+                    product_title=(asin_data.title or "") if asin_data else "",
+                )
+            except Exception as e:
+                logger.warning("新增活动分析异常 [%s] (全预过滤): %s", parent_asin, e)
+                nc_warnings.append(f"新增活动分析失败: {type(e).__name__}: {e}")
+        warnings_list.extend(nc_warnings)
+
         return CampaignAnalysisResult(
             parent_asin=parent_asin, days=days, run_id=run_id,
             shop_id=campaign_data.shop_id,
             parent_seller_sku=campaign_data.parent_seller_sku,
             site_code=campaign_data.site_code,
             total_campaigns=0,
-            skipped_campaigns=skipped_eliminated + (campaign_data.excluded or []),
-            warnings=["所有活动均在预过滤阶段被排除（疑似全部已淘汰）"],
+            adjustments=adjustments,
+            new_campaigns=new_campaigns,
+            new_campaigns_warnings=nc_warnings,
+            skipped_campaigns=skipped,
+            warnings=warnings_list,
             rounds_detail={},
+            sanity_check_passed=True,
+            llm_rounds_completed=0,
         )
 
+    # ── 正常路径：有可分析活动 ──
     # 4. 按 match_type 分流
     exact_list = [cu for cu in llm_campaigns if cu.match_type == "EXACT"]
     broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
@@ -492,7 +570,6 @@ async def _analyze_campaigns_impl(
     broad_sem = asyncio.Semaphore(cc)
     new_sem = asyncio.Semaphore(cc)     # 新增活动线独立限流（与 exact/broad 对等）
     rounds_detail: dict[str, dict] = {}
-    warnings_list: list[str] = []
 
     # 4.5 策略总览(执行总纲)：改为 gate task，与三流的 prefetch【重叠】跑（prefetch 不读 ctx_dict）。
     #     各流在 LLM 轮(_run_round)前 await gate → posture_brief 已注入，保证今日总纲一致。
@@ -521,34 +598,6 @@ async def _analyze_campaigns_impl(
     # 5. ★三股并行：精准流 / 广泛流 / 新增活动分析线（各自独立限流，互不阻塞）
     # return_exceptions=True：任一流抛未捕获异常 → 不连累其余流，转为 warning
     # 三股共享 ctx_dict（含 _strategic_overview_text = posture_brief），保证今日总纲一致
-    # 新增线输入（并行启动前一次性算好）：
-    existing_kws = {
-        (cu.keyword_text or "").strip().lower()
-        for cu in campaign_data.campaigns if cu.keyword_text
-    }
-    # 用预过滤阶段疑似已淘汰活动数作 FILL_AFTER_ELIMINATION 触发输入
-    # （并行架构下精准/广泛 adjustments 尚未产出；语义=已存在淘汰活动→词池已变窄）
-    pre_eliminated_count = len(skipped_eliminated)
-    shop_account = getattr(fetcher, "_last_shop_account", "") or ""
-    if not shop_account:
-        # _last_shop_account 为空时走 MCP 解析（与分析主链一致）
-        from app.config.settings import settings as _ss
-        from app.data.mcp_db_context import resolve_mcp_context_from_mcp
-        if getattr(_ss, "mcp_resolve_context", False):
-            try:
-                from app.data.mcp_adapter import McpAdapter
-                _shop_ctx = await asyncio.wait_for(
-                    resolve_mcp_context_from_mcp(parent_asin, McpAdapter()),
-                    timeout=getattr(_ss, "mcp_context_timeout", 30.0),
-                )
-                shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
-            except Exception:
-                shop_account = ""
-        else:
-            shop_account = ""
-    # 新增活动投放目标子 ASIN：历史活动数最多/花费最高的子 ASIN（非父 ASIN 占位）
-    target_child_asin = _pick_target_child_asin(campaign_data.campaigns)
-
     async def _no_op_new_campaigns():
         return [], [], {}
 
@@ -826,43 +875,14 @@ async def _analyze_campaigns_impl(
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
     #   位置关键：必须在 _resolve_budget_conflicts(§7) 之后——否则"低价捡漏强制淘汰兜底"会因
     #   复评项 current=$1/$0.20 把它打回 eliminate。复评项已带完整字段，无需 backfill/终态分类。
-    #
-     #   ★入池日期数据源：现走 ERP 库 t_advert_agent_pool_entry（原依赖 card+pending 表
-    #     confirm_status='CONFIRMED'，一步直跑不写 → 恒空 → 复评门永不进）。
-    #   流程：① 分析后双向同步池表(discovery 入池 + 手动复评离池)→ ② 读最新在池记录 → ③ 复评。
-    #   fail-open：ERP 库不通 → sync/读 失败 → 不复评，不连累主分析。
-    if settings.campaign_restart_enabled and pool_units:
-        from app.persistence.erp_writer.repository import _get_repository
-        repo = _get_repository()
-
-        # ① 分析后双向同步池表（discovery 入池 + 手动复评离池）
-        await _sync_pool_entries_if_needed()
-
-        # ② 读最新在池记录（覆盖上层传入的 elimination_entry_dates 旧快照）
-        entry_dates: dict = {}
-        try:
-            entry_dates = await asyncio.to_thread(
-                repo.get_active_entries, parent_asin,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("get_active_entries 失败 [%s]: %s (复评跳过)", parent_asin, e)
-
-        # ③ 复评
-        if entry_dates:
-            try:
-                reactivate_items, reactivated_keys = await _run_restart_review(
-                    pool_units, entry_dates, fetcher, campaign_data, parent_asin,
-                )
-                if reactivate_items:
-                    adjustments.extend(reactivate_items)
-                    skipped_campaigns = [
-                        s for s in skipped_campaigns
-                        if s.get("campaign_key") not in reactivated_keys
-                    ]
-                    _t(f"DONE restart_review ({len(reactivate_items)} 复评卡)")
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Campaign 复评异常 [%s]: %s (fail-open)", parent_asin, e)
-                warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
+    #   实现委托 _maybe_restart_review()（全预过滤路径共用）。
+    ri, rk = await _maybe_restart_review()
+    if ri:
+        adjustments.extend(ri)
+        skipped_campaigns = [
+            s for s in skipped_campaigns
+            if s.get("campaign_key") not in rk
+        ]
 
     # 8 + 8b：Sanity check 与 AI 汇总合成【并行】。
     # 两者都只读已定稿的 adjustments，产出独立（warnings vs 分组叙事），无数据依赖 →

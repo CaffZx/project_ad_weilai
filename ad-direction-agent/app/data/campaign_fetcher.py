@@ -1061,7 +1061,6 @@ _MCP_CAMPAIGN_KEY_MAP: dict[str, str] = {
 }
 _MCP_CAMPAIGN_DEFAULTS = {
     "campaign_status": "ENABLED",
-    "keyword_status": "ENABLED",
 }
 
 
@@ -1069,7 +1068,7 @@ def _normalize_mcp_campaign_keywords(rows: list[dict]) -> list[dict]:
     """将 MCP 工具返回的中文 key 映射为 _assemble 所期望的英文 key。
 
     入参 shape: [{"广告活动D":..., "广告活动名称":..., ...}, ...]  (MCP 原始)
-    出参 shape: [{"campaign_id":..., "campaign_name":..., ..., "campaign_status":"ENABLED", "keyword_status":"ENABLED"}, ...]
+    出参 shape: [{"campaign_id":..., "campaign_name":..., ..., "campaign_status":"ENABLED"}, ...]
     """
     if not rows:
         return []

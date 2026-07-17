@@ -75,7 +75,7 @@ flowchart TD
   C --> D["MCP context + campaign discovery"]
   D --> E["basic_info_v2 + product_report"]
   E --> F["CampaignData / CampaignUnit[]"]
-  F --> G["预过滤: 多词/低价池/无效活动"]
+  F --> G["预过滤: 否定词/多词活动/淘汰池"]
   G --> H["组合预分类"]
   H --> I["策略总览 overview gate"]
   I --> J["三股并行: exact / broad / new_campaigns"]
@@ -164,19 +164,82 @@ CampaignData 另有 Redis 缓存：
 
 ## 预过滤
 
-预过滤分为两类：
+预过滤分为两层，在 Campaign 数据拉取完成后、LLM 分析前顺序执行。第一层处理原始行 dict（MCP 未组装），第二层处理 `CampaignUnit`（MCP basic_info 组装后）。
 
-1. `campaign_prefilter.py` 的数据层过滤：多词活动、无效活动、维度补齐等。
-2. `campaign.py` 的分析前过滤：严格低价池活动，即 bid <= 0.20 且 budget <= 1.00。
+### 第一层：数据层硬过滤（`campaign_prefilter.py`）
 
-严格低价池活动不送 LLM 重复分析，而是：
+`filter_campaigns(raw: list[dict]) -> (surviving, excluded)` 是纯函数，无 I/O。在 `CampaignFetcher.fetch_campaigns()` 内部调用（MCP `ad_campaign_product_keyword_list` 返回 → `_normalize_mcp_campaign_keywords()` → `filter_campaigns()`）。
 
-- 标记为 `__prefiltered`
-- 归入低价捡漏组
-- 可进入淘汰复评候选
-- 前端以灰卡展示
+两条活跃规则：
 
-如果全部活动都被预过滤，系统仍会同步 pool entry，然后返回无 LLM 分析结果。
+| 规则 | 判定 | 处理 |
+|------|------|------|
+| 否定词 | `match_type` 含 `"negative"`（大小写不敏感） | 静默丢弃，不计入 `excluded` |
+| 多关键词活动 | 同一 `campaign_id` 下去重 `keyword_text` > 1 | 折叠为 1 条 `excluded`，`reason="多关键词活动，请到ERP手动修改"`，标记 `__prefiltered=True` |
+
+关键实现细节：
+
+- 多词判定用 `campaign_id`（数字主键，跨工具稳定）而非 `campaign_name`。
+- 否定词不计入多词关键词计数（广泛活动常有同词根否词，算进去会误判）。
+- `excluded` 条目中 `child_asin` 取该活动下关联行数最多的子 ASIN；`keyword_text` 硬编码为 `"多关键词活动"`。
+
+Surviving 继续进入下一阶段；excluded 最终合并进 `CampaignAnalysisResult.skipped_campaigns`，前端以预过滤灰卡展示。
+
+### 第二层：淘汰池预过滤（`campaign_prefilter.py` + `campaign.py`）
+
+`filter_eliminated_pool(units: list[CampaignUnit]) -> (surviving, skipped, pool_units)` 在 `analyze_campaigns()` 中调用，处理已组装的 `CampaignUnit` 列表。依赖 MCP `ad_campaign_basic_info_v2` 返回的 `current_bid` 和 `current_budget`，因此必须在第一层之后、`CampaignFetcher._assemble()` 之后执行。
+
+判定函数：`is_strictly_in_low_bid_pool(bid, budget)`，定义在 `campaign_guardrails.py`（阈值常量的归一化唯一来源）。
+
+```
+LOW_BID_MAX   = $0.20
+LOW_BUDGET_MAX = $1.00
+判定逻辑: bid ≤ $0.20 AND budget ≤ $1.00 (AND 口径，KB 21 §6)
+```
+
+满足条件的活动：
+
+- **不进 LLM 分析**：已在淘汰池，无需重复分析。
+- **三个输出**：
+  - `surviving`：未入池，送入 LLM 分流分析。
+  - `skipped`：dict 列表，含 `campaign_key/name/child_asin/match_type/keyword_text/reason/__prefiltered=True`，供前端灰卡渲染。
+  - `pool_units`：`CampaignUnit` 列表，保留完整对象供淘汰复评（KB 21 §7）使用——复评需要 `campaign_id`、`current_bid`、`current_budget` 等字段。
+
+不满足 AND 条件的活动（仅 bid≤$0.20 或仅 budget≤$1.00，或两者都不满足）归入 `surviving`，交 LLM 按 KB 规则判断。若 LLM 判淘汰，`P3_FORCE_ELIMINATE` 护栏在 OR 口径（`bid≤$0.10` 或 `budget≤$1.00` 且无出单）下执行强制淘汰。
+
+### `__prefiltered` 标记
+
+两层的 excluded/skipped 条目均含 `__prefiltered=True`。前端 `viewmodel.js` 据此区分"预过滤灰卡"（不可操作）和"LLM 丢失项"（可人工补救）。正常路径中 LLM 批次失败的 skipped 项不带此标记。
+
+### 淘汰池表同步
+
+`_sync_pool_entries_if_needed()` 在 `filter_eliminated_pool()` 之后、复评之前执行，调 `repository.sync_pool_entries()` 双向同步 `t_advert_agent_pool_entry`：
+
+- **入池方向（discovery）**：`live` 中 `is_strictly_in_low_bid_pool=True` 且池表无记录 → INSERT `entry_date=NOW()`。
+- **离池方向**：池表有记录但 `live` 中该 `campaign_id` 不存在或已不在池 → UPDATE `exit_date=NOW()`。
+
+此函数在两处被调用：正常路径（LLM 分析后、复评前）和全预过滤路径（early return 前）。两处调用同一函数定义，防止逻辑漂移。
+
+### 淘汰复评辅助函数
+
+`_maybe_restart_review()` 是 `analyze_campaigns()` 内的嵌套函数，封装了三个步骤：
+
+1. `_sync_pool_entries_if_needed()` — 同步池表。
+2. `repo.get_active_entries()` — 读取当前在池记录。
+3. `_run_restart_review(pool_units, entry_dates, ...)` — 调用 `campaign_restart.py` 的纯规则引擎判定。
+
+返回 `(reactivate_items, reactivated_keys)`。正常路径和全预过滤路径共用此函数。
+
+### 全预过滤路径
+
+`llm_campaigns == 0`（所有活动被两层预过滤筛掉）时不裸返回空结果，而是执行：
+
+1. `_maybe_restart_review()` — 淘汰复评：若有符合天数和花费条件的在池活动，产出 `reactivate_*` 调整。
+2. `analyze_new_campaigns()` — 新增活动分析：即使旧活动全在淘汰池，仍可能有新词可建。
+
+返回的 `CampaignAnalysisResult` 包含 `adjustments`（可能非空，含复评产物）、`new_campaigns`（可能非空）、`skipped_campaigns`（含所有被筛掉的条目）。`total_campaigns=0` 仅表示无可分析旧活动，不代表无任何产出。
+
+ERP 落库门禁 `should_push_to_erp()` 检查 `adjustments` 非空或 `new_campaigns` 非空即放行；`adjustments` 非空时还校验 `campaign_id`。全预过滤路径下的复评产物或新增活动建议均可通过门禁正常落库。
 
 ## 分流策略
 

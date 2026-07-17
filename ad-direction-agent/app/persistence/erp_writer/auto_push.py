@@ -217,19 +217,22 @@ def should_push_to_erp(result: CampaignAnalysisResult | dict[str, Any]) -> tuple
     # 并非主分析结果（adjustments/cards）的质量。sanity 结论照常落 summary
     # .validation_passed 字段，由前端按该字段警示，但不阻断主结果落库。
     adjustments = data.get("adjustments") or []
-    if not adjustments:
-        return False, "no adjustments"
-    has_cid = False
-    for adj in adjustments:
-        if isinstance(adj, dict):
-            cid = str(adj.get("campaign_id") or "").strip()
-        else:
-            cid = str(getattr(adj, "campaign_id", "") or "").strip()
-        if cid:
-            has_cid = True
-            break
-    if not has_cid:
-        return False, "no campaign_id on adjustments"
+    new_campaigns = data.get("new_campaigns") or []
+    if not adjustments and not new_campaigns:
+        return False, "no adjustments or new campaigns"
+    # campaign_id 校验仅针对 adjustments；新活动无已有 campaign_id
+    if adjustments:
+        has_cid = False
+        for adj in adjustments:
+            if isinstance(adj, dict):
+                cid = str(adj.get("campaign_id") or "").strip()
+            else:
+                cid = str(getattr(adj, "campaign_id", "") or "").strip()
+            if cid:
+                has_cid = True
+                break
+        if not has_cid:
+            return False, "no campaign_id on adjustments"
     return True, ""
 
 
