@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-12（版本日志见文末，最新 v3.18：核心词管理系统 — `is_core` 真实数据源闭环）
+> **最后更新**: 2026-07-17（版本日志见文末，最新 v3.19：核心词管理面板 + campaign_key 关键词级重构）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -121,7 +121,6 @@ parent_asin
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
 | `app/config/settings.py` | 283 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关 + `meta_filter_dashboard_light`) |
 | `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
-| `app/llm/kb_loader.py` | 234 | KB 加载器。`campaign_adjustment` 已拆为 `_exact`/`_broad` 两个 preset；v3.18 新增 `semantic_core` preset（KB29） |
 | `app/data/mcp_adapter.py` | 536 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点；meta_filter 透传 |
 | `app/data/mcp_mapping.py` | 258 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09)；`bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap |
 | `app/workflow/steps/campaign_portfolio.py` | 103 | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
@@ -309,6 +308,9 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-12 | **_snapshot_action 防御加固** | 补 `cat="ADJUST"` 显式映射；淘汰回退判定加 `not cat` 条件，避免 REACTIVATE/ADJUST 卡因 group=low_bid 被误判为淘汰。1 file +4/-2。 |
 | 07-12 | **KB29 核心词定义规则接入** | `kb_loader.py`：KB29 从预留位激活接入 `29-核心词定义规则.md`。`repository.py`：summary warnings 字段截断至 500 字符防超长写入。知识图谱 08 大幅扩充。4 files +375/-46。 |
 | 07-12 | **★ 核心词管理系统（is_core 真实数据源闭环）** | `core_keyword_fetcher.py`(新,414行)：MCP 拉关键词+listing→LLM `recommend_semantic_core()` 判定语义冲突(4种)+R1 精确相关→落库。`core_keyword.py` workflow(新,309行)：数据编排+语义判定+批量落库。`core_keyword.py` API(新,62行)：`POST /core-keyword/analyze` 离线 endpoint，`core_keyword_analyze_enabled` 闸控。`reasoner.py`：新增 `_SEMANTIC_CORE_PROMPT`(KB29 §1-6) + `recommend_semantic_core()`。`campaign.py`：主流程入口读核心词标签注入 `is_core`（填了从 v2.0 起一直硬编码 False 的坑）。`repository.py`：核心词表读/写方法。`settings.py`：`core_keyword_*` 4 项配置 + `azlisting_mcp_*` 独立 MCP 连接。`migrate_core_keyword.sql`(新) + `batch_core_keyword.py/.sh`(新) + `test_core_keyword.py`(新,627行)。18 files +2022/-8。 |
+| 07-16 | **★ campaign_key 关键词级重构** | `campaign_fetcher`：campaign_key 从 `"活动名×ASIN"` 改为 `"活动名×ASIN#match_type#keyword_id"`，消除同活动同词 BROAD/PHRASE 的 unit_by_key 碰撞。`models/campaign.py`：文档同步关键词级语义+聚合覆盖风险说明。`campaign_prefilter`：新增规则 0——否定词不进入 LLM 分析；match_type 读取优先级补 raw 字段。`campaign.py`/`mappers`：同步适配新 key 格式。`render.js`：前端适配。删除 `demo/codex_ux_patch.js`(已内化)。12 files +438/-33。 |
+| 07-16 | **★ 核心词管理面板 + policy 后端** | `core_keyword.py` API 扩展(+65行)：手动启用/禁用核心词标注、分组查询、任务状态刷新。`core_keyword_policy.py`(新,25行)：核心词策略引擎，聚合判定结果供前端渲染。`repository.py`：新增核心词分组查询/批量更新方法(+281行)。Web 端核心词管理弹窗：语义判定结果可人工审核修改、按 campaign 分组、空态/loading/error 三态完善。大量样式/交互 UX 修复。20+ commits。 |
+| 07-17 | **Codex 批跑 + 复盘记忆 + SkillOpt** | `batch_via_api_codex.py`(新)：Codex 复核批量调度入口，替代旧 batch_via_api.py 集成 deepseek-v4-pro review hook。`batch_night_monitor_codex.sh`(新)：守夜监控适配 Codex 批跑。`split_review_memory.py`(新)：复盘记忆加工脚本。新增 SkillOpt 实施方案文档 3 篇 + 复盘记忆落地实施方案文档 2 篇 + 链路跑通测试记录。 |
 
 ---
 
@@ -336,6 +338,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | ~~`POST /campaign/confirm` 落地~~ | ✅ 已完成 | campaign.py:433 已实现，confirm_decisions 落 ERP pending 表 + 推送 |
 | KB 遵循度评分器 | P2 | 消费实验 JSONL。2026-07-04 核实：全工程 0 引用，未实现 |
 | ~~A1 修复~~ | ✅ 已完成 | `_ensure_data` 已支持 meta_filter 按 filter 分 key 缓存（§15.5 确认） |
+| campaign_key 关键词级 → card 聚合覆盖 | P1 | v3.19 将 campaign_key 改为关键词级(加 #match_type#keyword_id)消除碰撞，但同活动多关键词单元合并为一张 card 时 budget/campaign_pending/placements 仍后写覆盖。长期应拆 campaign_key(活动级) + campaign_unit_key(关键词级) |
 | **campaign_key 粒度拆分** | P2 | ★2026-07-16：`campaign_key` 已从活动级改为关键词级（含 `#match_type#keyword_id`），消除了同活动同词 BROAD/PHRASE 的 `unit_by_key` 碰撞（A04）。但下游 card/预算/广告位/复盘仍按 `campaign_id` 聚合（一张 card），同活动多关键词单元合并时 `campaign_pending`(预算) 和 `placements_by_type`(广告位) 存在后写覆盖，`synthesis key_to_card` 映射可能漏掉非主 key。长期应拆为 `campaign_key`（活动级，聚合用）+ `campaign_unit_key`（关键词级，回填/定位用）。当前影响面小，代码点位已标 ⚠ 注释。详见 `mappers.py:369-372`, `repository.py:1050-1052`, `campaign_fetcher.py:1003-1007`。 |
 
 ### 4.3 设计决策汇总
@@ -1273,6 +1276,10 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
+最后更新：2026-07-17
+
+*v3.19: 核心词管理面板 + campaign_key 关键词级重构（2026-07-16/17，本地未部署服务器）—— ①campaign_key 从活动级改为关键词级(加#match_type#keyword_id)，消除 BROAD/PHRASE 碰撞 ②核心词管理面板 Web 端上线(policy 后端+分组查询+人工审核)③否定词不进入 LLM 分析 ④core_keyword API 扩展(手动标注/分组/刷新)。12+20 files +871/-68。*
+
 *v3.18: 核心词管理系统 — is_core 真实数据源闭环（2026-07-12，本地未部署服务器）—— ①核心词发现数据编排器+LLM 语义判定(semantic_conflict 4种+R1 精确相关)→落库 ②campaign 主流程 is_core 回填（填了从 v2.0 起一直硬编码 False 的坑）③KB29 核心词定义规则接入 ④azlisting MCP 独立连接 ⑤离线批跑脚本+DDL。18+4 files +2397/-54。*
 
 *v3.17: Product Identity 全线注入 + 挪组执行修复（2026-07-12，本地未部署服务器）—— ①`product_identity.py` 解析 (asin,shop_id,parent_seller_sku) 三元组 ②`ProductIdentityMixin` 注入所有层请求模型 ③缓存无 identity 自动丢弃 ④挪组 portfolioId 解析前移+按 pid 拆请求+失败分类告警 ⑤`_snapshot_action` 补 ADJUST 映射+淘汰判定加固 ⑥知识图谱 16 篇+5 新测试。51+3+1 files +4691/-256。*
