@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-17（版本日志见文末，最新 v3.19：核心词管理面板 + campaign_key 关键词级重构）
+> **最后更新**: 2026-07-17（版本日志见文末，最新 v3.19：核心词管理面板(前端+后端) + campaign_key 关键词级重构）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -131,11 +131,12 @@ parent_asin
 | `app/workflow/steps/advert_execution.py` | 324 | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表） |
 | `app/data/core_keyword_fetcher.py` | 414 | ★核心词发现数据编排器（v3.18 新增）：MCP 拉关键词+listing→LLM semantic_core 判定→落库 ERP `t_advert_agent_core_keyword` |
 | `app/workflow/steps/core_keyword.py` | 309 | ★核心词语义判定工作流（v3.18 新增）：数据编排+语义判定+批量落库+主流程 is_core 回填 |
-| `app/api/core_keyword.py` | 62 | ★核心词 API 端点（v3.18 新增）：`POST /core-keyword/analyze` 离线分析，`core_keyword_analyze_enabled` 闸控 |
+| `app/api/core_keyword.py` | 62 | ★核心词 API 端点（v3.18 新增，v3.19 扩展）：`POST /analyze` 离线分析 + `/status` `/enable` `/disable` `/groups` 管理接口 |
+| `app/core_keyword_policy.py` | 25 | ★核心词策略引擎（v3.19 新增）：按 campaign 分组聚合 semantics 判定结果 |
 | `scripts/erp_db/migrate_core_keyword.sql` | 45 | ★核心词表 DDL（v3.18 新增） |
 | `batch_core_keyword.py` / `batch_core_keyword.sh` | — | ★离线批跑脚本（v3.18 新增） |
 | `tests/workflow/test_core_keyword.py` | 627 | ★核心词全链路单测（v3.18 新增） |
-| `demo/campaign-panel/` | ~2292 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托 + 密度切换 + 卡片点选 + 确认详情表)，独立维护于 `campaign-panel/` 目录 (详见 §10.3) |
+| `demo/campaign-panel/` | ~2465 | ★前端合并模块 (ES module + CSS `.camp-` 前缀 + 事件委托 + 密度切换 + 卡片点选 + 确认详情表)。**v3.19 新增核心词管理弹窗**：state.js(+60)+render.js(+53)+panel.css(+49)+events.js(+12) |
 
 ### 3.2 关键配置项（settings.py）
 
@@ -309,7 +310,8 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-12 | **KB29 核心词定义规则接入** | `kb_loader.py`：KB29 从预留位激活接入 `29-核心词定义规则.md`。`repository.py`：summary warnings 字段截断至 500 字符防超长写入。知识图谱 08 大幅扩充。4 files +375/-46。 |
 | 07-12 | **★ 核心词管理系统（is_core 真实数据源闭环）** | `core_keyword_fetcher.py`(新,414行)：MCP 拉关键词+listing→LLM `recommend_semantic_core()` 判定语义冲突(4种)+R1 精确相关→落库。`core_keyword.py` workflow(新,309行)：数据编排+语义判定+批量落库。`core_keyword.py` API(新,62行)：`POST /core-keyword/analyze` 离线 endpoint，`core_keyword_analyze_enabled` 闸控。`reasoner.py`：新增 `_SEMANTIC_CORE_PROMPT`(KB29 §1-6) + `recommend_semantic_core()`。`campaign.py`：主流程入口读核心词标签注入 `is_core`（填了从 v2.0 起一直硬编码 False 的坑）。`repository.py`：核心词表读/写方法。`settings.py`：`core_keyword_*` 4 项配置 + `azlisting_mcp_*` 独立 MCP 连接。`migrate_core_keyword.sql`(新) + `batch_core_keyword.py/.sh`(新) + `test_core_keyword.py`(新,627行)。18 files +2022/-8。 |
 | 07-16 | **★ campaign_key 关键词级重构** | `campaign_fetcher`：campaign_key 从 `"活动名×ASIN"` 改为 `"活动名×ASIN#match_type#keyword_id"`，消除同活动同词 BROAD/PHRASE 的 unit_by_key 碰撞。`models/campaign.py`：文档同步关键词级语义+聚合覆盖风险说明。`campaign_prefilter`：新增规则 0——否定词不进入 LLM 分析；match_type 读取优先级补 raw 字段。`campaign.py`/`mappers`：同步适配新 key 格式。`render.js`：前端适配。删除 `demo/codex_ux_patch.js`(已内化)。12 files +438/-33。 |
-| 07-16 | **★ 核心词管理面板 + policy 后端** | `core_keyword.py` API 扩展(+65行)：手动启用/禁用核心词标注、分组查询、任务状态刷新。`core_keyword_policy.py`(新,25行)：核心词策略引擎，聚合判定结果供前端渲染。`repository.py`：新增核心词分组查询/批量更新方法(+281行)。Web 端核心词管理弹窗：语义判定结果可人工审核修改、按 campaign 分组、空态/loading/error 三态完善。大量样式/交互 UX 修复。20+ commits。 |
+| 07-16 | **★ 核心词后端：policy 引擎 + API 扩展 + 分组落库** | `core_keyword_policy.py`(新)：核心词策略引擎，按 campaign 分组聚合 semantics 判定结果供前端渲染。`core_keyword.py` API 扩展：`GET /status` 任务状态+`POST /enable`/`POST /disable` 手动标注、`GET /groups` 按 campaign_id 分组查询。`repository.py`(+281行)：`query_core_keyword_groups` 分组查询、`batch_update_core_keyword` 批量更新人工标注、`get_core_keyword_task_status` 刷新机制。`core_keyword_fetcher.py`(+19行)：数据编排器增加分组信号。`core_keyword.py` workflow(+27行)：state 表改名+唯一任务 ID+重复变更防护。 |
+| 07-16 | **★ 核心词前端：Web 管理弹窗** | `state.js`(+60行)：`_coreKeywordTab`/`_coreKeywordGroups`/`_coreKeywordTaskId` 状态管理 + `loadCoreKeywordGroups()`/`toggleCoreKeywordEnabled()` 操作。`render.js`(+53行)：`_renderCoreKeywordModal()` 渲染弹窗——语义判定结果展示(semantic_conflict pass/fail badge + semantic_core 标记)、按 campaign 分组折叠面板、手动开关控件、空态提示。`panel.css`(+49行)：弹窗样式(v3 设计)、分组折叠动画、badge 色值。`events.js`(+12行)：事件委托 `camp-toggle-core-keyword` 等。`panel.js`(+1行)：挂载核心词入口。 |
 | 07-17 | **Codex 批跑 + 复盘记忆 + SkillOpt** | `batch_via_api_codex.py`(新)：Codex 复核批量调度入口，替代旧 batch_via_api.py 集成 deepseek-v4-pro review hook。`batch_night_monitor_codex.sh`(新)：守夜监控适配 Codex 批跑。`split_review_memory.py`(新)：复盘记忆加工脚本。新增 SkillOpt 实施方案文档 3 篇 + 复盘记忆落地实施方案文档 2 篇 + 链路跑通测试记录。 |
 
 ---
@@ -1278,7 +1280,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
 
-*v3.19: 核心词管理面板 + campaign_key 关键词级重构（2026-07-16/17，本地未部署服务器）—— ①campaign_key 从活动级改为关键词级(加#match_type#keyword_id)，消除 BROAD/PHRASE 碰撞 ②核心词管理面板 Web 端上线(policy 后端+分组查询+人工审核)③否定词不进入 LLM 分析 ④core_keyword API 扩展(手动标注/分组/刷新)。12+20 files +871/-68。*
+*v3.19: 核心词管理面板(前端+后端) + campaign_key 关键词级重构（2026-07-16/17，本地未部署服务器）—— ①campaign_key 从活动级改为关键词级(加#match_type#keyword_id)消除 BROAD/PHRASE 碰撞+否定词不入 LLM ②**核心词后端**：`core_keyword_policy.py` 策略引擎+campaign 分组聚合；API 扩展(手动标注/分组查询/任务刷新)；repository +281行(分组查询/批量更新) ③**核心词前端**：Web 管理弹窗(state.js+60/render.js+53/panel.css+49/events.js+12)——语义判定结果展示、按 campaign 分组折叠面板、手动开关控件、空态/loading/error 三态 ④Codex 批跑脚本+SkillOpt 方案+复盘记忆加工。12+10+7 files +1128/-68。*
 
 *v3.18: 核心词管理系统 — is_core 真实数据源闭环（2026-07-12，本地未部署服务器）—— ①核心词发现数据编排器+LLM 语义判定(semantic_conflict 4种+R1 精确相关)→落库 ②campaign 主流程 is_core 回填（填了从 v2.0 起一直硬编码 False 的坑）③KB29 核心词定义规则接入 ④azlisting MCP 独立连接 ⑤离线批跑脚本+DDL。18+4 files +2397/-54。*
 
