@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.config.settings import settings
+from app.core_keyword_policy import normalize_core_keyword
 from app.data.campaign_fetcher import CampaignFetcher
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
@@ -1314,7 +1315,7 @@ async def _analyze_one_stream(
             cu,
             target_acos=strategy_context.target_acos,
             keyword_class=keyword_class_map.get(cu.keyword_text, ""),
-            is_core=cu.keyword_text in _core_set,
+            is_core=normalize_core_keyword(cu.keyword_text) in _core_set,
         )
         for cu in campaigns
     ]
@@ -1878,7 +1879,7 @@ def _backfill_campaign_adjustment_context(
         item.days_online = cu.days_online
         item.perf_7d = cu.perf_7d.model_dump() if cu.perf_7d else {}
         item.keyword_class = keyword_class_map.get(cu.keyword_text, "")
-        item.is_core = cu.keyword_text in _core_set
+        item.is_core = normalize_core_keyword(cu.keyword_text) in _core_set
         item.natural_rank = cu.natural_rank
         item.near_natural_rank = cu.near_natural_rank
         item.rank_change = cu.rank_change

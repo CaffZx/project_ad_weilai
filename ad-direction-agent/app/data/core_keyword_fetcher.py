@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config.settings import settings
+from app.core_keyword_policy import normalize_core_keyword
 from app.data.mcp_adapter import McpAdapter
 from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_db_context import _MCP_PARENT_KEY_MAP
@@ -297,6 +298,18 @@ class CoreKeywordFetcher:
                 existing.match_type = existing.match_type or item.match_type
         return list(merged.values())
 
+    @staticmethod
+    def _filter_excluded_keyword_items(
+        items: list[CampaignKeywordItem], excluded_keyword_norms: set[str],
+    ) -> list[CampaignKeywordItem]:
+        if not excluded_keyword_norms:
+            return items
+        excluded = {normalize_core_keyword(keyword) for keyword in excluded_keyword_norms}
+        return [
+            item for item in items
+            if normalize_core_keyword(item.keyword_text) not in excluded
+        ]
+
 
     async def _step5_rankings(
         self, items: list[CampaignKeywordItem], shop_account: str,
@@ -347,6 +360,7 @@ class CoreKeywordFetcher:
 
     async def fetch(
         self, parent_asin: str, parent_seller_sku: str, shop_id: int,
+        *, excluded_keyword_norms: set[str] | None = None,
     ) -> FetchResult:
         # Step1
         ctx = await self._step1_context(parent_asin)
@@ -375,10 +389,13 @@ class CoreKeywordFetcher:
                 self._step2_listing_info(shop_account, parent_asin, parent_seller_sku),
                 self._step3_campaign_keywords(parent_asin, parent_seller_sku, shop_account),
             )
+            campaigns = self._filter_excluded_keyword_items(
+                campaigns, excluded_keyword_norms or set(),
+            )
             if not campaigns:
                 return FetchResult(
                     context=ctx, listing=listing, campaigns=[], flow_keywords=[],
-                    error="核心词候选为空：广告关键词均来自多词活动",
+                    error="核心词候选为空：广告关键词均来自多词活动或被人工锁定/否决",
                 )
 
             # Step4 → 合并跨 campaign 同词 → Step5 → Step6（串行：合并依赖 Step4 的成本数据）

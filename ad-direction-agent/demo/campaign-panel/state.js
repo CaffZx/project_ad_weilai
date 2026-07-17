@@ -20,6 +20,8 @@ export function createCampaignState() {
     _processFilter: '',
     _portfolioOverride: {},
     _reallocOpen: false,
+    _coreKeywordManagement: null,
+    _coreKeywordIdentity: null,
     _confirm: null,            // {kind:'approve'|'reject'|'exec', title, msg} 确认弹窗
     _synthesisGroups: [],
     _synthesisSpecials: [],
@@ -119,6 +121,59 @@ export function createCampaignState() {
     state._selection.clear();
     _reRender();
   };
+
+  state.openCoreKeywordManagement = async function () {
+    if (!state.executable) { _toast('当前不是最新可执行批次，无法管理核心词'); return; }
+    if (!state._coreKeywordIdentity) { _toast('产品身份尚未加载，无法读取核心词'); return; }
+    const p = state._coreKeywordIdentity;
+    if (!p.parent_seller_sku || !p.shop_id) { _toast('缺少 ERP 产品身份，无法读取核心词'); return; }
+    try {
+      const qs = new URLSearchParams(p).toString();
+      const resp = await fetch((window.location.origin || '') + '/api/v1/agent/ad-direction/core-keyword/management?' + qs);
+      const body = await resp.json();
+      if (!resp.ok || !body.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+      state._coreKeywordManagement = body;
+      _reRender();
+    } catch (e) { _toast('读取核心词管理失败：' + (e.message || '未知错误')); }
+  };
+
+  state.closeCoreKeywordManagement = function () { state._coreKeywordManagement = null; _reRender(); };
+
+  state._coreKeywordPending = state._coreKeywordPending || new Set();
+  const _coreKeywordKey = (keyword_text) => String(keyword_text || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+  state.setCoreKeywordState = async function (keyword_text, nextState) {
+    const data = state._coreKeywordManagement;
+    if (!data || !state._coreKeywordIdentity) return;
+    const key = _coreKeywordKey(keyword_text);
+    if (!key) return;
+    if (state._coreKeywordPending.has(key)) return;
+    const current = (data.rows || []).find(row => _coreKeywordKey(row.keyword_text) === key);
+    if (current && current.state === nextState) return;
+    state._coreKeywordPending.add(key);
+    const minPendingMs = 800;
+    const pendingStartedAt = Date.now();
+    _reRender();
+    try {
+      const resp = await fetch((window.location.origin || '') + '/api/v1/agent/ad-direction/core-keyword/policy', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...state._coreKeywordIdentity, keyword_text, state: nextState,
+          expected_task_id: data.latest_task.id, expected_task_finished_at: data.latest_task.finished_at,
+          operator: ((window._erpParams || {}).userId) || 'tab5'}),
+      });
+      const body = await resp.json();
+      if (!resp.ok || !body.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+      state._coreKeywordManagement = body;
+      _reRender();
+    } catch (e) { _toast('核心词状态更新失败：' + (e.message || '未知错误')); }
+    finally {
+      const waitMs = Math.max(0, minPendingMs - (Date.now() - pendingStartedAt));
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      state._coreKeywordPending.delete(key);
+      _reRender();
+    }
+  };
+  state.addCoreKeywordFromPool = function (keyword) { if (keyword) state.setCoreKeywordState(keyword, 'LOCKED'); };
 
   state._selectedItems = function () {
     return state._campaignItems.filter(it => state._selection.has(it.item_id));
@@ -463,6 +518,11 @@ export function createCampaignState() {
     // 不再依赖页面层传入 executable / /decision/context —— 解除与 in_progress、ERP 可达性的耦合。
     state.executable = vm.is_latest === true;
     state._currentRunId = vm.run_id || '';
+    state._coreKeywordIdentity = {
+      parent_asin: vm.parent_asin || state.asin,
+      parent_seller_sku: vm.parent_seller_sku || (window._erpParams || {}).parentSellerSku || '',
+      shop_id: vm.shop_id || (window._erpParams || {}).shopId || '',
+    };
     state._campaignItems = vm.items || [];
     state._filteredItems = [...state._campaignItems];
     state.synthesis = vm.synthesis || null;

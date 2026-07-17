@@ -1,4 +1,5 @@
 import pytest
+from fastapi.responses import JSONResponse
 
 from app.config.settings import settings
 from app.api import core_keyword as core_keyword_api
@@ -11,9 +12,14 @@ from app.data.core_keyword_fetcher import (
 )
 from app.llm.reasoner import LLMReasoner
 from app.models.campaign import CampaignAdjustmentItem, CampaignPerf, CampaignUnit
-from app.persistence.erp_writer.repository import ErpDualWriterRepository
+from app.persistence.erp_writer.repository import (
+    ErpDualWriterRepository,
+    core_keyword_task_version,
+    resolve_effective_core_keywords,
+)
 from app.workflow.steps import campaign as campaign_step
 from app.workflow.steps import core_keyword as CK
+from app import start_core_keyword_server
 
 
 class _CallResult:
@@ -44,14 +50,171 @@ class _FakeAzlisting:
         return self.payload
 
 
+def test_resolve_effective_core_keywords_applies_policy_with_normalized_matching():
+    result = resolve_effective_core_keywords(
+        {"AI Dress", "disabled kw"},
+        {
+            " locked kw ": "LOCKED",
+            "DISABLED KW": "DISABLED",
+            "ai dress": "VETOED",
+        },
+    )
+
+    assert result == {"locked kw"}
+
+
+def test_resolve_effective_core_keywords_counts_manual_enabled_keyword():
+    result = resolve_effective_core_keywords(
+        {"ai core"},
+        {"manual enabled": "ENABLED"},
+    )
+
+    assert result == {"ai core", "manual enabled"}
+
+
+def test_management_keeps_manual_enabled_word_in_rows(monkeypatch):
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def close(self): pass
+
+    repo = ErpDualWriterRepository(
+        host="unused", port=0, user="unused", password="unused", database="unused",
+    )
+    monkeypatch.setattr(repo, "_connect", lambda: FakeConn())
+    monkeypatch.setattr(
+        repo, "_latest_core_keyword_task_cursor",
+        lambda *args: {"id": "ckt-current", "finished_at": "2026-07-16 10:00:00"},
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_labels_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "is_core": 0}],
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_policies_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "keyword_norm": "manual keyword", "state": "ENABLED"}],
+    )
+
+    payload = repo.list_core_keyword_management("B0TEST", "SKU-1", 1622)
+
+    assert payload["rows"] == [{
+        "keyword_text": "manual keyword", "types": ["manual"],
+        "semantic_evidence": [], "data_evidence": [],
+        "manual_reason": "人工覆盖", "state": "ENABLED",
+    }]
+
+
+def test_policy_update_same_state_skips_database_upsert(monkeypatch):
+    executed = []
+    committed = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def commit(self): committed.append(True)
+        def close(self): pass
+
+    repo = ErpDualWriterRepository(
+        host="unused", port=0, user="unused", password="unused", database="unused",
+    )
+    monkeypatch.setattr(repo, "_connect", lambda: FakeConn())
+    monkeypatch.setattr(
+        repo, "_latest_core_keyword_task_cursor",
+        lambda *args: {"id": "ckt-current", "finished_at": "2026-07-16 10:00:00"},
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_labels_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "is_core": 0}],
+    )
+    monkeypatch.setattr(
+        repo, "_core_keyword_policies_cursor",
+        lambda *args: [{"keyword_text": "manual keyword", "keyword_norm": "manual keyword", "state": "ENABLED"}],
+    )
+    monkeypatch.setattr(repo, "list_core_keyword_management", lambda *args: {"rows": []})
+
+    result = repo.upsert_core_keyword_policy(
+        "B0TEST", "SKU-1", 1622, "manual keyword", "ENABLED",
+        "ckt-current", "2026-07-16 10:00:00", "tab5",
+    )
+
+    assert result == {"rows": []}
+    assert executed == []
+    assert committed == [True]
+
+
+def test_core_keyword_task_version_matches_api_iso_datetime():
+    assert core_keyword_task_version("2026-07-16T07:00:00.123456") == "2026-07-16T07:00:00.123456"
+    assert core_keyword_task_version("2026-07-16 07:00:00.123456") == "2026-07-16T07:00:00.123456"
+
+
+def test_new_core_keyword_task_id_is_unique_for_each_run():
+    first = CK._new_task_id()
+    second = CK._new_task_id()
+
+    assert first != second
+    assert first.startswith("ckt")
+    assert len(first) == 32
+
+
+def test_core_keyword_server_manual_entry_uses_project_root_as_workdir():
+    assert start_core_keyword_server.SCRIPT_DIR == str(start_core_keyword_server.PROJECT_ROOT)
+
+
+@pytest.mark.asyncio
+async def test_fetcher_prefilters_locked_and_vetoed_before_perf_and_rank():
+    fetcher = CoreKeywordFetcher()
+    fake_starrocks = _FakeStarrocks({
+        "parent_listing_detail": [{
+            "shop_account": "shop_us",
+            "parent_seller_sku": "SKU-1",
+            "shop_id": 1622,
+            "site_code": "Amazon_US",
+        }],
+        "ad_campaign_product_keyword_list": [
+            {"campaign_id": "1", "广告活动名称": "camp_locked", "关键词": "locked kw", "关键词匹配类型": "EXACT"},
+            {"campaign_id": "2", "广告活动名称": "camp_vetoed", "关键词": "vetoed kw", "关键词匹配类型": "EXACT"},
+            {"campaign_id": "3", "广告活动名称": "camp_enabled", "关键词": "enabled kw", "关键词匹配类型": "EXACT"},
+        ],
+        "ad_campaign_product_report": [{"花费": 10, "广告订单量": 1, "ACOS": 25}],
+        "keyword_child_asins": [{"keyword": "enabled kw", "craw_nature_rank": 12}],
+        "flow_keywords": [],
+    })
+    fetcher._starrocks = fake_starrocks
+    fetcher._azlisting = _FakeAzlisting([])
+
+    result = await fetcher.fetch(
+        "B0TEST", "SKU-1", 1622,
+        excluded_keyword_norms={"locked kw", "vetoed kw"},
+    )
+
+    assert [item.keyword_text for item in result.campaigns] == ["enabled kw"]
+    report_campaigns = [
+        args["campaign_name"] for name, args in fake_starrocks.calls
+        if name == "ad_campaign_product_report"
+    ]
+    ranking_keywords = [
+        args["keyword"] for name, args in fake_starrocks.calls
+        if name == "keyword_child_asins"
+    ]
+    assert report_campaigns == ["camp_enabled"]
+    assert ranking_keywords == ["enabled kw"]
+
+
 @pytest.mark.asyncio
 async def test_step3_filters_multi_keyword_campaigns_before_data_core():
     fetcher = CoreKeywordFetcher()
     fetcher._starrocks = _FakeStarrocks({
         "ad_campaign_product_keyword_list": [
-            {"广告活动名称": "camp_multi", "关键词": "core dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
-            {"广告活动名称": "camp_multi", "关键词": "summer dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
-            {"广告活动名称": "camp_single", "关键词": "party dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "core dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "summer dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
+            {"campaign_id": "single", "广告活动名称": "camp_single", "关键词": "party dress", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
         ],
     })
 
@@ -249,9 +412,9 @@ async def test_fetcher_uses_azlisting_and_dedupes_campaign_reports(monkeypatch):
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"广告活动名称": "camp_multi", "关键词": "kw 1", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
-            {"广告活动名称": "camp_multi", "关键词": "kw 2", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
-            {"广告活动名称": "camp_single", "关键词": "kw 3", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "kw 1", "关键词匹配类型": "EXACT", "子ASIN": "B0C1"},
+            {"campaign_id": "multi", "广告活动名称": "camp_multi", "关键词": "kw 2", "关键词匹配类型": "EXACT", "子ASIN": "B0C2"},
+            {"campaign_id": "single", "广告活动名称": "camp_single", "关键词": "kw 3", "关键词匹配类型": "EXACT", "子ASIN": "B0C3"},
         ],
         "ad_campaign_product_report": [{"花费": 12, "广告订单量": 2, "ACOS": 25}],
         "keyword_child_asins": [{"keyword": "kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
@@ -293,9 +456,9 @@ async def test_fetcher_dedupes_campaign_keywords_before_ranking():
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"campaign_name": "camp_one", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C1"},
-            {"campaign_name": "camp_two", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C2"},
-            {"campaign_name": "camp_three", "keyword": "unique kw", "match_type": "PHRASE", "child_asin": "B0C3"},
+            {"campaign_id": "one", "campaign_name": "camp_one", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C1"},
+            {"campaign_id": "two", "campaign_name": "camp_two", "keyword": "repeat kw", "match_type": "EXACT", "child_asin": "B0C2"},
+            {"campaign_id": "three", "campaign_name": "camp_three", "keyword": "unique kw", "match_type": "PHRASE", "child_asin": "B0C3"},
         ],
         "ad_campaign_product_report": [{"cost": 10, "orders": 2, "acos": 25}],
         "keyword_child_asins": [{"keyword": "repeat kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
@@ -329,9 +492,9 @@ async def test_fetcher_excludes_keywords_from_multi_keyword_campaigns():
             "site_code": "Amazon_US",
         }],
         "ad_campaign_product_keyword_list": [
-            {"campaign_name": "camp_multi", "keyword": "multi kw one", "match_type": "EXACT", "child_asin": "B0C1"},
-            {"campaign_name": "camp_multi", "keyword": "multi kw two", "match_type": "EXACT", "child_asin": "B0C2"},
-            {"campaign_name": "camp_single", "keyword": "single kw", "match_type": "EXACT", "child_asin": "B0C3"},
+            {"campaign_id": "multi", "campaign_name": "camp_multi", "keyword": "multi kw one", "match_type": "EXACT", "child_asin": "B0C1"},
+            {"campaign_id": "multi", "campaign_name": "camp_multi", "keyword": "multi kw two", "match_type": "EXACT", "child_asin": "B0C2"},
+            {"campaign_id": "single", "campaign_name": "camp_single", "keyword": "single kw", "match_type": "EXACT", "child_asin": "B0C3"},
         ],
         "ad_campaign_product_report": [{"cost": 10, "orders": 2, "acos": 25}],
         "keyword_child_asins": [{"keyword": "single kw", "craw_nature_rank": 12, "near_craw_nature_rank": 15}],
@@ -368,7 +531,7 @@ async def test_offline_analysis_uses_analyze_switch_batches_llm_and_caps_core_ou
     captured_batches: list[list[str]] = []
 
     class FakeFetcher:
-        async def fetch(self, parent_asin, parent_seller_sku, shop_id):
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
             campaigns = [
                 CampaignKeywordItem(
                     campaign_name=f"camp_{i}",
@@ -432,12 +595,82 @@ async def test_offline_analysis_uses_analyze_switch_batches_llm_and_caps_core_ou
 
 
 @pytest.mark.asyncio
+async def test_offline_analysis_passes_locked_and_vetoed_terms_to_fetcher(monkeypatch):
+    old_analyze = settings.core_keyword_analyze_enabled
+    settings.core_keyword_analyze_enabled = True
+    captured: dict[str, set[str]] = {}
+
+    class FakeFetcher:
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
+            captured["excluded"] = excluded_keyword_norms or set()
+            return FetchResult(
+                context=FetchedContext(site_code="Amazon_US"),
+                listing=ListingProductInfo(), campaigns=[], flow_keywords=[],
+            )
+
+    monkeypatch.setattr(CK, "CoreKeywordFetcher", FakeFetcher)
+    monkeypatch.setattr(
+        ErpDualWriterRepository,
+        "fetch_core_keyword_exclusion_set",
+        lambda *args: {"locked kw", "vetoed kw"},
+        raising=False,
+    )
+    try:
+        await CK.run_core_keyword_analysis("B0TEST", "SKU-1", 1622)
+    finally:
+        settings.core_keyword_analyze_enabled = old_analyze
+
+    assert captured["excluded"] == {"locked kw", "vetoed kw"}
+
+
+@pytest.mark.asyncio
+async def test_management_api_returns_repository_management_payload(monkeypatch):
+    payload = {
+        "effective_core_count": 1,
+        "limit": 30,
+        "latest_task": {"id": "ckt-new", "finished_at": "2026-07-16T00:00:00"},
+        "rows": [],
+        "word_pool": ["current core", "current non-core"],
+    }
+
+    class FakeRepository:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def list_core_keyword_management(self, parent_asin, parent_seller_sku, shop_id):
+            assert (parent_asin, parent_seller_sku, shop_id) == ("B0TEST", "SKU-1", 1622)
+            return payload
+
+    monkeypatch.setattr("app.persistence.erp_writer.repository.ErpDualWriterRepository", FakeRepository)
+
+    out = await core_keyword_api.get_core_keyword_management("B0TEST", "SKU-1", 1622)
+
+    assert out == {"ok": True, **payload}
+
+
+@pytest.mark.asyncio
+async def test_policy_api_returns_http_409_for_a_stale_task(monkeypatch):
+    class FakeRepository:
+        def __init__(self, **kwargs): pass
+        def upsert_core_keyword_policy(self, *args, **kwargs): raise RuntimeError("STALE_TASK")
+
+    monkeypatch.setattr("app.persistence.erp_writer.repository.ErpDualWriterRepository", FakeRepository)
+    out = await core_keyword_api.set_core_keyword_policy({
+        "parent_asin": "B0TEST", "parent_seller_sku": "SKU-1", "shop_id": 1622,
+        "keyword_text": "core kw", "state": "LOCKED", "expected_task_id": "ckt-old",
+    })
+
+    assert isinstance(out, JSONResponse)
+    assert out.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_offline_analysis_refuses_when_analyze_switch_off(monkeypatch):
     old_analyze = settings.core_keyword_analyze_enabled
     settings.core_keyword_analyze_enabled = False
 
     class FailFetcher:
-        async def fetch(self, parent_asin, parent_seller_sku, shop_id):
+        async def fetch(self, parent_asin, parent_seller_sku, shop_id, *, excluded_keyword_norms=None):
             raise AssertionError("fetch should not run when analyze switch is off")
 
     monkeypatch.setattr(CK, "CoreKeywordFetcher", FailFetcher)
@@ -576,6 +809,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
     class FakeCursor:
         def __init__(self):
             self.sql = ""
+            self.sqls = []
             self.params = ()
 
         def __enter__(self):
@@ -586,6 +820,7 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
 
         def execute(self, sql, params):
             self.sql = sql
+            self.sqls.append(sql)
             self.params = params
 
         def fetchall(self):
@@ -618,10 +853,41 @@ def test_fetch_core_keyword_set_reads_latest_done_for_same_product_identity(monk
         settings.core_keyword_enabled = old_enabled
 
     assert result == {"core kw", "other core"}
-    assert "t.status = 'DONE'" in fake_repo.conn.cursor_obj.sql
-    assert "SELECT MAX(started_at)" in fake_repo.conn.cursor_obj.sql
+    assert any("t.status = 'DONE'" in sql for sql in fake_repo.conn.cursor_obj.sqls)
+    assert any("ORDER BY started_at DESC, finished_at DESC, id DESC" in sql for sql in fake_repo.conn.cursor_obj.sqls)
+    assert fake_repo.conn.cursor_obj.sqls[0]
     assert fake_repo.conn.cursor_obj.params == (
-        "B0TEST", "SKU-1", 1622,
         "B0TEST", "SKU-1", 1622,
     )
     assert fake_repo.conn.closed is True
+
+
+def test_write_core_keyword_task_replaces_retry_labels_and_updates_total_count():
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): return False
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def commit(self): pass
+        def close(self): pass
+
+    repo = object.__new__(ErpDualWriterRepository)
+    repo._connect = lambda: FakeConn()
+    repo._sync_core_keyword_policies_after_task = lambda cur, analysis, now: None
+    repo.write_core_keyword_task({
+        "task_id": "ckt-same-day", "parent_asin": "B0TEST", "parent_seller_sku": "SKU-1",
+        "shop_id": 1622, "site_code": "Amazon_US", "core_keyword_count": 1,
+        "labels": [{
+            "keyword_text": "new core", "semantic_conflict": "pass", "semantic_core": True,
+            "data_core": False, "is_core": True,
+        }],
+    })
+
+    sqls = [sql for sql, _ in executed]
+    assert any("DELETE FROM t_advert_agent_core_keyword_label" in sql for sql in sqls)
+    task_upsert = next(sql for sql in sqls if "INSERT INTO t_advert_agent_core_keyword_task" in sql)
+    assert "total_keyword_count=VALUES(total_keyword_count)" in task_upsert

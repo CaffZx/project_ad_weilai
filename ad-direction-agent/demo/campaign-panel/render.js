@@ -163,6 +163,7 @@ function _fullRender(state) {
   _renderSummaryStats(vm);
   _renderTabButtons(state);
   _renderReallocModal(state);
+  _renderCoreKeywordModal(state);
   _renderConfirmModal(state);
 }
 
@@ -666,6 +667,56 @@ function _renderPortfolioFilterPills(state) {
 
   el.innerHTML = pills + actionsHtml + hint;
   _show('camp-portfolio-pills-row');
+}
+
+function _renderCoreKeywordModal(state) {
+  const mount = _$('camp-modal-mount');
+  if (!mount || !state._coreKeywordManagement) return;
+  const data = state._coreKeywordManagement;
+  const labels = { LOCKED: '锁定', ENABLED: '默认启用', DISABLED: '未启用', VETOED: '否决' };
+  const typeLabels = { semantic: '语义核心', data: '数据核心', manual: '人工' };
+  const pendingKeys = state._coreKeywordPending || new Set();
+  const keywordKey = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const formatEvidence = (value) => {
+    if (!value) return '';
+    if (Array.isArray(value) && value.length === 0) return '';
+    if (typeof value !== 'string') return JSON.stringify(value);
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        if (parsed.length === 0) return '';
+        return parsed.map(item => {
+          if (typeof item === 'string') return item;
+          if (item && typeof item === 'object') {
+            return [item.condition, item.value, item.threshold].filter(Boolean).join(' · ');
+          }
+          return String(item || '');
+        }).filter(Boolean).join('\n');
+      }
+      return parsed && typeof parsed === 'object' ? JSON.stringify(parsed) : String(parsed || '');
+    } catch (_) {
+      return value;
+    }
+  };
+  const rows = (data.rows || []).map(row => {
+    const evidence = [row.semantic_evidence, row.data_evidence, row.manual_reason]
+      .map(formatEvidence).filter(Boolean).join('\n');
+    const types = (row.types || []).map(type => `<span class="camp-core-type ${_esc(type)}">${_esc(typeLabels[type] || type)}</span>`).join('');
+    const isPending = pendingKeys.has(keywordKey(row.keyword_text));
+    const choices = isPending
+      ? `<button disabled>保存中…</button>`
+      : Object.keys(labels).filter(key => key !== row.state).map(key => `<button data-action="camp-core-keyword-state" data-keyword="${_esc(row.keyword_text)}" data-state="${key}">${labels[key]}</button>`).join('');
+    const menuClass = isPending ? 'camp-core-menu is-pending' : 'camp-core-menu';
+    return `<tr><td class="camp-core-keyword"><strong>${_esc(row.keyword_text)}</strong></td><td class="camp-core-types">${types || '<span class="camp-core-type manual">人工</span>'}</td><td class="camp-core-reason">${_esc(evidence || '无可用 AI 证据')}</td><td><span class="camp-core-state state-${row.state}">${labels[row.state] || row.state}</span></td><td class="camp-core-action"><details class="${menuClass}"><summary aria-label="${isPending ? '保存中' : '切换核心词状态'}">⋮</summary><div class="camp-core-menu-list">${choices}</div></details></td></tr>`;
+  }).join('');
+  const options = (data.word_pool || []).map(word => `<option value="${_esc(word)}"></option>`).join('');
+  const emptyState = data.latest_task ? '本轮没有可管理的核心词' : '暂无核心词分析记录';
+  const emptyHtml = `<div class="camp-core-empty"><strong>${emptyState}</strong><span>离线核心词任务完成后，AI 推荐词会自动显示在这里。</span></div>`;
+  const addDisabled = pendingKeys.size ? ' disabled' : '';
+  mount.innerHTML = `<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal" role="dialog" aria-modal="true" aria-label="核心词管理"><header class="camp-core-header"><div class="camp-core-heading"><h3>核心词管理</h3><p>锁定/否决不会进入核心词离线判定；Campaign LLM 分析仍会照常执行。</p></div><span class="camp-core-count">当前有效核心词 ${data.effective_core_count || 0} / ${data.limit || 30}</span><button class="camp-core-close" data-action="camp-core-keyword-close" aria-label="关闭">×</button></header><div class="camp-core-body"><div class="camp-core-add"><div class="camp-core-search"><input id="camp-core-keyword-input" list="camp-core-keyword-pool" placeholder="搜索本轮离线任务词池（选择后默认锁定）"><datalist id="camp-core-keyword-pool">${options}</datalist></div><button class="camp-core-add-button" data-action="camp-core-keyword-add"${addDisabled}>＋ 添加核心词</button></div>${rows ? `<div class="camp-core-table-wrap"><table class="camp-core-table"><thead><tr><th>核心词</th><th>核心类型</th><th>核心原因</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyHtml}</div><footer class="camp-core-footer"><button data-action="camp-core-keyword-close">关闭</button></footer></section></div>`;
+  const add = mount.querySelector('[data-action="camp-core-keyword-add"]');
+  const input = mount.querySelector('#camp-core-keyword-input');
+  if (add && input) add.addEventListener('click', () => { add.dataset.keyword = input.value; });
 }
 
 // ── 回算修改弹窗（一次改 3 个活动组；低价捡漏固定 $1 不可改）──

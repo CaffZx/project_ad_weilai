@@ -38,6 +38,18 @@ export function mountEventDelegation(rootEl, state) {
       case 'camp-clear-selection':
         state.clearSelection();
         return;
+      case 'camp-core-keyword-manage':
+        state.openCoreKeywordManagement();
+        return;
+      case 'camp-core-keyword-close':
+        state.closeCoreKeywordManagement();
+        return;
+      case 'camp-core-keyword-state':
+        state.setCoreKeywordState(data.keyword, data.state);
+        return;
+      case 'camp-core-keyword-add':
+        state.addCoreKeywordFromPool(data.keyword);
+        return;
       case 'camp-batch-approve':
         state.askConfirm('approve');
         return;

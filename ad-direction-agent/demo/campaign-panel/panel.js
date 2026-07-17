@@ -135,6 +135,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
             <span class="sep"></span>
             <span id="camp-batch-count" style="font-size:12px;color:var(--camp-muted-fg);">已选 0 / 0</span>
             <span class="sep"></span>
+            <button class="core-keyword-manage" data-action="camp-core-keyword-manage">核心词管理</button>
             <button class="primary" data-action="camp-batch-approve" title="对勾选项确认后直接通过 MCP 真实下发到亚马逊广告，不可撤销">同意所选</button>
             <button class="danger" data-action="camp-batch-reject">不同意所选</button>
           </div>

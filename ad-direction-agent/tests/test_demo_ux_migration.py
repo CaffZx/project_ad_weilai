@@ -56,6 +56,68 @@ def test_approve_confirm_details_are_generated_from_state_items():
     assert "placement_adjustments" in render
 
 
+def test_core_keyword_management_never_silently_ignores_a_click():
+    state = read(PANEL_STATE)
+
+    assert "if (!state.executable) { _toast('当前不是最新可执行批次，无法管理核心词'); return; }" in state
+    assert "if (!state._coreKeywordIdentity) { _toast('产品身份尚未加载，无法读取核心词'); return; }" in state
+
+
+def test_core_keyword_management_modal_uses_visible_overlay_and_empty_state():
+    render = read(PANEL_RENDER)
+
+    assert '<div class="camp-modal-overlay camp-core-overlay"><section class="camp-modal camp-core-modal"' in render
+    assert "暂无核心词分析记录" in render
+    assert 'data-action="camp-core-keyword-add"' in render
+
+
+def test_core_keyword_management_modal_matches_v3_layout_contract():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+
+    assert 'class="camp-modal-overlay camp-core-overlay"' in render
+    assert 'class="camp-core-header"' in render
+    assert 'class="camp-core-count"' in render
+    assert 'class="camp-core-empty"' in render
+    assert 'class="camp-core-footer"' in render
+    assert ".camp-core-overlay" in css
+    assert ".camp-core-type.semantic" in css
+    assert ".camp-core-type.data" in css
+    assert ".camp-core-type.manual" in css
+
+
+def test_core_keyword_state_changes_have_frontend_inflight_guard():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+    state = read(PANEL_STATE)
+
+    assert "state._coreKeywordPending = state._coreKeywordPending || new Set();" in state
+    assert "if (state._coreKeywordPending.has(key)) return;" in state
+    assert "state._coreKeywordPending.delete(key);" in state
+    assert "const minPendingMs = 800;" in state
+    assert "await new Promise(resolve => setTimeout(resolve, waitMs));" in state
+    assert "camp-core-menu is-pending" in render
+    assert "camp-core-add-button" in render and "disabled" in render
+    assert ".camp-core-menu.is-pending" in css
+
+
+def test_core_keyword_modal_uses_search_placeholder_without_redundant_tips():
+    css = read(PANEL_CSS)
+    render = read(PANEL_RENDER)
+
+    assert 'placeholder="搜索本轮离线任务词池（选择后默认锁定）"' in render
+    assert "<span>从词池中选择后默认锁定</span>" not in render
+    assert "竖三点始终显示除当前状态外的三种状态" not in render
+    assert "justify-content:flex-end" in css
+
+
+def test_core_keyword_evidence_formatter_hides_empty_ai_evidence_arrays():
+    render = read(PANEL_RENDER)
+
+    assert "if (Array.isArray(value) && value.length === 0) return '';" in render
+    assert "if (parsed.length === 0) return '';" in render
+
+
 def test_demo_native_analyzing_overlay_and_request_hints():
     html = read(DEMO)
 
