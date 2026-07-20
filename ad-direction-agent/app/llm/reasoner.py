@@ -241,6 +241,12 @@ _CAMPAIGN_SHARED_INTRO = """你是一个资深的亚马逊广告运营专家。�
 ## 业务知识（必须严格遵循）
 {kb_content}
 
+## 业务知识优先级（必须遵循）
+1. 本次注入 KB 中的禁止条件、保护条件和前置诊断步骤优先于任何经验判断。
+2. 只使用本次注入且与当前广告方向匹配的动作规则。
+3. 输入未提供的数据只能标注为缺失，不得当作 0、正常、异常或已完成的历史动作。
+4. KB 已规定的淘汰、调整和数值约束必须按 KB 执行；不得以 Prompt 示例或单一字段自行创造更高优先级规则。
+
 ## 策略上下文解读
 用户消息中的「策略上下文」包含该 ASIN 的产品阶段、广告目的、目标 ACOS、利润率、评分、退货率、库存天数、自然单占比等信息。这些是活动分析的"背景"，不需要在每个活动中重复输出。
 
@@ -266,8 +272,8 @@ _CAMPAIGN_EXACT_PROMPT = (
 3. **查动作矩阵**: KB 17 §3 按广告方向 × 问题类型取有序动作；冲突时进 KB 17 §4 裁决；如指向淘汰，必须先走 KB 17 §7 的"淘汰前诊断路径"。
 4. **取约束数值**: KB 15 §1（Bid 公式/保护规则/硬上下限）、KB 15 §2（预算范围 + 淡旺季系数）、KB 15 §3（广告位矩阵 + 阻断条件）。
 5. **应用幅度系数**: 最终幅度 = KB 19 基础幅度 × KB 17 §5.2 阶段系数 × KB 17 §5.3 淡旺季系数。
-6. **细化执行**: KB 22 §2（精准调整规则）、KB 19 §5/§9（广告位决策/好坏判断）、KB 21（淘汰规则）。
-通用基准: KB 18 §1-4/§6、KB 19 §1-4/§6/§10、KB 22 §0/§1。
+6. **细化执行**: KB 22 §2（精准调整规则）、KB 19 §5/§9（广告位决策/好坏判断）、KB 21 §0-4（淘汰规则）。
+通用基准: KB 18 §1/§3、KB 19 §1-4/§6/§9、KB 22 §0。
 
 > **自然排名信号**（活动列表含「自然排名」行时才有，仅精准）：排名上升且 ACOS 在容忍度内 → 倾向保护/推进该词（KB 22 §2.2 Ranking 保护、KB 19 §5 广告位）；排名下滑或「已掉榜」→ 命中 RANK_* 问题类型，谨慎降 bid/淘汰（如指向淘汰先走 KB 17 §7 淘汰前诊断）；无「自然排名」行 → 按现有指标逻辑，勿臆测排名。
 
@@ -299,9 +305,8 @@ _CAMPAIGN_EXACT_PROMPT = (
 - **真实出价复合评估**：某广告位的真实出价 = Bid×(1+该位加价比例)，并非基础 Bid。当你同时调整 `proposed_bid` 与某广告位 `action` 时，两者会叠加放大/抵消该位的真实出价。给广告位 action 前必须以「当前真实出价」为基准评估复合后的真实出价变动幅度，勿只看加价比例步长；若复合后真实出价变动过大（如 >30%）而证据不足，应下调 action 档位（大涨→小涨/维持）或收敛 proposed_bid，并在 evidence 说明
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.20 或 当前日预算 ≤ $1.00 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
-- action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
-- 必须输出 triggered_rule（如 NO_CVR_HIGH_SPEND）和 evidence
+- 是否淘汰、淘汰保护和淘汰前诊断路径均以本次注入的 KB 21 §0-4 为准。
+- action=eliminate_to_low_bid_pool 时，按 KB 21 §4 输出固定执行值，并给出命中的 triggered_rule 和 evidence。
 
 ### reasoning 文案禁则
 - 禁止泄露内部约束术语（Bid步长/决策矩阵/规则编号/confidence等级）
@@ -314,7 +319,7 @@ _CAMPAIGN_BROAD_PROMPT = (
     + """
 
 ## 角色
-你正在分析**广泛/词组广告活动**（BROAD / PHRASE / AUTO 匹配类型）。调整维度为 Budget → Bid → SearchTerm（否词/提词）。禁止 Placement 调整（该字段填 N/A）。
+你正在分析**广泛/词组广告活动**（BROAD / PHRASE / AUTO 匹配类型）。调整维度为 Budget → Bid → SearchTerm（否词/提词）。
 
 ## KB 引用指引（决策链：诊断 → 取值 → 动作）
 1. **先算容忍度**: KB 17 §2 + KB 15 §4（目标ACOS + 阶段加值 + ranking/旺季/promotion 加值）。所有 ACOS 高低判断必须对比该值，禁止硬编码"ACOS>40%"。
@@ -322,8 +327,8 @@ _CAMPAIGN_BROAD_PROMPT = (
 3. **查动作矩阵**: KB 17 §3 按广告方向 × 问题类型取有序动作（广泛活动多走 §3.2 expand_keywords / §3.3 optimize_acos）；冲突时进 KB 17 §4 裁决；如指向淘汰，必须先走 KB 17 §7 的"广泛/词组淘汰前诊断路径"（先否词 → 仍无改善才降 Bid/预算 → 仍无改善才淘汰）。
 4. **取约束数值**: KB 15 §1（Bid 公式/保护规则/硬上下限）、KB 15 §2（预算范围 + 淡旺季系数）。
 5. **应用幅度系数**: 最终幅度 = KB 19 基础幅度 × KB 17 §5.2 阶段系数 × KB 17 §5.3 淡旺季系数。
-6. **细化执行**: KB 22 §3（广泛/词组调整规则）、KB 19 §7/§8（自动广泛组/否词触发）、KB 21（淘汰规则）。
-通用基准: KB 18 §1-4/§6、KB 19 §1-4/§6/§10、KB 22 §0/§1。
+6. **细化执行**: KB 22 §3（广泛/词组调整规则）、KB 19 §7/§8（自动广泛组/否词触发）、KB 21 §0-4（淘汰规则）。
+通用基准: KB 19 §1-4/§6-8。
 
 ## 输出格式
 {
@@ -352,9 +357,8 @@ _CAMPAIGN_BROAD_PROMPT = (
 - 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
 
 ### 淘汰活动
-- **硬规则（最高优先）**：当前 Bid ≤ $0.20 或 当前日预算 ≤ $1.00 → 必须 action=eliminate_to_low_bid_pool（已接近淘汰池底值，无需再走调整诊断；proposed_bid/proposed_budget 不得调高，后端会强制修正为 $1.00/$0.20）。**例外：上线 ≤3 天的新活动受 KB 21 §2 保护，不适用此硬规则（后端会强制修正为 keep）。**
-- action=eliminate_to_low_bid_pool 时，proposed_budget/proposed_bid 无需填写（后端自动修正为 $1.00/$0.20）
-- 必须输出 triggered_rule（如 IRRELEVANT_NO_IMPROVEMENT）和 evidence
+- 是否淘汰、淘汰保护和淘汰前诊断路径均以本次注入的 KB 21 §0-4 为准。
+- action=eliminate_to_low_bid_pool 时，按 KB 21 §4 输出固定执行值，并给出命中的 triggered_rule 和 evidence。
 
 ### reasoning 文案禁则
 - 禁止泄露内部约束术语（Bid步长/决策矩阵/规则编号/confidence等级）
@@ -363,16 +367,21 @@ _CAMPAIGN_BROAD_PROMPT = (
 )
 
 
-def _build_campaign_system_prompt(task_type: str = "exact") -> str:
+def _build_campaign_system_prompt(
+    task_type: str = "exact",
+    ad_directions: list[str] | tuple[str, ...] | str | None = None,
+) -> str:
     # 精准/广泛各取切片化 preset（2026-06-24）：精准带广告位节、广泛带否词节，互不注入对方噪声
-    preset = "campaign_adjustment_exact" if task_type == "exact" else "campaign_adjustment_broad"
     template = _CAMPAIGN_EXACT_PROMPT if task_type == "exact" else _CAMPAIGN_BROAD_PROMPT
-    return template.replace("{kb_content}", kb.build(preset))
+    return template.replace(
+        "{kb_content}",
+        kb.build_campaign_adjustment(task_type, ad_directions),
+    )
 
 
 # ── Campaign 新增活动 Prompt (KB 16 + 06) ────────────────────────────────────
 
-_NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于知识库 KB 16《新增活动规则》+ KB 06《关键词类型规则》，为候选关键词判断**是否值得新建活动**以及**关键词类别**。
+_NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于知识库 KB 16《新增活动规则》、KB 06《关键词类型规则》和 KB 28 §2《相关性分级规则》，为候选关键词判断**是否值得新建活动**以及**关键词类别**。
 
 重要：输出中文，JSON key 用英文。
 
@@ -381,7 +390,7 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 
 ## 任务范围（重要）
 你只做三类判断 + 文本输出：
-1. **action**：该词是否值得新建活动（create / skip）。参考 KB 16 §1 触发场景与 §6 阻断精神、KB28 §0 场景框架，以及【今日总纲】。
+1. **action**：该词是否值得新建活动（create / skip）。参考 KB 16 §1 触发场景与 §6 阻断精神，以及【今日总纲】。
 2. **keyword_class**：按 KB 06 判该词类别（generic / long_tail / competitor / brand / custom）。
 3. **relevance_tier**：按 KB28 §2 判该词与本产品的相关性档位（R1 / R2 / R3 / R4）。
 4. **文本**：reason / evidence / negative_strategy。
@@ -579,6 +588,7 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
   - `low_bid_retention_release`、`priority_context`（产品定位/淡旺季/是否含 ranking 推词）
 - `groups[]`：
   - `current_group_budget` = 该组合在 Amazon 的**真实当前预算**（来自 portfolio MCP；若为 0 则该组之前不存在，可从 0 起建）
+  - `daily_spend` = 该组合**日均花费**（与 current_group_budget 同口径，可直接计算消耗率/利用率）。**None 表示 MCP 未返回花费数据**，此时不适用 KB23 §3.6 的花费判定、不计算组合利用率。
   - `group_requested_delta` = 组内活动**想加/减多少**（净需求信号，不是绝对预算）
   - `new_requested_delta` = 其中来自本轮**新建活动**的需求（current=0 全是净增）
   - `campaigns[]`：组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断）
@@ -1782,7 +1792,9 @@ class LLMReasoner:
         user_message = preamble + "\n".join(ctx_parts) + "\n" + "\n".join(camp_parts)
 
         messages = [
-            {"role": "system", "content": _build_campaign_system_prompt(task_type)},
+            {"role": "system", "content": _build_campaign_system_prompt(
+                task_type, strategy_context.get("ad_directions"),
+            )},
             {"role": "user", "content": user_message},
         ]
 

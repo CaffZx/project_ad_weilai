@@ -272,7 +272,7 @@
 /* ── batch toolbar ── */
 .camp-batch-toolbar {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 8px 12px; margin-bottom: 8px;
+  padding: 6px 12px; margin-bottom: 6px;
   background: var(--camp-card-bg); border: 1px solid var(--camp-border); border-radius: var(--camp-radius-card);
 }
 .camp-batch-toolbar .sep { flex: 1; }
@@ -295,7 +295,7 @@
 /* ── 组合筛选气泡 ── */
 .camp-portfolio-pills-row {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--camp-border);
+  margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--camp-border);
   width: 100%;
 }
 .camp-portfolio-pill {

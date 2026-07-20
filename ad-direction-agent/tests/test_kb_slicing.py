@@ -13,6 +13,7 @@
 import pytest
 
 from app.llm.kb_loader import kb, _split_sections
+from app.llm.reasoner import _build_campaign_system_prompt, _build_new_campaign_prompt
 
 
 # ── 切块器 ───────────────────────────────────────────────
@@ -23,6 +24,20 @@ def test_split_sections_parses_numbered_headings():
     assert set(secs) == {"1", "2", "7A"}
     assert secs["1"].startswith("## 1. 甲")
     assert "内容B" in secs["2"]
+
+
+def test_split_sections_parses_numbered_subheadings():
+    text = (
+        "## 3. 动作矩阵\n总则\n\n"
+        "### 3.1 排名\n排名动作\n\n"
+        "### 3.2 扩词\n扩词动作\n\n"
+        "## 4. 冲突\n冲突规则\n"
+    )
+    secs = _split_sections(text)
+    assert "## 3. 动作矩阵" in secs["3"]
+    assert "排名动作" in secs["3.1"]
+    assert "扩词动作" not in secs["3.1"]
+    assert "冲突规则" not in secs["3.2"]
 
 
 def test_split_sections_empty_for_unnumbered():
@@ -78,6 +93,42 @@ def test_stream_split_placement_vs_negative():
     assert "否词触发规则" in br
 
 
+def test_campaign_exact_uses_only_requested_direction_matrix():
+    exact = kb.build_campaign_adjustment("exact", ["优化ACOS"])
+    assert "### 3.3 广告方向 = `优化ACOS`" in exact
+    assert "### 3.1 广告方向 = `推进自然位`" not in exact
+    assert "### 3.2 广告方向 = `新增扩词`" not in exact
+    assert "### 3.4 广告方向 = `平衡维持`" not in exact
+
+
+def test_campaign_adjustment_drops_elimination_follow_up_noise():
+    exact = kb.build_campaign_adjustment("exact", ["优化ACOS"])
+    broad = kb.build_campaign_adjustment("broad", ["优化ACOS"])
+    for content in (exact, broad):
+        assert "淘汰释放预算回算" not in content
+        assert "淘汰后重新启用判断" not in content
+
+
+def test_campaign_prompt_is_kb_first_and_direction_scoped():
+    prompt = _build_campaign_system_prompt("exact", ["优化ACOS"])
+    assert "业务知识优先级（必须遵循）" in prompt
+    assert "不得引用未注入的 KB 章节或自行补充规则" not in prompt
+    assert "不得仅因当前 Bid 或 Budget 处于低值就跳过诊断直接淘汰" not in prompt
+    assert "当前 Bid ≤ $0.20 或 当前日预算 ≤ $1.00" not in prompt
+    assert "KB18 §1-4/§6" not in prompt
+    assert "KB22 §1" not in prompt
+    assert "### 3.3 广告方向 = `优化ACOS`" in prompt
+    assert "### 3.1 广告方向 = `推进自然位`" not in prompt
+
+
+def test_new_campaign_prompt_uses_only_its_decision_scope():
+    prompt = _build_new_campaign_prompt()
+    assert "本调用只做逐词相关性与新建判断" not in prompt
+    assert "竞品Deal压价" not in prompt
+    assert "扩词场景识别框架" not in prompt
+    assert "场景化扩词配额" not in prompt
+
+
 def test_new_campaign_drops_code_numerics():
     nc = kb.build("new_campaign")
     # KB16 §2/§3/§5：预算/bid/输出schema 是代码用的，prompt 禁 LLM 输出 → 噪声
@@ -87,6 +138,9 @@ def test_new_campaign_drops_code_numerics():
     # 但触发场景 + 阻断 + keyword_class 判定依据必须在
     assert "触发场景" in nc and "阻断条件" in nc
     assert "Long Tail" in nc                       # KB06 keyword_class 依据
+    assert "扩词场景识别框架" not in nc              # KB28 §0 非逐词相关性判断
+    assert "场景化扩词配额" not in nc                # KB28 §3 非逐词相关性判断
+    assert "竞品Deal压价" not in nc                 # KB08 缺少竞品事实字段，不注入
 
 
 # ── 迭代护栏 + 接口契约 ──────────────────────────────────

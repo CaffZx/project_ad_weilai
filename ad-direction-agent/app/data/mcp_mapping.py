@@ -228,6 +228,7 @@ def build_campaign_tool_args(
     parent_asin: str = "",
     parent_seller_sku: str = "",
     qryFixedPortfolio: bool | None = None,   # ad_portfolio_list 专用
+    qryReport: bool = False,                # ad_portfolio_list 专用
 ) -> dict:
     """构建 campaign 级 MCP 入参。
 
@@ -246,6 +247,12 @@ def build_campaign_tool_args(
                 "parent_seller_sku": parent_seller_sku}
         if qryFixedPortfolio is not None:
             base["qryFixedPortfolio"] = qryFixedPortfolio
+        if qryReport:
+            base["qryReport"] = True
+            if start_date:
+                base["start_date"] = start_date
+            if end_date:
+                base["end_date"] = end_date
     elif tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
     elif tool_name == "ad_campaign_basic_info" and campaign_name_list:

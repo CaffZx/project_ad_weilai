@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.config.settings import settings
-from app.core_keyword_policy import normalize_core_keyword
+from app.core.core_keyword_policy import normalize_core_keyword
 from app.data.campaign_fetcher import CampaignFetcher
 from app.data.campaign_prefilter import filter_eliminated_pool
 from app.models.asin_data import ASINData
@@ -329,6 +329,9 @@ async def _analyze_campaigns_impl(
     elimination_entry_dates: dict | None = None,  # deprecated/unused: 内部 sync 后从 state 库读取
 ) -> CampaignAnalysisResult:
 
+    # Portfolio 每次分析都重新拉取；这里只缓存 CampaignData。
+    portfolio_data: dict | None = None
+
     # 1. 获取活动数据 — 优先 Redis 缓存（refresh=True 时跳过），miss 时拉 MCP/Doris
     if campaign_data is None:
         if not refresh:
@@ -361,20 +364,6 @@ async def _analyze_campaigns_impl(
                     sanity_check_passed=False,
                     data_unavailable=True,
                 )
-
-        # ★ 拉取广告组合真实预算（fail-open：MCP 失败 → None → 回退 60/20/20 兜底）
-        portfolio_data: dict | None = None
-        try:
-            portfolio_data = await fetcher.fetch_portfolio_list(
-                parent_asin,
-                parent_seller_sku=(campaign_data.parent_seller_sku
-                                   if campaign_data and campaign_data.parent_seller_sku else ""),
-                shop_account=getattr(fetcher, "_last_shop_account", "") or "",
-            )
-            if portfolio_data:
-                _t("DONE fetch_portfolio")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("fetch_portfolio_list 异常 [%s]: %s (回退 60/20/20)", parent_asin, e)
 
     if campaign_data.total_campaigns == 0:
         return CampaignAnalysisResult(
@@ -549,6 +538,26 @@ async def _analyze_campaigns_impl(
             sanity_check_passed=True,
             llm_rounds_completed=0,
         )
+
+    # ★ Portfolio 预算+花费不随 CampaignData 缓存，每次分析都重新拉取。
+    # 放在两个 early return 之后：total_campaigns==0 和全预过滤 total==0 都不需要 portfolio。
+    # shop_account 优先取缓存/预取 CampaignData，兼容旧对象时回退到 fetcher 上下文。
+    try:
+        portfolio_data = await fetcher.fetch_portfolio_list(
+            parent_asin,
+            parent_seller_sku=(campaign_data.parent_seller_sku
+                               if campaign_data and campaign_data.parent_seller_sku else ""),
+            shop_account=(campaign_data.shop_account
+                          if campaign_data and campaign_data.shop_account
+                          else getattr(fetcher, "_last_shop_account", "") or ""),
+            days=days,
+            site_code=(campaign_data.site_code
+                       if campaign_data and campaign_data.site_code else "Amazon_US"),
+        )
+        if portfolio_data:
+            _t("DONE fetch_portfolio")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fetch_portfolio_list 异常 [%s]: %s (回退 60/20/20)", parent_asin, e)
 
     # ── 正常路径：有可分析活动 ──
     # 4. 按 match_type 分流

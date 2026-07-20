@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config.settings import settings
-from app.core_keyword_policy import normalize_core_keyword
+from app.core.core_keyword_policy import normalize_core_keyword
 from app.data.mcp_adapter import McpAdapter
 from app.data.mcp_client import StreamableHttpMcpInvoker
 from app.data.mcp_db_context import _MCP_PARENT_KEY_MAP

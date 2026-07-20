@@ -79,7 +79,7 @@ class CampaignFetcher:
         shop_id = db_ctx.shop_id or 0
         parent_seller_sku = db_ctx.parent_seller_sku or ""
         site_code = db_ctx.site_code or "Amazon_US"
-        # 缓存供新增活动线 discover_new_keywords 复用 (shop_account 不在 CampaignData 上)
+        # 缓存供新增活动线 discover_new_keywords 复用
         self._last_shop_id = shop_id
         self._last_shop_account = db_ctx.shop_account or ""
         self._last_site_code = site_code  # 供懒加载 placement/search_term 按站点构日期窗口
@@ -113,6 +113,7 @@ class CampaignFetcher:
             return CampaignData(
                 parent_asin=parent_asin,
                 shop_id=shop_id,
+                shop_account=shop_account,
                 parent_seller_sku=parent_seller_sku,
                 site_code=site_code,
                 total_campaigns=0,
@@ -130,6 +131,7 @@ class CampaignFetcher:
             return CampaignData(
                 parent_asin=parent_asin,
                 shop_id=shop_id,
+                shop_account=shop_account,
                 parent_seller_sku=parent_seller_sku,
                 site_code=site_code,
                 total_campaigns=len(raw_campaigns),
@@ -256,6 +258,7 @@ class CampaignFetcher:
         return CampaignData(
             parent_asin=parent_asin,
             shop_id=shop_id,
+            shop_account=shop_account,
             parent_seller_sku=parent_seller_sku,
             site_code=site_code,
             total_campaigns=len(campaigns),
@@ -816,19 +819,25 @@ class CampaignFetcher:
         parent_asin: str,
         parent_seller_sku: str,
         shop_account: str,
+        days: int = 7,
+        site_code: str = "Amazon_US",
     ) -> dict[str, dict]:
-        """拉取广告组合真实预算（qryFixedPortfolio=true，仅 4 类固定组合）。
+        """拉取广告组合真实预算+日均花费（qryFixedPortfolio=true + qryReport=true）。
 
-        返回 {group_type: {"budget": float, "portfolio_id": str}}
-        未匹配的组合 → budget=0；整体 MCP 失败 → 返回空 dict。
+        返回 {group_type: {"budget": float, "portfolio_id": str, "daily_spend": float | None}}
+        budget 为日预算，daily_spend 为日均花费（MCP 已换算，与 budget 同口径可直接对比）。
+        未匹配的组合 → budget=0, daily_spend=None；整体 MCP 失败 → 返回空 dict。
+        日期窗口按站点时区，与其他 MCP 工具口径一致（make_date_window）。
         """
         if not (settings.campaign_portfolio_fetch_enabled and shop_account):
             return {}
+        start_date, end_date = make_date_window(days, site_code)
         try:
             res = await self._mcp().campaign_call_tool(
                 "ad_portfolio_list", "", shop_account,
                 parent_asin=parent_asin, parent_seller_sku=parent_seller_sku,
-                qryFixedPortfolio=True,
+                qryFixedPortfolio=True, qryReport=True,
+                start_date=start_date, end_date=end_date,
                 timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
             )
         except Exception as e:
@@ -864,30 +873,44 @@ class CampaignFetcher:
                 continue
             grouped[matched].append(row)
 
+        def _parse_daily_spend(row: dict) -> float | None:
+            raw = row.get("日均花费")
+            if raw is None:
+                return None
+            return _to_float(raw)
+
         result: dict[str, dict] = {}
         for group, matches in grouped.items():
             if not matches:
-                logger.warning("组合 [%s] 未匹配到 portfolio，预算按 $0 处理", group)
-                result[group] = {"budget": 0.0, "portfolio_id": ""}
+                logger.warning("组合 [%s] 未匹配到 portfolio，预算按 $0、花费无数据", group)
+                result[group] = {"budget": 0.0, "portfolio_id": "", "daily_spend": None}
                 continue
             if len(matches) > 1:
                 ids = [str(m.get("广告组合id") or "") for m in matches]
                 logger.warning(
-                    "组合 [%s] 匹配到 %d 个 portfolio (%s)，预算已汇总",
+                    "组合 [%s] 匹配到 %d 个 portfolio (%s)，预算/花费已汇总",
                     group, len(matches), ", ".join(ids),
                 )
             total_budget = sum(
                 _to_float(m.get("广告组合预算")) or 0.0 for m in matches
             )
+            daily_spend_vals = [_parse_daily_spend(m) for m in matches]
+            have_daily_spend = any(v is not None for v in daily_spend_vals)
+            total_daily_spend = sum(v for v in daily_spend_vals if v is not None) if have_daily_spend else None
             pid = str(matches[0].get("广告组合id") or "")
-            result[group] = {"budget": round(total_budget, 2), "portfolio_id": pid}
+            result[group] = {
+                "budget": round(total_budget, 2),
+                "portfolio_id": pid,
+                "daily_spend": round(total_daily_spend, 2) if total_daily_spend is not None else None,
+            }
 
         logger.info(
-            "ad_portfolio_list [%s]: %d/%d 组命中 budgets=%s",
+            "ad_portfolio_list [%s]: %d/%d 组命中 budgets=%s spends=%s",
             parent_asin,
             sum(1 for v in result.values() if v["budget"] > 0),
             len(result),
             {g: v["budget"] for g, v in result.items()},
+            {g: v["daily_spend"] for g, v in result.items() if v["daily_spend"] is not None},
         )
         return result
 

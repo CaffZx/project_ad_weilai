@@ -10,7 +10,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from app.config.settings import settings
-from app.core_keyword_policy import (
+from app.core.core_keyword_policy import (
     normalize_core_keyword,
     resolve_effective_core_keywords,
 )
@@ -731,6 +731,7 @@ class ErpDualWriterRepository:
             budget_impact, validation_passed, alert_count, alert_msg,
             main_push_count, main_push_budget, broad_auto_count, broad_auto_budget,
             test_new_count, test_new_budget, eliminate_bubble_count, eliminate_bubble_budget,
+            main_push_current_budget, broad_auto_current_budget, test_new_current_budget,
             analysis_overview, create_count,
             create_by, editor_by, creator_id, editor_id,
             create_time, update_time
@@ -739,6 +740,7 @@ class ErpDualWriterRepository:
             %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,
             %s,%s,
             %s,%s,%s,%s,
             %s,%s
@@ -769,6 +771,9 @@ class ErpDualWriterRepository:
             test_new_budget=VALUES(test_new_budget),
             eliminate_bubble_count=VALUES(eliminate_bubble_count),
             eliminate_bubble_budget=VALUES(eliminate_bubble_budget),
+            main_push_current_budget=VALUES(main_push_current_budget),
+            broad_auto_current_budget=VALUES(broad_auto_current_budget),
+            test_new_current_budget=VALUES(test_new_current_budget),
             analysis_overview=VALUES(analysis_overview),
             create_count=VALUES(create_count),
             editor_by=VALUES(editor_by),
@@ -805,6 +810,9 @@ class ErpDualWriterRepository:
                 bg.get("test_new_budget"),
                 bg.get("eliminate_bubble_count"),
                 bg.get("eliminate_bubble_budget"),
+                bg.get("main_push_current_budget"),
+                bg.get("broad_auto_current_budget"),
+                bg.get("test_new_current_budget"),
                 run.overview_text,
                 run.create_count,
                 op, op, str(aud_int) if aud_int is not None else None, str(aud_int) if aud_int is not None else None,

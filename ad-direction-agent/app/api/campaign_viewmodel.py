@@ -241,6 +241,15 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             budget_summary["portfolio_constraints"] = pc
         if target_budget is not None:
             budget_summary["target_budget"] = target_budget
+        cur = {}
+        if srow.get("main_push_current_budget") is not None:
+            cur["精准主力组"] = _f(srow.get("main_push_current_budget"))
+        if srow.get("broad_auto_current_budget") is not None:
+            cur["自动广泛组"] = _f(srow.get("broad_auto_current_budget"))
+        if srow.get("test_new_current_budget") is not None:
+            cur["精准测试组"] = _f(srow.get("test_new_current_budget"))
+        if cur:
+            budget_summary["portfolio_current_budget"] = cur
 
     overview = None
     ov_text = srow.get("analysis_overview") if srow else None

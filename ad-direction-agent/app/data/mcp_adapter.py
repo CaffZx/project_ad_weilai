@@ -481,6 +481,7 @@ class McpAdapter(DataSourceAdapter):
         parent_asin: str = "",
         parent_seller_sku: str = "",
         qryFixedPortfolio: bool | None = None,   # ad_portfolio_list 专用
+        qryReport: bool = False,                # ad_portfolio_list 专用
     ) -> _CallResult:
         """Campaign 级 MCP 工具调用封装。
         ad_campaign_basic_info (V1) 支持 campaign_name_list 批量。
@@ -494,6 +495,7 @@ class McpAdapter(DataSourceAdapter):
             parent_asin=parent_asin,
             parent_seller_sku=parent_seller_sku,
             qryFixedPortfolio=qryFixedPortfolio,
+            qryReport=qryReport,
         )
         t = timeout if timeout is not None else getattr(settings, "campaign_mcp_tool_timeout", 300.0)
         return await self.call_tool_timed_with_args(tool_name, args, t)

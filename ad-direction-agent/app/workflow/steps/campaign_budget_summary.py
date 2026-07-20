@@ -92,6 +92,15 @@ def build_summary(
     else:
         source = f"{source}+portfolio" if source else "portfolio"
 
+    # portfolio_current_budget：仅 MCP 成功时取真实值；MCP 失败 → None（绝不填入 60/20/20）
+    current_budget = {}
+    if pf_ok:
+        for g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD):
+            p = pf.get(g)
+            current_budget[g] = _f(p.get("budget")) if p else None
+    else:
+        for g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD):
+            current_budget[g] = None
     return {
         "target_budget": round(target_budget, 2),
         "target_budget_source": source,
@@ -100,4 +109,5 @@ def build_summary(
             PORTFOLIO_TEST: test_amount,
             PORTFOLIO_BROAD: broad_amount,
         },
+        "portfolio_current_budget": current_budget,
     }

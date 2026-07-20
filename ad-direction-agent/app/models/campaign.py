@@ -82,6 +82,7 @@ class CampaignData(BaseModel):
     """顶层容器，对标 ASINData"""
     parent_asin: str
     shop_id: int = 0
+    shop_account: str = ""
     parent_seller_sku: str = ""
     site_code: str = "Amazon_US"
     total_campaigns: int = 0

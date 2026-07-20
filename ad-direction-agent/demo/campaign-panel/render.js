@@ -630,12 +630,19 @@ function _renderPortfolioFilterPills(state) {
     const isElim = name === LOW_BID;
     const ov = state._portfolioOverride[name];
 
-    // 广告组合预算行：低价捡漏组硬编码 $1（KB 21 §6 固定 $1，常量直接写）；其余 override > 后端回算值
+    // 广告组合预算行：当前原始预算 → AI建议值
+    // 低价捡漏组硬编码 $1，不显示 current
+    const curBudgets = bs.portfolio_current_budget || {};
     let amt, amtLabel;
     if (isElim) { amt = '$1'; amtLabel = '广告组合预算'; }
-    else if (ov != null) { amt = money0(ov); amtLabel = '广告组合预算(覆盖)'; }
-    else if (constraints[name] != null) { amt = money0(constraints[name]); amtLabel = '广告组合预算'; }
-    else { amt = '—'; amtLabel = '广告组合预算'; }
+    else {
+      amtLabel = ov != null ? '组合预算(覆盖)' : '组合预算';
+      const cur = curBudgets[name];
+      const prop = ov != null ? ov : constraints[name];
+      const curStr = cur != null ? '$' + Number(cur).toFixed(0) : '—';
+      const propStr = prop != null ? '$' + Number(prop).toFixed(0) : '—';
+      amt = curStr + ' → ' + propStr;
+    }
 
     // 调整前/后预算（统计值）。低价捡漏组淘汰活动预算固定 $1、统计无意义 → 占位 "—"（美观对齐）
     const b = budgetByName[name];

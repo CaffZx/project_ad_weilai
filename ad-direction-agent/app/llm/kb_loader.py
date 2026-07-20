@@ -13,20 +13,33 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 一级标题切块：匹配 "## 1. 标题" / "## 7A. 标题"，捕获节号(1 / 7A)
-_H2_NUM = re.compile(r"^##\s+(\d+[A-Za-z]?)\.", re.M)
+# 编号标题切块：支持 "## 1. 标题" / "## 7A. 标题"，以及
+# "### 3.1 标题"。H2 选中时包含其全部子节；H3 选中时只保留该子节。
+_NUM_HEADING = re.compile(
+    r"^(#{2,3})\s+(\d+(?:\.\d+)*(?:[A-Za-z])?)\.?(?:\s|$)", re.M,
+)
 
 
 def _split_sections(text: str) -> dict[str, str]:
-    """按 ## 一级编号标题把 KB 文件切成 {节号: 含标题全文(到下一节前)}。
+    """按编号 H2/H3 标题把 KB 文件切成 {节号: 含标题全文}。
 
-    仅切「## N.」编号标题(KB18/17/15/19/22/16 等)；无编号标题的文件
-    (如 KB08) 切不出节号 → 返回空 dict,build 退回整文件。
+    H2 节号（如 ``3``）包含整个一级节；H3 节号（如 ``3.2``）只包含
+    当前子节。无编号标题的文件（如 KB08）返回空 dict，``build`` 退回整文件。
     """
-    marks = [(m.group(1), m.start()) for m in _H2_NUM.finditer(text)]
+    marks = [
+        (m.group(2), len(m.group(1)), m.start())
+        for m in _NUM_HEADING.finditer(text)
+    ]
     out: dict[str, str] = {}
-    for i, (num, start) in enumerate(marks):
-        end = marks[i + 1][1] if i + 1 < len(marks) else len(text)
+    for i, (num, level, start) in enumerate(marks):
+        if level == 2:
+            end = next(
+                (next_start for _, next_level, next_start in marks[i + 1:]
+                 if next_level == 2),
+                len(text),
+            )
+        else:
+            end = marks[i + 1][2] if i + 1 < len(marks) else len(text)
         out[num] = text[start:end].strip()
     return out
 
@@ -61,11 +74,15 @@ class KnowledgeBase:
         #   KB15 §0(示例) §5(速查卡输出schema)；KB19 §10(汇总,与各节重复)
         #   KB22 §1(类型判定,与KB18§1重复) §4(输出字段) §5(90行YAML示例,与 prompt 冲突)
         # 精准/广泛差异:精准要广告位(KB15§3/KB19§5§9/KB22§2),广泛要否词(KB19§7§8/KB22§3)。
+        # KB17 §3 细分为 3.1-3.4；build_campaign_adjustment() 会按当前广告方向
+        # 收窄，直接 build(preset) 时保留全量，兼容已有调用和离线检查。
         "campaign_adjustment_exact": [
-            "18:1,3", "17:1,2,3,4,5,7", "15:1,2,3,4", "19:1,2,3,4,5,6,9", "22:0,2", "21",
+            "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,3,4",
+            "19:1,2,3,4,5,6,9", "22:0,2", "21:0,1,2,3,4",
         ],
         "campaign_adjustment_broad": [
-            "18:1,3", "17:1,2,3,4,5,7", "15:1,2,4", "19:1,2,3,4,6,7,8", "22:0,3", "21",
+            "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,4",
+            "19:1,2,3,4,6,7,8", "22:0,3", "21:0,1,2,3,4",
         ],
         # Campaign 策略总览(执行总纲)：维度/广告目的→方向倾向 + 目的触发 + 取舍优先级
         # 仅做定性指挥(不写数值),故不引入 15(数值规则);保持小切片。
@@ -75,11 +92,9 @@ class KnowledgeBase:
         #   §5(输出schema)——这些是【代码】按 KB16 定的数值,prompt 明令 LLM 禁止输出 budget/
         #   bid/campaign_name/placement,§5 还与 prompt 的 JSON 输出格式直接冲突(诱导越界)。
         #   KB02 只留 §1-6(策略语境),剔除 §7-10(特殊场景/广告位/预算组合/竞品态势,与建词无关)。
-        #   KB06 全留(keyword_class 判定核心);KB08 全留(竞品词姿态,无编号标题不切片)。
-        #   2026: 接入 KB28 §0(场景框架)§2(相关性R1-R4)§3(配额/各场景词类型)——治"选词不准:
-        #   不综合权衡自然位/搜索量/周排名×相关度、低量词误推"。暂不注入 §1(来源表是搜索词报告族,
-        #   与当前 flow/own 源不匹配)、§4(竞品,未启用)、§5-8。
-        "new_campaign":         ["16:1,6", "06", "02:1,2,3,4,5,6", "08", "28:0,2,3"],
+        #   KB06 全留(keyword_class 判定核心)。KB08 依赖竞品价格/评价/促销事实，当前逐词调用不提供，
+        #   故不注入。KB28 只保留 §2 相关性档位；§0 场景判定和 §3 配额属于候选发现/数量控制，不属逐词语义判断。
+        "new_campaign":         ["16:1,6", "06", "02:1,2,3,4,5,6", "28:2"],
         # Campaign 预算回算 agent: KB23 自包含三层回算算法(§5 增量/§6 二次分配/§7 分配方式
         #   /§3.1A 组内优先级/§9 输出/§10 护栏)。算术由代码预聚合,LLM 只判分配方式+组内排序+解释。
         "budget_reallocation":  ["23"],
@@ -124,6 +139,17 @@ class KnowledgeBase:
         "competitor": "竞品词",
         "brand": "品牌词",
         "custom": "自定义",
+    }
+
+    _DIRECTION_ACTION_SECTIONS: dict[str, str] = {
+        "push_natural_rank": "3.1",
+        "推进自然位": "3.1",
+        "expand_keywords": "3.2",
+        "新增扩词": "3.2",
+        "optimize_acos": "3.3",
+        "优化ACOS": "3.3",
+        "balance_maintain": "3.4",
+        "平衡维持": "3.4",
     }
 
     # 文件 ID → 相对路径（含子目录）
@@ -213,6 +239,47 @@ class KnowledgeBase:
         ids = self.PRESETS.get(preset)
         if ids is None:
             raise KeyError(f"未知的 KB preset: {preset}")
+        return self._build_specs(preset, ids)
+
+    def build_campaign_adjustment(
+        self,
+        task_type: str,
+        ad_directions: list[str] | tuple[str, ...] | str | None = None,
+    ) -> str:
+        """按 Campaign 流和当前广告方向构建最小调整规则包。
+
+        无方向、空方向或未知方向时回退为 KB17 的四个动作子节，避免缺少
+        业务规则；已识别方向只注入对应的 3.x 动作矩阵。
+        """
+        preset = (
+            "campaign_adjustment_exact"
+            if task_type == "exact"
+            else "campaign_adjustment_broad"
+        )
+        if isinstance(ad_directions, str):
+            directions = [ad_directions]
+        else:
+            directions = list(ad_directions or [])
+
+        selected = {
+            self._DIRECTION_ACTION_SECTIONS.get(str(direction).strip())
+            for direction in directions
+            if str(direction).strip()
+        }
+        selected.discard(None)
+        if not selected:
+            selected = {"3.1", "3.2", "3.3", "3.4"}
+
+        ids = list(self.PRESETS[preset])
+        action_spec = "17:1,2," + ",".join(sorted(selected)) + ",4,5,7"
+        for index, spec in enumerate(ids):
+            if spec.startswith("17:"):
+                ids[index] = action_spec
+                break
+        return self._build_specs(preset, ids)
+
+    def _build_specs(self, preset: str, ids: list[str]) -> str:
+        """按已解析的 spec 列表拼接内容，供静态和运行时 preset 复用。"""
         out: list[str] = []
         for spec in ids:
             fid, _, sel = spec.partition(":")

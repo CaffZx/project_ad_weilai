@@ -135,7 +135,7 @@ Campaign 主入口需要：
 | 活动商品表现 | `ad_campaign_product_report` | `campaign_fetcher.py:186`；`:454` `_fetch_perf_one()` | ACOS、spend、sales、orders、clicks、CVR 等事实 |
 | placement | `ad_campaign_placement_report` | `campaign.py:1873` `_prefetch_placement()`；`campaign_fetcher.py:501` `fetch_placement_for()` | exact 流广告位建议和 P10 placement 护栏 |
 | search term | `ad_campaign_search_term_report` | `campaign.py:1935` `_prefetch_search_terms()`；`campaign_fetcher.py:557` `fetch_search_terms_for()` | broad/phrase/auto 流否定词、搜索词证据 |
-| portfolio 预算 | `ad_portfolio_list` | `campaign.py:366`；`campaign_fetcher.py:813` `fetch_portfolio_list()` | 组合预算汇总和预算回算 |
+| portfolio 预算+日均花费 | `ad_portfolio_list` (qryFixedPortfolio=true, qryReport=true) | `campaign.py:542`；`campaign_fetcher.py:814` `fetch_portfolio_list()` | 组合当前预算、日均花费用于回算；日期窗口按站点时区与其他报表同口径 |
 | 自然排名 | `keyword_child_asins` / `own_keyword_flow` | `campaign_fetcher.py:920` 附近批量拉取 | exact/new campaign 的关键词自然位证据 |
 | 新建活动候选词 | `flow_keywords` / `own_keyword_flow` / 可选竞品反查 | `campaign_fetcher.py:602`；`:665`；`campaign_new.py:263` | 新建 exact/broad 活动候选池 |
 | 建议竞价 | `suggested_bid` 或竞品反查自带 bid | `campaign_fetcher.py:759`；`:746` | 新建活动 bid 补齐 |
@@ -143,7 +143,7 @@ Campaign 主入口需要：
 同一字段的多来源和兜底：
 
 - campaign_id 优先来自 `ad_campaign_list`，活动-关键词关系来自 `ad_campaign_product_keyword_list`；两路在 `fetch_campaigns()` 中并行合并，避免单一路径缺字段导致活动不可识别。
-- portfolio 预算优先使用 `ad_portfolio_list` 真实预算；失败时预算模块按既定比例做业务兜底，但该兜底只影响预算汇总，不伪造 MCP 明细事实。
+- portfolio 预算+日均花费优先使用 `ad_portfolio_list` 真实值（MCP `广告组合预算` + `日均花费`）；失败时预算模块按既定比例做业务兜底，但该兜底只影响预算汇总，不伪造 MCP 明细事实。
 - 新建活动候选词来自 `flow_keywords` 和 `own_keyword_flow`，竞品词源是可选增强；竞品不可用时不阻断主线。
 - 当前链路是 MCP 真源，不再描述本地数仓直连兜底。
 
@@ -570,8 +570,8 @@ Campaign 引擎维护四类组合语义：
 
 预算相关模块：
 
-- `campaign_budget_summary.py`：生成预算汇总，优先使用 `ad_portfolio_list` 真实 portfolio 预算；失败则按 60/20/20 兜底。
-- `campaign_budget_reallocation.py`：按 KB23 做组合预算回算，起点是 current_group_budget，并受增量约束。
+- `campaign_budget_summary.py`：生成预算汇总，优先使用 `ad_portfolio_list` 真实 portfolio 预算；失败则按 60/20/20 兜底。MCP 成功时输出 `portfolio_current_budget`（原始预算），失败时为 None。
+- `campaign_budget_reallocation.py`：按 KB23 做组合预算回算，起点是 current_group_budget，并受增量约束。`to_budget_summary()` 新增 `portfolio_current_budget`：仅 `constraint_basis=portfolio` 时取真实值，兜底推算值不写入。
 - `campaign_parent_allowed_net_increase`：父级允许净增，当前默认 0，意味着预算增长要非常谨慎。
 
 低价捡漏组不参与主推/测试/广泛三组预算约束，通常按每活动 1 美元思路处理。

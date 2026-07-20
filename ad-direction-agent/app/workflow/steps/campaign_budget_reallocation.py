@@ -99,7 +99,9 @@ def aggregate(
 ) -> dict:
     """预聚合 LLM 输入包。
 
-    组合预算来源优先级：ad_portfolio_list MCP 真实值 > 父目标×60/20/20 兜底。
+    组合预算/花费来源优先级：ad_portfolio_list MCP 真实值 > 父目标×60/20/20 兜底。
+    daily_spend 为日均花费（MCP 已换算），与 current_group_budget（日预算）同口径，
+    供 LLM 直接对比预算消耗率做回算决策。
     新增活动（KB23 §5.1）：current=0 的纯净增需求。
     """
     sv_map = search_volume_map or {}
@@ -121,16 +123,21 @@ def aggregate(
     groups: dict[str, dict] = {}
     for g in _ACTIVE_GROUPS:
         if pf_ok:
-            # MCP 成功：按真实值，缺组/0 就是 0（不虚构）
+            # MCP 成功：按真实值，缺组/0 就是 0（不虚构）；daily_spend 缺失保留 None
             current_group_budget = _f((pf.get(g) or {}).get("budget")) or 0.0
+            daily_spend = (pf.get(g) or {}).get("daily_spend")
+            if daily_spend is not None:
+                daily_spend = _f(daily_spend)
             constraint_basis = "portfolio"
         else:
             # MCP 整体失败：父目标 × 占比兜底
             current_group_budget = (round(parent_target * shares[g] / share_sum, 2)
                                     if parent_target else 0.0)
+            daily_spend = None
         groups[g] = {
             "group": g,
             "current_group_budget": round(current_group_budget, 2),
+            "daily_spend": round(daily_spend, 2) if daily_spend is not None else None,
             "constraint_source": constraint_basis if current_group_budget > 0 else "none",
             "group_requested_delta": 0.0,
             "new_requested_delta": 0.0,
@@ -280,6 +287,17 @@ def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> d
         return round(_f(g.get("proposed_group_budget")), 2) if g else None
 
     proposed_total = round(sum(_f(_proposed(g)) for g in _ACTIVE_GROUPS if _proposed(g) is not None), 2)
+    # portfolio_current_budget：仅 MCP 成功时取真实值，绝不填入 60/20/20 推算值
+    basis = parent.get("constraint_basis", "")
+    agg_groups = {g.get("group"): g for g in agg.get("groups", []) if isinstance(g, dict)}
+    current_budget = {}
+    if basis == "portfolio":
+        for g in _ACTIVE_GROUPS:
+            gd = agg_groups.get(g) or {}
+            current_budget[g] = gd.get("current_group_budget")
+    else:
+        for g in _ACTIVE_GROUPS:
+            current_budget[g] = None
     return {
         "target_budget": parent.get("parent_target_daily_budget"),
         "target_budget_source": parent.get("target_budget_source", ""),
@@ -288,6 +306,7 @@ def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> d
             PORTFOLIO_TEST: _proposed(PORTFOLIO_TEST),
             PORTFOLIO_BROAD: _proposed(PORTFOLIO_BROAD),
         },
+        "portfolio_current_budget": current_budget,
         "portfolio_budget_summary": {
             "parent_target_daily_budget": parent.get("parent_target_daily_budget"),
             "parent_allowed_net_increase": parent.get("parent_allowed_net_increase"),

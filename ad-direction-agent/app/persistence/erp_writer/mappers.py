@@ -123,19 +123,23 @@ def _portfolio_groups_from_payload(
         except (TypeError, ValueError):
             pass
     constraints = (budget_summary or {}).get("portfolio_constraints") or {}
+    cur_budgets = (budget_summary or {}).get("portfolio_current_budget") or {}
     return {
         "main_push_count": counts[PORTFOLIO_MAIN],
         "main_push_budget": constraints.get(PORTFOLIO_MAIN)
         if constraints.get(PORTFOLIO_MAIN) is not None
         else round(budget_sums[PORTFOLIO_MAIN], 2),
+        "main_push_current_budget": cur_budgets.get(PORTFOLIO_MAIN),
         "broad_auto_count": counts[PORTFOLIO_BROAD],
         "broad_auto_budget": constraints.get(PORTFOLIO_BROAD)
         if constraints.get(PORTFOLIO_BROAD) is not None
         else round(budget_sums[PORTFOLIO_BROAD], 2),
+        "broad_auto_current_budget": cur_budgets.get(PORTFOLIO_BROAD),
         "test_new_count": counts[PORTFOLIO_TEST],
         "test_new_budget": constraints.get(PORTFOLIO_TEST)
         if constraints.get(PORTFOLIO_TEST) is not None
         else round(budget_sums[PORTFOLIO_TEST], 2),
+        "test_new_current_budget": cur_budgets.get(PORTFOLIO_TEST),
         "eliminate_bubble_count": counts[PORTFOLIO_ELIMINATE],
         "eliminate_bubble_budget": round(budget_sums[PORTFOLIO_ELIMINATE], 2),
     }

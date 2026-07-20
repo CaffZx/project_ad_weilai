@@ -118,6 +118,14 @@ def test_core_keyword_evidence_formatter_hides_empty_ai_evidence_arrays():
     assert "if (parsed.length === 0) return '';" in render
 
 
+def test_portfolio_budget_keeps_arrow_when_current_budget_is_unavailable():
+    render = read(PANEL_RENDER)
+
+    assert "const curStr = cur != null ? '$' + Number(cur).toFixed(0) : '—';" in render
+    assert "const propStr = prop != null ? '$' + Number(prop).toFixed(0) : '—';" in render
+    assert "amt = curStr + ' → ' + propStr;" in render
+
+
 def test_demo_native_analyzing_overlay_and_request_hints():
     html = read(DEMO)
 
