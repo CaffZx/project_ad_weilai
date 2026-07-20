@@ -202,6 +202,7 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
             "parentSellerSku": parent_sku,
             "currentUserId": user,
             "adjustReason": f"AI 决策批次 {dec.get('id') or ''} 执行",
+            "decisionId": str(dec.get("id") or ""),
             "campaignVoList": list(camp_vo.values()),
         })
     return plan

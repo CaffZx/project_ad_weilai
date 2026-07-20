@@ -409,6 +409,26 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             timeout=settings.campaign_total_timeout,
         )
 
+        # ── codex 复核 hook ── 暂注释，待 CODEX_FORCE 逻辑修正确认后再启用
+        # try:
+        #     import os as _os
+        #     import sys as _sys
+        #     if "/opt/ad_agent_codex" not in _sys.path:
+        #         _sys.path.insert(0, "/opt/ad_agent_codex")
+        #     from review_hook import maybe_review as _maybe_review
+        #     _uc = req.get("use_codex_review")
+        #     if _uc is None and _os.environ.get("CODEX_FORCE"):
+        #         _uc = _os.environ["CODEX_FORCE"] == "1"
+        #     _force = None if _uc is None else bool(_uc)
+        #     _outcome = await _maybe_review(
+        #         result, asin=asin, target_acos=strat_ctx.target_acos, force=_force)
+        #     if _outcome.reviewed:
+        #         logger.info("codex 复核已应用 [%s]: %s", asin, _outcome.stats)
+        #     elif _outcome.error:
+        #         logger.warning("codex 复核失败(fail-open)[%s]: %s", asin, _outcome.error)
+        # except Exception as _e:  # noqa: BLE001 — fail-open,绝不打断 campaign 分析
+        #     logger.warning("codex 复核 hook 异常(fail-open)[%s]: %s", asin, _e)
+
         # 操作人 ID：前端 _userId（ERP 用户）或 operator 字段；写库时填 audit 列。
         operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
 

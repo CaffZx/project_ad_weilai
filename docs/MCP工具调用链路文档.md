@@ -1,13 +1,14 @@
-# MCP 工具调用链路：定时分析 → ERP 落库
+# MCP 工具调用链路：分析 → 执行 → 落库
 
 ## 概述
 
-定时批跑（cron → `batch_via_api.py` → `/campaign/viewmodel`）到 ERP 落库全链路涉及 **17 个 MCP 工具**，分 6 个阶段，含大量并行调用。
+全链路分两段：（A）定时批跑（cron → `batch_via_api.py` → `/campaign/viewmodel`）分析 + ERP 落库，涉及 **17 个 StarRocks 数据 MCP 工具**；（B）前端"同意执行"后调 **6 个广告执行 MCP 工具**（独立网关 `whpadvertapi.91cyerp.com/mcp`）真改亚马逊广告。
 
-工具调用方分为三类：
+工具调用方分为四类：
 - **Skill 执行器** (`mcp_query.py`)：主数据拉取，通过 `run_planned_mcp_tools` 并行
 - **Campaign 编排器** (`campaign_fetcher.py`)：活动发现 + 效果拉取 + 新词发现
 - **复评/CPC** (`campaign.py`)：淘汰活动复评所需的窗口订单和 CPC 数据
+- **广告执行** (`advert_execution.py` / `portfolio_execution.py`)：真改广告（挪组/预算/Bid/状态/广告位/新建/否定词）
 
 ---
 
@@ -124,8 +125,8 @@
 
 | 工具 | 入参 | 超时 | 返回 | 下游消费 |
 |---|---|---|---|---|
-| `keyword_child_asins` | `{"keyword":"", "site_code", "parent_asin", ...}` — 全量查，非逐词 | 300s/工具, 45s overall | 每词 `{craw_nature_rank, near_craw_nature_rank}` | 主源：按 keyword 匹配到 CampaignUnit |
-| `own_keyword_flow` | `{"parent_asin", "parent_seller_sku", "shop_account"}` — 与 1d-a 并行 | 同上 | 每词 `{自然位排位}`（当前排名） | 补缺：1d-a 没覆盖的关键词 |
+| `keyword_child_asins` | `{"keyword":"", "site_code", "parent_asin", ...}` — 全量查，非逐词 | 300s/工具, 45s overall | 每词 `{craw_nature_rank, near_craw_nature_rank, 周变化}` | **主源**（新功能唯一源）：按 keyword 匹配到 CampaignUnit |
+| `own_keyword_flow` | `{"parent_asin", "parent_seller_sku", "shop_account"}` — 与 1d-a 并行 | 同上 | 每词 `{自然位排位, 词的周排名, 周搜索量}` | **仅旧功能兜底**：1d-a 没覆盖的关键词补缺（新功能禁用，无周变化字段） |
 
 ---
 
@@ -236,11 +237,121 @@
 LLM (7 类调用, 3 组并行)
 ─────────────────────────────────
 ERP Write (MySQL, 21 表)
+─────────────────────────────────
+7a (agent_query_portfolio_list, 串行先于 MCP 调用)
+  ↓
+7b (agent_async_batch_update_advert ∥ agent_create_portfolio_campaign × K ∥ agent_create_negative_keywords, 并行)
 ```
 
 ---
 
-## 其他已注册但本链路未调用的工具（用于实时分析）
+## 阶段 7：广告调整真实执行（前端"同意执行"）
+
+**入口**：`POST /campaign/confirm` → `submit_execution_direct()`  
+**网关**：`whpadvertapi.91cyerp.com/mcp`（独立于 StarRocks 数据 MCP）  
+**核心原则**：挪组失败不阻塞预算/Bid/状态/广告位等其他调整。
+
+### 7a. `agent_query_portfolio_list`（串行，最先）
+
+| 项目 | 内容 |
+|---|---|
+| **调用位置** | `advert_execution.py:181` `_resolve_modify_portfolios` |
+| **调用目的** | 查 ASIN 下所有组合列表 → 按组名匹配 → 取 `portfolioId` |
+| **入参** | `{"shopId": int, "parentAsin": str, "parentSellerSku": str}` — 来自 `t_advert_agent_decision` |
+| **arg builder** | `advert_mcp_client.py:84-97` |
+| **返回结构** | 裸数组 `[{name, portfolioId, amount, state, ...}]`；非数组直接 `raise ValueError` |
+
+**后续处理**（`_resolve_modify_portfolios`）：
+1. ERP 码 → 中文组名：`unmap_campaign_group_type("exact_core_group")` → `"精准主力组"`
+2. 中文组名 → portfolio：`_match_portfolio("精准主力组", portfolios)` → 单向子串匹配（`g in nm`），必须唯一命中
+3. 取 `portfolioId` 字段（仅此字段，不 fallback 到 `id` 或 `portfolio_id`）
+4. 按 `portfolioId` 拆分 `paramsVoList`，`portfolioId` 放在 `paramsVo` 顶层
+
+**匹配失败处理**：
+- 0 个匹配 → `reason="不存在"` → 写 `plan.move_errors` → 该活动其他调整继续下发，仅不挪组
+- ≥2 个匹配 → `reason="存在多个"` → 同上
+- 匹配到但 `portfolioId` 为空 → `reason="ID缺失"` → 同上
+- 查询 MCP 本身失败 → 整体跳过挪组，所有 `campaignGroupType` 被清除，其他调整继续
+
+### 7b. `agent_async_batch_update_advert`（串行于 7a 之后）
+
+| 项目 | 内容 |
+|---|---|
+| **调用位置** | `advert_execution.py:460` `submit_execution_direct` |
+| **调用目的** | 异步批量修改已有活动（预算/Bid/状态/广告位/挪组） |
+| **入参** | `{"paramsVoList": [...]}` — 由 `build_exec_plan()` 构造、`_resolve_modify_portfolios()` 拆分注入 `portfolioId` |
+
+**`paramsVoList[i]` 顶层字段**：
+
+| 字段 | 来源 | 表.列 |
+|------|------|------|
+| `shopId` | decision 记录 | `t_advert_agent_decision.shop_id` |
+| `parentAsin` | decision 记录 | `t_advert_agent_decision.parent_asin` |
+| `parentSellerSku` | decision 记录 | `t_advert_agent_decision.parent_seller_sku` |
+| `currentUserId` | 前端入参 | `req.operator`（fallback `"tab5"`） |
+| `adjustReason` | 动态拼接 | `"AI 决策批次 {decision_id} 执行"` |
+| `decisionId` | decision 记录 | `t_advert_agent_decision.id` |
+| `portfolioId` | MCP 实时查询 | `agent_query_portfolio_list` → `_match_portfolio()` |
+
+**`campaignVoList[j]` 字段**：
+
+| 字段 | 来源 | 表.列 |
+|------|------|------|
+| `campaignId` | pending 记录 | `t_advert_agent_modify_campaign_pending.campaign_id` |
+| `campaignBudget` | pending 记录 | `t_advert_agent_modify_campaign_pending.new_budget` |
+| `campaignState` | pending 记录 | `t_advert_agent_modify_campaign_pending.new_state` |
+| `keywordShowVoList[].keyword` | pending 记录 | `t_advert_agent_modify_keyword_pending.keyword_text` |
+| `keywordShowVoList[].keywordId` | pending 记录 | `t_advert_agent_modify_keyword_pending.keyword_id` |
+| `keywordShowVoList[].keywordBid` | pending 记录 | `t_advert_agent_modify_keyword_pending.new_bid` |
+| `keywordShowVoList[].keywordState` | pending 记录 | `t_advert_agent_modify_keyword_pending.new_state` |
+| `placementTopPercent` | pending 记录 | `t_advert_agent_modify_placement_pending.new_percent`（`placement_type='TOP'`） |
+| `placementProductPagePercent` | 同上 | 同上（`placement_type='PRODUCT_PAGE'`） |
+| `placementRestPercent` | 同上 | 同上（`placement_type='REST'`） |
+
+### 7c. `agent_create_portfolio_campaign`（与 7b 并行，逐 card）
+
+| 项目 | 内容 |
+|---|---|
+| **调用位置** | `advert_execution.py:484` |
+| **调用目的** | 新建活动（可选含新建组合） |
+| **入参** | `{shopId, parentAsin, parentSellerSku, asin, createCampaignVo, ...}` — 来自 `t_advert_agent_modify_suggest_card`（`suggest_category='CREATE'`） |
+| **组合匹配** | 同 7a：`card.campaign_group_type` → `unmap` → `_match_portfolio` → 注入 `portfolioId` |
+
+### 7d. `agent_create_negative_keywords`（与 7b/7c 并行）
+
+| 项目 | 内容 |
+|---|---|
+| **调用位置** | `advert_execution.py:495` |
+| **调用目的** | 创建否定词/关键词 |
+| **入参** | `{shopId, parentAsin, parentSellerSku, keywordType, campaignVoList[{campaignId, keywordVoList[{matchType, keyword}]}]}` |
+
+### 7e. 返回值 → 前端
+
+```json
+{
+  "ok": true,
+  "ops": 5,
+  "task_ids": ["uuid..."],
+  "errors": [],
+  "move_errors": [
+    {"campaign_id": "123", "campaign_name": "活动A", "group": "精准测试组", "reason": "存在多个"}
+  ]
+}
+```
+
+`move_errors` 经 `campaign_confirm()` 扁平透传 → `state.js` 按 `group+reason` 去重 → sticky toast：`"精准测试组存在多个，已跳过 1 个活动，不阻塞预算和bid修改。"`
+
+### 7f. `agent_batch_update_advert_result`（已封装，未接入主流程）
+
+| 工具 | 调用位置 | 用途 |
+|------|---------|------|
+| `agent_batch_update_advert_result` | `advert_mcp_client.py:69` | 按 `taskIds` 查询异步执行结果 |
+
+当前主流程提交后不 poll 结果，`execute_status` 保持 `IN_PROGRESS`。
+
+---
+
+## 其他已注册但本链路未调用的工具
 
 | 工具 | 原因 |
 |---|---|
@@ -250,4 +361,5 @@ ERP Write (MySQL, 21 表)
 | `ad_search_term_report`（ASIN 级） | 被 campaign 级 `ad_campaign_search_term_report` 替代 |
 | `ad_optimization` | 工具已注册，尚未接入 |
 | `listing_basic_info`（V1） | 已注册但项目已全量切换到 V2（V1 返回字段冗余，V2 精简） |
+| `agent_batch_update_advert_result` | 已封装但主流程未 poll 异步结果 |
 | `shein_*` / `product_competitors*` 系列 | 非广告方向，不适用 |
