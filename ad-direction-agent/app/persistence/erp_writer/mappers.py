@@ -124,24 +124,60 @@ def _portfolio_groups_from_payload(
             pass
     constraints = (budget_summary or {}).get("portfolio_constraints") or {}
     cur_budgets = (budget_summary or {}).get("portfolio_current_budget") or {}
+    spend_1d = (budget_summary or {}).get("portfolio_spend_1d") or {}
+    spend_3d = (budget_summary or {}).get("portfolio_spend_3d") or {}
+    spend_7d = (budget_summary or {}).get("portfolio_spend_7d") or {}
+    acos_1d = (budget_summary or {}).get("portfolio_acos_1d") or {}
+    acos_3d = (budget_summary or {}).get("portfolio_acos_3d") or {}
+    acos_7d = (budget_summary or {}).get("portfolio_acos_7d") or {}
+    def _acos_map(grp):
+        return {
+            f"_acos_1d": acos_1d.get(grp),
+            f"_acos_3d": acos_3d.get(grp),
+            f"_acos_7d": acos_7d.get(grp),
+        }
     return {
         "main_push_count": counts[PORTFOLIO_MAIN],
         "main_push_budget": constraints.get(PORTFOLIO_MAIN)
         if constraints.get(PORTFOLIO_MAIN) is not None
         else round(budget_sums[PORTFOLIO_MAIN], 2),
         "main_push_current_budget": cur_budgets.get(PORTFOLIO_MAIN),
+        "main_push_spend_1d": spend_1d.get(PORTFOLIO_MAIN),
+        "main_push_spend_3d": spend_3d.get(PORTFOLIO_MAIN),
+        "main_push_spend_7d": spend_7d.get(PORTFOLIO_MAIN),
+        "main_push_acos_1d": acos_1d.get(PORTFOLIO_MAIN),
+        "main_push_acos_3d": acos_3d.get(PORTFOLIO_MAIN),
+        "main_push_acos_7d": acos_7d.get(PORTFOLIO_MAIN),
         "broad_auto_count": counts[PORTFOLIO_BROAD],
         "broad_auto_budget": constraints.get(PORTFOLIO_BROAD)
         if constraints.get(PORTFOLIO_BROAD) is not None
         else round(budget_sums[PORTFOLIO_BROAD], 2),
         "broad_auto_current_budget": cur_budgets.get(PORTFOLIO_BROAD),
+        "broad_auto_spend_1d": spend_1d.get(PORTFOLIO_BROAD),
+        "broad_auto_spend_3d": spend_3d.get(PORTFOLIO_BROAD),
+        "broad_auto_spend_7d": spend_7d.get(PORTFOLIO_BROAD),
+        "broad_auto_acos_1d": acos_1d.get(PORTFOLIO_BROAD),
+        "broad_auto_acos_3d": acos_3d.get(PORTFOLIO_BROAD),
+        "broad_auto_acos_7d": acos_7d.get(PORTFOLIO_BROAD),
         "test_new_count": counts[PORTFOLIO_TEST],
         "test_new_budget": constraints.get(PORTFOLIO_TEST)
         if constraints.get(PORTFOLIO_TEST) is not None
         else round(budget_sums[PORTFOLIO_TEST], 2),
         "test_new_current_budget": cur_budgets.get(PORTFOLIO_TEST),
+        "test_new_spend_1d": spend_1d.get(PORTFOLIO_TEST),
+        "test_new_spend_3d": spend_3d.get(PORTFOLIO_TEST),
+        "test_new_spend_7d": spend_7d.get(PORTFOLIO_TEST),
+        "test_new_acos_1d": acos_1d.get(PORTFOLIO_TEST),
+        "test_new_acos_3d": acos_3d.get(PORTFOLIO_TEST),
+        "test_new_acos_7d": acos_7d.get(PORTFOLIO_TEST),
         "eliminate_bubble_count": counts[PORTFOLIO_ELIMINATE],
         "eliminate_bubble_budget": round(budget_sums[PORTFOLIO_ELIMINATE], 2),
+        "eliminate_bubble_spend_1d": spend_1d.get(PORTFOLIO_ELIMINATE),
+        "eliminate_bubble_spend_3d": spend_3d.get(PORTFOLIO_ELIMINATE),
+        "eliminate_bubble_spend_7d": spend_7d.get(PORTFOLIO_ELIMINATE),
+        "eliminate_bubble_acos_1d": acos_1d.get(PORTFOLIO_ELIMINATE),
+        "eliminate_bubble_acos_3d": acos_3d.get(PORTFOLIO_ELIMINATE),
+        "eliminate_bubble_acos_7d": acos_7d.get(PORTFOLIO_ELIMINATE),
     }
 
 

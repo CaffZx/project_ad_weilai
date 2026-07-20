@@ -639,20 +639,32 @@ function _renderPortfolioFilterPills(state) {
       amtLabel = ov != null ? '组合预算(覆盖)' : '组合预算';
       const cur = curBudgets[name];
       const prop = ov != null ? ov : constraints[name];
-      const curStr = cur != null ? '$' + Number(cur).toFixed(0) : '—';
-      const propStr = prop != null ? '$' + Number(prop).toFixed(0) : '—';
+      const curStr = cur != null ? '$' + Number(cur).toFixed(0) : '-';
+      const propStr = prop != null ? '$' + Number(prop).toFixed(0) : '-';
       amt = curStr + ' → ' + propStr;
     }
+
+    // 1/3/7 天组合实际花费（看板数据，不会为 NULL 时用 — 占位）
+    const spend1 = (bs.portfolio_spend_1d || {})[name];
+    const spend3 = (bs.portfolio_spend_3d || {})[name];
+    const spend7 = (bs.portfolio_spend_7d || {})[name];
+    const moneyOrDash = v => v != null ? '$' + Number(v).toFixed(2) : '-';
+    const acos1 = (bs.portfolio_acos_1d || {})[name];
+    const acos3 = (bs.portfolio_acos_3d || {})[name];
+    const acos7 = (bs.portfolio_acos_7d || {})[name];
+    const pctOrDash = v => v != null ? (v * 100).toFixed(0) + '%' : '-';
+    const spendLine = `<span class="pp-spend">1/3/7天花费：${moneyOrDash(spend1)} / ${moneyOrDash(spend3)} / ${moneyOrDash(spend7)} &nbsp;&nbsp;ACOS ${pctOrDash(acos1)} / ${pctOrDash(acos3)} / ${pctOrDash(acos7)}</span>`;
 
     // 调整前/后预算（统计值）。低价捡漏组淘汰活动预算固定 $1、统计无意义 → 占位 "—"（美观对齐）
     const b = budgetByName[name];
     const budgetLine = isElim
-      ? `<span class="pp-budget" style="opacity:.4;">调整前 — | 调整后 —</span>`
-      : `<span class="pp-budget">调整前 ${money0(b.cur)} | 调整后 ${money0(b.prop)}</span>`;
+      ? `<span class="pp-budget" style="opacity:.4;">活动预算之和 调整前 — | 调整后 —</span>`
+      : `<span class="pp-budget">活动预算之和 调整前 ${money0(b.cur)} | 调整后 ${money0(b.prop)}</span>`;
 
     return `<button class="camp-portfolio-pill${active}" type="button" data-action="camp-toggle-portfolio" data-portfolio="${esc}">
       <span class="pp-name">${_esc(name)} (${countByName[name] || 0})</span>
       <span class="pp-amount">${amtLabel} ${amt}</span>
+      ${spendLine}
       ${budgetLine}
     </button>`;
   }).join('');

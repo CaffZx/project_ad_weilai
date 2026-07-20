@@ -26,6 +26,7 @@ from app.config.settings import settings
 from app.models.campaign import CampaignAdjustmentItem, CampaignStrategyContext, CampaignUnit
 from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_BROAD,
+    PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
 )
@@ -54,6 +55,28 @@ def build_summary(
     target_budget: float | None = ctx.daily_budget
     source: str = ctx.daily_budget_source or ""
 
+    pf = portfolio_data or {}
+    pf_ok = len(pf) > 0   # MCP 成功（即使各组 budget=0），区别于整体失败
+
+    def _safe_spend(v) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _spend_map(field: str) -> dict[str, float | None]:
+        out: dict[str, float | None] = {}
+        for g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE):
+            if pf_ok:
+                p = pf.get(g) or {}
+                fv = _safe_spend(p.get(field))
+                out[g] = round(fv, 2) if fv is not None else None
+            else:
+                out[g] = None
+        return out
+
     if target_budget is None or target_budget <= 0:
         logger.info(
             "Campaign budget_summary [%s]: 目标预算不可用 (daily_budget=None)",
@@ -63,10 +86,13 @@ def build_summary(
             "target_budget": None,
             "target_budget_source": source,
             "portfolio_constraints": None,
+            "portfolio_spend_1d": _spend_map("spend_1d"),
+            "portfolio_spend_3d": _spend_map("spend_3d"),
+            "portfolio_spend_7d": _spend_map("spend_7d"),
+            "portfolio_acos_1d": _spend_map("acos_1d"),
+            "portfolio_acos_3d": _spend_map("acos_3d"),
+            "portfolio_acos_7d": _spend_map("acos_7d"),
         }
-
-    pf = portfolio_data or {}
-    pf_ok = len(pf) > 0   # MCP 成功（即使各组 budget=0），区别于整体失败
 
     def _budget_for(group: str) -> float:
         """MCP 成功 → 真实值（含 0）；MCP 失败 → 0 供下游回退判定。"""
@@ -110,4 +136,10 @@ def build_summary(
             PORTFOLIO_BROAD: broad_amount,
         },
         "portfolio_current_budget": current_budget,
+        "portfolio_spend_1d": _spend_map("spend_1d"),
+        "portfolio_spend_3d": _spend_map("spend_3d"),
+        "portfolio_spend_7d": _spend_map("spend_7d"),
+        "portfolio_acos_1d": _spend_map("acos_1d"),
+        "portfolio_acos_3d": _spend_map("acos_3d"),
+        "portfolio_acos_7d": _spend_map("acos_7d"),
     }

@@ -250,6 +250,34 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             cur["精准测试组"] = _f(srow.get("test_new_current_budget"))
         if cur:
             budget_summary["portfolio_current_budget"] = cur
+        for win, fields in [("spend_1d", ("main_push_spend_1d", "broad_auto_spend_1d", "test_new_spend_1d", "eliminate_bubble_spend_1d")),
+                            ("spend_3d", ("main_push_spend_3d", "broad_auto_spend_3d", "test_new_spend_3d", "eliminate_bubble_spend_3d")),
+                            ("spend_7d", ("main_push_spend_7d", "broad_auto_spend_7d", "test_new_spend_7d", "eliminate_bubble_spend_7d"))]:
+            sp = {}
+            if srow.get(fields[0]) is not None:
+                sp["精准主力组"] = _f(srow.get(fields[0]))
+            if srow.get(fields[1]) is not None:
+                sp["自动广泛组"] = _f(srow.get(fields[1]))
+            if srow.get(fields[2]) is not None:
+                sp["精准测试组"] = _f(srow.get(fields[2]))
+            if srow.get(fields[3]) is not None:
+                sp["低价捡漏组"] = _f(srow.get(fields[3]))
+            if sp:
+                budget_summary["portfolio_" + win] = sp
+        for win, fields in [("acos_1d", ("main_push_acos_1d", "broad_auto_acos_1d", "test_new_acos_1d", "eliminate_bubble_acos_1d")),
+                            ("acos_3d", ("main_push_acos_3d", "broad_auto_acos_3d", "test_new_acos_3d", "eliminate_bubble_acos_3d")),
+                            ("acos_7d", ("main_push_acos_7d", "broad_auto_acos_7d", "test_new_acos_7d", "eliminate_bubble_acos_7d"))]:
+            ac = {}
+            if srow.get(fields[0]) is not None:
+                ac["精准主力组"] = _f(srow.get(fields[0]))
+            if srow.get(fields[1]) is not None:
+                ac["自动广泛组"] = _f(srow.get(fields[1]))
+            if srow.get(fields[2]) is not None:
+                ac["精准测试组"] = _f(srow.get(fields[2]))
+            if srow.get(fields[3]) is not None:
+                ac["低价捡漏组"] = _f(srow.get(fields[3]))
+            if ac:
+                budget_summary["portfolio_" + win] = ac
 
     overview = None
     ov_text = srow.get("analysis_overview") if srow else None

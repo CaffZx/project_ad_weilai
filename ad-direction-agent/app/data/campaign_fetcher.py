@@ -819,98 +819,141 @@ class CampaignFetcher:
         parent_asin: str,
         parent_seller_sku: str,
         shop_account: str,
-        days: int = 7,
         site_code: str = "Amazon_US",
     ) -> dict[str, dict]:
-        """拉取广告组合真实预算+日均花费（qryFixedPortfolio=true + qryReport=true）。
+        """拉取广告组合真实预算+日均花费+1/3/7天总花费。
 
-        返回 {group_type: {"budget": float, "portfolio_id": str, "daily_spend": float | None}}
-        budget 为日预算，daily_spend 为日均花费（MCP 已换算，与 budget 同口径可直接对比）。
-        未匹配的组合 → budget=0, daily_spend=None；整体 MCP 失败 → 返回空 dict。
-        日期窗口按站点时区，与其他 MCP 工具口径一致（make_date_window）。
+        固定 3 窗口并行调 ad_portfolio_list(qryFixedPortfolio=true, qryReport=true)：
+          - 7d: budget / daily_spend（LLM 消费） + spend_7d（看板）
+          - 3d: spend_3d（看板）
+          - 1d: spend_1d（看板）
+
+        返回 {group_type: {budget, portfolio_id, daily_spend, spend_1d, spend_3d, spend_7d}}
+        7d 失败 → 返回空 dict（LLM 回退 60/20/20）；1d/3d 失败仅对应 spend 为 None。
         """
         if not (settings.campaign_portfolio_fetch_enabled and shop_account):
             return {}
-        start_date, end_date = make_date_window(days, site_code)
-        try:
-            res = await self._mcp().campaign_call_tool(
-                "ad_portfolio_list", "", shop_account,
-                parent_asin=parent_asin, parent_seller_sku=parent_seller_sku,
-                qryFixedPortfolio=True, qryReport=True,
-                start_date=start_date, end_date=end_date,
-                timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
-            )
-        except Exception as e:
-            logger.warning("ad_portfolio_list 调用失败 [%s]: %s (回退 60/20/20)", parent_asin, e)
-            return {}
-        if not res.ok:
-            logger.warning("ad_portfolio_list 返回失败 [%s]: %s (回退 60/20/20)", parent_asin, res.error)
-            return {}
 
-        rows = _as_rows(res.value)
-        if not rows:
-            logger.warning("ad_portfolio_list 返回空行 [%s]，回退 60/20/20", parent_asin)
-            return {}
-
-        # 按 4 关键词模糊匹配：「精准测试组」in 「B0xxx-精准测试组」→ ✅
-        grouped: dict[str, list[dict]] = {g: [] for g in self._PORTFOLIO_GROUP_KEYWORDS}
-        for row in rows:
-            name = str(row.get("广告组合名称") or "").strip()
-            if not name:
-                continue
-            matched: str | None = None
-            for keyword in self._PORTFOLIO_GROUP_KEYWORDS:
-                if keyword in name:
-                    if matched is not None:
-                        logger.warning(
-                            "portfolio 行 [%s] 同时匹配 [%s] 和 [%s]，取首次命中 [%s]",
-                            name, matched, keyword, matched,
-                        )
-                    else:
-                        matched = keyword
-            if matched is None:
-                logger.warning("portfolio 行 [%s] 未能匹配任何组合类型，已跳过", name)
-                continue
-            grouped[matched].append(row)
-
-        def _parse_daily_spend(row: dict) -> float | None:
-            raw = row.get("日均花费")
-            if raw is None:
+        async def _fetch_portfolio_report(window_days: int):
+            sd, ed = make_date_window(window_days, site_code)
+            try:
+                res = await self._mcp().campaign_call_tool(
+                    "ad_portfolio_list", "", shop_account,
+                    parent_asin=parent_asin, parent_seller_sku=parent_seller_sku,
+                    qryFixedPortfolio=True, qryReport=True,
+                    start_date=sd, end_date=ed,
+                    timeout=getattr(settings, "campaign_mcp_tool_timeout", 300.0),
+                )
+            except Exception as e:
+                logger.warning("ad_portfolio_list %dd 异常 [%s]: %s", window_days, parent_asin, e)
                 return None
-            return _to_float(raw)
+            if not res.ok:
+                logger.warning("ad_portfolio_list %dd 返回失败 [%s]: %s", window_days, parent_asin, res.error)
+                return None
+            rows = _as_rows(res.value)
+            return rows if rows else None
+
+        rows_1d, rows_3d, rows_7d = await asyncio.gather(
+            _fetch_portfolio_report(1),
+            _fetch_portfolio_report(3),
+            _fetch_portfolio_report(7),
+        )
+
+        if rows_7d is None:
+            logger.warning("ad_portfolio_list 7d 失败 [%s]，回退 60/20/20", parent_asin)
+            return {}
+
+        def _group_rows(rows: list[dict]) -> dict[str, list[dict]]:
+            grouped: dict[str, list[dict]] = {g: [] for g in self._PORTFOLIO_GROUP_KEYWORDS}
+            for row in rows:
+                name = str(row.get("广告组合名称") or "").strip()
+                if not name:
+                    continue
+                matched: str | None = None
+                for keyword in self._PORTFOLIO_GROUP_KEYWORDS:
+                    if keyword in name:
+                        if matched is not None:
+                            logger.warning(
+                                "portfolio 行 [%s] 同时匹配 [%s] 和 [%s]，取首次命中 [%s]",
+                                name, matched, keyword, matched,
+                            )
+                        else:
+                            matched = keyword
+                if matched is None:
+                    logger.warning("portfolio 行 [%s] 未能匹配任何组合类型，已跳过", name)
+                    continue
+                grouped[matched].append(row)
+            return grouped
+
+        grouped_1d = _group_rows(rows_1d) if rows_1d is not None else {}
+        grouped_3d = _group_rows(rows_3d) if rows_3d is not None else {}
+        grouped_7d = _group_rows(rows_7d)
+
+        def _sum_field(matches: list[dict], field: str) -> float | None:
+            vals = []
+            for m in matches:
+                raw = m.get(field)
+                if raw is None:
+                    continue
+                v = _to_float(raw)
+                if v is not None:
+                    vals.append(v)
+            return sum(vals) if vals else None
 
         result: dict[str, dict] = {}
-        for group, matches in grouped.items():
-            if not matches:
+        for group in self._PORTFOLIO_GROUP_KEYWORDS:
+            m7 = grouped_7d.get(group) or []
+            if not m7:
                 logger.warning("组合 [%s] 未匹配到 portfolio，预算按 $0、花费无数据", group)
-                result[group] = {"budget": 0.0, "portfolio_id": "", "daily_spend": None}
+                result[group] = {
+                    "budget": 0.0, "portfolio_id": "",
+                    "daily_spend": None,
+                    "spend_1d": None, "spend_3d": None, "spend_7d": None,
+                }
                 continue
-            if len(matches) > 1:
-                ids = [str(m.get("广告组合id") or "") for m in matches]
+            if len(m7) > 1:
+                ids = [str(m.get("广告组合id") or "") for m in m7]
                 logger.warning(
                     "组合 [%s] 匹配到 %d 个 portfolio (%s)，预算/花费已汇总",
-                    group, len(matches), ", ".join(ids),
+                    group, len(m7), ", ".join(ids),
                 )
-            total_budget = sum(
-                _to_float(m.get("广告组合预算")) or 0.0 for m in matches
-            )
-            daily_spend_vals = [_parse_daily_spend(m) for m in matches]
-            have_daily_spend = any(v is not None for v in daily_spend_vals)
-            total_daily_spend = sum(v for v in daily_spend_vals if v is not None) if have_daily_spend else None
-            pid = str(matches[0].get("广告组合id") or "")
+            pid = str(m7[0].get("广告组合id") or "")
+            total_budget = _sum_field(m7, "广告组合预算") or 0.0
+            daily_spend = _sum_field(m7, "日均花费")
+            spend_7d = _sum_field(m7, "花费")
+            sales_7d = _sum_field(m7, "销售额")
+
+            m1 = grouped_1d.get(group) if rows_1d is not None else None
+            m3 = grouped_3d.get(group) if rows_3d is not None else None
+            spend_1d = _sum_field(m1, "花费") if m1 is not None else None
+            spend_3d = _sum_field(m3, "花费") if m3 is not None else None
+            sales_1d = _sum_field(m1, "销售额") if m1 is not None else None
+            sales_3d = _sum_field(m3, "销售额") if m3 is not None else None
+
+            def _safe_acos(sp: float | None, sa: float | None) -> float | None:
+                if sp is None or sa is None or sa == 0:
+                    return None
+                return sp / sa
+
             result[group] = {
                 "budget": round(total_budget, 2),
                 "portfolio_id": pid,
-                "daily_spend": round(total_daily_spend, 2) if total_daily_spend is not None else None,
+                "daily_spend": round(daily_spend, 2) if daily_spend is not None else None,
+                "spend_1d": round(spend_1d, 2) if spend_1d is not None else None,
+                "spend_3d": round(spend_3d, 2) if spend_3d is not None else None,
+                "spend_7d": round(spend_7d, 2) if spend_7d is not None else None,
+                "acos_1d": _safe_acos(spend_1d, sales_1d),
+                "acos_3d": _safe_acos(spend_3d, sales_3d),
+                "acos_7d": _safe_acos(spend_7d, sales_7d),
             }
 
         logger.info(
-            "ad_portfolio_list [%s]: %d/%d 组命中 budgets=%s spends=%s",
+            "ad_portfolio_list [%s]: %d/%d 组命中 budgets=%s, daily=%s, spend_7d=%s",
             parent_asin,
-            sum(1 for v in result.values() if v["budget"] > 0),
-            len(result),
+            sum(1 for v in result.values() if v["budget"] > 0), len(result),
             {g: v["budget"] for g, v in result.items()},
             {g: v["daily_spend"] for g, v in result.items() if v["daily_spend"] is not None},
+            {g: v["spend_7d"] for g, v in result.items() if v["spend_7d"] is not None},
         )
         return result
 

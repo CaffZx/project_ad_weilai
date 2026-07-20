@@ -549,8 +549,7 @@ async def _analyze_campaigns_impl(
                                if campaign_data and campaign_data.parent_seller_sku else ""),
             shop_account=(campaign_data.shop_account
                           if campaign_data and campaign_data.shop_account
-                          else getattr(fetcher, "_last_shop_account", "") or ""),
-            days=days,
+                          else getattr(fetcher, "_last_shop_account", "") or shop_account or ""),
             site_code=(campaign_data.site_code
                        if campaign_data and campaign_data.site_code else "Amazon_US"),
         )
@@ -979,7 +978,7 @@ async def _analyze_campaigns_impl(
             if not ok:
                 return _fallback(why)
             _t("DONE budget_realloc(agent)")
-            return bra.to_budget_summary(agent_out, agg, source="agent")
+            return bra.to_budget_summary(agent_out, agg, portfolio_data=portfolio_data, source="agent")
         except Exception as e:  # noqa: BLE001
             logger.exception("预算回算 agent 异常 [%s]: %s", parent_asin, e)
             return _fallback(f"{type(e).__name__}: {e}")

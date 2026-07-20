@@ -277,7 +277,11 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> dict:
+def to_budget_summary(
+    agent_out: dict, agg: dict, *,
+    portfolio_data: dict[str, dict] | None = None,
+    source: str = "agent",
+) -> dict:
     """映射成与 build_summary 同形契约。前端 portfolio_constraints 零改。"""
     parent = agg.get("parent", {})
     by_name = {g.get("group"): g for g in agent_out.get("budget_groups", []) if isinstance(g, dict)}
@@ -298,6 +302,26 @@ def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> d
     else:
         for g in _ACTIVE_GROUPS:
             current_budget[g] = None
+    pf = portfolio_data or {}
+    pf_ok = len(pf) > 0
+    def _safe_spend(v) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    _ALL_PORTFOLIO_GROUPS = _ACTIVE_GROUPS + (PORTFOLIO_ELIMINATE,)
+    def _spend_map(field: str) -> dict[str, float | None]:
+        out: dict[str, float | None] = {}
+        for g in _ALL_PORTFOLIO_GROUPS:
+            if pf_ok:
+                p = pf.get(g) or {}
+                fv = _safe_spend(p.get(field))
+                out[g] = round(fv, 2) if fv is not None else None
+            else:
+                out[g] = None
+        return out
     return {
         "target_budget": parent.get("parent_target_daily_budget"),
         "target_budget_source": parent.get("target_budget_source", ""),
@@ -307,6 +331,12 @@ def to_budget_summary(agent_out: dict, agg: dict, *, source: str = "agent") -> d
             PORTFOLIO_BROAD: _proposed(PORTFOLIO_BROAD),
         },
         "portfolio_current_budget": current_budget,
+        "portfolio_spend_1d": _spend_map("spend_1d"),
+        "portfolio_spend_3d": _spend_map("spend_3d"),
+        "portfolio_spend_7d": _spend_map("spend_7d"),
+        "portfolio_acos_1d": _spend_map("acos_1d"),
+        "portfolio_acos_3d": _spend_map("acos_3d"),
+        "portfolio_acos_7d": _spend_map("acos_7d"),
         "portfolio_budget_summary": {
             "parent_target_daily_budget": parent.get("parent_target_daily_budget"),
             "parent_allowed_net_increase": parent.get("parent_allowed_net_increase"),
