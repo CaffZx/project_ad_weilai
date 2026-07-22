@@ -276,7 +276,7 @@ def _pending_lists_from_adjustment(
     keyword_text: str | None,
     match_type: str | None,
     kw_lookup: dict[tuple[str, str, str], str],
-) -> tuple[list[KeywordPendingCanonical], list[CampaignPendingCanonical], list[PlacementCanonical]]:
+) -> tuple[list[KeywordPendingCanonical], list[CampaignPendingCanonical], list[PlacementCanonical], list[str], list[str]]:
     keyword_pending: list[KeywordPendingCanonical] = []
     if campaign_id and any(v is not None for v in (adj.get("current_bid"), adj.get("proposed_bid"))):
         kw_id = _warehouse_id(adj.get("keyword_id")) or _resolve_keyword_id(
@@ -333,32 +333,33 @@ def _pending_lists_from_adjustment(
             )
         )
 
+    neg_exact_list: list[str] = []
+    neg_phrase_list: list[str] = []
     for neg in adj.get("negative_keywords") or []:
         if not campaign_id:
             continue
-        neg_text = neg.get("keyword")
-        neg_mt = _normalize_match_type(neg.get("match_type") or "NEGATIVE")
-        kw_id = _resolve_keyword_id(kw_lookup, campaign_id, neg_text, neg_mt)
-        if not kw_id:
-            logger.warning(
-                "[%s] 否定词无 keyword_id（campaign_id=%s keyword=%s），跳过",
-                parent_asin,
-                campaign_id,
-                neg_text,
-            )
+        neg_text = (neg.get("keyword") or "").strip()
+        if not neg_text:
             continue
+        neg_mt = str(neg.get("match_type") or "NEGATIVE_EXACT").strip().upper()
+        neg_reason = (neg.get("reason") or "")[:512]
         keyword_pending.append(
             KeywordPendingCanonical(
-                keyword_id=kw_id,
+                keyword_id="",
                 keyword_text=neg_text,
-                match_type="NEGATIVE",
+                match_type=neg_mt,
                 old_state=None,
-                new_state="PAUSED",
+                new_state="NEGATIVE",
                 old_bid=None,
                 new_bid=None,
+                neg_evidence=neg_reason or None,
             )
         )
-    return keyword_pending, campaign_pending, placements
+        if neg_mt == "NEGATIVE_PHRASE":
+            neg_phrase_list.append(neg_text)
+        else:
+            neg_exact_list.append(neg_text)
+    return keyword_pending, campaign_pending, placements, neg_exact_list, neg_phrase_list
 
 
 def canonicalize_payload(
@@ -428,11 +429,13 @@ def canonicalize_payload(
         campaign_pending: list[CampaignPendingCanonical] = []
         placements_by_type: dict[str, PlacementCanonical] = {}
         seen_kw_pending: set[tuple[str, str]] = set()
+        neg_exact_set: set[str] = set()
+        neg_phrase_set: set[str] = set()
 
         for idx, adj in group:
             match_type_adj = _normalize_match_type(adj.get("match_type"))
             keyword_text_adj = _clip(adj.get("keyword_text"), 512)
-            kw_list, camp_list, plc_list = _pending_lists_from_adjustment(
+            kw_list, camp_list, plc_list, neg_exact, neg_phrase = _pending_lists_from_adjustment(
                 adj,
                 parent_asin=parent_asin,
                 campaign_id=campaign_id,
@@ -441,15 +444,23 @@ def canonicalize_payload(
                 kw_lookup=kw_lookup,
             )
             for kw in kw_list:
-                key = (kw.keyword_id, kw.match_type or "")
+                # 否词按 (keyword_text, match_type) 去重；普通词仍按 (keyword_id, match_type)
+                if kw.new_state == "NEGATIVE":
+                    key = ((kw.keyword_text or "").strip().lower(), kw.match_type or "")
+                else:
+                    key = (kw.keyword_id, kw.match_type or "")
                 if key in seen_kw_pending:
                     continue
                 seen_kw_pending.add(key)
                 keyword_pending.append(kw)
             if camp_list:
-                campaign_pending = camp_list  # ⚠ 同 campaign 多 adjustment 时后写覆盖
+                campaign_pending = camp_list
             for plc in plc_list:
-                placements_by_type[plc.placement_type] = plc  # ⚠ 同 placement_type 后写覆盖
+                placements_by_type[plc.placement_type] = plc
+            for t in neg_exact:
+                neg_exact_set.add(t)
+            for t in neg_phrase:
+                neg_phrase_set.add(t)
 
             legacy_content = {
                 "campaign_name": adj.get("campaign_name"),
@@ -512,6 +523,8 @@ def canonicalize_payload(
                 placements=list(placements_by_type.values()),
                 keyword_pending=keyword_pending,
                 campaign_pending=campaign_pending,
+                proposed_negetive_exact_keyword=sorted(neg_exact_set),
+                proposed_negetive_phrase_keyword=sorted(neg_phrase_set),
             )
         )
 

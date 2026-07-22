@@ -52,6 +52,7 @@ def test_write_full_keeps_create_and_gray_cards_without_campaign_id():
 
     cur = _Cursor()
     repo = ErpDualWriterRepository.__new__(ErpDualWriterRepository)
+    repo._operator = None
     counts = repo._upsert_modern_cards_and_pending(
         cur, run, datetime.now(timezone.utc),
     )

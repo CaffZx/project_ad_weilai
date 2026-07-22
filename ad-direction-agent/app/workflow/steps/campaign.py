@@ -2158,7 +2158,7 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
       - 其他全部代码 derive: budget 变 → adjust_budget; bid 变 → adjust_bid;
         placement 非空 → adjust_placement; 全没变 → keep
       - 多维同时变: 按业务优先级 budget > bid > placement 选 1 个 (单 action 字段限制)
-      - keep 时强制 proposed=current,清 direction/placement/neg_kw (keep 就是 keep)
+      - keep 时强制 proposed=current,清 direction/placement；否词是独立叠加建议，保留
 
     Returns:
         bool: True 表示 action 被改写过 (用于日志统计)
@@ -2197,15 +2197,14 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
     changed = (item.action != derived)
     item.action = derived
 
-    # keep 语义清理: proposed 对齐 current, 清空 direction/placement/neg_kw
+    # keep 语义清理: proposed 对齐 current, 清空 direction/placement。
+    # 否词不参与 action 推导，是独立叠加建议，不能因数值维度维持而丢失。
     if derived == "keep":
         item.proposed_bid = item.current_bid
         item.proposed_budget = item.current_budget
         item.direction = {}
         if item.placement_adjustments:
             item.placement_adjustments = []
-        if item.negative_keywords:
-            item.negative_keywords = []
 
     return changed
 

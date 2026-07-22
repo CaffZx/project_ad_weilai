@@ -401,16 +401,19 @@ function _renderCards(state) {
     // 广告位/否词 专用渲染
     let extras = '';
     let placementBrief = '';
+    let negBrief = '';
     if (klass === 'create') {
       extras = _renderNewCampaignExtras(adj);
     } else {
       // 常驻广告位加价简表（真实 bid），不进 .detail
       placementBrief = _renderPlacementsBrief(adj);
+      // 常驻否词简表（按类型分组词列表），不进 .detail
+      negBrief = _renderNegKeywordsBrief(adj);
       if (adj.placement_adjustments && adj.placement_adjustments.length > 0) {
         extras += _renderPlacements(adj.placement_adjustments);
       }
-      if (adj.negative_keywords && adj.negative_keywords.length > 0) {
-        extras += _renderNegKeywords(adj.negative_keywords);
+      if (adj.neg_details && adj.neg_details.length > 0) {
+        extras += _renderNegKeywords(adj.neg_details);
       }
     }
 
@@ -427,6 +430,7 @@ function _renderCards(state) {
           <div class="meta">${_renderMetaChips(adj)}</div>
           <div class="values">${vals}</div>
           ${placementBrief}
+          ${negBrief}
           <div class="reason" style="white-space:pre-wrap;">${_esc(fullReason)}</div>
           <div class="detail hidden" style="display:none;">
             ${_renderEvidence(adj)}
@@ -470,6 +474,21 @@ function _renderEvidence(adj) {
   if (!adj.evidence || !adj.evidence.length) return '';
   return `<div style="margin-top:8px;font-size:12px;color:var(--camp-muted-fg);">
     <strong>证据：</strong><ul style="margin:4px 0 0 18px;padding:0;">${adj.evidence.map(e => `<li>${_esc(e)}</li>`).join('')}</ul></div>`;
+}
+
+// ── 否词常驻简表（卡片表面，按类型分组展示词列表）──
+function _renderNegKeywordsBrief(adj) {
+  const brief = adj.neg_keywords_brief;
+  if (!brief) return '';
+  const parts = [];
+  if (brief.exact && brief.exact.length) {
+    parts.push('<span style="font-weight:500;">否定精准</span> ' + brief.exact.map(k => _esc(k)).join(' · '));
+  }
+  if (brief.phrase && brief.phrase.length) {
+    parts.push('<span style="font-weight:500;">否定词组</span> ' + brief.phrase.map(k => _esc(k)).join(' · '));
+  }
+  if (!parts.length) return '';
+  return '<div style="margin-top:4px;font-size:11px;color:var(--camp-muted-fg);">' + parts.join(' &nbsp;|&nbsp; ') + '</div>';
 }
 
 // ── 广告位调整 ──
@@ -523,33 +542,18 @@ function _renderNewCampaignExtras(adj) {
   return h;
 }
 
-// ── 否词 ──
-function _renderNegKeywords(negKws) {
-  if (!negKws || !negKws.length) return '';
-  const decl = negKws.filter(n => n.is_declaration);
-  const real = negKws.filter(n => !n.is_declaration);
-  let h = '';
-  if (decl.length) {
-    h += '<div style="margin-top:8px;font-size:12px;">';
-    h += '<strong>否词策略：</strong>';
-    h += decl.map(n => _esc(n.keyword || '')).join('，');
-    h += '</div>';
-  }
-  if (real.length) {
-    const rec = real.filter(n => (n.vote || n.recommend) !== 'optional');
-    const opt = real.filter(n => (n.vote || n.recommend) === 'optional');
-    h += '<div style="margin-top:8px;font-size:12px;color:var(--camp-muted-fg);"><strong>否定关键词：</strong></div>';
-    if (rec.length) {
-      h += '<div style="font-size:11px;margin-left:12px;margin-top:2px;">推荐：';
-      h += rec.map(n => _esc(n.keyword || '?')).join('、');
-      h += '</div>';
-    }
-    if (opt.length) {
-      h += '<div style="font-size:11px;margin-left:12px;margin-top:2px;">可选：';
-      h += opt.map(n => _esc(n.keyword || '?')).join('、');
-      h += '</div>';
-    }
-  }
+// ── 否词展开明细（逐词逐证据，对齐广告位渲染模式）──
+function _renderNegKeywords(negDetails) {
+  if (!negDetails || !negDetails.length) return '';
+  let h = '<div style="margin-top:8px;font-size:12px;color:var(--camp-muted-fg);"><strong>否词明细：</strong></div>';
+  negDetails.forEach(n => {
+    const mt = n.match_type || '';
+    const mtLabel = mt === 'NEGATIVE_EXACT' ? '精准' : (mt === 'NEGATIVE_PHRASE' ? '词组' : (mt === 'NEGATIVE' ? '否词' : mt));
+    h += '<div style="font-size:12px;margin-left:12px;margin-top:4px;">'
+      + _esc(n.keyword || '?') + ' <span style="color:var(--camp-muted-fg);">(' + _esc(mtLabel) + ')</span>'
+      + (n.evidence ? '<div style="font-size:11px;color:var(--camp-muted-fg);">' + _esc(n.evidence) + '</div>' : '')
+      + '</div>';
+  });
   return h;
 }
 
@@ -653,7 +657,8 @@ function _renderPortfolioFilterPills(state) {
     const acos3 = (bs.portfolio_acos_3d || {})[name];
     const acos7 = (bs.portfolio_acos_7d || {})[name];
     const pctOrDash = v => v != null ? (v * 100).toFixed(0) + '%' : '-';
-    const spendLine = `<span class="pp-spend">1/3/7天花费：${moneyOrDash(spend1)} / ${moneyOrDash(spend3)} / ${moneyOrDash(spend7)} &nbsp;&nbsp;ACOS ${pctOrDash(acos1)} / ${pctOrDash(acos3)} / ${pctOrDash(acos7)}</span>`;
+    const spendLine = `<span class="pp-spend">1/3/7天花费：${moneyOrDash(spend1)} / ${moneyOrDash(spend3)} / ${moneyOrDash(spend7)}</span>`;
+    const acosLine = `<span class="pp-acos">ACOS：${pctOrDash(acos1)} / ${pctOrDash(acos3)} / ${pctOrDash(acos7)}</span>`;
 
     // 调整前/后预算（统计值）。低价捡漏组淘汰活动预算固定 $1、统计无意义 → 占位 "—"（美观对齐）
     const b = budgetByName[name];
@@ -665,6 +670,7 @@ function _renderPortfolioFilterPills(state) {
       <span class="pp-name">${_esc(name)} (${countByName[name] || 0})</span>
       <span class="pp-amount">${amtLabel} ${amt}</span>
       ${spendLine}
+      ${acosLine}
       ${budgetLine}
     </button>`;
   }).join('');

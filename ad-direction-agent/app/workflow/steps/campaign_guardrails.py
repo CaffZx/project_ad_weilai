@@ -461,14 +461,13 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
 # ── helper ────────────────────────────────────────────
 
 def _force_keep(item) -> None:
-    """将 item 重置为 keep 状态。"""
+    """将数值/广告位动作重置为 keep，保留独立否词建议。"""
     item.action = "keep"
     item.proposed_budget = item.current_budget
     item.proposed_bid = item.current_bid
     if hasattr(item, "direction"):
         item.direction = {}
     item.placement_adjustments = []
-    item.negative_keywords = []
 
 
 def _sample_insufficient(item, *, product_stage: str = "") -> tuple[bool, list[str]]:

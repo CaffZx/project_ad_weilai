@@ -61,13 +61,14 @@ class PlacementCanonical:
 
 @dataclass(slots=True)
 class KeywordPendingCanonical:
-    keyword_id: str
-    keyword_text: str | None
-    match_type: str | None
-    old_state: str | None
-    new_state: str | None
-    old_bid: Decimal | None
-    new_bid: Decimal | None
+    keyword_id: str = ""                     # 否词为 ""
+    keyword_text: str | None = None
+    match_type: str | None = None
+    old_state: str | None = None
+    new_state: str | None = None
+    old_bid: Decimal | None = None
+    new_bid: Decimal | None = None
+    neg_evidence: str | None = None          # 否词证据（LLM reason）
 
 
 @dataclass(slots=True)
@@ -109,6 +110,8 @@ class SuggestCardCanonical:
     placements: list[PlacementCanonical] = field(default_factory=list)
     keyword_pending: list[KeywordPendingCanonical] = field(default_factory=list)
     campaign_pending: list[CampaignPendingCanonical] = field(default_factory=list)
+    proposed_negetive_exact_keyword: list = field(default_factory=list)   # JSON: 否词精准文本列表
+    proposed_negetive_phrase_keyword: list = field(default_factory=list)  # JSON: 否词词组文本列表
 
 
 @dataclass(slots=True)

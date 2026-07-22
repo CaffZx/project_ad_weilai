@@ -97,10 +97,13 @@ def test_p0_ignores_non_core():
 def test_p1_blocks_eliminate_when_sample_insufficient():
     """cost < $5 or clicks < 10 or days ≤ 3 → 禁止淘汰"""
     item = _make_item(perf_7d={"cost": 2.0, "clicks": 3, "orders": 0},
-                       days_online=30, action="eliminate_to_low_bid_pool")
+                       days_online=30, action="eliminate_to_low_bid_pool",
+                       negative_keywords=[{"keyword": "irrelevant query"}])
     gp = apply_all([item])
     assert any(r.rule_id == "P1_SAMPLE_INSUFFICIENT" for r in gp.results)
     assert item.action == "keep"
+    # 否词是独立的叠加建议；P1 仅撤销淘汰，不得丢弃否词。
+    assert item.negative_keywords == [{"keyword": "irrelevant query"}]
 
 
 def test_p1_retry_instruction_blocks_eliminate_without_keep_only_bias():

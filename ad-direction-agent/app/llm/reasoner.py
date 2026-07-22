@@ -342,7 +342,7 @@ _CAMPAIGN_BROAD_PROMPT = (
       "proposed_budget": 8.0, "proposed_bid": 0.40,
       "evidence": ["7天花费$12.0", "否词5个后搜索词质量仍差"],
       "negative_keywords": [
-        {"keyword": "wedding dress", "clicks_7d": 12, "orders_7d": 0, "reason": "无转化高点击"}
+        {"keyword": "wedding dress", "match_type": "NEGATIVE_EXACT", "reason": "7天点击12次、零订单、无转化"}
       ],
       "review_level": "MANUAL_REVIEW"
     }
@@ -354,7 +354,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 ### 必填结构字段
 - **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
-- 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）
+- 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）。每个否词必须包含 keyword（搜索词文本）、match_type（仅允许 NEGATIVE_EXACT）、reason（证据：点击/花费/订单数及否定原因）
 
 ### 淘汰活动
 - 是否淘汰、淘汰保护和淘汰前诊断路径均以本次注入的 KB 21 §0-4 为准。
@@ -1830,6 +1830,25 @@ class LLMReasoner:
                 adj["match_type"] = src.get("match_type", "")
                 adj["current_bid"] = src.get("current_bid")
                 adj["current_budget"] = src.get("current_budget")
+                # 否词闸门：仅保留精准否定，词组否定在本层丢弃，下游永无感知
+                raw_neg = adj.get("negative_keywords") or []
+                cleaned_neg = []
+                for nk in raw_neg:
+                    if not isinstance(nk, dict):
+                        continue
+                    nk_mt = str(nk.get("match_type", "")).strip().upper()
+                    if nk_mt != "NEGATIVE_EXACT":
+                        logger.warning(
+                            "Campaign batch [%s] cid=%s 丢弃非精准否词 keyword=%r match_type=%r",
+                            asin, cid, nk.get("keyword"), nk_mt,
+                        )
+                        continue
+                    cleaned_neg.append({
+                        "keyword": (nk.get("keyword") or "").strip(),
+                        "match_type": "NEGATIVE_EXACT",
+                        "reason": (nk.get("reason") or "")[:512],
+                    })
+                adj["negative_keywords"] = cleaned_neg
                 adjustments.append(adj)
             # 后处理：规则编号脱敏 + 文风清洗
             for adj in adjustments:

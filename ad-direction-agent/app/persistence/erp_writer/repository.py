@@ -892,11 +892,12 @@ class ErpDualWriterRepository:
             suggest_category, confidence_level, campaign_group_type, campaign_id, campaign_name,
             asin, keyword, keyword_match_type, trigger_rule, description, evidence,
             keyword_class, review_level, is_core, perf_json, is_prefiltered, prefilter_reason,
+            proposed_negetive_exact_keyword, proposed_negetive_phrase_keyword,
             confirm_status, execute_status, sort_order, create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,
             'PENDING','PENDING',%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
@@ -918,6 +919,8 @@ class ErpDualWriterRepository:
             perf_json=VALUES(perf_json),
             is_prefiltered=VALUES(is_prefiltered),
             prefilter_reason=VALUES(prefilter_reason),
+            proposed_negetive_exact_keyword=VALUES(proposed_negetive_exact_keyword),
+            proposed_negetive_phrase_keyword=VALUES(proposed_negetive_phrase_keyword),
             sort_order=VALUES(sort_order),
             update_time=VALUES(update_time)
         """
@@ -925,22 +928,26 @@ class ErpDualWriterRepository:
         keyword_sql = """
         INSERT INTO t_advert_agent_modify_keyword_pending (
             id, shop_id, parent_asin, parent_seller_sku, site_code, decision_id, batch_no, suggest_card_id,
-            campaign_id, campaign_name, keyword_id, keyword_text, match_type,
-            old_state, new_state, old_bid, new_bid, confirm_status, execute_status, create_time, update_time
+            campaign_id, campaign_name, keyword_id, keyword_text, neg_evidence, match_type,
+            old_state, new_state, old_bid, new_bid, submit_user_id, submit_user_name,
+            confirm_status, execute_status, create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
             campaign_id=VALUES(campaign_id),
             keyword_id=VALUES(keyword_id),
             keyword_text=VALUES(keyword_text),
+            neg_evidence=VALUES(neg_evidence),
             match_type=VALUES(match_type),
             old_state=VALUES(old_state),
             new_state=VALUES(new_state),
             old_bid=VALUES(old_bid),
             new_bid=VALUES(new_bid),
+            submit_user_id=VALUES(submit_user_id),
+            submit_user_name=VALUES(submit_user_name),
             update_time=VALUES(update_time)
         """
 
@@ -948,9 +955,9 @@ class ErpDualWriterRepository:
         INSERT INTO t_advert_agent_modify_campaign_pending (
             id, shop_id, parent_asin, parent_seller_sku, decision_id, suggest_card_id, batch_no, site_code,
             campaign_id, campaign_name, old_state, new_state, old_budget, new_budget,
-            confirm_status, execute_status, create_time, update_time
+            submit_user_id, submit_user_name, confirm_status, execute_status, create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -959,6 +966,8 @@ class ErpDualWriterRepository:
             new_state=VALUES(new_state),
             old_budget=VALUES(old_budget),
             new_budget=VALUES(new_budget),
+            submit_user_id=VALUES(submit_user_id),
+            submit_user_name=VALUES(submit_user_name),
             update_time=VALUES(update_time)
         """
 
@@ -966,9 +975,9 @@ class ErpDualWriterRepository:
         INSERT INTO t_advert_agent_modify_placement_pending (
             id, shop_id, parent_asin, parent_seller_sku, decision_id, suggest_card_id, batch_no, site_code,
             campaign_id, campaign_name, placement_type, old_percent, new_percent, adjust_action, remark,
-            confirm_status, execute_status, create_time, update_time
+            submit_user_id, submit_user_name, confirm_status, execute_status, create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -977,8 +986,12 @@ class ErpDualWriterRepository:
             new_percent=VALUES(new_percent),
             adjust_action=VALUES(adjust_action),
             remark=VALUES(remark),
+            submit_user_id=VALUES(submit_user_id),
+            submit_user_name=VALUES(submit_user_name),
             update_time=VALUES(update_time)
         """
+
+        op = self._operator or None
 
         for card in run.cards:
             cur.execute(
@@ -1008,6 +1021,8 @@ class ErpDualWriterRepository:
                     card.perf_json,
                     1 if card.is_prefiltered else 0,
                     card.prefilter_reason,
+                    json.dumps(card.proposed_negetive_exact_keyword or [], ensure_ascii=False),
+                    json.dumps(card.proposed_negetive_phrase_keyword or [], ensure_ascii=False),
                     card.sort_order,
                     now,
                     now,
@@ -1016,9 +1031,16 @@ class ErpDualWriterRepository:
             card_count += 1
 
             for idx, kw in enumerate(card.keyword_pending, start=1):
-                kw_row_id = warehouse_pending_id(
-                    "mkp", run.decision_id, card.card_id, kw.keyword_id, kw.match_type, idx,
-                )
+                # 否词用 (keyword_text + match_type) 生成稳定 id；普通词沿用 (keyword_id + match_type + idx)
+                if kw.keyword_id:
+                    kw_row_id = warehouse_pending_id(
+                        "mkp", run.decision_id, card.card_id, kw.keyword_id, kw.match_type, idx,
+                    )
+                else:
+                    kw_row_id = stable_id(
+                        "mkp", run.decision_id, card.card_id,
+                        (kw.keyword_text or "").strip().lower(), kw.match_type or "",
+                    )
                 cur.execute(
                     keyword_sql,
                     (
@@ -1032,13 +1054,15 @@ class ErpDualWriterRepository:
                         card.card_id,
                         card.campaign_id,
                         card.campaign_name,
-                        kw.keyword_id,
+                        kw.keyword_id or None,
                         kw.keyword_text,
+                        kw.neg_evidence,
                         kw.match_type,
                         kw.old_state,
                         kw.new_state,
                         kw.old_bid,
                         kw.new_bid,
+                        op, op,
                         now,
                         now,
                     ),
@@ -1066,6 +1090,7 @@ class ErpDualWriterRepository:
                         c.new_state,
                         c.old_budget,
                         c.new_budget,
+                        op, op,
                         now,
                         now,
                     ),
@@ -1094,6 +1119,7 @@ class ErpDualWriterRepository:
                         plc.new_percent,
                         plc.adjust_action,
                         plc.remark,
+                        op, op,
                         now,
                         now,
                     ),

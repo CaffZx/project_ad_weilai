@@ -314,9 +314,11 @@
 .camp-portfolio-pill .pp-name { font-weight: 600; }
 .camp-portfolio-pill .pp-amount { font-size: 11px; opacity: 0.85; margin-top: 1px; }
 .camp-portfolio-pill .pp-spend { font-size: 11px; opacity: 0.85; margin-top: 1px; grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camp-portfolio-pill .pp-acos { font-size: 11px; opacity: 0.85; margin-top: 1px; grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .camp-portfolio-pill .pp-budget { font-size: 11px; opacity: 0.85; margin-top: 1px; }
 .camp-portfolio-pill.active .pp-amount,
 .camp-portfolio-pill.active .pp-spend,
+.camp-portfolio-pill.active .pp-acos,
 .camp-portfolio-pill.active .pp-budget { opacity: 1; }
 .camp-portfolio-pill .pp-acts { display: flex; gap: 4px; margin-top: 3px; }
 .camp-portfolio-pill .pp-act {

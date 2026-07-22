@@ -430,7 +430,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         #     logger.warning("codex 复核 hook 异常(fail-open)[%s]: %s", asin, _e)
 
         # 操作人 ID：前端 _userId（ERP 用户）或 operator 字段；写库时填 audit 列。
-        operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
+        operator = str(req.get("operator") or req.get("_userId") or "").strip() or None
 
         extra = {
             "state": state,

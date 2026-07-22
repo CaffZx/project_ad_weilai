@@ -53,8 +53,13 @@ def _is_negative(row: dict) -> bool:
 
 
 def _neg_match_type(match_type: Any) -> str:
+    """标准化否词匹配类型。兼容裸 EXACT/PHRASE 和带前缀格式；未知值不静默降级，返回空串由调用方跳过。"""
     mt = str(match_type or "").strip().upper()
-    return "NEGATIVE_EXACT" if mt == "EXACT" else "NEGATIVE_PHRASE"
+    if mt == "NEGATIVE_EXACT":
+        return "NEGATIVE_EXACT"
+    if mt == "NEGATIVE_PHRASE":
+        return "NEGATIVE_PHRASE"
+    return ""
 
 
 def _num(v: Any) -> float | None:
@@ -262,19 +267,29 @@ def _build_negative_call(plan, neg_by_campaign, shop_id, parent_asin, parent_sku
     for campaign_id, rows in neg_by_campaign.items():
         if not campaign_id:
             continue
-        campaign_vo_list.append({
-            "campaignId": campaign_id,
-            "keywordVoList": [{
-                "matchType": _neg_match_type(r.get("match_type")),
-                "keyword": r.get("keyword_text"),
-            } for r in rows],
-        })
+        kw_vo_list = []
         for r in rows:
+            mt = _neg_match_type(r.get("match_type"))
+            if not mt:
+                plan.warnings.append(
+                    f"否词 match_type 无效（keyword={r.get('keyword_text')} "
+                    f"match_type={r.get('match_type')}），跳过执行"
+                )
+                continue
+            kw_vo_list.append({
+                "matchType": mt,
+                "keyword": r.get("keyword_text"),
+            })
             plan.ops.append({
                 "record_kind": "keyword", "suggest_card_id": str(r.get("suggest_card_id")),
                 "campaign_id": campaign_id, "keyword_id": r.get("keyword_id"),
                 "keyword_text": r.get("keyword_text"), "pending_id": r.get("id"),
                 "is_negative": True, "new_state": "NEGATIVE",
+            })
+        if kw_vo_list:
+            campaign_vo_list.append({
+                "campaignId": campaign_id,
+                "keywordVoList": kw_vo_list,
             })
     if campaign_vo_list:
         plan.negative_calls.append({

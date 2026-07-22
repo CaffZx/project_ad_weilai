@@ -227,6 +227,7 @@ class Settings(BaseSettings):
     advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
     advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
+    campaign_negative_keyword_exec_enabled: bool = False  # 否词执行开关（默认关，后续验证通过后开启）
 
     # ── 核心词判定（离线，7 天一次）──
     core_keyword_enabled: bool = True              # 主流程是否读取核心词标签。fail-soft：表空/异常返回空 set，不影响主流程

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 
 def _action_klass(action: str) -> str:
     """action 字段 → CSS klass."""
@@ -112,6 +113,30 @@ def _index_pending(rows: list, key: str = "suggest_card_id") -> dict:
     return out
 
 
+def _parse_json(v) -> list | None:
+    """安全解析 JSON 列，兼容 DB 驱动返回字符串或原生列表。"""
+    if v is None:
+        return None
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return parsed if isinstance(parsed, list) else None
+        except Exception:
+            return None
+    return None
+
+
+_NEGATIVE_MATCH_TYPES = {
+    "NEGATIVE_EXACT",
+    "NEGATIVE_PHRASE",
+}
+
+def _is_negative_row(r: dict) -> bool:
+    return (r.get("match_type") or "").upper() in _NEGATIVE_MATCH_TYPES
+
+
 def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
     """21 表快照 raw dict → CampaignViewModel（实时轨 mode=interactive / 快照轨 mode=readonly 共用）。
 
@@ -137,13 +162,12 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
 
         bid_rows = [
             r for r in kw_rows
-            if (r.get("match_type") or "").upper() != "NEGATIVE"
+            if not _is_negative_row(r)
             and (r.get("old_bid") is not None or r.get("new_bid") is not None)
         ]
         neg_rows = [
             r for r in kw_rows
-            if (r.get("match_type") or "").upper() == "NEGATIVE"
-            or (r.get("new_state") or "").upper() in ("NEGATIVE", "PAUSED")
+            if _is_negative_row(r)
         ]
 
         current_budget = _f(camp_rows[0].get("old_budget")) if camp_rows else None
@@ -159,6 +183,20 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             "evidence": r.get("remark") or "",
         } for r in plc_rows]
         negative_keywords = [{"keyword": r.get("keyword_text") or ""} for r in neg_rows]
+
+        # 否词常驻简表：从 card JSON 列取按类型分组的词列表
+        neg_exact_brief = _parse_json(card.get("proposed_negetive_exact_keyword")) or []
+        neg_phrase_brief = _parse_json(card.get("proposed_negetive_phrase_keyword")) or []
+        neg_keywords_brief = {"exact": neg_exact_brief, "phrase": neg_phrase_brief}
+        # 否词展开明细：从 pending 行取逐词证据，按 match_type + keyword 排序
+        neg_details = sorted(
+            [{
+                "keyword": r.get("keyword_text") or "",
+                "match_type": r.get("match_type") or "",
+                "evidence": r.get("neg_evidence") or "",
+            } for r in neg_rows],
+            key=lambda x: (x["match_type"], (x["keyword"] or "").lower()),
+        )
 
         cat = (card.get("suggest_category") or "").upper()
         is_pref = bool(card.get("is_prefiltered"))
@@ -198,6 +236,8 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             "proposed_bid": proposed_bid,
             "placement_adjustments": placement_adjustments,
             "negative_keywords": negative_keywords,
+            "neg_keywords_brief": neg_keywords_brief,
+            "neg_details": neg_details,
             "ai_portfolio_class": _GROUP_CODE_TO_LABEL.get(grp_code, grp_code),
             "triggered_rule": card.get("trigger_rule") or "",
             "review_level": _REVIEW_LEVEL_LABELS.get(card.get("review_level") or "", card.get("review_level") or ""),

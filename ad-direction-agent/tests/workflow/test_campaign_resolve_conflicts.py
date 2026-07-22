@@ -15,7 +15,7 @@ os.environ["LLM_GLOBAL_CONCURRENCY"] = "420"
 
 import pytest
 from app.models.campaign import CampaignAdjustmentItem
-from app.workflow.steps.campaign import _resolve_budget_conflicts
+from app.workflow.steps.campaign import _normalize_action, _resolve_budget_conflicts
 
 
 def _item(name="c1", action="keep", current_budget=1.0, current_bid=0.20,
@@ -87,11 +87,24 @@ def test_new_campaign_llm_misjudge_eliminate_corrected_to_keep():
     assert item.proposed_bid == 0.50     # 回退 current
     assert item.direction == {}
     assert item.placement_adjustments == []
-    assert item.negative_keywords == []
+    # 样本保护只撤销淘汰，不能顺带抹掉独立否词建议。
+    assert item.negative_keywords == [{"keyword": "bad"}]
     assert len(warnings) == 1
     assert "上线仅 2 天" in warnings[0]
     assert "样本不足" in warnings[0]
     assert "强制修正为 keep" in warnings[0]
+
+
+def test_normalize_keep_preserves_negative_keywords():
+    """数值动作归一为 keep 时，否词仍是可执行的独立建议。"""
+    item = _item(action="adjust_bid", current_budget=5.0, current_bid=0.50)
+    item.negative_keywords = [{"keyword": "irrelevant query"}]
+
+    changed = _normalize_action(item)
+
+    assert changed is True
+    assert item.action == "keep"
+    assert item.negative_keywords == [{"keyword": "irrelevant query"}]
 
 
 def test_new_campaign_llm_misjudge_eliminate_with_low_budget_force_eliminated():

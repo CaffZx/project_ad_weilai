@@ -362,23 +362,24 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
                         op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
                         op["error_msg"] = f"{type(e).__name__}: {e}"
 
-        for call in plan.negative_calls:
-            try:
-                res = await client.create_negative_keywords(call)
-                results["negative"].append(res)
-                ok, msg = parse_result_envelope(res)
-                for op in plan.ops:
-                    if op.get("is_negative"):
-                        op["modify_result"] = "SUCCESS" if ok else "FAIL"
-                        op["execute_status"] = "SUCCESS" if ok else "FAIL"
-                        if not ok:
-                            op["error_msg"] = msg
-            except Exception as e:  # noqa: BLE001
-                logger.exception("create_negative_keywords 失败 [%s]: %s", decision_id, e)
-                for op in plan.ops:
-                    if op.get("is_negative"):
-                        op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
-                        op["error_msg"] = f"{type(e).__name__}: {e}"
+        if settings.campaign_negative_keyword_exec_enabled:
+            for call in plan.negative_calls:
+                try:
+                    res = await client.create_negative_keywords(call)
+                    results["negative"].append(res)
+                    ok, msg = parse_result_envelope(res)
+                    for op in plan.ops:
+                        if op.get("is_negative"):
+                            op["modify_result"] = "SUCCESS" if ok else "FAIL"
+                            op["execute_status"] = "SUCCESS" if ok else "FAIL"
+                            if not ok:
+                                op["error_msg"] = msg
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("create_negative_keywords 失败 [%s]: %s", decision_id, e)
+                    for op in plan.ops:
+                        if op.get("is_negative"):
+                            op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
+                            op["error_msg"] = f"{type(e).__name__}: {e}"
     finally:
         await client.aclose()
 
@@ -433,7 +434,14 @@ async def submit_execution_direct(
         return {"ok": True, "dry_run": True, "ops": len(plan.ops),
                 "warnings": plan.warnings}
 
-    # 真跑：调 MCP，不写库
+    # 标 CONFIRMED：记录"同意执行"操作人
+    confirm_items = [{"card_id": cid, "decision": "approve"} for cid in card_ids]
+    try:
+        _get_repository().confirm_decisions(decision_id, confirm_items, operator=operator)
+    except Exception:
+        pass
+
+    # 真跑：调 MCP
     client = AdvertMcpClient()
     try:
         # 挪组：MODIFY 路径注入 portfolioId
@@ -488,16 +496,17 @@ async def submit_execution_direct(
                 logger.exception("create_portfolio_campaign 失败(direct) [%s]: %s", decision_id, e)
                 errors.append(f"create: {type(e).__name__}: {e}")
 
-        for call in plan.negative_calls:
-            try:
-                res = await client.create_negative_keywords(call)
-                results["negative"].append(res)
-                ok, msg = parse_result_envelope(res)
-                if not ok:
-                    errors.append(f"negative: {msg}")
-            except Exception as e:  # noqa: BLE001
-                logger.exception("create_negative_keywords 失败(direct) [%s]: %s", decision_id, e)
-                errors.append(f"negative: {type(e).__name__}: {e}")
+        if settings.campaign_negative_keyword_exec_enabled:
+            for call in plan.negative_calls:
+                try:
+                    res = await client.create_negative_keywords(call)
+                    results["negative"].append(res)
+                    ok, msg = parse_result_envelope(res)
+                    if not ok:
+                        errors.append(f"negative: {msg}")
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("create_negative_keywords 失败(direct) [%s]: %s", decision_id, e)
+                    errors.append(f"negative: {type(e).__name__}: {e}")
     finally:
         await client.aclose()
 

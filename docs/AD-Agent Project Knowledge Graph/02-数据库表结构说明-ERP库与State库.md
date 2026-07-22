@@ -734,6 +734,7 @@ CREATE TABLE `t_advert_agent_modify_keyword_pending` (
   `campaign_name` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '广告活动名称',
   `keyword_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关键词ID',
   `keyword_text` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关键词文本',
+  `neg_evidence` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '否词证据（LLM原始reason）',
   `match_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT 'EXACT/PHRASE/BROAD',
   `old_state` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改前状态',
   `new_state` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改后状态',
@@ -973,6 +974,8 @@ CREATE TABLE `t_advert_agent_modify_suggest_card` (
   `keyword_class` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '关键词分类',
   `perf_json` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci COMMENT '性能指标JSON',
   `prefilter_reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '预过滤原因',
+  `proposed_negetive_exact_keyword` json DEFAULT NULL COMMENT 'LLM建议-否定精准词列表',
+  `proposed_negetive_phrase_keyword` json DEFAULT NULL COMMENT 'LLM建议-否定词组词列表',
   `review_level` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '复评等级',
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE KEY `uk_modify_suggest_card_campaign` (`decision_id`,`campaign_id`) USING BTREE,
@@ -1328,7 +1331,7 @@ Campaign 分析写 ERP 时，一张前端 card 可以对应多类 pending：
 | --- | --- | --- |
 | MODIFY existing campaign | `campaign_pending` | budget、campaign state、portfolio/group |
 | keyword bid/state | `keyword_pending` | bid 调整、关键词暂停/启用 |
-| negative keyword | `keyword_pending` | 新建否定词，执行时走 negative MCP |
+| negative keyword | `keyword_pending`（match_type=NEGATIVE，keyword_id=NULL） | 新建否定词，执行时走 negative MCP |
 | placement | `placement_pending` | TOS/ROS/Product Page 溢价 |
 | CREATE new campaign | `campaign_pending` + `keyword_pending` + 可选 `placement_pending` | 新建活动和关键词 |
 | 灰卡/预过滤 | 通常无 pending | 展示，不可执行 |
