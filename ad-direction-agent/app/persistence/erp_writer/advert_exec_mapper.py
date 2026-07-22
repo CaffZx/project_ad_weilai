@@ -53,12 +53,13 @@ def _is_negative(row: dict) -> bool:
 
 
 def _neg_match_type(match_type: Any) -> str:
-    """标准化否词匹配类型。兼容裸 EXACT/PHRASE 和带前缀格式；未知值不静默降级，返回空串由调用方跳过。"""
+    """标准化否词匹配类型 → MCP 期望的 lowerCamelCase。
+    DB 存储 NEGATIVE_EXACT / NEGATIVE_PHRASE，MCP 要求 negativeExact / negativePhrase。"""
     mt = str(match_type or "").strip().upper()
     if mt == "NEGATIVE_EXACT":
-        return "NEGATIVE_EXACT"
+        return "negativeExact"
     if mt == "NEGATIVE_PHRASE":
-        return "NEGATIVE_PHRASE"
+        return "negativePhrase"
     return ""
 
 

@@ -2028,7 +2028,7 @@ async def _prefetch_search_terms(
         result = await asyncio.wait_for(
             fetcher.fetch_search_terms_for(list(search_term_names), shop_account,
                                            start_date=sd, end_date=ed),
-            timeout=60,
+            timeout=getattr(settings, "campaign_st_fetch_timeout", 180),
         ) or {}
         for name in enriched:
             s_name = name.get("campaign_name", "")

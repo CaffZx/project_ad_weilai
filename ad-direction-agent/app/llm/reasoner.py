@@ -327,8 +327,8 @@ _CAMPAIGN_BROAD_PROMPT = (
 3. **查动作矩阵**: KB 17 §3 按广告方向 × 问题类型取有序动作（广泛活动多走 §3.2 expand_keywords / §3.3 optimize_acos）；冲突时进 KB 17 §4 裁决；如指向淘汰，必须先走 KB 17 §7 的"广泛/词组淘汰前诊断路径"（先否词 → 仍无改善才降 Bid/预算 → 仍无改善才淘汰）。
 4. **取约束数值**: KB 15 §1（Bid 公式/保护规则/硬上下限）、KB 15 §2（预算范围 + 淡旺季系数）。
 5. **应用幅度系数**: 最终幅度 = KB 19 基础幅度 × KB 17 §5.2 阶段系数 × KB 17 §5.3 淡旺季系数。
-6. **细化执行**: KB 22 §3（广泛/词组调整规则）、KB 19 §7/§8（自动广泛组/否词触发）、KB 21 §0-4（淘汰规则）。
-通用基准: KB 19 §1-4/§6-8。
+6. **否词决策**: 先读 KB 30 §2（必需数据）确认数据可用，再按 KB 30 §3 判断搜索词相关性，最后走 KB 30 §5 准入规则和 KB 30 §6 精准/词组选择。**注意**: 当前仅注入 7 天搜索词数据，不含更长时间窗口。若搜索词点击<10 且花费<$5，应输出 SAMPLE_INSUFFICIENT 而非强行否词或淘汰。
+7. **淘汰决策**: KB 21 §0-4。
 
 ## 输出格式
 {
@@ -1774,11 +1774,13 @@ class LLMReasoner:
                 terms = st_data if isinstance(st_data, list) else st_data.get("search_terms", [])
                 if terms:
                     camp_parts.append(f"  - ★搜索词报告 ({len(terms)} 个搜索词):")
-                    for t in terms[:15]:  # 最多展示15个
+                    for t in terms:
                         if isinstance(t, dict):
+                            imp = t.get('impressions', 0)
                             camp_parts.append(
                                 f"      [{t.get('keyword','?')}] 花费=${t.get('cost',0)}, "
-                                f"订单={t.get('orders',0)}, 点击={t.get('clicks',0)}, "
+                                f"销售额=${t.get('sales',0)}, 订单={t.get('orders',0)}, "
+                                f"点击={t.get('clicks',0)}, 曝光={imp}, "
                                 f"ACOS={t.get('acos','N/A')}%"
                             )
 

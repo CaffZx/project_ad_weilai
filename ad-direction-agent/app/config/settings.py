@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     # Campaign 分析
     campaign_discovery_timeout: float = 90.0
     campaign_mcp_tool_timeout: float = 300.0
+    campaign_st_fetch_timeout: float = 180.0    # search_term 预取总超时（所有广泛活动共享）
     # 用 MCP 工具 ad_campaign_product_keyword_list 发现活动 + 关键词
     mcp_discover_campaigns: bool = True
     # 用 MCP 工具 ad_campaign_basic_info_v2 (campaign_id_list) 替代 V1 (campaign_name_list)。
@@ -227,7 +228,7 @@ class Settings(BaseSettings):
     advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
     advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
-    campaign_negative_keyword_exec_enabled: bool = False  # 否词执行开关（默认关，后续验证通过后开启）
+    campaign_negative_keyword_exec_enabled: bool = True   # 否词执行开关
 
     # ── 核心词判定（离线，7 天一次）──
     core_keyword_enabled: bool = True              # 主流程是否读取核心词标签。fail-soft：表空/异常返回空 set，不影响主流程

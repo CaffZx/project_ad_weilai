@@ -134,7 +134,7 @@ Campaign 主入口需要：
 | 活动基础信息 | `ad_campaign_basic_info_v2` | `campaign_fetcher.py:177`；`:352` `_fetch_basic_batch_v2()` | current bid、budget、match type、state 等基础字段 |
 | 活动商品表现 | `ad_campaign_product_report` | `campaign_fetcher.py:186`；`:454` `_fetch_perf_one()` | ACOS、spend、sales、orders、clicks、CVR 等事实 |
 | placement | `ad_campaign_placement_report` | `campaign.py:1873` `_prefetch_placement()`；`campaign_fetcher.py:501` `fetch_placement_for()` | exact 流广告位建议和 P10 placement 护栏 |
-| search term | `ad_campaign_search_term_report` | `campaign.py:1935` `_prefetch_search_terms()`；`campaign_fetcher.py:557` `fetch_search_terms_for()` | broad/phrase/auto 流否定词、搜索词证据 |
+| search term | `ad_campaign_search_term_report` | `campaign.py:1985` `_prefetch_search_terms()`；`campaign_fetcher.py:560` `fetch_search_terms_for()` — 含预过滤+排序+截10 | broad/phrase/auto 流否定词、搜索词证据；预过滤规则见 §搜索词预过滤 |
 | portfolio 预算+花费+ACOS | `ad_portfolio_list` (固定 1/3/7d 三窗口并行) | `campaign.py:546`；`campaign_fetcher.py:817` `fetch_portfolio_list()` | 原始预算→回算；日均花费→LLM prompt；1/3/7d 花费+ACOS→DB→前端看板 |
 | 自然排名 | `keyword_child_asins` / `own_keyword_flow` | `campaign_fetcher.py:920` 附近批量拉取 | exact/new campaign 的关键词自然位证据 |
 | 新建活动候选词 | `flow_keywords` / `own_keyword_flow` / 可选竞品反查 | `campaign_fetcher.py:602`；`:665`；`campaign_new.py:263` | 新建 exact/broad 活动候选池 |
@@ -146,6 +146,19 @@ Campaign 主入口需要：
 - portfolio 预算+花费+ACOS 优先使用 `ad_portfolio_list` 真实值（固定 1/3/7d 三窗口并行，7d 失败→整体回退 60/20/20；1d/3d 失败仅对应窗口 NULL）。预算兜底只影响 LLM 回算，不伪造花费/ACOS 事实。花费/ACOS 不进入 `aggregate()` 或 LLM prompt，仅走 DB→快照→前端看板。
 - 新建活动候选词来自 `flow_keywords` 和 `own_keyword_flow`，竞品词源是可选增强；竞品不可用时不阻断主线。
 - 当前链路是 MCP 真源，不再描述本地数仓直连兜底。
+
+### 搜索词预过滤
+
+在 `fetch_search_terms_for()` 内完成，位于 MCP 拉取后、注入 LLM prompt 前。每条搜索词按以下规则判定是否保留：
+
+| 优先级 | 条件 | 动作 | 理由 |
+|--------|------|------|------|
+| ① | 有订单 (`orders > 0`) | 保留 | 已验证有效，可判断否词 ACOS 或提取精准 |
+| ② | 点击 ≥ 3 | 保留 | 有复现，可判断转化方向 |
+| ③ | 曝光 ≥ 200 且 点击 ≤ 1 | 保留 | 高曝光零点击 = CTRL 异常信号 |
+| — | 点击 ≤ 1 且 0 订单 且 曝光 < 200 | **过滤** | 单次偶发点击 + 低曝光 = 纯噪音 |
+
+保留词按 **花费降序 → 同花费曝光降序** 排序，取前 10 条注入 LLM prompt。prompt 注入字段：keyword、clicks、cost、orders、impressions、ACOS。
 
 ## 运行互斥和缓存
 
@@ -397,7 +410,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 **P0 — 核心词禁淘汰** (`_p0_core_protect`)
 
 - 触发：`is_core=True` 且 `action == eliminate_to_low_bid_pool`
-- 动作：`_force_keep(item)` —— action 改 keep，proposed_bid/budget 回退到 current，清空 direction/placement_adjustments/negative_keywords
+- 动作：`_force_keep(item)` —— action 改 keep，proposed_bid/budget 回退到 current，清空 direction/placement_adjustments；保留 negative_keywords（否词是叠加建议，keep 时不丢失）
 - 优先级：最高。P3 显式检查 `is_core` → return，确保不被硬淘汰覆盖
 - KB 依据：KB21 §2 Custom 核心词保护
 - R3/R4 回灌文案：

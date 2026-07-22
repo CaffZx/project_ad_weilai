@@ -564,7 +564,7 @@ class CampaignFetcher:
         start_date: str = "",
         end_date: str = "",
     ) -> dict[str, list]:
-        """按需拉取搜索词报告（仅广泛广告）。"""
+        """按需拉取搜索词报告（仅广泛广告）。返回已预过滤、排序、截断。"""
         results: dict[str, list] = {}
         sem = self._mcp_sem
 
@@ -579,16 +579,37 @@ class CampaignFetcher:
                     payload = _as_rows(res.value)
                     terms = []
                     for row in payload:
+                        orders = int(_to_float(row.get("广告订单量")) or 0)
+                        clicks = int(_to_float(row.get("点击量")) or 0)
+                        impressions = int(_to_float(row.get("曝光量")) or 0)
+                        # ── 搜索词预过滤 ──
+                        # 保留规则（优先级从高到低）：
+                        #   ① 有订单 → 已验证有效，可判断否词 ACOS 或提取精准
+                        #   ② 点击 ≥ 3 → 有复现，可判断转化方向
+                        #   ③ 曝光 ≥ 200 且 点击 ≤ 1 → 高曝光零点击 = CTRL 异常信号
+                        # 过滤规则：
+                        #   点击 ≤ 1 且 0 订单 且 曝光 < 200 → 单次偶发点击 = 纯噪音
+                        if orders > 0:
+                            pass
+                        elif clicks >= 3:
+                            pass
+                        elif impressions >= 200 and clicks <= 1:
+                            pass
+                        elif clicks <= 1 and orders == 0 and impressions < 200:
+                            continue
                         terms.append({
                             "keyword": str(row.get("搜索词") or ""),
-                            "clicks": int(_to_float(row.get("点击量")) or 0),
+                            "clicks": clicks,
                             "cost": _to_float(row.get("花费")) or 0.0,
                             "sales": _to_float(row.get("销售额")) or 0.0,
-                            "orders": int(_to_float(row.get("广告订单量")) or 0),
+                            "orders": orders,
+                            "impressions": impressions,
                             "acos": _to_pct(row.get("ACOS")),
                             "cvr": _to_pct(row.get("CVR")),
                         })
-                    return name, terms
+                    # 花费降序 → 同花费曝光降序 → 取前10
+                    terms.sort(key=lambda t: (-t["cost"], -t["impressions"]))
+                    return name, terms[:10]
             except Exception as e:  # noqa: BLE001
                 logger.warning("search_term 解析失败 [%s]: %s", name, e)
             return name, []
