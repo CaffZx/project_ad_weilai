@@ -231,23 +231,17 @@ class NewKeywordFetcher:
                 child_asin = parent_asin
             async with az_sem:
                 try:
-                    res = await asyncio.wait_for(
-                        self._mcp().call_tool_timed_with_args(
-                            "erp_listing_asin_keyword_rank_history",
-                            {
-                                "asin": child_asin,
-                                "keyword": record.keyword_text,
-                                "siteCode": site_code.replace("Amazon_", ""),
-                                "startDate": hist_start,
-                                "endDate": hist_end,
-                            },
-                            az_timeout,
-                        ),
-                        timeout=az_timeout + 5,
+                    res = await self._mcp().call_tool_timed_with_args(
+                        "erp_listing_asin_keyword_rank_history",
+                        {
+                            "asin": child_asin,
+                            "keyword": record.keyword_text,
+                            "siteCode": site_code.replace("Amazon_", ""),
+                            "startDate": hist_start,
+                            "endDate": hist_end,
+                        },
+                        az_timeout,
                     )
-                except asyncio.TimeoutError:
-                    record.history_state = "query_failed"
-                    return
                 except Exception as e:
                     logger.debug("history enrichment [%s][%s]: %s", parent_asin, record.keyword_text, e)
                     record.history_state = "query_failed"
