@@ -21,6 +21,7 @@ data/source/csv_output/
 
 # 运行时
 *.log
+logs/
 agent_checkpoints.db
 
 # 运营配置（运行时生成，按 ASIN 隔离，不提交）
