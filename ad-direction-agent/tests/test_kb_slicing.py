@@ -129,6 +129,17 @@ def test_new_campaign_prompt_uses_only_its_decision_scope():
     assert "场景化扩词配额" not in prompt
 
 
+def test_new_campaign_prompt_explains_rank_history_evidence_states():
+    prompt = _build_new_campaign_prompt()
+
+    assert "search_rank" in prompt
+    assert "rank_trend" in prompt
+    assert "rank_tier" in prompt
+    assert "sponsored_rank" in prompt
+    assert "not_eligible / query_failed" in prompt
+    assert "不等同于“无自然位”" in prompt
+
+
 def test_new_campaign_drops_code_numerics():
     nc = kb.build("new_campaign")
     # KB16 §2/§3/§5：预算/bid/输出schema 是代码用的，prompt 禁 LLM 输出 → 噪声

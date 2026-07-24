@@ -400,18 +400,25 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 ## 输入
 - 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循；含运营配置的「目标关键词类型」）
 - **本产品标题** + **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
-- 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / week_search_volume(周搜索量) / natural_rank(当前自然位) / week_rank(词的周排名) / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
+- 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / search_rank(流量词库搜索排名) / week_search_volume(周搜索量) / week_rank(词的周排名) / natural_rank(历史最新自然位) / rank_trend(近7天自然位序列) / rank_tier(自然位分位) / sponsored_rank(广告排位) / history_state / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
+
+## 排名数据使用规则（必须遵循）
+- `search_rank` 是流量词库的搜索排名，反映词的热度/竞争位置；它**不是** `week_rank`，也不能单独证明该词与本产品相关。
+- `natural_rank`、`rank_trend`、`rank_tier`、`sponsored_rank` 仅在 `history_state=ok` 时才是可用的历史证据。自然位数字越小越靠前；趋势序列只作辅助判断，不可脱离标题属性单独建词。
+- `rank_tier` 与 `sponsored_rank` 是辅助信号：可用于判断排名层级和广告竞争，但不能替代产品属性相关性判断。
+- `history_state=not_eligible / query_failed / empty` 表示没有可用的历史排名证据：`not_eligible` 是预过滤未查询，`query_failed` 是查询失败，`empty` 是查询无历史记录。它们**不等同于“无自然位”**，不得把它们写成“该 ASIN 从未有自然位”或据此降低相关性；应以标题、已投词和其余可用信号判断。
 
 ## 相关性判断与档位（首要，KB28 §2 + KB 06 §3 相关性精神）
-**综合权衡**这四个信号 → 给出 relevance_tier，不要只看其中一个：
-  ① 自然位 natural_rank（靠前=数字小=事实相关强）② 周排名 week_rank（趋势/当周位置）
-  ③ 搜索量 search_volume / week_search_volume ④ 与**标题具体属性**的相关度。
+**综合权衡**可用信号 → 给出 relevance_tier，不要只看其中一个：
+  ① `history_state=ok` 时的自然位 natural_rank（靠前=数字小=事实相关强）及 rank_trend
+  ② search_rank / week_rank / search_volume / week_search_volume 的热度与位置
+  ③ rank_tier / sponsored_rank 的辅助竞争信号 ④ 与**标题具体属性**的相关度。
 - **R1 精确相关**：词义=产品本体，或精确匹配标题核心属性（品类+核心属性词），或 natural_rank 有值（亚马逊确实让本产品排该词=事实相关）。
 - **R2 扩展相关**：同类目近义、上位/下位词、强相关使用场景词；有搜索量/排名数据支撑。
 - **R3 试探相关**：可能相关、需验证（跨类目联想词等）；**仅测试期可承接，且 reason 必须写明"为何判定可能相关"**。
 - **R4 风险相关**：词义偏离、易招无效点击 → **一律 action=skip**。
 - **属性级精准，不是品类级**：仅"同品类"不够。例：标题"短裙 mini skirt"→"中长裙 midi/maxi""连衣裙 dress"长度/款式不符 → 判 R4 并 skip；reason 点明属性是否吻合。
-- **信号怎么综合**：自然位/周排名靠前 + 标题属性吻合 → 倾向 R1；**搜索量高但与标题属性不符 → 不因量大就抬档**（量大≠相关）；**搜索量低但属性精确吻合或有自然位 → 仍可 R1**（低量精准长尾是运营偏好，勿因量小误杀）。
+- **信号怎么综合**：可用自然位/周排名靠前 + 标题属性吻合 → 倾向 R1；**搜索量高但与标题属性不符 → 不因量大就抬档**（量大≠相关）；**搜索量低但属性精确吻合或有可用自然位 → 仍可 R1**（低量精准长尾是运营偏好，勿因量小误杀）。历史状态非 ok 时，不得把缺失数据当作负面证据。
 - **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，不要因参照少就过度 skip——以标题为主判相关性。
 
 ## 词型偏好与运营目标类型（KB 06 + 运营配置）
@@ -1937,14 +1944,24 @@ class LLMReasoner:
         cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class + relevance_tier)"]
         for i, c in enumerate(candidates):
             rank = c.get("natural_rank")
+            trend = c.get("rank_trend") or ""
+            sr = c.get("search_rank")
             wk = c.get("week_rank")
             wsv = c.get("week_search_volume")
+            tier = c.get("rank_tier") or ""
+            sp = c.get("sponsored_rank")
+            his = c.get("history_state") or ""
             line = (
                 f"\n### 候选 {i + 1}: {c.get('keyword_text', '')}"
                 f"\n  - 搜索量: {c.get('search_volume', 0)}"
+                + (f"\n  - 搜索排名: {sr}" if sr is not None else "")
                 + (f"\n  - 周搜索量: {wsv}" if wsv is not None else "")
                 + f"\n  - 当前自然位: {rank if rank is not None else 'N/A(无自然位)'}"
+                + (f"\n  - 自然位趋势(7天): {trend}" if trend else "")
+                + (f"\n  - 自然位分位: {tier}" if tier else "")
+                + (f"\n  - 广告排位: {sp}" if sp is not None else "")
                 + (f"\n  - 词的周排名: {wk}" if wk is not None else "")
+                + (f"\n  - 历史数据: {his}" if his and his != "ok" else "")
                 + f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
             )
             if c.get("source"):

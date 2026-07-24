@@ -297,9 +297,10 @@ async def analyze_new_campaigns(
         warnings.append(f"新增活动分析被阻断: {block}")
         return [], warnings, search_volume_map
 
-    # 1. 候选词发现 (MCP flow_keywords + own_keyword_flow)
-    # ① 竞品发现(direct_competitors→reverse)只依赖 parent_asin/sku/shop，与 flow/own 独立 →
-    #    competitor 开启时作 task 与 discover_new_keywords 并行（少串 ~2 个 MCP 往返），下方竞品块 await 同一 task。
+    # 1. 候选词发现 (NewKeywordFetcher: flow + own + history + suggest_bid)
+    from app.data.new_keyword_fetcher import NewKeywordFetcher
+
+    # ① 竞品发现（独立 task，与 flow/own 并行）
     comp_task = (
         asyncio.create_task(fetcher.discover_competitor_keywords(
             parent_asin=parent_asin, shop_account=shop_account,
@@ -308,13 +309,19 @@ async def analyze_new_campaigns(
         if settings.campaign_new_competitor_enabled else None
     )
     try:
-        flow_rows, own_rows = await fetcher.discover_new_keywords(
-            parent_asin=parent_asin,
-            shop_account=shop_account,
-            parent_seller_sku=parent_seller_sku,
-            site_code=site_code,
+        kw_fetcher = NewKeywordFetcher()
+        kw_data = await kw_fetcher.fetch(
+            parent_asin=parent_asin, shop_account=shop_account,
+            parent_seller_sku=parent_seller_sku, site_code=site_code,
+            existing_keywords=existing_keywords,
+            target_child_asin=target_child_asin,
+            pre_eliminated_count=pre_eliminated_count,
+            strategy_context=strategy_context,
             days=days,
         )
+        search_volume_map = kw_data.search_volume_map
+        if kw_data.errors:
+            warnings.extend(kw_data.errors)
     except Exception as e:  # noqa: BLE001
         if comp_task is not None:
             comp_task.cancel()
@@ -322,92 +329,32 @@ async def analyze_new_campaigns(
         warnings.append(f"候选词发现失败: {type(e).__name__}: {e}")
         return [], warnings, search_volume_map
 
-    # flow/own 空：competitor 关→无源可分，直接返；competitor 开→竞品仍可能有词，继续（下方 await comp_task）
-    if not flow_rows and not own_rows and not settings.campaign_new_competitor_enabled:
-        warnings.append("候选词发现返回空 (MCP 数据不可用)")
-        return [], warnings, search_volume_map
-
-    # 全量搜索量映射（不过滤、含已有活动词）→ 透传给预算回算 agent（KB23 §3.1A），零新增 MCP
-    for r in flow_rows:
-        kw = str(r.get("关键词") or r.get("keyword") or "").strip().lower()
-        if not kw:
-            continue
-        try:
-            search_volume_map[kw] = int(float(r.get("搜索量") or r.get("search_volume") or 0))
-        except (TypeError, ValueError):
-            continue
-
-    # 2. 归一化 + 硬过滤
-    def _to_int_or_none(v):
-        try:
-            return int(float(v)) if v not in (None, "") else None
-        except (TypeError, ValueError):
-            return None
-
-    own_rank_map: dict[str, int] = {}
-    own_week_map: dict[str, dict] = {}   # kw -> {"week_rank", "week_search_volume"}（KB28 §2 周排名信号）
-    for r in own_rows:
-        kw = str(r.get("关键词") or r.get("keyword") or "").strip().lower()
-        if not kw:
-            continue
-        # own_keyword_flow 真实字段=自然排位排名/自然位排位（live 核实 2026-06-24，非"自然排名"）
-        rank = _to_int_or_none(r.get("自然排位排名") or r.get("自然位排位")
-                               or r.get("自然排名") or r.get("natural_rank"))
-        if rank is not None:
-            own_rank_map[kw] = rank
-        # KB28 §2 周排名信号：own_keyword_flow「词的周排名」+「周搜索量」（缺则 None；语义待 live 终核）
-        wk = _to_int_or_none(r.get("词的周排名") or r.get("week_rank"))
-        wsv = _to_int_or_none(r.get("周搜索量") or r.get("week_search_volume"))
-        if wk is not None or wsv is not None:
-            own_week_map[kw] = {"week_rank": wk, "week_search_volume": wsv}
-
-    # 去重合并来源（Q1）：by_kw 同词只留一条，多源命中则合并 source_reason、bucket 归最高优先级源。
-    # 注：existing_keywords(已投词) / 噪声 / 搜索量<阈值 仍是「直接过滤」(非跨源去重)。
+    # 2. ★ NewKeywordRecord → NewCampaignCandidate 投影 + 竞品合并
     by_kw: dict[str, NewCampaignCandidate] = {}
-    # ── 源1+2: flow_keywords（含自然位机会词）──
-    for r in flow_rows:
-        kw = str(r.get("关键词") or r.get("keyword") or "").strip().lower()
-        if not kw or kw in existing_keywords or _is_noise_keyword(kw):
-            continue
-        try:
-            sv = int(float(r.get("搜索量") or r.get("search_volume") or 0))
-        except (TypeError, ValueError):
-            sv = 0
-        if sv < MIN_SEARCH_VOLUME:
-            continue
-        rank = own_rank_map.get(kw)
-        _wk = own_week_map.get(kw, {})
+    for r in kw_data.records:
+        his_ok = r.history_state == "ok"
         cand = NewCampaignCandidate(
-            keyword_text=kw, search_volume=sv, natural_rank=rank, suggested_bid=None,
-            week_rank=_wk.get("week_rank"), week_search_volume=_wk.get("week_search_volume"),
+            keyword_text=r.keyword_text,
+            search_volume=r.search_volume,
+            search_rank=r.search_rank,
+            natural_rank=r.natural_rank if his_ok else None,
+            rank_trend=r.rank_trend if his_ok else None,
+            rank_tier=r.rank_tier if his_ok else None,
+            sponsored_rank=r.sponsored_rank if his_ok else None,
+            week_rank=r.week_rank,
+            week_search_volume=r.week_search_volume,
+            history_state=r.history_state,
+            suggested_bid=None,   # 下方 bid_task 并行填
+            source=r.source,
+            source_reason=r.source_reason,
         )
-        # 按信号分桶（H2/H10）：有自然位机会(28-48)=事实相关→ranking_opportunity，否则 flow
-        if rank is not None and 28 <= rank <= 48:
-            cand.source = "ranking_opportunity"
-            cand.source_reason = f"自然位{rank}机会词(搜索量{sv})"
-        else:
-            cand.source = "flow"
-            cand.source_reason = f"流量词库(搜索量{sv})"
         cand.trigger_scene = _label_trigger(cand, strategy_context, pre_eliminated_count)
         _merge_candidate(by_kw, cand)
 
-    # own_rows 中有自然位机会但 flow 缺失的词也纳入（ranking_opportunity 桶）
-    for kw, rank in own_rank_map.items():
-        if kw in existing_keywords or _is_noise_keyword(kw):
-            continue
-        if 28 <= rank <= 48:
-            _wk = own_week_map.get(kw, {})
-            _merge_candidate(by_kw, NewCampaignCandidate(
-                keyword_text=kw, search_volume=0, natural_rank=rank,
-                week_rank=_wk.get("week_rank"), week_search_volume=_wk.get("week_search_volume"),
-                trigger_scene="RANKING_OPPORTUNITY_NO_EXACT",
-                source="ranking_opportunity", source_reason=f"自然位{rank}机会词",
-            ))
-
-    # ── 源3: 竞品词（Step3，默认关；reverse-only，fail-open）──
+    # ── 竞品词合并 ──
     if settings.campaign_new_competitor_enabled:
         try:
-            comp_rows = await comp_task if comp_task is not None else []  # ① await 上方已并行启动的 task
+            comp_rows = await comp_task if comp_task is not None else []
         except Exception as e:  # noqa: BLE001
             logger.warning("new_campaigns 竞品源失败 [%s]: %s (非阻塞)", parent_asin, e)
             comp_rows = []
@@ -415,13 +362,13 @@ async def analyze_new_campaigns(
             kw = str(r.get("keyword") or "").strip().lower()
             if not kw or kw in existing_keywords or _is_noise_keyword(kw):
                 continue
-            sv = r.get("search_volume")   # H4: 竞品桶不套 MIN_SEARCH_VOLUME（搜索量可能 None）
+            sv = r.get("search_volume")
             _merge_candidate(by_kw, NewCampaignCandidate(
                 keyword_text=kw,
                 search_volume=int(sv) if isinstance(sv, int) else 0,
-                natural_rank=own_rank_map.get(kw),
-                suggested_bid=r.get("suggested_bid"),   # 反查自带建议竞价（bonus）
-                trigger_scene="COMPETITOR_INTERCEPT_WINDOW",   # H6: 显式设，_label_trigger 不会给
+                natural_rank=r.get("natural_rank"),
+                suggested_bid=r.get("suggested_bid"),
+                trigger_scene="COMPETITOR_INTERCEPT_WINDOW",
                 source="competitor",
                 source_reason=f"竞品{r.get('competitor_asin', '')}反查"
                               + (f"·搜索量{sv}" if sv is not None else ""),
@@ -432,7 +379,17 @@ async def analyze_new_campaigns(
         logger.info("Campaign new [%s]: 硬过滤后无候选词", parent_asin)
         return [], warnings, search_volume_map
 
-    # ★量控：competitor 开启→按来源配额分桶选取(H2)；关闭→退回单一全局排序(Step2 现状)
+    # 28-48 自然位且搜索量 ≥500 的词优先占用 Top-N 配额；
+    # 超额时按搜索量降序取满，避免突破 LLM 输入上限。
+    _MIN_OPPORTUNITY_SV = 500
+    guaranteed = [c for c in candidates
+                  if c.trigger_scene == "RANKING_OPPORTUNITY_NO_EXACT"
+                  and (c.search_volume or 0) >= _MIN_OPPORTUNITY_SV]
+    guaranteed.sort(key=lambda c: (-(c.search_volume or 0), c.keyword_text))
+    guaranteed = guaranteed[:getattr(settings, "campaign_new_max_count", 40)]
+    rest = [c for c in candidates if c not in guaranteed]
+
+    # ★量控：competitor 开启→按来源配额分桶选取；关闭→退回单一全局排序 → Top-N
     max_n = getattr(settings, "campaign_new_max_count", 40)
     if settings.campaign_new_competitor_enabled:
         quotas = {
@@ -440,36 +397,15 @@ async def analyze_new_campaigns(
             "ranking_opportunity": getattr(settings, "campaign_new_quota_ranking", 15),
             "flow": getattr(settings, "campaign_new_quota_flow", 5),
         }
-        candidates = _select_by_quota(
-            candidates, max_n, quotas,
+        rest = _select_by_quota(
+            rest, max_n - len(guaranteed), quotas,
             priority=["competitor", "ranking_opportunity", "flow"],
         )
+        candidates = guaranteed + rest
     else:
-        candidates.sort(key=_longtail_sort_key)   # 长尾优先（词数多优先），与配额桶内一致
-        candidates = candidates[:max_n]
-
-    # 2b. ★建议竞价（KB 16 §3）：填 cand.suggested_bid，供 LLM 之后的 _calc_initial_bid 用。
-    #   ② LLM 决策不看 bid（prompt 禁用，reasoner.py:397/402）→ 此查询作 task 与双轮 LLM 并行（见下方），组装前 join。
-    #   ③ 竞品词已自带 reverse 的 bid（discover_competitor_keywords）→ 只查 suggested_bid 仍为空的词，避免重复查询。
-    async def _fill_suggested_bids() -> None:
-        kw_texts = [c.keyword_text for c in candidates if c.suggested_bid is None]
-        if not (settings.campaign_new_enabled and shop_account and kw_texts):
-            return
-        try:
-            bids = await fetcher.fetch_suggested_bids(
-                kw_texts, shop_account, parent_asin, parent_seller_sku,
-            )
-            for c in candidates:
-                if c.suggested_bid is None:
-                    sb = bids.get(c.keyword_text)
-                    if sb is not None:
-                        c.suggested_bid = sb
-            logger.info(
-                "Campaign new [%s]: MCP 建议竞价命中 %d/%d（竞品 reverse 自带 bid 不再查）",
-                parent_asin, len([c for c in candidates if c.suggested_bid is not None]), len(candidates),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Campaign new [%s]: 建议竞价查询失败 (非阻塞): %s", parent_asin, e)
+        rest.sort(key=_longtail_sort_key)
+        quota = max_n - len(guaranteed)
+        candidates = guaranteed + rest[:max(0, quota)]
 
     logger.info("Campaign new [%s]: %d 个候选词进入双轮 LLM 选词", parent_asin, len(candidates))
 
@@ -525,8 +461,26 @@ async def analyze_new_campaigns(
     if overview_gate is not None:
         await overview_gate
 
-    # ② 建议竞价 task 与双轮 LLM 并行（LLM 不依赖 bid）；组装前 await，确保 cand.suggested_bid 已填。
-    # cand_dump 已在上方按当前 bid 状态快照（竞品已填/其余 None），LLM 不看 bid，并行填值不影响其决策。
+    # ③ 建议竞价与 LLM 并行（LLM 不消费 bid）
+    async def _fill_suggested_bids() -> None:
+        kw_texts = [c.keyword_text for c in candidates if c.suggested_bid is None]
+        if not kw_texts:
+            return
+        try:
+            bids = await fetcher.fetch_suggested_bids(
+                kw_texts, shop_account, parent_asin, parent_seller_sku,
+            )
+            for c in candidates:
+                sb = bids.get(c.keyword_text)
+                if sb is not None and c.suggested_bid is None:
+                    c.suggested_bid = sb
+            logger.info(
+                "Campaign new [%s]: MCP 建议竞价命中 %d/%d",
+                parent_asin, len([c for c in candidates if c.suggested_bid is not None]), len(candidates),
+            )
+        except Exception as e:
+            logger.warning("Campaign new [%s]: 建议竞价查询失败 (非阻塞): %s", parent_asin, e)
+
     bid_task = asyncio.create_task(_fill_suggested_bids())
     try:
         (r1, r1_ok), (r2, r2_ok) = await asyncio.gather(_run_round(1), _run_round(2))
@@ -535,7 +489,7 @@ async def analyze_new_campaigns(
         logger.warning("new_campaigns 双轮 LLM 异常 [%s]: %s", parent_asin, e)
         warnings.append(f"new_campaigns LLM 异常: {type(e).__name__}: {e}")
         return [], warnings, search_volume_map
-    await bid_task   # 组装(_calc_initial_bid 读 cand.suggested_bid)前确保填完；_fill 内部 fail-open
+    await bid_task
 
     # 4. 容错选词：
     #    两轮都成功执行 → 取交集（降幻觉，两轮 keyword_class 一致才 high）

@@ -177,21 +177,66 @@ class CampaignBatchResult(BaseModel):
 
 
 class NewCampaignCandidate(BaseModel):
-    """新增活动候选词（数据层产出，喂给 LLM 前的中间结构）。
+    """新增活动候选词（NewKeywordRecord → LLM 投影结构）。
 
     keyword_class / match_type 由 LLM 基于 KB 06 判定，不在候选阶段填。
     """
     keyword_text: str
     search_volume: int = 0                  # flow_keywords 提供
-    natural_rank: int | None = None         # own_keyword_flow 提供，无则 None
-    week_rank: int | None = None            # own_keyword_flow「词的周排名」（周排名信号，KB28 §2 相关性判据之一）
-    week_search_volume: int | None = None   # own_keyword_flow「周搜索量」（与 flow 的搜索量互补）
+    search_rank: int | None = None          # flow_keywords.搜索排名
+    natural_rank: int | None = None         # erp_listing_asin_keyword_rank_history.crawNatureRank（最新日）
+    rank_trend: str | None = None           # 近7天自然位趋势, "5→6→9→3→3→6→6"
+    rank_tier: str | None = None            # history.crawNatureRankPosition
+    sponsored_rank: int | None = None       # history.crawSpRank
+    week_rank: int | None = None            # own_keyword_flow.词的周排名
+    week_search_volume: int | None = None   # own_keyword_flow.周搜索量
+    history_state: str = ""                 # ok / empty / query_failed / not_eligible
     # ★KB 16 §3「建议竞价(suggestedBid)」：MCP whp_amazon_advert_keyword_suggest_bid 批量查询填入。
     #   命中→_calc_initial_bid 按公式 min(0.5, bid×0.5) 计算；未命中→降级占位 $0.30。
     suggested_bid: float | None = None
     trigger_scene: str = ""                 # KB 16 §1 场景码（展示标签，非筛选门禁）
     source: str = "flow"                    # 候选来源: flow / ranking_opportunity / competitor (多源配额分桶用)
     source_reason: str = ""                 # 来源说明 (如 "竞品B0XXX反查·搜索量1200")，喂 LLM 作参考
+
+
+class NewKeywordRecord(BaseModel):
+    """一词一份，跨源归一化后的统一事实对象。"""
+    keyword_text: str
+    # flow_keywords
+    search_volume: int = 0
+    search_rank: int | None = None
+    # own_keyword_flow
+    week_rank: int | None = None
+    week_search_volume: int | None = None
+    own_natural_rank: int | None = None          # own 自然位，预过滤/补漏信号
+    own_rank_tier: str | None = None             # own 自然位排位
+    is_own_only: bool = False                    # own 有、flow 无的补漏词
+    # erp_listing_asin_keyword_rank_history enrichment
+    natural_rank: int | None = None              # history.crawNatureRank 最新日
+    rank_trend: str | None = None                # 近7天自然位趋势, "5→6→9→3→3→6→6"
+    rank_tier: str | None = None                 # history.crawNatureRankPosition
+    sponsored_rank: int | None = None            # history.crawSpRank
+    history_state: str = "not_queried"           # not_queried | ok | empty | query_failed | not_eligible
+    # code-generated
+    source: str = "flow"                         # flow / ranking_opportunity
+    source_reason: str = ""
+    trigger_scene: str = ""
+
+
+class NewKeywordData(BaseModel):
+    """一次新增扩词分析的容器。"""
+    parent_asin: str
+    shop_id: int = 0
+    shop_account: str = ""
+    parent_seller_sku: str = ""
+    site_code: str = "Amazon_US"
+    records: list[NewKeywordRecord] = Field(default_factory=list)
+    search_volume_map: dict[str, int] = Field(default_factory=dict)
+    total_discovered: int = 0
+    total_own: int = 0
+    history_queried: int = 0
+    history_success: int = 0
+    errors: list[str] = Field(default_factory=list)
 
 
 class NewCampaignItem(BaseModel):
