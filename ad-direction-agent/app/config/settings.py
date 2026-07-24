@@ -241,6 +241,8 @@ class Settings(BaseSettings):
     azlisting_mcp_token: str = ""
     azlisting_mcp_header_name: str = "Authorization"
     azlisting_mcp_timeout: float = 60.0
+    azlisting_mcp_max_connections: int = 20
+    azlisting_mcp_max_in_flight: int = 20
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

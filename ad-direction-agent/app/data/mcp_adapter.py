@@ -119,38 +119,42 @@ class _CallResult:
 
 class McpAdapter(DataSourceAdapter):
     def __init__(self, invoker: McpInvoker | None = None):
-        self._invoker = invoker or self._create_invoker()
+        self._test_invoker = invoker  # 测试注入路径，非 None 时绕开 registry
         self._sem = asyncio.Semaphore(max(1, settings.mcp_max_concurrency))
 
-    @staticmethod
-    def _create_invoker() -> McpInvoker:
-        transport = (settings.mcp_transport or "none").lower()
-        if transport in ("http", "sse", "streamable-http"):
-            return StreamableHttpMcpInvoker()
-        if transport == "rest":
-            return LegacyRestMcpInvoker()
-        return UnsupportedMcpInvoker()
-
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> _CallResult:
-        retries = max(0, settings.mcp_retries)
+        # 测试注入路径 → 走注入的 invoker + 实例级 sem
+        if self._test_invoker is not None:
+            invoker = self._test_invoker
+            sem = self._sem
+            retries = max(0, settings.mcp_retries)
+            server_id = "test"
+        else:
+            from app.data.mcp_registry import registry
+            try:
+                runtime = registry.resolve(tool_name)
+            except ValueError as e:
+                return _CallResult(ok=False, error=str(e))
+            invoker = runtime.get_invoker()
+            sem = runtime._sem
+            retries = max(0, runtime.config.retries)
+            server_id = registry.get_server_id(tool_name)
+
         last_err = None
         for attempt in range(retries + 1):
-            # 首次请求加 50-200ms 随机抖动，打散批量并发，避免瞬间压满网关连接池
             if attempt == 0:
                 await asyncio.sleep(random.uniform(0.01, 0.30))
             t0 = time.monotonic()
             try:
-                async with self._sem:
+                async with sem:
                     value = await asyncio.wait_for(
-                        self._invoker.call_tool(tool_name, arguments),
+                        invoker.call_tool(tool_name, arguments),
                         timeout=settings.mcp_timeout,
                     )
                 elapsed = time.monotonic() - t0
                 logger.info(
-                    "MCP tool ok [%s] attempt=%s elapsed=%.2fs args=%s",
-                    tool_name,
-                    attempt + 1,
-                    elapsed,
+                    "MCP tool ok [%s] server=%s attempt=%s elapsed=%.2fs args=%s",
+                    tool_name, server_id, attempt + 1, elapsed,
                     json.dumps(arguments, ensure_ascii=False)[:220],
                 )
                 return _CallResult(ok=True, value=value)
@@ -160,11 +164,8 @@ class McpAdapter(DataSourceAdapter):
                 last_err = str(e) or type(e).__name__
                 elapsed = time.monotonic() - t0
                 logger.warning(
-                    "MCP tool fail [%s] attempt=%s elapsed=%.2fs error=%s args=%s",
-                    tool_name,
-                    attempt + 1,
-                    elapsed,
-                    last_err,
+                    "MCP tool fail [%s] server=%s attempt=%s elapsed=%.2fs error=%s args=%s",
+                    tool_name, server_id, attempt + 1, elapsed, last_err,
                     json.dumps(arguments, ensure_ascii=False)[:220],
                 )
                 if attempt < retries:

@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-17（版本日志见文末，最新 v3.19：核心词管理面板(前端+后端) + campaign_key 关键词级重构）
+> **最后更新**: 2026-07-22（版本日志见文末，最新 v3.20：KB30/31/32 否词治理 + 组合 spend 窗口 + 预过滤收口）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -313,6 +313,12 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-16 | **★ 核心词后端：policy 引擎 + API 扩展 + 分组落库** | `core_keyword_policy.py`(新)：核心词策略引擎，按 campaign 分组聚合 semantics 判定结果供前端渲染。`core_keyword.py` API 扩展：`GET /status` 任务状态+`POST /enable`/`POST /disable` 手动标注、`GET /groups` 按 campaign_id 分组查询。`repository.py`(+281行)：`query_core_keyword_groups` 分组查询、`batch_update_core_keyword` 批量更新人工标注、`get_core_keyword_task_status` 刷新机制。`core_keyword_fetcher.py`(+19行)：数据编排器增加分组信号。`core_keyword.py` workflow(+27行)：state 表改名+唯一任务 ID+重复变更防护。 |
 | 07-16 | **★ 核心词前端：Web 管理弹窗** | `state.js`(+60行)：`_coreKeywordTab`/`_coreKeywordGroups`/`_coreKeywordTaskId` 状态管理 + `loadCoreKeywordGroups()`/`toggleCoreKeywordEnabled()` 操作。`render.js`(+53行)：`_renderCoreKeywordModal()` 渲染弹窗——语义判定结果展示(semantic_conflict pass/fail badge + semantic_core 标记)、按 campaign 分组折叠面板、手动开关控件、空态提示。`panel.css`(+49行)：弹窗样式(v3 设计)、分组折叠动画、badge 色值。`events.js`(+12行)：事件委托 `camp-toggle-core-keyword` 等。`panel.js`(+1行)：挂载核心词入口。 |
 | 07-17 | **Codex 批跑 + 复盘记忆 + SkillOpt** | `batch_via_api_codex.py`(新)：Codex 复核批量调度入口，替代旧 batch_via_api.py 集成 deepseek-v4-pro review hook。`batch_night_monitor_codex.sh`(新)：守夜监控适配 Codex 批跑。`split_review_memory.py`(新)：复盘记忆加工脚本。新增 SkillOpt 实施方案文档 3 篇 + 复盘记忆落地实施方案文档 2 篇 + 链路跑通测试记录。 |
+| 07-17 | **批跑脚本迁移 scripts/** | 7 个批跑脚本从仓库根目录迁移到 `scripts/` 子目录（batch_core_keyword/batch_monitor/batch_night_monitor/batch_via_api 等）。9 files。 |
+| 07-17 | **预过滤逻辑收口 + 删死代码** | `campaign_prefilter`：淘汰池预过滤从 campaign.py 迁入独立函数 `filter_eliminated_pool()`；删除非 ENABLED/近7天无数据两个死代码分支。`campaign.py`：编排层委托给 prefilter。`test_campaign_prefilter.py`(新)。7 files +374/-146。 |
+| 07-17 | **Codex 复核 hook 预埋 + decisionId 追踪** | `campaign.py`：Codex review hook 代码预埋（暂注释，待 CODEX_FORCE 修复后启用）。`advert_exec_mapper`：paramsVoList 补 decisionId 字段。3 files +139/-6。 |
+| 07-17 | **KB 细粒度切片 + core_keyword_policy 迁移 + 文档清理** | `kb_loader.py`(+97行)：KB 切片粒度细化。`core_keyword_policy.py` 从 `app/` 移到 `app/core/`。删除 6 篇过期文档。`test_campaign_cache_context.py`(新) + `test_kb_slicing.py`(+54行)。28 files +542/-1312。 |
+| 07-17 | **组合预算 spend 多周期窗口** | `to_budget_summary`/`build_summary` 新增 `portfolio_spend_{1d,3d,7d,14d,30d}` 五个周期。`campaign_fetcher.fetch_portfolio_list` 补 spend 字段提取。前端组合预算卡多周期对比。`migrate_portfolio_spend_windows.sql`(新)。10 files +351/-78。 |
+| 07-22 | **★ KB30/31/32 新规则 + 广泛否词执行链路** | KB30(新)：广泛广告否词与搜索词治理规则。KB31(新)：样本窗口与生命周期状态规则。KB32(新)：自动广告调整规则。`reasoner`：广泛流 prompt 集成 KB30 否词指令。`advert_execution`：`agent_create_negative_keywords` MCP 真实否词下发。`campaign_viewmodel`/`repository`/`mappers`：灰卡补否词字段+落库。`render.js`(+66行)：前端展示否词建议列表。`campaign_fetcher`(+29行)：补 search_term 数据源。`test_negative_keyword_persistence.py`(新)。24+8 files +1696/-289。 |
 
 ---
 
@@ -1279,6 +1285,10 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.20: KB30/31/32 否词治理 + 组合 spend 窗口 + 预过滤收口 + KB 切片细化（2026-07-17~22，本地未部署服务器）—— ①KB30/31/32 新规则(否词治理/样本窗口/自动广告调整)+广泛否词 MCP 真实下发链路 ②组合预算 spend 多周期窗口(1d/3d/7d/14d/30d)+前端展示 ③预过滤收口 campaign_prefilter+删死代码 ④KB 细粒度切片+core_keyword_policy 迁移 app/core/ ⑤Codex hook 预埋+decisionId 追踪 ⑥批跑脚本迁移 scripts/+清理过期文档。24+10+8+3+28+7+9 files。*
+
+最后更新：2026-07-22
 
 *v3.19: 核心词管理面板(前端+后端) + campaign_key 关键词级重构（2026-07-16/17，本地未部署服务器）—— ①campaign_key 从活动级改为关键词级(加#match_type#keyword_id)消除 BROAD/PHRASE 碰撞+否定词不入 LLM ②**核心词后端**：`core_keyword_policy.py` 策略引擎+campaign 分组聚合；API 扩展(手动标注/分组查询/任务刷新)；repository +281行(分组查询/批量更新) ③**核心词前端**：Web 管理弹窗(state.js+60/render.js+53/panel.css+49/events.js+12)——语义判定结果展示、按 campaign 分组折叠面板、手动开关控件、空态/loading/error 三态 ④Codex 批跑脚本+SkillOpt 方案+复盘记忆加工。12+10+7 files +1128/-68。*
 

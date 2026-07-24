@@ -877,7 +877,13 @@ async def _analyze_campaigns_impl(
             if cu is None:
                 continue
             eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
-            item.ai_portfolio_class = _classify_portfolio(cu, llm_action=item.action, effective_budget=eff, perf_7d_orders=cu.perf_7d.orders)
+            item.ai_portfolio_class = _classify_portfolio(
+                cu,
+                llm_action=item.action,
+                effective_budget=eff,
+                perf_7d_orders=cu.perf_7d.orders,
+                is_core=item.is_core,
+            )
             cu.portfolio = item.ai_portfolio_class
 
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。

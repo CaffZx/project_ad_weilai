@@ -129,6 +129,17 @@ def test_classify_no_orders_and_low_budget_eliminate():
     assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_ELIMINATE
 
 
+def test_classify_core_broad_low_budget_no_orders_stays_broad():
+    """核心词受保护：即使预算触底且零订单，也不得归低价捡漏组。"""
+    cu = _cu("BROAD", bid=0.25, budget=1.00, orders=0)
+    assert classify(
+        cu,
+        llm_action="adjust_bid",
+        perf_7d_orders=cu.perf_7d.orders,
+        is_core=True,
+    ) == PORTFOLIO_BROAD
+
+
 def test_classify_no_orders_and_low_bid_eliminate():
     """无出单 + bid=$0.10 → 归淘汰。"""
     cu = _cu("BROAD", bid=0.10, budget=10.00, orders=0)

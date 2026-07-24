@@ -9,7 +9,7 @@
 #    与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
 
 # 判定优先级 (命中即止) - 2026-06-04 对齐 KB23 §3.1:
-#   1. 淘汰      — LLM action=eliminate_to_low_bid_pool OR 低价捡漏档 (bid≤$0.21 或 预算≤$1.01)
+#   1. 淘汰      — 非核心词且 (LLM action=eliminate_to_low_bid_pool OR 低价捡漏档)
 #   2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
 #   3. 测试/新增 — EXACT AND current_budget < $5 (KB23 精准测试组)
 #   4. 主推      — EXACT AND current_budget ≥ $5 (KB23 精准主力组)
@@ -83,6 +83,7 @@ def classify(
     effective_budget: float | None = None,
     *,
     perf_7d_orders: int = 0,
+    is_core: bool = False,
 ) -> str:
     """按优先级判定 4 组合归属,返回常量字符串。
 
@@ -97,10 +98,15 @@ def classify(
                     仅作用于 EXACT 主力↔测试,淘汰/广泛分支不受影响。
         perf_7d_orders: 近 7 天订单数。淘汰池 OR 归类须同时满足无出单
                     (对齐 _p3_force_eliminate 语义),有出单的触底活动不归淘汰。
+        is_core: 核心词保护标记。核心词不得归低价捡漏组，后续按匹配类型归类。
     """
-    # 1. 淘汰 (LLM 标记 OR (已在淘汰池 AND 无出单)) —— 读 current,不受 effective_budget 影响
+    # 1. 淘汰 (非核心词且 LLM 标记 OR (已在淘汰池 AND 无出单))。
+    #    核心词保护优先于淘汰归组；护栏外再设一层终态分类防线。
     in_pool = _is_in_elimination_pool(unit.current_bid, unit.current_budget)
-    if llm_action == "eliminate_to_low_bid_pool" or (in_pool and perf_7d_orders == 0):
+    if not is_core and (
+        llm_action == "eliminate_to_low_bid_pool"
+        or (in_pool and perf_7d_orders == 0)
+    ):
         return PORTFOLIO_ELIMINATE
     mt = (unit.match_type or "").upper()
     # 2. 广泛 / 自动 (BROAD/PHRASE/AUTO) —— 业务上"测词广告",硬归类

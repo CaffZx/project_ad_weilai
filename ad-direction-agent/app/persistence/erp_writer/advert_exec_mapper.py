@@ -209,6 +209,7 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
             "currentUserId": user,
             "adjustReason": f"AI 决策批次 {dec.get('id') or ''} 执行",
             "decisionId": str(dec.get("id") or ""),
+            "agentVersion": "V2",
             "campaignVoList": list(camp_vo.values()),
         })
     return plan
@@ -249,6 +250,7 @@ def _build_create_call(plan, card, cid, camp_rows, kw_rows, plc_rows,
         "parentSellerSku": parent_sku,
         "currentUserId": user,
         "adjustReason": f"AI 新建活动：{card.get('campaign_name')}",
+        "agentVersion": "V2",
         "createCampaignVo": {k: v for k, v in create_vo.items() if v is not None},
     }
     # 子 ASIN：分析阶段 pick_target_child_asin 选定并落库到 card.asin，执行期直接读回。
@@ -299,6 +301,7 @@ def _build_negative_call(plan, neg_by_campaign, shop_id, parent_asin, parent_sku
             "parentSellerSku": parent_sku,
             "keywordType": "negative",
             "currentUserId": user,
+            "agentVersion": "V2",
             "campaignVoList": campaign_vo_list,
         })
 
