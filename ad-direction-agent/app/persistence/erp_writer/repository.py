@@ -23,6 +23,7 @@ from .text_utils import (
     level_to_score,
     map_direction_type,
     map_direction_types_json,
+    map_operating_mode,
     map_product_position,
     map_product_stage,
     map_purpose_target,
@@ -1350,13 +1351,13 @@ class ErpDualWriterRepository:
         sql = """
         INSERT INTO t_advert_agent_decision (
             id, parent_asin, parent_seller_sku, shop_id, site_code, day_range,
-            product_position, product_stage, season_type,
+            product_position, product_stage, season_type, operating_mode,
             advert_purposes, target_keyword_types,
             target_acos_suggest, daily_budget_suggest, advert_direction_types,
             batch_no, product_name,
             create_by, editor_by, creator_id, editor_id, create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             parent_asin=VALUES(parent_asin),
@@ -1367,6 +1368,7 @@ class ErpDualWriterRepository:
             product_position=VALUES(product_position),
             product_stage=VALUES(product_stage),
             season_type=VALUES(season_type),
+            operating_mode=VALUES(operating_mode),
             advert_purposes=VALUES(advert_purposes),
             target_keyword_types=VALUES(target_keyword_types),
             target_acos_suggest=VALUES(target_acos_suggest),
@@ -1390,6 +1392,7 @@ class ErpDualWriterRepository:
                 map_product_position(meta.get("product_position")),
                 map_product_stage(meta.get("product_stage")),
                 map_season_type(meta.get("season_type")),
+                map_operating_mode(meta.get("operating_mode")),
                 to_enum_list(meta.get("ad_purposes"), map_purpose_target),
                 to_enum_list(meta.get("target_keyword_types"), map_target_keyword_type),
                 (str(_a) if (_a := target_acos.get("recommended_target")) not in (None, "") else None),
@@ -1411,13 +1414,13 @@ class ErpDualWriterRepository:
         sql = """
         INSERT INTO t_advert_agent_decision_config (
             id, shop_id, parent_asin, parent_seller_sku, site_code, day_range,
-            product_position, product_stage, season_type,
+            product_position, product_stage, season_type, operating_mode,
             advert_purposes, target_keyword_types,
             advert_direction_types,
             target_acos_suggest, daily_budget_suggest,
             create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -1428,6 +1431,7 @@ class ErpDualWriterRepository:
             product_position=VALUES(product_position),
             product_stage=VALUES(product_stage),
             season_type=VALUES(season_type),
+            operating_mode=VALUES(operating_mode),
             advert_purposes=VALUES(advert_purposes),
             target_keyword_types=VALUES(target_keyword_types),
             advert_direction_types=VALUES(advert_direction_types),
@@ -1449,6 +1453,7 @@ class ErpDualWriterRepository:
                 map_product_position(meta.get("product_position")),
                 map_product_stage(meta.get("product_stage")),
                 map_season_type(meta.get("season_type")),
+                map_operating_mode(meta.get("operating_mode")),
                 to_enum_list(meta.get("ad_purposes"), map_purpose_target),
                 to_enum_list(meta.get("target_keyword_types"), map_target_keyword_type),
                 map_direction_types_json(meta.get("advert_direction_types") or []),
@@ -2333,6 +2338,35 @@ class ErpDualWriterRepository:
         finally:
             if conn:
                 conn.close()
+
+    @staticmethod
+    def fetch_core_keyword_locked_count(
+        parent_asin: str, parent_seller_sku: str, shop_id: int,
+    ) -> int:
+        try:
+            repo = _get_repository()
+            conn = repo._connect()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COUNT(1)
+                           FROM t_advert_agent_core_keyword_state
+                           WHERE parent_asin = %s
+                             AND parent_seller_sku = %s
+                             AND shop_id = %s
+                             AND state IN ('LOCKED')""",
+                        (parent_asin, parent_seller_sku, shop_id),
+                    )
+                    row = cur.fetchone()
+                    return int(row.get("COUNT(1)") or row.get("count(1)") or next(iter(row.values())) or 0)
+            finally:
+                conn.close()
+        except Exception:
+            logger.warning(
+                "fetch_core_keyword_locked_count 失败 [%s/%s/%s]，按 0 继续",
+                parent_asin, parent_seller_sku, shop_id, exc_info=True,
+            )
+            return 0
 
     @staticmethod
     def fetch_core_keyword_set(

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS strategy_config (
     product_level VARCHAR(32),
     product_stage VARCHAR(32),
     season_stage VARCHAR(32),
+    operating_mode VARCHAR(32) NULL,
     updated_at DATETIME(6) NOT NULL
 ) ENGINE=InnoDB;
 

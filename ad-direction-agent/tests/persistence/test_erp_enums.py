@@ -7,12 +7,14 @@ from app.persistence.erp_writer.text_utils import (
     map_direction_types_json,
     map_product_position,
     map_product_stage,
+    map_operating_mode,
     map_purpose_target,
     map_season_type,
     map_target_keyword_type,
     normalize_advert_direction_types_list,
     normalize_site_code,
     to_enum_list,
+    unmap_operating_mode,
 )
 
 
@@ -27,6 +29,13 @@ def test_product_enums():
     assert map_product_position("重点产品 (P1)") == "P1_PRODUCT"
     assert map_product_stage("推进期") == "PROMOTING"
     assert map_season_type("旺季准备") == "PEAK_SEASON_PREPARE"
+
+
+def test_operating_mode_enum_round_trip_preserves_none():
+    assert map_operating_mode("控制清货") == "CONTROLLED_CLEARANCE"
+    assert unmap_operating_mode("CONTROLLED_CLEARANCE") == "控制清货"
+    assert map_operating_mode(None) is None
+    assert unmap_operating_mode(None) is None
 
 
 def test_ad_purposes_json():

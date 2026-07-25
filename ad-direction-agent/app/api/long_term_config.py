@@ -26,6 +26,7 @@ async def get_config(
         product_level=config.get("product_level"),
         product_stage=config.get("product_stage"),
         season_stage=config.get("season_stage"),
+        operating_mode=config.get("operating_mode"),
         ad_purposes=config.get("ad_purposes", []),
         target_keyword_strategy=config.get("target_keyword_strategy", []),
         last_modified=config.get("last_modified", ""),
@@ -50,6 +51,8 @@ async def update_config(
         updates["product_stage"] = req.product_stage
     if req.season_stage is not None:
         updates["season_stage"] = req.season_stage
+    if req.operating_mode is not None:
+        updates["operating_mode"] = req.operating_mode.value
     if req.ad_purposes is not None:
         updates["ad_purposes"] = req.ad_purposes
     if req.target_keyword_strategy is not None:
@@ -63,6 +66,7 @@ async def update_config(
         product_level=config.get("product_level"),
         product_stage=config.get("product_stage"),
         season_stage=config.get("season_stage"),
+        operating_mode=config.get("operating_mode"),
         ad_purposes=config.get("ad_purposes", []),
         target_keyword_strategy=config.get("target_keyword_strategy", []),
         last_modified=config.get("last_modified", ""),

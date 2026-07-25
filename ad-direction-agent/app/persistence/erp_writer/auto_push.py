@@ -159,6 +159,7 @@ def wizard_payload_from_state(
         "product_position": long_term.get("product_level"),
         "product_stage": long_term.get("product_stage"),
         "season_type": long_term.get("season_stage"),
+        "operating_mode": long_term.get("operating_mode"),
         "ad_purposes": ad_purposes,
         "target_keyword_types": target_kw,
         "advert_direction_types": erp_directions,
@@ -245,6 +246,7 @@ def _merge_decision_meta(kb_payload: dict[str, Any], wizard_payload: dict[str, A
         decision_meta.setdefault("product_position", lt.get("product_level"))
         decision_meta.setdefault("product_stage", lt.get("product_stage"))
         decision_meta.setdefault("season_type", lt.get("season_stage"))
+        decision_meta.setdefault("operating_mode", lt.get("operating_mode"))
         decision_meta.setdefault("ad_purposes", lt.get("ad_purposes"))
         decision_meta.setdefault("target_keyword_types", lt.get("target_keyword_strategy"))
     raw_dirs = (

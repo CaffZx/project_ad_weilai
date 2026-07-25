@@ -400,17 +400,17 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 ## 输入
 - 策略上下文（ASIN 级，含【今日总纲】posture_brief — 必须遵循；含运营配置的「目标关键词类型」）
 - **本产品标题** + **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
-- 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / search_rank(流量词库搜索排名) / week_search_volume(周搜索量) / week_rank(词的周排名) / natural_rank(历史最新自然位) / rank_trend(近7天自然位序列) / rank_tier(自然位分位) / sponsored_rank(广告排位) / history_state / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
+- 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / search_rank(流量词库搜索排名) / week_search_volume(周搜索量) / week_rank(词的周排名) / natural_rank(当前自然位) / rank_trend(近7天自然位序列) / rank_tier(自然位分位) / sponsored_rank(广告排位) / history_state / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
 
 ## 排名数据使用规则（必须遵循）
 - `search_rank` 是流量词库的搜索排名，反映词的热度/竞争位置；它**不是** `week_rank`，也不能单独证明该词与本产品相关。
-- `natural_rank`、`rank_trend`、`rank_tier`、`sponsored_rank` 仅在 `history_state=ok` 时才是可用的历史证据。自然位数字越小越靠前；趋势序列只作辅助判断，不可脱离标题属性单独建词。
-- `rank_tier` 与 `sponsored_rank` 是辅助信号：可用于判断排名层级和广告竞争，但不能替代产品属性相关性判断。
-- `history_state=not_eligible / query_failed / empty` 表示没有可用的历史排名证据：`not_eligible` 是预过滤未查询，`query_failed` 是查询失败，`empty` 是查询无历史记录。它们**不等同于“无自然位”**，不得把它们写成“该 ASIN 从未有自然位”或据此降低相关性；应以标题、已投词和其余可用信号判断。
+- `natural_rank` 是当前自然位；有值时即可作为产品在该词下的排名事实。自然位数字越小越靠前，但不可脱离标题属性单独建词。
+- `rank_trend`、`rank_tier`、`sponsored_rank` 是附加排名信号，仅在 `history_state=ok` 时使用；可用于判断趋势、排名层级和广告竞争，但不能替代产品属性相关性判断。
+- `history_state` 只影响 `rank_trend`、`rank_tier`、`sponsored_rank` 是否可用：`not_eligible` 是未查询补充数据，`query_failed` 是查询失败，`empty` 是无补充记录。它们不表示没有当前自然位，也不得据此降低相关性；应以标题、已投词和其余可用信号判断。
 
 ## 相关性判断与档位（首要，KB28 §2 + KB 06 §3 相关性精神）
 **综合权衡**可用信号 → 给出 relevance_tier，不要只看其中一个：
-  ① `history_state=ok` 时的自然位 natural_rank（靠前=数字小=事实相关强）及 rank_trend
+  ① 当前自然位 natural_rank（靠前=数字小=事实相关强），以及 `history_state=ok` 时的 rank_trend
   ② search_rank / week_rank / search_volume / week_search_volume 的热度与位置
   ③ rank_tier / sponsored_rank 的辅助竞争信号 ④ 与**标题具体属性**的相关度。
 - **R1 精确相关**：词义=产品本体，或精确匹配标题核心属性（品类+核心属性词），或 natural_rank 有值（亚马逊确实让本产品排该词=事实相关）。

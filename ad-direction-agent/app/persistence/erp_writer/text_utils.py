@@ -95,6 +95,21 @@ _SEASON_TYPE_MAP = {
     "LATE_PEAK_SEASON": "LATE_PEAK_SEASON",
 }
 
+_OPERATING_MODE_MAP = {
+    "立即退出": "IMMEDIATE_EXIT",
+    "控制清货": "CONTROLLED_CLEARANCE",
+    "限时修复": "LIMITED_REPAIR",
+    "稳定经营": "STABLE_OPERATION",
+    "积极推进": "ACTIVE_PROMOTION",
+    "获取利润": "PROFIT_HARVEST",
+    "immediate_exit": "IMMEDIATE_EXIT",
+    "controlled_clearance": "CONTROLLED_CLEARANCE",
+    "limited_repair": "LIMITED_REPAIR",
+    "stable_operation": "STABLE_OPERATION",
+    "active_promotion": "ACTIVE_PROMOTION",
+    "profit_harvest": "PROFIT_HARVEST",
+}
+
 # advert_direction_types / direction_recommend_detail.direction_type (WHP ad_directions)
 _DIRECTION_ID_TO_ERP = {
     "push_natural": "PUSH_NATURAL",
@@ -181,6 +196,10 @@ def map_season_type(value: str | None) -> str | None:
     return _map_single(value, _SEASON_TYPE_MAP)
 
 
+def map_operating_mode(value: str | None) -> str | None:
+    return _map_single(value, _OPERATING_MODE_MAP)
+
+
 def map_purpose_target(value: str | None) -> str | None:
     """purpose_score.advert_purpose — ERP enum code."""
     return map_ad_purpose(value)
@@ -199,6 +218,15 @@ _PRODUCT_STAGE_REVERSE = {
 _SEASON_TYPE_REVERSE = {
     "OFF_SEASON": "淡季", "PEAK_SEASON_PREPARE": "旺季准备",
     "BIG_PEAK_SEASON": "大旺季", "LATE_PEAK_SEASON": "旺季末期",
+}
+_OPERATING_MODE_REVERSE = {
+    "IMMEDIATE_EXIT": "立即退出",
+    "CONTROLLED_CLEARANCE": "控制清货",
+    "LIMITED_REPAIR": "限时修复",
+    "STABLE_OPERATION": "稳定经营",
+    "ACTIVE_PROMOTION": "积极推进",
+    "ACTIVE_PROMOTION": "积极推进",
+    "PROFIT_HARVEST": "获取利润",
 }
 _AD_PURPOSE_REVERSE = {
     "TRAFFIC": "引流型", "CONVERSION": "转化型", "RANKING": "排名型", "PROFIT": "盈利型",
@@ -228,6 +256,10 @@ def unmap_product_stage(value: str | None) -> str | None:
 
 def unmap_season_type(value: str | None) -> str | None:
     return _unmap_single(value, _SEASON_TYPE_REVERSE)
+
+
+def unmap_operating_mode(value: str | None) -> str | None:
+    return _unmap_single(value, _OPERATING_MODE_REVERSE)
 
 
 def unmap_ad_purpose(value: str | None) -> str | None:

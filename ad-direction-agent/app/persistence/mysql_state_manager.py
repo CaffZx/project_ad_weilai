@@ -18,21 +18,6 @@ logger = logging.getLogger(__name__)
 BASE_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 
-_IDENTITY_TABLES = (
-    "strategy_config",
-    "tactics_config",
-    "acos_override",
-    "budget_override",
-    "adjustment_history",
-    "p3_recommendation",
-    "keyword_analysis",
-    "target_scores",
-    "workflow_meta",
-    "feedback",
-    "analysis_session",
-)
-
-
 def _coerce_shop_id(value) -> int | None:
     try:
         shop_id = int(value)
@@ -130,40 +115,6 @@ class MySQLStateManager:
                     s = stmt.strip()
                     if s and not s.startswith("--"):
                         cur.execute(s)
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS cnt
-                      FROM INFORMATION_SCHEMA.COLUMNS
-                     WHERE TABLE_SCHEMA=%s
-                       AND TABLE_NAME='analysis_session'
-                       AND COLUMN_NAME='execution_started_at'
-                    """,
-                    (settings.state_db_database,),
-                )
-                row = cur.fetchone() or {}
-                if not int(row.get("cnt") or 0):
-                    cur.execute(
-                        "ALTER TABLE analysis_session "
-                        "ADD COLUMN execution_started_at DATETIME(6) NULL"
-                    )
-                for table in _IDENTITY_TABLES:
-                    cur.execute(
-                        """
-                        SELECT COLUMN_NAME
-                          FROM INFORMATION_SCHEMA.COLUMNS
-                         WHERE TABLE_SCHEMA=%s
-                           AND TABLE_NAME=%s
-                           AND COLUMN_NAME IN ('shop_id', 'parent_seller_sku')
-                        """,
-                        (settings.state_db_database, table),
-                    )
-                    existing_cols = {r.get("COLUMN_NAME") for r in (cur.fetchall() or [])}
-                    if "shop_id" not in existing_cols:
-                        cur.execute(f"ALTER TABLE {table} ADD COLUMN shop_id BIGINT NULL")
-                    if "parent_seller_sku" not in existing_cols:
-                        cur.execute(
-                            f"ALTER TABLE {table} ADD COLUMN parent_seller_sku VARCHAR(128) NULL"
-                        )
             conn.commit()
             self._schema_ready = True
             logger.info("MySQL state schema ensured")
@@ -193,7 +144,7 @@ class MySQLStateManager:
 
             def _sync_fetch():
                 strat = self._execute(
-                    "SELECT product_level, product_stage, season_stage, updated_at "
+                    "SELECT product_level, product_stage, season_stage, operating_mode, updated_at "
                     "FROM strategy_config WHERE asin=%s",
                     (asin,),
                     "one",
@@ -221,6 +172,7 @@ class MySQLStateManager:
                     "product_level": strat.get("product_level"),
                     "product_stage": strat.get("product_stage"),
                     "season_stage": strat.get("season_stage"),
+                    "operating_mode": strat.get("operating_mode"),
                 })
             if tact:
                 ap = tact.get("ad_purposes")
@@ -257,20 +209,22 @@ class MySQLStateManager:
             now = self._now()
             shop_id, parent_seller_sku = _identity_from_mapping(config)
             try:
-                if any(k in config for k in ("product_level", "product_stage", "season_stage")):
+                if any(k in config for k in ("product_level", "product_stage", "season_stage", "operating_mode")):
                     existing = self.get_long_term_config(asin)
                     pl = config.get("product_level", existing.get("product_level"))
                     ps = config.get("product_stage", existing.get("product_stage"))
                     ss = config.get("season_stage", existing.get("season_stage"))
+                    om = config.get("operating_mode", existing.get("operating_mode"))
                     self._execute(
                         "INSERT INTO strategy_config "
-                        "(asin, shop_id, parent_seller_sku, product_level, product_stage, season_stage, updated_at) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+                        "(asin, shop_id, parent_seller_sku, product_level, product_stage, season_stage, operating_mode, updated_at) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
                         "shop_id=COALESCE(VALUES(shop_id), shop_id), "
                         "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
                         "product_level=VALUES(product_level), product_stage=VALUES(product_stage), "
-                        "season_stage=VALUES(season_stage), updated_at=VALUES(updated_at)",
-                        (asin, shop_id, parent_seller_sku, pl, ps, ss, now),
+                        "season_stage=VALUES(season_stage), operating_mode=VALUES(operating_mode), "
+                        "updated_at=VALUES(updated_at)",
+                        (asin, shop_id, parent_seller_sku, pl, ps, ss, om, now),
                     )
                 if "ad_purposes" in config or "target_keyword_strategy" in config:
                     existing = self.get_long_term_config(asin)

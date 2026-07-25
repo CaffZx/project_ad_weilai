@@ -213,92 +213,93 @@ class NewKeywordFetcher:
                      parent_asin, len(guaranteed), len(records) - len(guaranteed), len(records), _TOP_N)
 
         # ── Step 6: history enrichment (AZ, 逐词, 信号量限流) ──
-        az_sem = asyncio.Semaphore(getattr(settings, "azlisting_mcp_max_in_flight", 5))
-        az_timeout = getattr(settings, "azlisting_mcp_timeout", 60.0)
-        enrichment_timeout = getattr(settings, "campaign_new_enrichment_timeout", 600.0)
+        if getattr(settings, "campaign_new_history_enabled", False):
+            az_sem = asyncio.Semaphore(getattr(settings, "azlisting_mcp_max_in_flight", 5))
+            az_timeout = getattr(settings, "azlisting_mcp_timeout", 60.0)
+            enrichment_timeout = getattr(settings, "campaign_new_enrichment_timeout", 600.0)
 
-        # 7 天窗口日期（按站点时区，复用统一口径）
-        hist_start, hist_end = make_date_window(7, site_code)
+            # 7 天窗口日期（按站点时区，复用统一口径）
+            hist_start, hist_end = make_date_window(7, site_code)
 
-        async def _enrich_one(record: NewKeywordRecord) -> None:
-            child_asin = target_child_asin or ""
-            if not child_asin:
-                for r in own_rows:
-                    if str(r.get("关键词") or r.get("keyword") or "").strip().lower() == record.keyword_text:
-                        child_asin = str(r.get("ASIN") or r.get("asin") or "")
-                        break
-            if not child_asin:
-                child_asin = parent_asin
-            async with az_sem:
-                try:
-                    res = await self._mcp().call_tool_timed_with_args(
-                        "erp_listing_asin_keyword_rank_history",
-                        {
-                            "asin": child_asin,
-                            "keyword": record.keyword_text,
-                            "siteCode": site_code.replace("Amazon_", ""),
-                            "startDate": hist_start,
-                            "endDate": hist_end,
-                        },
-                        az_timeout,
-                    )
-                except Exception as e:
-                    logger.debug("history enrichment [%s][%s]: %s", parent_asin, record.keyword_text, e)
+            async def _enrich_one(record: NewKeywordRecord) -> None:
+                child_asin = target_child_asin or ""
+                if not child_asin:
+                    for r in own_rows:
+                        if str(r.get("关键词") or r.get("keyword") or "").strip().lower() == record.keyword_text:
+                            child_asin = str(r.get("ASIN") or r.get("asin") or "")
+                            break
+                if not child_asin:
+                    child_asin = parent_asin
+                async with az_sem:
+                    try:
+                        res = await self._mcp().call_tool_timed_with_args(
+                            "erp_listing_asin_keyword_rank_history",
+                            {
+                                "asin": child_asin,
+                                "keyword": record.keyword_text,
+                                "siteCode": site_code.replace("Amazon_", ""),
+                                "startDate": hist_start,
+                                "endDate": hist_end,
+                            },
+                            az_timeout,
+                        )
+                    except Exception as e:
+                        logger.debug("history enrichment [%s][%s]: %s", parent_asin, record.keyword_text, e)
+                        record.history_state = "query_failed"
+                        return
+                if not (isinstance(res, object) and getattr(res, "ok", False)):
                     record.history_state = "query_failed"
                     return
-            if not (isinstance(res, object) and getattr(res, "ok", False)):
-                record.history_state = "query_failed"
-                return
-            data = res.value
-            if isinstance(data, dict) and "data" in data:
-                rows = data["data"]
-            elif isinstance(data, dict) and "rows" in data:
-                rows = data["rows"]
-            else:
-                rows = _as_rows_safe(data)
-            if not rows or not isinstance(rows, list):
-                record.history_state = "empty"
-                return
-            # 最新日
-            latest = rows[-1] if isinstance(rows, list) else None
-            if not isinstance(latest, dict):
-                record.history_state = "empty"
-                return
-            record.natural_rank = _to_int_or_none(latest.get("crawNatureRank"))
-            record.rank_tier = str(latest.get("crawNatureRankPosition") or "")
-            record.sponsored_rank = _to_int_or_none(latest.get("crawSpRank"))
-            # 7 天趋势: "5→6→9→3→3→6→6"
-            trend_parts: list[str] = []
-            for day in rows:
-                if not isinstance(day, dict):
-                    continue
-                nr = _to_int_or_none(day.get("crawNatureRank"))
-                trend_parts.append(str(nr) if nr is not None else "-")
-            if trend_parts:
-                record.rank_trend = "→".join(trend_parts)
-            record.history_state = "ok"
+                data = res.value
+                if isinstance(data, dict) and "data" in data:
+                    rows = data["data"]
+                elif isinstance(data, dict) and "rows" in data:
+                    rows = data["rows"]
+                else:
+                    rows = _as_rows_safe(data)
+                if not rows or not isinstance(rows, list):
+                    record.history_state = "empty"
+                    return
+                latest = rows[-1] if isinstance(rows, list) else None
+                if not isinstance(latest, dict):
+                    record.history_state = "empty"
+                    return
+                record.natural_rank = _to_int_or_none(latest.get("crawNatureRank"))
+                record.rank_tier = str(latest.get("crawNatureRankPosition") or "")
+                record.sponsored_rank = _to_int_or_none(latest.get("crawSpRank"))
+                trend_parts: list[str] = []
+                for day in rows:
+                    if not isinstance(day, dict):
+                        continue
+                    nr = _to_int_or_none(day.get("crawNatureRank"))
+                    trend_parts.append(str(nr) if nr is not None else "-")
+                if trend_parts:
+                    record.rank_trend = "→".join(trend_parts)
+                record.history_state = "ok"
 
-        async def _enrich_all():
-            eligible = [r for r in records if r.own_natural_rank is not None]
+            async def _enrich_all():
+                eligible = [r for r in records if r.own_natural_rank is not None]
+                for r in records:
+                    if r.own_natural_rank is None:
+                        r.history_state = "not_eligible"
+                if not eligible:
+                    return
+                tasks = [asyncio.create_task(_enrich_one(r)) for r in eligible]
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=enrichment_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("NewKeywordFetcher [%s]: history enrichment 总超时 %.0fs",
+                                   parent_asin, enrichment_timeout)
+                ok = sum(1 for r in records if r.history_state == "ok")
+                logger.info("NewKeywordFetcher [%s]: history enriched %d/%d", parent_asin, ok, len(records))
+
+            await _enrich_all()
+        else:
             for r in records:
-                if r.own_natural_rank is None:
-                    r.history_state = "not_eligible"
-            if not eligible:
-                return
-            tasks = [asyncio.create_task(_enrich_one(r)) for r in eligible]
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=enrichment_timeout,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("NewKeywordFetcher [%s]: history enrichment 总超时 %.0fs",
-                               parent_asin, enrichment_timeout)
-            # 统计
-            ok = sum(1 for r in records if r.history_state == "ok")
-            logger.info("NewKeywordFetcher [%s]: history enriched %d/%d", parent_asin, ok, len(records))
-
-        await _enrich_all()
+                r.history_state = "disabled"
 
         # ── Step 7: source 标注 ──
         for r in records:

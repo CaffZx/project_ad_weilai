@@ -136,8 +136,11 @@ def test_new_campaign_prompt_explains_rank_history_evidence_states():
     assert "rank_trend" in prompt
     assert "rank_tier" in prompt
     assert "sponsored_rank" in prompt
-    assert "not_eligible / query_failed" in prompt
-    assert "不等同于“无自然位”" in prompt
+    assert "`not_eligible`" in prompt
+    assert "`query_failed`" in prompt
+    assert "natural_rank` 是当前自然位" in prompt
+    assert "`history_state` 只影响 `rank_trend`、`rank_tier`、`sponsored_rank`" in prompt
+    assert "仅在 `history_state=ok` 时才是可用的历史证据" not in prompt
 
 
 def test_new_campaign_drops_code_numerics():

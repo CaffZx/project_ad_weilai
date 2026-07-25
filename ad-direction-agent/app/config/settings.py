@@ -156,6 +156,7 @@ class Settings(BaseSettings):
 
     # Campaign 新增活动分析 (KB 16, 独立并行分析线)
     campaign_new_enabled: bool = True         # 总开关 (关闭退化到无新增建议)
+    campaign_new_history_enabled: bool = False  # AZ history enrichment 开关（关闭则仅用 own 自然位，不查历史趋势）
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
     campaign_new_max_count: int = 40          # 单次分析最大候选词数 (排序后截断 Top-N；2026-06-18 20→40)
     campaign_new_max_creates: int = 20        # 输出硬截断 (双轮交集后 Top-N，EXACT 优先)
@@ -242,7 +243,7 @@ class Settings(BaseSettings):
     azlisting_mcp_header_name: str = "Authorization"
     azlisting_mcp_timeout: float = 60.0
     azlisting_mcp_max_connections: int = 20
-    azlisting_mcp_max_in_flight: int = 20
+    azlisting_mcp_max_in_flight: int = 5
 
     # 原始配置数据（启动时加载）
     _raw_tags: dict | None = None

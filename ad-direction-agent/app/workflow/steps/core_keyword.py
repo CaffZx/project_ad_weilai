@@ -59,19 +59,21 @@ def _condition_cost_rank(
     campaigns: list[CampaignKeywordItem],
     results: dict[str, tuple[bool, list[dict]]],
 ) -> None:
-    n = len(campaigns)
-    if n < 3:
+    eligible = [c for c in campaigns if c.cost_14d > 0]
+    m = len(eligible)
+    if m < 3:
         return
-    threshold_idx = max(1, int(n * 0.3))
-    sorted_c = sorted(campaigns, key=lambda x: x.cost_14d, reverse=True)
+    threshold_idx = max(1, int(m * 0.3))
+    sorted_c = sorted(eligible, key=lambda x: x.cost_14d, reverse=True)
     top_kw = {c.keyword_text for c in sorted_c[:threshold_idx]}
+    n = len(campaigns)
     for c in campaigns:
         if c.keyword_text in top_kw:
             is_core, ev = results[c.keyword_text]
             ev.append({
                 "condition": "高广告花费",
                 "value": f"cost=${c.cost_14d:.2f}",
-                "threshold": f"关键词花费排名 {sorted_c.index(c)+1}/{n}（前 {sorted_c.index(c)/n:.0%}，阈值 30%）",
+                "threshold": f"关键词花费排名 {sorted_c.index(c)+1}/{m}（前 {sorted_c.index(c)/m:.0%}，阈值 30%）",
             })
             results[c.keyword_text] = (True, ev)
 
@@ -237,16 +239,20 @@ async def run_core_keyword_analysis(
     if not settings.core_keyword_analyze_enabled:
         return {"ok": False, "error": "core_keyword_analyze_enabled is False"}
 
-    # 1. MCP 拉数
+    # 1. MCP 拉数（先读人工策略，获取排除词 + 锁定词数）
     excluded_keyword_norms: set[str] = set()
+    locked_count: int = 0
     try:
         from app.persistence.erp_writer.repository import ErpDualWriterRepository
         excluded_keyword_norms = ErpDualWriterRepository.fetch_core_keyword_exclusion_set(
             parent_asin, parent_seller_sku, shop_id,
         )
+        locked_count = ErpDualWriterRepository.fetch_core_keyword_locked_count(
+            parent_asin, parent_seller_sku, shop_id,
+        )
     except Exception:
         logger.warning(
-            "读取核心词离线排除策略失败 [%s/%s/%s]，按无排除继续",
+            "读取核心词离线人工策略失败 [%s/%s/%s]，按无策略继续",
             parent_asin, parent_seller_sku, shop_id, exc_info=True,
         )
     fetcher = CoreKeywordFetcher()
@@ -300,7 +306,8 @@ async def run_core_keyword_analysis(
 
     # 4. merge + 截断
     rows = _merge(all_keywords, all_llm_kw, data_results)
-    rows = _truncate_top_n(rows, max_n=30)
+    ai_max = max(0, min(60 - locked_count, 30))
+    rows = _truncate_top_n(rows, max_n=ai_max)
     core_count = sum(1 for r in rows if r["is_core"])
 
     source_refs = ["starsrock"]

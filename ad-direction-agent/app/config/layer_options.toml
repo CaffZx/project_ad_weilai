@@ -78,6 +78,41 @@ id = "旺季末期"
 label = "旺季末期"
 description = "旺季尾声，逐步缩减预算，防止库存积压"
 
+[strategy.operating_mode]
+label = "经营模式"
+description = "人工选定，Agent根据模式自动推导广告权限和策略，不自行改变模式"
+selection_type = "radio"
+
+[[strategy.operating_mode.options]]
+id = "immediate_exit"
+label = "立即退出"
+description = "全部活动暂停或迁入低价捡漏组"
+
+[[strategy.operating_mode.options]]
+id = "controlled_clearance"
+label = "控制清货"
+description = "控制成本、收缩预算，允许有限清货动作"
+
+[[strategy.operating_mode.options]]
+id = "limited_repair"
+label = "限时修复"
+description = "在父ASIN预算和目标ACOS内限时修复"
+
+[[strategy.operating_mode.options]]
+id = "stable_operation"
+label = "稳定经营"
+description = "保持盈利对象稳定，避免不必要扩量"
+
+[[strategy.operating_mode.options]]
+id = "active_promotion"
+label = "积极推进"
+description = "ACOS良好且在预算内时广泛自动不机械限流"
+
+[[strategy.operating_mode.options]]
+id = "profit_harvest"
+label = "获取利润"
+description = "以利润和现金回收为第一目标，优先低成本流量"
+
 # ── Layer 1.2 策略层 ─────────────────────────────────────
 
 [tactics.ad_purposes]

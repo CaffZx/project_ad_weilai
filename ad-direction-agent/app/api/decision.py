@@ -206,6 +206,14 @@ _SEASON_ZH = {
     "OFF_SEASON": "淡季", "PEAK_SEASON_PREPARE": "旺季准备",
     "BIG_PEAK_SEASON": "大旺季", "LATE_PEAK_SEASON": "旺季末期",
 }
+_OPERATING_MODE_ZH = {
+    "IMMEDIATE_EXIT": "立即退出",
+    "CONTROLLED_CLEARANCE": "控制清货",
+    "LIMITED_REPAIR": "限时修复",
+    "STABLE_OPERATION": "稳定经营",
+    "ACTIVE_PROMOTION": "积极推进",
+    "PROFIT_HARVEST": "获取利润",
+}
 _PURPOSE_ZH = {"TRAFFIC": "引流型", "CONVERSION": "转化型", "RANKING": "排名型", "PROFIT": "盈利型"}
 _KWTYPE_ZH = {"GENERIC": "大词", "LONG_TAIL": "长尾词", "COMPETITOR": "竞品词",
               "BRAND": "品牌词", "CUSTOM": "自定义"}
@@ -240,6 +248,7 @@ def _translate_preset(row: dict) -> dict:
             "product_level": _POSITION_ZH.get(row.get("product_position"), row.get("product_position")),
             "product_stage": _STAGE_ZH.get(row.get("product_stage"), row.get("product_stage")),
             "season_stage": _SEASON_ZH.get(row.get("season_type"), row.get("season_type")),
+            "operating_mode": _OPERATING_MODE_ZH.get(row.get("operating_mode"), row.get("operating_mode")),
         },
         "tactics": {
             "ad_purposes": [_PURPOSE_ZH.get(x, x) for x in _json_list(row.get("advert_purposes"))],

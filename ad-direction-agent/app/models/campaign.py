@@ -104,6 +104,7 @@ class CampaignStrategyContext(BaseModel):
     product_stage: str = ""
     product_level: str = ""
     season_stage: str = ""
+    operating_mode: str = ""
     ad_purposes: list[str] = Field(default_factory=list)
     ad_directions: list[str] = Field(default_factory=list)   # 广告方向选择(运营 tab4 已选)：取自 workflow_state.execution.selected_directions
     target_keyword_strategy: list[str] = Field(default_factory=list)
@@ -184,13 +185,13 @@ class NewCampaignCandidate(BaseModel):
     keyword_text: str
     search_volume: int = 0                  # flow_keywords 提供
     search_rank: int | None = None          # flow_keywords.搜索排名
-    natural_rank: int | None = None         # erp_listing_asin_keyword_rank_history.crawNatureRank（最新日）
+    natural_rank: int | None = None         # 当前自然位（统一业务口径）
     rank_trend: str | None = None           # 近7天自然位趋势, "5→6→9→3→3→6→6"
     rank_tier: str | None = None            # history.crawNatureRankPosition
     sponsored_rank: int | None = None       # history.crawSpRank
     week_rank: int | None = None            # own_keyword_flow.词的周排名
     week_search_volume: int | None = None   # own_keyword_flow.周搜索量
-    history_state: str = ""                 # ok / empty / query_failed / not_eligible
+    history_state: str = ""                 # 趋势/分位/广告排位补充数据状态
     # ★KB 16 §3「建议竞价(suggestedBid)」：MCP whp_amazon_advert_keyword_suggest_bid 批量查询填入。
     #   命中→_calc_initial_bid 按公式 min(0.5, bid×0.5) 计算；未命中→降级占位 $0.30。
     suggested_bid: float | None = None

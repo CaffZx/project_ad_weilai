@@ -19,6 +19,7 @@ class _FakeState:
             "product_level": "重点产品 (P1)",
             "product_stage": "推进期",
             "season_stage": "旺季准备",
+            "operating_mode": "稳定经营",
             "ad_purposes": ["转化型"],
             "target_keyword_strategy": ["大词"],
         }
@@ -62,6 +63,7 @@ def test_wizard_payload_from_state():
     assert len(wizard["target_scores"]) == 1
     assert len(wizard["keyword_analysis"]) == 1
     assert wizard["decision_meta"]["product_position"] == "重点产品 (P1)"
+    assert wizard["decision_meta"]["operating_mode"] == "稳定经营"
     assert partial is False
 
 

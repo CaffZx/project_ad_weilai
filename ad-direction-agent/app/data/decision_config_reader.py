@@ -17,6 +17,7 @@ from app.persistence.erp_writer.text_utils import (
     unmap_ad_purpose,
     unmap_product_position,
     unmap_product_stage,
+    unmap_operating_mode,
     unmap_season_type,
     unmap_target_keyword_type,
 )
@@ -43,7 +44,7 @@ def load_layer14(asin: str, parent_seller_sku: str | None = None) -> dict | None
         with conn.cursor() as cur:
             if parent_seller_sku:
                 cur.execute(
-                    "SELECT product_position, product_stage, season_type, "
+                    "SELECT product_position, product_stage, season_type, operating_mode, "
                     "advert_purposes, target_keyword_types, advert_direction_types, day_range "
                     "FROM t_advert_agent_decision_config "
                     "WHERE parent_asin=%s AND parent_seller_sku=%s "
@@ -52,7 +53,7 @@ def load_layer14(asin: str, parent_seller_sku: str | None = None) -> dict | None
                 )
             else:
                 cur.execute(
-                    "SELECT product_position, product_stage, season_type, "
+                    "SELECT product_position, product_stage, season_type, operating_mode, "
                     "advert_purposes, target_keyword_types, advert_direction_types, day_range "
                     "FROM t_advert_agent_decision_config "
                     "WHERE parent_asin=%s ORDER BY update_time DESC LIMIT 1",
@@ -65,6 +66,7 @@ def load_layer14(asin: str, parent_seller_sku: str | None = None) -> dict | None
             "product_level": unmap_product_position(row.get("product_position")) or "",
             "product_stage": unmap_product_stage(row.get("product_stage")) or "",
             "season_stage": unmap_season_type(row.get("season_type")) or "",
+            "operating_mode": unmap_operating_mode(row.get("operating_mode")),
             "ad_purposes": from_enum_list(row.get("advert_purposes"), unmap_ad_purpose),
             "target_keyword_strategy": from_enum_list(
                 row.get("target_keyword_types"), unmap_target_keyword_type),

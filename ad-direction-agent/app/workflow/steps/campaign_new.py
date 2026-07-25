@@ -337,10 +337,10 @@ async def analyze_new_campaigns(
             keyword_text=r.keyword_text,
             search_volume=r.search_volume,
             search_rank=r.search_rank,
-            natural_rank=r.natural_rank if his_ok else None,
-            rank_trend=r.rank_trend if his_ok else None,
-            rank_tier=r.rank_tier if his_ok else None,
-            sponsored_rank=r.sponsored_rank if his_ok else None,
+            natural_rank=r.own_natural_rank,                     # own 做主源
+            rank_trend=r.rank_trend if his_ok else None,          # history 补充趋势
+            rank_tier=r.rank_tier if his_ok else None,            # history 补充分位
+            sponsored_rank=r.sponsored_rank if his_ok else None,  # history 补充广告排位
             week_rank=r.week_rank,
             week_search_volume=r.week_search_volume,
             history_state=r.history_state,

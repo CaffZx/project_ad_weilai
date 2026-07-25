@@ -92,14 +92,24 @@ def _install() -> None:
         cand_parts = ["## 候选关键词列表 (逐词判断 action + keyword_class + relevance_tier)"]
         for i, c in enumerate(candidates):
             rank = c.get("natural_rank")
+            trend = c.get("rank_trend") or ""
+            sr = c.get("search_rank")
             wk = c.get("week_rank")
             wsv = c.get("week_search_volume")
+            tier = c.get("rank_tier") or ""
+            sp = c.get("sponsored_rank")
+            his = c.get("history_state") or ""
             line = (
                 f"\n### 候选 {i + 1}: {c.get('keyword_text', '')}"
                 f"\n  - 搜索量: {c.get('search_volume', 0)}"
+                + (f"\n  - 搜索排名: {sr}" if sr is not None else "")
                 + (f"\n  - 周搜索量: {wsv}" if wsv is not None else "")
                 + f"\n  - 当前自然位: {rank if rank is not None else 'N/A(无自然位)'}"
+                + (f"\n  - 自然位趋势(7天): {trend}" if trend else "")
+                + (f"\n  - 自然位分位: {tier}" if tier else "")
+                + (f"\n  - 广告排位: {sp}" if sp is not None else "")
                 + (f"\n  - 词的周排名: {wk}" if wk is not None else "")
+                + (f"\n  - 历史数据: {his}" if his and his != "ok" else "")
                 + f"\n  - 触发场景(参考): {c.get('trigger_scene', '')}"
             )
             if c.get("source"):

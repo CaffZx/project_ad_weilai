@@ -118,6 +118,16 @@ class SeasonStage(StrEnum):
     PEAK_END = "旺季末期"
 
 
+class OperatingMode(StrEnum):
+    """经营模式——人工录入，Agent 据此推导广告权限和策略。"""
+    IMMEDIATE_EXIT = "立即退出"
+    CONTROLLED_CLEARANCE = "控制清货"
+    LIMITED_REPAIR = "限时修复"
+    STABLE_OPERATION = "稳定经营"
+    ACTIVE_PROMOTION = "积极推进"
+    PROFIT_HARVEST = "获取利润"
+
+
 class AdPurpose(StrEnum):
     TRAFFIC = "引流型"
     CONVERSION = "转化型"
@@ -175,7 +185,7 @@ class StrategyOptionsResponse(BaseModel):
     """GET 战略层选项"""
     asin: str
     dimensions: list[StrategyDimension]
-    current_selection: dict | None = None  # 从long_term_config加载 {product_level, product_stage, season_stage}
+    current_selection: dict | None = None  # 从long_term_config加载 {product_level, product_stage, season_stage, operating_mode}
     data_ok: bool = True
     missing_fields: list[str] = []
     days: int = 7
@@ -189,6 +199,7 @@ class StrategyConfirmRequest(ProductIdentityMixin):
     product_level: ProductLevel
     product_stage: ProductStage
     season_stage: SeasonStage
+    operating_mode: OperatingMode | None = None
 
 
 class StrategyConfirmResponse(BaseModel):
@@ -434,6 +445,7 @@ class LongTermConfigResponse(BaseModel):
     product_level: ProductLevel | None = None
     product_stage: ProductStage | None = None
     season_stage: SeasonStage | None = None
+    operating_mode: OperatingMode | None = None
     ad_purposes: list[AdPurpose] = Field(default_factory=list)
     target_keyword_strategy: list[TargetKeywordStrategy] = Field(default_factory=list)
     last_modified: str = ""
@@ -444,5 +456,6 @@ class LongTermConfigUpdateRequest(ProductIdentityMixin):
     product_level: ProductLevel | None = None
     product_stage: ProductStage | None = None
     season_stage: SeasonStage | None = None
+    operating_mode: OperatingMode | None = None
     ad_purposes: list[AdPurpose] | None = None
     target_keyword_strategy: list[TargetKeywordStrategy] | None = None

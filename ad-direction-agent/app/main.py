@@ -10,17 +10,6 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 # ──────────────────────────────────────────────────────────────────────────────
 
-import os as _mp_os
-if _mp_os.environ.get("DUMP_NEW_CAMPAIGN_LLM", "").strip() in ("1", "true", "yes"):
-    import importlib.util as _mp_iu
-    _mp_spec = _mp_iu.spec_from_file_location(
-        "dump_new_campaign_llm",
-        _mp_os.path.join(_mp_os.path.dirname(_mp_os.path.dirname(_mp_os.path.abspath(__file__))),
-                         "scripts", "dump_new_campaign_llm.py"),
-    )
-    _mp_mod = _mp_iu.module_from_spec(_mp_spec)
-    _mp_spec.loader.exec_module(_mp_mod)
-
 from pathlib import Path
 
 from fastapi import FastAPI

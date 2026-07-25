@@ -35,6 +35,25 @@ def test_long_term_config_writes_product_identity_columns():
     assert params[:3] == ("B0TEST", 1622, "SKU-001")
 
 
+def test_long_term_config_writes_nullable_operating_mode_column():
+    """经营模式与三项战略字段同表持久化，空值必须原样写为 SQL NULL。"""
+    mgr = _manager()
+    mgr.get_long_term_config = Mock(return_value={})  # type: ignore[method-assign]
+    mgr._execute = Mock()
+
+    assert mgr.set_long_term_config(
+        "B0TEST",
+        {
+            "product_level": "常规产品 (P2)",
+            "operating_mode": None,
+        },
+    )
+
+    sql, params = mgr._execute.call_args_list[0].args[:2]
+    assert "operating_mode" in sql
+    assert params[-2] is None
+
+
 def test_workflow_state_writes_product_identity_columns():
     mgr = _manager()
     mgr._execute = Mock()
