@@ -2099,7 +2099,7 @@ class ErpDualWriterRepository:
                 )
                 if not latest:
                     return {
-                        "effective_core_count": 0, "limit": 30,
+                        "effective_core_count": 0, "limit": 60,
                         "latest_task": None, "rows": [], "word_pool": [],
                     }
                 labels = self._core_keyword_labels_cursor(cur, str(latest["id"]))
@@ -2149,7 +2149,7 @@ class ErpDualWriterRepository:
                     {norm: row.get("state") or "ENABLED" for norm, row in policy_by_norm.items()},
                 )
                 return {
-                    "effective_core_count": len(effective), "limit": 30,
+                    "effective_core_count": len(effective), "limit": 60,
                     "latest_task": {
                         "id": latest["id"],
                         "finished_at": core_keyword_task_version(latest.get("finished_at")),
