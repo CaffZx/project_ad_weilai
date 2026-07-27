@@ -1209,11 +1209,14 @@ def build_campaign_strategy_context(
     if discount is not None:
         flags.append(f"折扣率 {discount}% (Listing优化中，禁止大动作)")
 
+    operating_mode = long_term.get("operating_mode") or ""
+
     return CampaignStrategyContext(
         parent_asin=asin,
         product_stage=long_term.get("product_stage", ""),
         product_level=long_term.get("product_level", ""),
         season_stage=long_term.get("season_stage", ""),
+        operating_mode=operating_mode,
         ad_purposes=long_term.get("ad_purposes", []),
         ad_directions=[_zh_ad_direction(d) for d in (ad_directions or [])],
         target_keyword_strategy=long_term.get("target_keyword_strategy", []),
@@ -1264,6 +1267,7 @@ def _build_overview_facts(
         "product_stage": strat_ctx.product_stage,
         "product_level": strat_ctx.product_level,
         "season_stage": strat_ctx.season_stage,
+        "operating_mode": strat_ctx.operating_mode,
         "ad_purposes": strat_ctx.ad_purposes,
         "target_keyword_strategy": strat_ctx.target_keyword_strategy,
         "ad_directions": strat_ctx.ad_directions,

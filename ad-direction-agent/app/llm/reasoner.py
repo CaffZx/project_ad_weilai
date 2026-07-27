@@ -1061,6 +1061,7 @@ class LLMReasoner:
             parts.append(f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}")
             parts.append(f"  - 产品阶段: {strategy.get('product_stage', '?')}")
             parts.append(f"  - 淡旺季: {strategy.get('season_stage', '?')}")
+            parts.append(f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}")
             parts.append("")
 
         # 策略层上下文
@@ -1260,6 +1261,7 @@ class LLMReasoner:
             f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
             f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
+            f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}",
             "",
             "## 策略层",
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
@@ -1384,6 +1386,7 @@ class LLMReasoner:
             f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
             f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
+            f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}",
             "",
             "## 策略层",
             f"  - 广告目的: {tactics.get('ad_purposes', [])}",
@@ -1671,6 +1674,7 @@ class LLMReasoner:
             f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
+            f"  - 经营模式: {strategy_context.get('operating_mode') or '未设置'}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
             f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
         ]
@@ -1914,6 +1918,7 @@ class LLMReasoner:
             f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
+            f"  - 经营模式: {strategy_context.get('operating_mode') or '未设置'}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
             f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
         ]
@@ -2045,6 +2050,7 @@ class LLMReasoner:
             f"  - 广告方向(运营已选): {strategy_context.get('ad_directions', []) or '未选'}",
             f"  - 目标关键词类型: {strategy_context.get('target_keyword_strategy', [])}",
         ]
+        ctx_lines.append(f"  - 经营模式: {strategy_context.get('operating_mode') or '未设置'}")
         margin = strategy_context.get("margin")
         ctx_lines.append(f"  - 毛利率: {'%.1f%%' % (margin * 100) if margin is not None else 'N/A'}")
         db = strategy_context.get("daily_budget")

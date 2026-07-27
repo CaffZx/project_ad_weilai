@@ -225,7 +225,6 @@ _OPERATING_MODE_REVERSE = {
     "LIMITED_REPAIR": "限时修复",
     "STABLE_OPERATION": "稳定经营",
     "ACTIVE_PROMOTION": "积极推进",
-    "ACTIVE_PROMOTION": "积极推进",
     "PROFIT_HARVEST": "获取利润",
 }
 _AD_PURPOSE_REVERSE = {

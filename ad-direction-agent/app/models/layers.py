@@ -128,6 +128,24 @@ class OperatingMode(StrEnum):
     PROFIT_HARVEST = "获取利润"
 
 
+class AdPermission(StrEnum):
+    """经营模式映射的广告权限等级——下游护栏和动作生成据此收窄允许范围。"""
+    STOP = "stop"
+    CLEARANCE_ONLY = "clearance_only"
+    NORMAL = "normal"
+
+
+def operating_mode_to_permission(mode: OperatingMode | None) -> AdPermission:
+    """经营模式 → 广告权限，纯函数。仅 IMMEDIATE_EXIT 和 CONTROLLED_CLEARANCE 有特殊权限，
+    其余模式（含 None）统一 NORMAL。"""
+    if mode is None:
+        return AdPermission.NORMAL
+    return {
+        OperatingMode.IMMEDIATE_EXIT: AdPermission.STOP,
+        OperatingMode.CONTROLLED_CLEARANCE: AdPermission.CLEARANCE_ONLY,
+    }.get(mode, AdPermission.NORMAL)
+
+
 class AdPurpose(StrEnum):
     TRAFFIC = "引流型"
     CONVERSION = "转化型"
