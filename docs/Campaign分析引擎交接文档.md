@@ -1,6 +1,6 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-22（版本日志见文末，最新 v3.20：KB30/31/32 否词治理 + 组合 spend 窗口 + 预过滤收口）
+> **最后更新**: 2026-07-25（版本日志见文末，最新 v3.21：战略层经营模式 + 新增活动选词重构 + MCP registry）
 > **版本**: v2.0
 > **分支**: chenv3.2
 
@@ -319,6 +319,9 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-17 | **KB 细粒度切片 + core_keyword_policy 迁移 + 文档清理** | `kb_loader.py`(+97行)：KB 切片粒度细化。`core_keyword_policy.py` 从 `app/` 移到 `app/core/`。删除 6 篇过期文档。`test_campaign_cache_context.py`(新) + `test_kb_slicing.py`(+54行)。28 files +542/-1312。 |
 | 07-17 | **组合预算 spend 多周期窗口** | `to_budget_summary`/`build_summary` 新增 `portfolio_spend_{1d,3d,7d,14d,30d}` 五个周期。`campaign_fetcher.fetch_portfolio_list` 补 spend 字段提取。前端组合预算卡多周期对比。`migrate_portfolio_spend_windows.sql`(新)。10 files +351/-78。 |
 | 07-22 | **★ KB30/31/32 新规则 + 广泛否词执行链路** | KB30(新)：广泛广告否词与搜索词治理规则。KB31(新)：样本窗口与生命周期状态规则。KB32(新)：自动广告调整规则。`reasoner`：广泛流 prompt 集成 KB30 否词指令。`advert_execution`：`agent_create_negative_keywords` MCP 真实否词下发。`campaign_viewmodel`/`repository`/`mappers`：灰卡补否词字段+落库。`render.js`(+66行)：前端展示否词建议列表。`campaign_fetcher`(+29行)：补 search_term 数据源。`test_negative_keyword_persistence.py`(新)。24+8 files +1696/-289。 |
+| 07-25 | **MCP registry 集中化 + 新增活动选词重构** | `mcp_registry.py`(新)：MCP 工具注册收口到单文件，`mcp_adapter` 适配。`new_keyword_fetcher.py`(新)：多源候选词发现统一编排器，`campaign_new.py` -130 行委托给 fetcher。`models/campaign.py`：新增 `NewKeywordCandidate` 模型含 priority_caps。`campaign_portfolio.py`：补混合匹配冲突阻断 filter 调用。`test_new_keyword_priority_caps.py`(新) + `test_portfolio_match_and_exec.py` 补冲突用例。18 files。 |
+| 07-25 | **★ 战略层新增经营模式(operating_mode)** | `layers.py`：`OperatingMode`(6值)+`AdPermission`(3级)+`operating_mode_to_permission()` 纯函数。`layer_options.toml`：第 4 个 radio 组。`text_utils.py`：`map_operating_mode`/`unmap_operating_mode` 中英文互转。`repository`/`auto_push`/`decision_config_reader`：ERP 决策表读写。`decision`/`long_term_config`：API 透传。`mysql_state_manager`/`schema.sql`：state DB 加列。`campaign.py`：`build_campaign_strategy_context` 接入 operating_mode。`migrate_operating_mode.sql` + `migrate_state_schema_columns.sql`(新)。test 5 个。28 files +524/-178。 |
+| 07-25 | **.gitignore + core_keyword limit 扩大** | `.gitignore` 加 `logs/` 目录。`repository.py`：核心词策略查询 limit 30→60。 |
 
 ---
 
@@ -1285,6 +1288,10 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.21: 战略层经营模式 + 新增活动选词重构 + MCP registry（2026-07-25，本地未部署服务器）—— ①`OperatingMode` 6值+`AdPermission` 3级+`operating_mode_to_permission()` ②ERP/state DB 全链路持久化 ③`new_keyword_fetcher.py` 统一多源候选词发现+`campaign_new.py` -130 行 ④`mcp_registry.py` MCP 工具集中注册 ⑤`.gitignore` 加 logs/。28+18+7 files。*
+
+最后更新：2026-07-25
 
 *v3.20: KB30/31/32 否词治理 + 组合 spend 窗口 + 预过滤收口 + KB 切片细化（2026-07-17~22，本地未部署服务器）—— ①KB30/31/32 新规则(否词治理/样本窗口/自动广告调整)+广泛否词 MCP 真实下发链路 ②组合预算 spend 多周期窗口(1d/3d/7d/14d/30d)+前端展示 ③预过滤收口 campaign_prefilter+删死代码 ④KB 细粒度切片+core_keyword_policy 迁移 app/core/ ⑤Codex hook 预埋+decisionId 追踪 ⑥批跑脚本迁移 scripts/+清理过期文档。24+10+8+3+28+7+9 files。*
 
