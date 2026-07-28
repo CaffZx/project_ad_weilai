@@ -1,4 +1,5 @@
 import asyncio
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,29 @@ def test_wizard_strategy_context_keeps_saved_operating_mode():
 
     assert result.strategy is not None
     assert result.strategy.operating_mode == "控制清货"
+
+
+def test_immediate_exit_option_is_last_and_marked_as_dangerous():
+    options_file = Path(__file__).parents[2] / "app" / "config" / "layer_options.toml"
+    options = tomllib.loads(options_file.read_text(encoding="utf-8"))
+    operating_modes = options["strategy"]["operating_mode"]["options"]
+
+    assert operating_modes[-1]["id"] == "immediate_exit"
+    assert operating_modes[-1]["risk_level"] == "danger"
+
+
+def test_strategy_demo_marks_immediate_exit_and_confirms_before_save():
+    demo = Path(__file__).parents[2] / "demo" / "ad-asisitant-agent.html"
+    source = demo.read_text(encoding="utf-8")
+
+    assert 'data-risk="${riskLevel}"' in source
+    assert 'data-label="${opt.label}"' in source
+    assert "高危操作" in source
+    assert "dd-text-danger" in source
+    assert "showImmediateExitConfirm" in source
+    assert source.index("if (om === '立即退出')") < source.index(
+        "callAPI('/strategy/confirm'"
+    )
 
 
 def test_strategy_demo_replaces_product_stage_with_persisted_operating_mode():

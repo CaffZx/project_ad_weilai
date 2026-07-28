@@ -84,11 +84,6 @@ description = "人工选定，Agent根据模式自动推导广告权限和策略
 selection_type = "radio"
 
 [[strategy.operating_mode.options]]
-id = "immediate_exit"
-label = "立即退出"
-description = "全部活动暂停或迁入低价捡漏组"
-
-[[strategy.operating_mode.options]]
 id = "controlled_clearance"
 label = "控制清货"
 description = "控制成本、收缩预算，允许有限清货动作"
@@ -112,6 +107,12 @@ description = "ACOS良好且在预算内时广泛自动不机械限流"
 id = "profit_harvest"
 label = "获取利润"
 description = "以利润和现金回收为第一目标，优先低成本流量"
+
+[[strategy.operating_mode.options]]
+id = "immediate_exit"
+label = "立即退出"
+description = "全部活动暂停或迁入低价捡漏组"
+risk_level = "danger"
 
 # ── Layer 1.2 策略层 ─────────────────────────────────────
 

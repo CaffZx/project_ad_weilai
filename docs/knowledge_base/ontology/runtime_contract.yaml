@@ -34,7 +34,7 @@ operating_modes:
 # 六模式全部补全（v3.4.0，C-06）。v3.3.0 只有 4 条且 stable_operation / profit_harvest 完全空白，
 # 代码里其余 4 模式一律 NORMAL、无差异化行为——运营却以为选了模式就生效。
 # 权威表见 docs/knowledge_base/09-冲突裁决规则.md §4。
-# ACOS 判定统一使用目标 ACOS×1.5/×2；经营模式只控制权限，不改变阈值。
+# stage_acos_coefficient：阶段 ACOS 正加值的乘数，见 09号§3.2 / 15号§4.1A。
 mode_policies:
   immediate_exit:
     ad_permission: stop

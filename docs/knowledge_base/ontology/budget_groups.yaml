@@ -322,14 +322,14 @@ natural_traffic_priority_score:
       weight: 1
       scale:
         - { score: 5, condition: "ACOS ≤ 目标 ACOS" }
-        - { score: 3, condition: "ACOS ≤ 目标 ACOS×1.5" }
-        - { score: 1, condition: "目标 ACOS×1.5 < ACOS ≤ 目标 ACOS×2 且有订单" }
-        - { score: 0, condition: "ACOS > 目标 ACOS×2 或无转化支持" }
+        - { score: 3, condition: "ACOS ≤ 有效容忍上限" }
+        - { score: 1, condition: "ACOS 接近容忍上限且有订单" }
+        - { score: 0, condition: "ACOS 超容忍上限或无转化支持" }
   execution_rules:
     - 预算优先给 natural_traffic_priority_score 最高的活动
     - 不得仅因某词从第7页升到第4页，就优先于从第2页升到第1页的词（后者通常能带来更高自然流量）
     - 不得仅按排名提升幅度判断；不同搜索量词同样提升一页，带来的自然流量不同
-    - ACOS 是成本约束而非第一优先级；只要 ACOS 不超过目标 ACOS×1.5，优先考虑自然流量机会
+    - ACOS 是成本约束而非第一优先级；只要 ACOS 在有效容忍范围内，优先考虑自然流量机会
     - 若关键字段缺失（搜索量/自然位/相关性/ACOS），不得自动大幅加预算 → MANUAL_REVIEW 或小预算观察
     - 不得因为多个活动都表现好就平均加预算（平均加预算稀释推词预算，削弱自然位推进效果）
 

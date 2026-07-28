@@ -288,6 +288,7 @@ body.sidebar-collapsed #sidebarCollapseBtn { left: 0; }
 .dd-btn.open, .md-btn.open { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
 .dd-text { color: var(--muted-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .dd-text.selected { color: var(--foreground); font-weight: 500; }
+.dd-text.dd-text-danger { color: var(--danger); }
 .dd-arrow { font-size: 10px; color: #9CA3AF; flex-shrink: 0; transition: transform var(--transition-fast); }
 .dd-btn.open .dd-arrow, .md-btn.open .dd-arrow { transform: rotate(180deg); }
 .dd-panel, .md-panel { position: absolute; z-index: 50; top: 100%; left: 0; right: 0; margin-top: 3px;
@@ -2163,14 +2164,18 @@ async function loadStrategy() {
   let html = `<div style="display:flex;gap:10px">`;
   data.dimensions.forEach(dim => {
     const selVal = prefilled ? data.current_selection[dim.id] : null;
+    const selectedOption = dim.options.find(opt => opt.id === selVal || opt.label === selVal);
+    const selectedRisk = selectedOption?.risk_level === 'danger';
     html += `<div class="dd-wrapper"><label class="dd-label">${dim.label}</label>
       <div style="position:relative"><button type="button" class="dd-btn" data-dim="${dim.id}" onclick="toggleDropdown(this)">
-        <span class="dd-text ${selVal?'selected':''}">${selVal || '请选择'}</span><span class="dd-arrow">▾</span>
+        <span class="dd-text ${selVal?'selected':''}${selectedRisk?' dd-text-danger':''}">${selVal || '请选择'}</span><span class="dd-arrow">▾</span>
       </button><div class="dd-panel hidden">`;
     dim.options.forEach(opt => {
       const sel = selVal === opt.id ? ' selected' : '';
-      html += `<div class="dd-option${sel}" data-value="${opt.id}" data-dim="${dim.id}" onclick="selectDropdown(this)">
-        <div class="dd-opt-label">${opt.label}</div>
+      const riskLevel = opt.risk_level || '';
+      const riskBadge = riskLevel === 'danger' ? '<span class="badge badge-red badge-pill" style="margin-left:6px">高危操作</span>' : '';
+      html += `<div class="dd-option${sel}" data-value="${opt.id}" data-label="${opt.label}" data-dim="${dim.id}" data-risk="${riskLevel}" onclick="selectDropdown(this)">
+        <div class="dd-opt-label">${opt.label}${riskBadge}</div>
         <div class="dd-opt-desc">${opt.description||''}</div>
       </div>`;
     });
@@ -2335,6 +2340,10 @@ async function confirmStrategy() {
   };
   const p = g('product_level'), om = g('operating_mode'), ss = g('season_stage');
   if (!p || !om || !ss) { err('errSec1', '请完整选择产品定位、经营模式和季节阶段'); return; }
+  if (om === '立即退出') {
+    const confirmed = await showImmediateExitConfirm();
+    if (!confirmed) return;
+  }
   hide('errSec1');
   btn.disabled = true; btn.textContent = '⏳ 保存中...';
   try {
@@ -2382,7 +2391,7 @@ function applyPersistedStrategySelection(config) {
     const value = config && config[dim];
     if (!value) return;
     const option = Array.from(qsa(`.dd-option[data-dim="${dim}"]`)).find(el =>
-      el.dataset.value === value || el.querySelector('.dd-opt-label')?.textContent === value
+      el.dataset.value === value || el.dataset.label === value
     );
     if (option) selectDropdown(option);
   });
@@ -3263,7 +3272,7 @@ async function loadExecution() {
   if (dirs.length) {
     _lastExecAiDirs = data.recommended_directions || [];
     dirs.forEach(d => {
-      const defaultSel = d.recommended && d.suitability_score >= 40;
+      const defaultSel = false;
       const title = d.label || cnDir(d.id);
       html += renderDirCard(d);
       // 左栏下拉选项（多选，默认勾选 AI 推荐项；value=英文 id 供保存，data-label=中文供展示）
@@ -3429,6 +3438,28 @@ function showReasonPopup(el) {
   document.body.appendChild(overlay);
 }
 
+function showImmediateExitConfirm() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'reason-overlay';
+    overlay.innerHTML = `<div class="reason-popup">
+      <h4 style="color:var(--danger)">高危操作：立即退出</h4>
+      <div style="font-size:13px;line-height:1.6;color:var(--foreground)">
+        确认后会按“立即退出”经营模式保存配置。专用确定性执行接口接入后，该模式将跳过常规策略层配置和 Campaign 分析，直接执行退出操作。
+      </div>
+      <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary btn-sm">取消</button>
+        <button class="btn btn-sm" style="background:var(--danger);color:#fff">确认并保存</button>
+      </div></div>`;
+    const close = confirmed => { overlay.remove(); resolve(confirmed); };
+    const [cancel, confirm] = overlay.querySelectorAll('button');
+    cancel.addEventListener('click', () => close(false));
+    confirm.addEventListener('click', () => close(true));
+    overlay.addEventListener('click', event => { if (event.target === overlay) close(false); });
+    document.body.appendChild(overlay);
+  });
+}
+
 // ═══════════════ 下拉框全家桶 ═══════════════
 function toggleDropdown(btn) {
   const panel = btn.nextElementSibling;
@@ -3441,8 +3472,9 @@ function selectDropdown(el) {
   const panel = el.closest('.dd-panel');
   const btn = panel.parentElement.querySelector('.dd-btn');
   const text = btn.querySelector('.dd-text');
-  const label = el.querySelector('.dd-opt-label').textContent;
+  const label = el.dataset.label;
   text.textContent = label; text.classList.add('selected');
+  text.classList.toggle('dd-text-danger', el.dataset.risk === 'danger');
   panel.querySelectorAll('.dd-option').forEach(o => o.classList.remove('selected'));
   el.classList.add('selected');
   closeAllDropdowns();

@@ -231,7 +231,7 @@ actions:
       - diagnosis_path_complete
     physical_action_codes: [move_portfolio, adjust_budget, adjust_bid]   # 复合，展开见 30号§3.1
     forbidden_objects_or_scenes:
-      - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 close_campaign
+      - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 stop_campaign
       - campaign_age_under_3_days
       - core_keyword_ranking_support
       - high_priority_protected_keyword        # v3.4.0：标题词/后台ST词/核心卖点词/is_core_keyword
@@ -274,12 +274,12 @@ actions:
     validation_rule_refs:
       - ONT-007
 
-  close_campaign:                              # v3.4.0 新增（C-03）
+  stop_campaign:                               # v3.4.0 新增（C-03）
     scope: CAMPAIGN
-    label_zh: 关闭活动（退出投放）
+    label_zh: 停止投放（退出投放）
     target_objects:
       - Campaign
-    physical_action_codes: [close_campaign]
+    physical_action_codes: [stop_campaign]
     is_growth_action: false
     applicable_campaign_types:
       - broad_keyword
@@ -320,11 +320,11 @@ actions:
     physical_action_codes: [pause]
     is_growth_action: false
     required_signals:
-      - explicit_resume_condition               # 必须有明确恢复条件，否则应用 close_campaign
+      - explicit_resume_condition               # 必须有明确恢复条件，否则应用 stop_campaign
     forbidden_objects_or_scenes:
       - no_explicit_resume_condition
     review_level: HIGH_RISK_REVIEW
-    note: 极少使用。没有明确恢复条件的停投一律用 close_campaign。
+    note: 极少使用。没有明确恢复条件的停投一律用 stop_campaign。
 
   demote_to_exact_testing:                     # v3.4.0 新增（32号§2.3）
     scope: CAMPAIGN
@@ -530,10 +530,10 @@ growth_actions:
 # 退出类动作汇总（供 30号§2 与 ONT-RUNTIME-007 引用）
 exit_actions:
   exact_keyword: eliminate_to_low_bid_pool
-  broad_keyword: close_campaign
-  phrase_keyword: close_campaign
-  auto_discovery: close_campaign
-  product_targeting: close_campaign
+  broad_keyword: stop_campaign
+  phrase_keyword: stop_campaign
+  auto_discovery: stop_campaign
+  product_targeting: stop_campaign
 
 # 复合动作汇总（供 ActionBundle 展开与同批回滚使用，见 30号§3）
 composite_actions:

@@ -8,7 +8,7 @@ description: 各 Campaign Type 允许/禁止动作、目标类型、所需报表
 #  1) broad/phrase/auto 的 allowed_actions 曾含 eliminate_to_low_bid_pool，
 #     与 ONT-016 / ONT-RUNTIME-002 / budget_groups.classification_rules / 21号 / 05号§7 全部冲突。
 #     actions.yaml 侧本来就是对的（forbidden: campaign_match_type_not_exact），本文件是唯一错误源。
-#     已改为 close_campaign。
+#     已改为 stop_campaign。
 #  2) exact_keyword 的 forbidden_actions 曾写 mass_negative_keywords（只禁「批量」否词），
 #     给「少量否词」开了口子，与 ONT-015 / ONT-RUNTIME-005「精准完全禁止否词」冲突。
 #     已改为 add_negative_search_term 全禁，并补 recommended_next_step。
@@ -42,7 +42,7 @@ campaign_types:
       - add_negative_search_term          # 全禁，不只是批量。ONT-015 / ONT-RUNTIME-005
       - blind_broad_expansion
       - expand_keywords                   # 单关键词精准活动扩词会变成多关键词 → ROUTE-002 直接进低价捡漏组
-      - close_campaign                    # EXACT 的退出动作是 eliminate_to_low_bid_pool（ONT-016）
+      - stop_campaign                    # EXACT 的退出动作是 eliminate_to_low_bid_pool（ONT-016）
     forbidden_action_alternatives:
       add_negative_search_term:
         status: blocked
@@ -81,7 +81,7 @@ campaign_types:
       - promote_search_term_to_keyword
       - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - close_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -112,7 +112,7 @@ campaign_types:
       - promote_search_term_to_keyword
       - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - close_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -140,7 +140,7 @@ campaign_types:
       - promote_search_term_to_keyword
       - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - close_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -170,7 +170,7 @@ campaign_types:
       - placement_adjustment              # PP 优先，ONT-010
       - expand_keywords                   # 扩 ASIN / 类目 Target（非关键词）
       - create_campaign                   # 竞品截流窗口触发时新建（16号§1）
-      - close_campaign                    # v3.4.0：退出动作
+      - stop_campaign                    # v3.4.0：退出动作
       - balance_maintain_no_action
     forbidden_actions:
       - keyword_match_type_adjustment
@@ -200,7 +200,7 @@ validation_rule_ref: ONT-002
 
 low_bid_retention_eligible_types:   # 唯一可进低价捡漏组的类型（ONT-016）
   - exact_keyword
-close_campaign_exit_types:          # 退出走 close_campaign 的类型（ONT-RUNTIME-007）
+stop_campaign_exit_types:          # 退出走 stop_campaign 的类型（ONT-RUNTIME-007）
   - broad_keyword
   - phrase_keyword
   - auto_discovery

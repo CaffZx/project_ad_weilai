@@ -18,9 +18,10 @@
 ### 1.1 目标 ACOS 的性质
 
 目标 ACOS 是**人工录入或确认**的经营参数，Agent 只推荐、不自行改变（`02号§维度总览`：ACOS目标
-维度的 Agent 权限为「仅建议」）。它是整套知识库所有 ACOS 判断的基准线 —— `15号§4` 使用它的倍数。
+维度的 Agent 权限为「仅建议」）。它是整套知识库所有 ACOS 判断的基准线 —— `15号§4` 的有效容忍
+上限就是在它之上做加法。
 
-**目标 ACOS 倍数规则**：目标 ACOS×1.5 为轻度回落边界，目标 ACOS×2 为中度回落边界。
+**目标 ACOS ≠ 有效容忍上限。** 前者是经营目标，后者是「超过多少才触发动作」的判定线。
 
 ### 1.2 推荐公式
 
@@ -64,7 +65,7 @@
 清仓期的目标不是利润而是回收现金，故不走 §1.2 公式：
 
 - 目标 ACOS 上限按 `03号§2` 的 liquidating 行取值。
-- 清仓期仍使用目标 ACOS 倍数；经营模式只约束允许动作，不改变 ×1.5/×2 判定边界。
+- 有效容忍上限的阶段加值按 `15号§4.2` 的 liquidating 行。
 - **经营模式修正**：若同时 `operating_mode ∈ {profit_harvest, immediate_exit, limited_repair}`，
   阶段正加值归零（`09号§3` 职责分离通则）；若 `operating_mode = controlled_clearance`，
   liquidating 的正加值**保留**（清货与 liquidating 方向一致，是唯一保留的一格）。
@@ -206,7 +207,7 @@ Agent 输出的任何关键词、搜索词、否定词、Target，**必须能在
 | --- | --- |
 | 清仓期触发任何扩词场景 | `status = blocked`，`reason_code = LIQUIDATING_NO_EXPANSION` |
 | **唯一例外**：节日款尾货承接 | 按 `24号§4.2` `SEA-001`：允许少量 R1 词，单轮 ≤2 个，强制 `HIGH_RISK_REVIEW`，需运营显式确认 |
-| 清仓期已有活动 | 可调 Bid / 预算（只降不升）、可否词、可 `stop_campaign`；PP 加价按 `15号§3.1` liquidating 行 |
+| 清仓期已有活动 | 可调 Bid / 预算（只降不升）、可否词、可 `stop_campaign`；**仅精准广告**可 PP 加价（按 `15号§3.1` liquidating 行）；广泛/词组/自动/商品定投 Placement 统一 `N/A` |
 
 **与经营模式的关系**：`liquidating` 是产品阶段（客观状态），`controlled_clearance` 是经营模式
 （经营意图）。两者可同时为真，也可只有其一。禁扩词由**产品阶段**触发；
