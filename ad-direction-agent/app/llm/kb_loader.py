@@ -9,7 +9,10 @@ ENUM_MAP：以 layer_options.toml 为中文 term 唯一权威源；KB 英文 enu
 """
 import logging
 import re
+from functools import cached_property
 from pathlib import Path
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +79,20 @@ class KnowledgeBase:
         # 精准/广泛差异:精准要广告位(KB15§3/KB19§5§9/KB22§2),广泛要否词(KB19§7§8/KB22§3)。
         # KB17 §3 细分为 3.1-3.4；build_campaign_adjustment() 会按当前广告方向
         # 收窄，直接 build(preset) 时保留全量，兼容已有调用和离线检查。
+        # v3.4.8：补入 10 号安全护栏、03 号阈值、14 号名词定义、动作词表。
+        # 精准流额外注入升降级规则（exact_grade）；广泛流额外注入广泛自动调整规则
+        # （broad_auto）和否词规则（30 号旧版）。
         "campaign_adjustment_exact": [
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,3,4",
             "19:1,2,3,4,5,6,9", "22:0,2", "21:0,1,2,3,4",
+            "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
+            "action_vocab", "exact_grade",
         ],
         "campaign_adjustment_broad": [
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,4",
             "19:1,2,3,4,6", "22:0", "21:0,1,2,3,4",
+            "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
+            "action_vocab", "broad_auto",
             "30:2,3,5,6",
         ],
         # Campaign 策略总览(执行总纲)：维度/广告目的→方向倾向 + 目的触发 + 取舍优先级
@@ -187,6 +197,10 @@ class KnowledgeBase:
         "30": "执行规则/30-广泛广告否词与搜索词治理规则.md",
         "31": "执行规则/31-样本窗口与生命周期状态规则.md",
         "32": "执行规则/32-自动广告调整规则.md",
+        # v3.4.8 新 KB 文件（与上述旧编号文件并存，内容不同）
+        "action_vocab":  "30-动作词表与映射.md",
+        "broad_auto":    "执行规则/31-广泛自动词组调整规则.md",
+        "exact_grade":   "执行规则/32-精准组合升降级规则.md",
     }
 
     def __init__(self):
@@ -244,6 +258,48 @@ class KnowledgeBase:
             raise KeyError(f"未知的 KB preset: {preset}")
         return self._build_specs(preset, ids)
 
+    @cached_property
+    def _ontology_contract(self) -> dict:
+        """懒加载 runtime_contract.yaml。缺失时 fail-fast —— 宁可拒绝启动也不在零约束下运行。"""
+        path = self.ROOT / "ontology" / "runtime_contract.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"Ontology 运行时契约缺失: {path}")
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def build_ontology_card(self, task_type: str) -> str:
+        """从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt。
+
+        精准流不注入 ONT-RUNTIME-001（广泛/词组/自动禁止广告位）——
+        精准广告允许广告位调整，这条规则对其是噪声。
+        """
+        contract = self._ontology_contract
+        injection = contract.get("ontology_card_injection") or {}
+        common_ids = set(injection.get("always_inject") or [])
+        if not common_ids:  # 兜底：契约未声明时注入除 001 外的全部
+            common_ids = {
+                r["rule_id"] for r in contract.get("hard_rules", [])
+                if r.get("rule_id") != "ONT-RUNTIME-001"
+            }
+        if task_type != "exact":
+            common_ids.update(injection.get("inject_unless_exact") or ["ONT-RUNTIME-001"])
+
+        selected = [
+            r for r in contract.get("hard_rules", [])
+            if r.get("rule_id") in common_ids
+        ]
+        card = {
+            "ontology_version": contract.get("version", ""),
+            "execution_layers": contract.get("decision_grain", {}).get("execution_layers", {}),
+            "mode_policies": contract.get("mode_policies", {}),
+            "portfolio_groups": contract.get("portfolio_groups", {}),
+            "portfolio_routing": contract.get("portfolio_routing", {}),
+            "hard_rules": selected,
+            "action_bundle": contract.get("action_bundle", {}),
+        }
+        return "【Ontology Runtime Contract】\n" + yaml.safe_dump(
+            card, allow_unicode=True, sort_keys=False,
+        ).strip()
+
     def build_campaign_adjustment(
         self,
         task_type: str,
@@ -274,12 +330,15 @@ class KnowledgeBase:
             selected = {"3.1", "3.2", "3.3", "3.4"}
 
         ids = list(self.PRESETS[preset])
+        # 方向收窄：运营选了哪些方向就只注入对应的 17号§3 动作矩阵
         action_spec = "17:1,2," + ",".join(sorted(selected)) + ",4,5,7"
         for index, spec in enumerate(ids):
             if spec.startswith("17:"):
                 ids[index] = action_spec
                 break
-        return self._build_specs(preset, ids)
+        knowledge = self._build_specs(preset, ids)
+        ontology_card = self.build_ontology_card(task_type)
+        return f"{knowledge}\n\n---\n\n{ontology_card}"
 
     def _build_specs(self, preset: str, ids: list[str]) -> str:
         """按已解析的 spec 列表拼接内容，供静态和运行时 preset 复用。"""

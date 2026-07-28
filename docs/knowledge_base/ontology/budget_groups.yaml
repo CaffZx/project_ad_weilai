@@ -1,9 +1,13 @@
 # Ontology Phase 1b — 广告组合与预算分配
 # 来源: docs/knowledge_base/执行规则/23-广告组合与预算分配规则.md
-# 版本: phase_1b（在 phase_1 对象/动作合法性之上扩展预算控制层）
+# 版本: v3.3.0（与广告闭环运行时契约同步）
 
-version: phase_1b
-description: ParentASIN → AdBudgetGroup → Campaign 三层预算控制、组合归类、回算与二次分配
+version: 3.4.0
+description: >
+  ParentASIN → AdBudgetGroup → Campaign 三层预算控制、组合归类、回算与二次分配。
+  v3.4.0：新增第五组 product_targeting_group（**v3.4.3 已收回为 auto_broad_group 子桶**）；
+  低价捡漏组 Bid 改 min(current_bid, 0.20)；
+  超配分两级（GROUP-010）；max_exact_push_share 规模阈值（GROUP-011）。
 
 # AdBudgetGroup 可映射 Amazon Portfolio、ERP 广告组合或内部预算分组。
 # 与 entities.yaml 中 Portfolio（组织容器）区分：Portfolio 偏账号结构，AdBudgetGroup 偏预算控制语义。
@@ -29,10 +33,10 @@ entities:
       group_type:
         type: enum
         allowed_values:
-          - promotion_group
-          - testing_group
+          - exact_core_group
+          - exact_testing_group
           - auto_broad_group
-          - elimination_group
+          - low_bid_retention_group
       current_group_budget: { type: decimal }
       proposed_group_budget: { type: decimal }
       group_budget_delta: { type: decimal }
@@ -55,85 +59,146 @@ entities:
       belongs_to_group: { type: string, ref: group_type }
 
 group_types:
-  promotion_group:
-    label_zh: 推广组
-    purpose: 已验证关键词、核心词、主推词、稳定承接词
+  exact_core_group:
+    label_zh: 精准主力组
+    purpose: 通过连续三个完整站点自然日验证的精准活动
     campaign_type_restriction:
       only:
         - exact_keyword
-    budget_trait: 活动预算 ≥ $5
-    allocation_weight_default: 0.60
+    identity_rule: 组合身份由连续三日花费与汇总ACOS验证决定，不由预算金额决定
+    allocation_weight_default: dynamic
 
-  testing_group:
-    label_zh: 测试组
-    purpose: 精准测试词、待验证词、未进入推广组的活动
+  exact_testing_group:
+    label_zh: 精准测试组
+    purpose: 精准测试词、待验证词、未进入精准主力组的活动
     campaign_type_restriction:
       only:
         - exact_keyword
-    budget_trait: 活动预算 < $5
-    allocation_weight_default: 0.20
+    identity_rule: 单关键词精准活动未通过连续三日验证时留在本组，预算金额不改变身份
+    allocation_weight_default: dynamic
 
   auto_broad_group:
-    label_zh: 自动广泛组
+    label_zh: 广泛自动组
     purpose: 自动、广泛、词组，跑搜索词与发现流量
     campaign_type_restriction:
       only:
         - broad_keyword
         - phrase_keyword
         - auto_discovery
-    budget_trait: 不因预算大小进入推广组；只管理广泛类型
-    allocation_weight_default: 0.20
+    budget_trait: 不因预算大小进入精准主力组；只管理广泛类型
+    allocation_weight_default: dynamic
 
-  elimination_group:
-    label_zh: 淘汰组
+  # v3.4.3：商品定投从第五个物理组合收回为 auto_broad_group 内的逻辑子桶。
+  # 子桶不是组合：不参与顶层预算切分、不需要 Amazon 后台新建 Portfolio、
+  # 不需要 ERP 组合汇总表加列。它保留的独立性见下。
+  _subtypes:
+    product_targeting:                   # portfolio_subtype
+      parent_group: auto_broad_group
+      label_zh: 商品定投子桶
+      purpose: 竞品截流、类目拓展、防守自家页面
+      campaign_type_restriction:
+        only:
+          - product_targeting
+      identity_rule: >
+        由 campaign_type 硬路由为 auto_broad_group + subtype=product_targeting（ROUTE-005）；
+        不套三日验证（无关键词）。reason_code 必须可辨识，不得落 unknown 兜底。
+      placement_allowed: true             # 覆盖父组的 ONT-002 禁令
+      placement_preference: product_pages # PP 优先，ONT-010
+      exit_action: stop_campaign         # 不进低价捡漏组（ONT-016）
+      budget_note: 预算计入 auto_broad_group；子桶只影响组内压缩顺序与统计口径
+    negative_keyword_applicable: false    # 无搜索词
+    allocation_weight_default: dynamic
+    compression_order: 2                  # 预算紧张时的压缩顺序，见 group_compression_order
+    note: >
+      v3.3.0 定义了 product_targeting 这个 campaign_type 且允许它调广告位（ONT-010），
+      但四个组的 campaign_type_restriction 没有一个收它，route_portfolio() 把它兜底路由到
+      auto_broad_group（reason_code=unknown_match_type_safe_route）——
+      结果同一活动既在广泛自动组、又允许调广告位，自相矛盾并违反 ONT-012；
+      其预算也永远不进组合汇总，父 ASIN 预算账目长期缺一块。
+
+  low_bid_retention_group:
+    label_zh: 低价捡漏组
     purpose: 本轮放弃、不主推、低预算低 Bid 保留
-    campaign_type_restriction: all_types_allowed
+    campaign_type_restriction:
+      only:
+        - exact_keyword
     budget_trait:
       group_budget_fixed: 1.0
-      bid_fixed: 0.20
+      bid_rule: min(current_bid, 0.20)   # v3.4.0：不再写死 0.20（C-10）
     immutable_properties:
       rule_ref: ONT-014
-      description: 预算 $1 + Bid $0.20 为对象层不变属性，不可被任何动作覆盖；与 GROUP-004/004A 构成双层防线
+      description: >
+        预算 $1 + Bid min(current_bid, 0.20) 为对象层不变属性，不可被任何动作覆盖；
+        与 GROUP-004/004A 构成双层防线。Bid 已低于 0.20 时保持不变，不得抬高。
     allocation_weight_default: 0.0
     participates_in_increase_allocation: false
     participates_in_reallocation_receive: false
 
 classification_rules:
   table:
-    - condition: campaign_type=exact_keyword AND daily_budget>=5 AND validated_effective
-      group: promotion_group
-      note: 有出单或 ACOS 达标视为已验证有效
-    - condition: campaign_type=exact_keyword AND daily_budget<5
-      group: testing_group
     - condition: campaign_type IN [broad_keyword, phrase_keyword, auto_discovery]
       group: auto_broad_group
-      note: 无论预算多少，永不进入推广组或测试组
-    - condition: eliminated_or_abandoned_or_low_bid_pool
-      group: elimination_group
+      note: >
+        无论预算、退出状态或是否多 Target，始终属于广泛自动组；
+        需要退出时执行 stop_campaign（30号§1 #13），不进入低价捡漏组（ONT-016）
+    - condition: campaign_type = product_targeting        # v3.4.3（子桶）
+      group: auto_broad_group
+      subtype: product_targeting
+      note: >
+        硬路由（ROUTE-005）→ auto_broad_group + subtype=product_targeting；
+        不套三日验证；退出时 stop_campaign，不进低价捡漏组；
+        广告位权限按子桶放开（ONT-010），不受父组 ONT-002 禁令约束
+    - condition: campaign_type=exact_keyword AND multi_keyword_campaign
+      group: low_bid_retention_group
+      note: 多关键词精准活动按已确认规则确定性迁入
+    - condition: campaign_type=exact_keyword AND single_keyword_campaign AND eliminated_or_already_low_bid_pool
+      group: low_bid_retention_group
+    - condition: >
+        campaign_type=exact_keyword AND single_keyword_campaign
+        AND three_complete_local_days_each_spend_gt_threshold
+        AND aggregate_acos_3d_lt_target_acos
+      group: exact_core_group
+      note: >
+        门槛 = 固定 $5.00（03号§10，v3.4.3 按经营决定从比例恢复固定值）。
+        三日汇总 ACOS，不使用日 ACOS 平均。
+        非美元站点换算美元等值属待排期（本期仅 US 投放，见 00号§6）。
+    - condition: campaign_type=exact_keyword AND single_keyword_campaign AND NOT exact_core_validation_passed
+      group: exact_testing_group
 
   priority_chain:
-    - elimination_group
-    - auto_broad_group
-    - promotion_group
-    - testing_group
+    - auto_broad_group                                 # 含 product_targeting 子桶
+    - multi_keyword_exact_to_low_bid_retention_group
+    - single_keyword_exact_elimination
+    - single_keyword_exact_validation
   priority_notes:
-    - 本轮淘汰则无论原组合一律进入淘汰组
-    - Broad/Phrase/Auto 始终自动广泛组
-    - 已验证精准且预算≥$5 进推广组
-    - 精准测试且预算<$5 进测试组
+    - Broad/Phrase/Auto 始终广泛自动组
+    - PRODUCT_TARGETING 始终 auto_broad_group + subtype=product_targeting（ROUTE-005，v3.4.3）
+    - 多关键词精准进入低价捡漏组
+    - 单关键词精准通过连续三日验证进精准主力组，否则在精准测试组
+    - 预算金额只影响额度，不影响组合身份
+    - 未知 campaign_type / match_type 一律 BLOCKED，不再兜底到 auto_broad_group（ROUTE-999）
+
+# 预算紧张时的压缩顺序（v3.4.0 明确）
+group_compression_order:
+  order:
+    - exact_testing_group        # 1. 优先压缩
+    - auto_broad_group           # 2. 组内先压 product_targeting 子桶，再压广泛/词组/自动
+    - exact_core_group           # 3. 最后，且不得断供（GROUP-BUDGET-004）
+  excluded:
+    - low_bid_retention_group    # 固定 $1，不参与增减
 
 group_presence:
   rules:
     - scenario: 新品起步未跑出有效词
       may_exist: [auto_broad_group]
-      may_absent: [promotion_group, testing_group]
+      may_absent: [exact_core_group, exact_testing_group]
       normal: true
-    - scenario: 推广组已在消耗
-      constraint: 测试组与自动广泛组不得挤占推广组预算；测试组优先压缩
+    - scenario: 精准主力组已在消耗
+      constraint: 精准测试组与广泛自动组不得挤占精准主力组预算；精准测试组优先压缩
     - scenario: 无淘汰活动
-      elimination_group: optional
-    - scenario: 存在淘汰组
-      elimination_group_budget: fixed_1_usd
+      low_bid_retention_group: optional
+    - scenario: 存在低价捡漏组
+      low_bid_retention_group_budget: fixed_1_usd
 
 promotion_signals:
   signal_1_search_term_direct:
@@ -142,7 +207,21 @@ promotion_signals:
       - search_term_orders_7d >= 3
       - search_term_acos_7d <= target_acos
       - no_existing_exact_campaign_for_term
-    action: 新建 Exact 精准活动，初始预算 < $5，归属 testing_group
+    action: 新建 Exact 精准活动，初始预算 < $5，归属 exact_testing_group
+
+  signal_3_cvr_channel:                # v3.4.0 新增（C-13）
+    description: CVR 通道 —— 覆盖「点击多、CVR 达标、订单差一两单」的真实好词
+    all_required:
+      - search_term_cvr_gt_category_mean_x_0_8
+      - search_term_spend_7d_gte_no_order_spend_threshold   # 03号§7.3，样本量下限
+      - no_existing_exact_campaign_for_term
+      - relevance_tier: R1
+    action: 新建 Exact 精准活动，归属 exact_testing_group
+    review_level: HIGH_RISK_REVIEW      # 强制人工，样本量风险由人工兜底
+    note: >
+      v3.3.0 里 16号§1 用 CVR 通道（不看订单）、23号§3.4 用订单通道，两者互斥且分别喂给
+      new_campaign 与 budget_reallocation 两个不同调用点，会同时触发并给出矛盾建议。
+      v3.4.0 统一为三通道并存，16号§1 已改为引用 23号§3.4。
 
   signal_2_word_root:
     description: 同词根验证信号
@@ -151,31 +230,44 @@ promotion_signals:
     performance_any_one:
       - root_search_terms_orders_7d_sum >= 3
       - root_acos_7d_sum <= target_acos
-    action: 新建以词根为目标的 Exact 活动，初始预算 < $5，归属 testing_group
+    action: 新建以词根为目标的 Exact 活动，初始预算 < $5，归属 exact_testing_group
 
 promotion_upgrade:
-  from: testing_group
-  to: promotion_group
+  from: exact_testing_group
+  to: exact_core_group
+  action_code: promote_to_exact_core
   all_required:
     - campaign_type: exact_keyword
-    - current_daily_budget: ">= 5"
-    - acos_3d: "<= target_acos"
-  note: 自动广泛组不因预算≥$5 升入推广组
+    - single_keyword_campaign: true
+    - three_complete_local_days: true
+    - each_day_spend: "> 5.0 USD"
+    - aggregate_acos_3d: "< target_acos"
+  required_natural_rank_condition:
+    - organic_rank_rising_vs_previous_7d
+  natural_rank_window_days: 7
+  natural_rank_comparison: previous_7d_period
+  organic_rank_usage:
+    - admission_gate
+    - promotion_priority_ranking      # 多活动同时达标时的排序因子（natural_traffic_priority_score）
+    - mild_regression_retention       # 轻度回落是否保留在主力组（32号§2.2）
+  note: >
+    预算金额不能代替验证；广泛自动组与商品定投组不发生升组。
+    admission_only：门槛只用于准入，已在主力组的活动不因门槛变化被自动降级。
 
 group_budget_004:
   rule_id: GROUP-BUDGET-004
-  trigger_basis: promotion_group_actual_spend
+  trigger_basis: exact_core_group_actual_spend
   not_trigger_basis: product_stage_label
   tiers:
     - name: no_actual_spend
-      criteria: 推广组为空 OR 推广组所有活动 7d 花费 = 0
-      policy: 测试组+自动广泛组可自由使用父 ASIN 预算；GROUP-BUDGET-004 暂不生效
+      criteria: 精准主力组为空 OR 精准主力组所有活动 7d 花费 = 0
+      policy: 精准测试组+广泛自动组可自由使用父 ASIN 预算；GROUP-BUDGET-004 暂不生效
     - name: low_spend
-      criteria: 推广组 7d 花费 > 0 且 < 5
-      policy: GROUP-BUDGET-004 轻度生效；推广组优先保障，测试组无需大幅压缩
+      criteria: 精准主力组 7d 花费 > 0 且 < 5
+      policy: GROUP-BUDGET-004 轻度生效；精准主力组优先保障，精准测试组无需大幅压缩
     - name: stable_spend
-      criteria: 推广组 7d 花费 >= 5 且有出单
-      policy: GROUP-BUDGET-004 完全生效；推广组不得断供，测试组优先压缩，自动广泛组次之
+      criteria: 精准主力组 7d 花费 >= 5 且有出单
+      policy: GROUP-BUDGET-004 完全生效；精准主力组不得断供，精准测试组优先压缩，广泛自动组次之
 
 # ---------------------------------------------------------------------------
 # 全局广告目标 — 自然流量优先级评分（GROUP-BUDGET-006 核心依赖）
@@ -191,53 +283,53 @@ natural_traffic_priority_score:
       label_zh: 搜索量评分
       weight: 3
       scale:
-        - score: 5; condition: 搜索量 Top 20% 或明显大流量词
-        - score: 3; condition: 搜索量 Top 20%–50%
-        - score: 2; condition: 搜索量缺失但词高度相关
-        - score: 1; condition: 低搜索量词
+        - { score: 5, condition: "搜索量 Top 20% 或明显大流量词" }
+        - { score: 3, condition: "搜索量 Top 20%–50%" }
+        - { score: 2, condition: "搜索量缺失但词高度相关" }
+        - { score: 1, condition: "低搜索量词" }
     current_position_score:
       label_zh: 当前自然位评分
       weight: 3
       scale:
-        - score: 5; condition: 第1页 / Top20
-        - score: 4; condition: 第2页 / Top21–40
-        - score: 3; condition: 第3页 / Top41–60
-        - score: 2; condition: 第4–5页
-        - score: 1; condition: 第6页以后
-        - score: 0; condition: 无自然排名
+        - { score: 5, condition: "第1页 / Top20" }
+        - { score: 4, condition: "第2页 / Top21–40" }
+        - { score: 3, condition: "第3页 / Top41–60" }
+        - { score: 2, condition: "第4–5页" }
+        - { score: 1, condition: "第6页以后" }
+        - { score: 0, condition: "无自然排名" }
     page_uplift_score:
       label_zh: 排名上升评分
       weight: 3
       scale:
-        - score: 5; condition: 本轮进入第1页 / Top20
-        - score: 4; condition: 本轮进入第2页
-        - score: 3; condition: 本轮进入第3页
-        - score: 2; condition: 仍在第4页以后但有上升
-        - score: 1; condition: 轻微上升但仍无有效流量位置
-        - score: 0; condition: 无上升或下滑
+        - { score: 5, condition: "本轮进入第1页 / Top20" }
+        - { score: 4, condition: "本轮进入第2页" }
+        - { score: 3, condition: "本轮进入第3页" }
+        - { score: 2, condition: "仍在第4页以后但有上升" }
+        - { score: 1, condition: "轻微上升但仍无有效流量位置" }
+        - { score: 0, condition: "无上升或下滑" }
     relevance_score:
       label_zh: 词相关性评分
       weight: 2
       scale:
-        - score: 5; condition: 核心精准词，直接对应产品主卖点
-        - score: 4; condition: 强相关长尾词
-        - score: 3; condition: 中相关词
-        - score: 2; condition: 弱相关但可观察
-        - score: 1; condition: 泛词 / 相关性低
-        - score: 0; condition: 明显不相关
+        - { score: 5, condition: "核心精准词，直接对应产品主卖点" }
+        - { score: 4, condition: "强相关长尾词" }
+        - { score: 3, condition: "中相关词" }
+        - { score: 2, condition: "弱相关但可观察" }
+        - { score: 1, condition: "泛词 / 相关性低" }
+        - { score: 0, condition: "明显不相关" }
     acos_score:
       label_zh: ACOS 评分
       weight: 1
       scale:
-        - score: 5; condition: ACOS ≤ 目标 ACOS
-        - score: 3; condition: ACOS ≤ 有效容忍上限
-        - score: 1; condition: ACOS 接近容忍上限且有订单
-        - score: 0; condition: ACOS 超容忍上限或无转化支持
+        - { score: 5, condition: "ACOS ≤ 目标 ACOS" }
+        - { score: 3, condition: "ACOS ≤ 目标 ACOS×1.5" }
+        - { score: 1, condition: "目标 ACOS×1.5 < ACOS ≤ 目标 ACOS×2 且有订单" }
+        - { score: 0, condition: "ACOS > 目标 ACOS×2 或无转化支持" }
   execution_rules:
     - 预算优先给 natural_traffic_priority_score 最高的活动
     - 不得仅因某词从第7页升到第4页，就优先于从第2页升到第1页的词（后者通常能带来更高自然流量）
     - 不得仅按排名提升幅度判断；不同搜索量词同样提升一页，带来的自然流量不同
-    - ACOS 是成本约束而非第一优先级；只要 ACOS 在有效容忍范围内，优先考虑自然流量机会
+    - ACOS 是成本约束而非第一优先级；只要 ACOS 不超过目标 ACOS×1.5，优先考虑自然流量机会
     - 若关键字段缺失（搜索量/自然位/相关性/ACOS），不得自动大幅加预算 → MANUAL_REVIEW 或小预算观察
     - 不得因为多个活动都表现好就平均加预算（平均加预算稀释推词预算，削弱自然位推进效果）
 
@@ -279,7 +371,7 @@ health_ratio_bottleneck:
 # 来源: 23 §4.4
 # ---------------------------------------------------------------------------
 promotion_internal_reallocation:
-  description: 推广组内有活动命中 push_natural_rank + RANK_OPPORTUNITY 但组合预算受限时，执行组内挪移
+  description: 精准主力组内有活动命中 push_natural_rank + RANK_OPPORTUNITY 但组合预算受限时，执行组内挪移
   core_principle: 广告核心目的是推出词的自然位和自然流量，不是词越多越好；预算流向始终优先给 natural_traffic_priority_score 最高的活动
   step_1_identify_sources:
     description: 识别可释放活动（组内挪移来源）
@@ -291,10 +383,10 @@ promotion_internal_reallocation:
   step_2_identify_targets:
     description: 识别优先增加活动（组内挪移目标）
     priority_order:
-      - priority: 1; criterion: natural_traffic_priority_score 最高
-      - priority: 2; criterion: 分数接近时，优先当前自然位更接近第1页 / Top20 的词
-      - priority: 3; criterion: 再优先词更精准 / 相关性更强的词
-      - priority: 4; criterion: 最后比较 ACOS、订单数、CVR 等成本和转化指标
+      - { priority: 1, criterion: "natural_traffic_priority_score 最高" }
+      - { priority: 2, criterion: "分数接近时，优先当前自然位更接近第1页 / Top20 的词" }
+      - { priority: 3, criterion: "再优先词更精准 / 相关性更强的词" }
+      - { priority: 4, criterion: "最后比较 ACOS、订单数、CVR 等成本和转化指标" }
   step_3_execution:
     - "Step 3-1: 从可释放活动砍预算，汇入挪移池"
     - "Step 3-2: 按优先级依次补给 ranking push 活动，每个活动不超过其 requested_delta"
@@ -316,12 +408,12 @@ budget_principles:
   GROUP-BUDGET-002:
     rule: 组合预算调整后，必须回算 ParentASIN 总预算
   GROUP-BUDGET-003:
-    rule: 淘汰活动释放的预算发生在 Campaign 活动层，不以淘汰组组合预算作为释放来源
+    rule: 淘汰活动释放的预算发生在 Campaign 活动层，不以低价捡漏组组合预算作为释放来源
   GROUP-BUDGET-004:
-    rule: 推广组不得因测试组或自动广泛组扩张而断供
+    rule: 精准主力组不得因精准测试组或广泛自动组扩张而断供
     detail_ref: group_budget_004
   GROUP-BUDGET-005:
-    rule: 淘汰组组合预算固定 $1，Bid 固定 $0.20，不参与预算增加和二次分配
+    rule: 低价捡漏组组合预算固定 $1，Bid = `min(current_bid, $0.20)`，不参与预算增加和二次分配
   GROUP-BUDGET-006:
     rule: 所有预算增加和预算挪移均遵循全局广告目标，优先给 natural_traffic_priority_score 最高的活动；balance_maintain 类活动最后，预算紧张时可不加
     detail_ref: natural_traffic_priority_score
@@ -345,7 +437,7 @@ budget_principles:
     rule: 精准主力组内预算集中规则 — ① 活动层：balance_maintain / profit 方向活动若预算利用率低且自然位无有效提升，不对其加预算，预算自然向 natural_traffic_priority_score 高的 ranking push 活动集中；② 挪移层：当高分 ranking push 活动预算已满但组合预算仍紧张时，执行内部挪移，将利用率<50%的非ranking活动压缩至实际花费×1.3，释放给高分 ranking push 活动
     detail_ref: promotion_internal_reallocation
   GROUP-BUDGET-009:
-    rule: 父 ASIN 总预算需要降低时，各组合按当前预算占比等比例压缩，维持原有结构比例不变；推广组内的 ranking push 保护（GROUP-BUDGET-006/008）在组合层等比例降低后，仍在组内层面继续生效
+    rule: 父 ASIN 总预算需要降低时，各组合按当前预算占比等比例压缩，维持原有结构比例不变；精准主力组内的 ranking push 保护（GROUP-BUDGET-006/008）在组合层等比例降低后，仍在组内层面继续生效
     method: proportional_by_current_group_budget_ratio
 
 campaign_budget_sum_note:
@@ -359,8 +451,8 @@ campaign_budget_sum_note:
 
 delta_formulas:
   campaign_budget_delta: proposed_daily_budget - current_daily_budget
-  group_requested_delta: sum(campaign_budget_delta for campaigns in group, exclude elimination_group from increase pool)
-  eliminated_campaign_release: sum(current_daily_budget - 1 for campaigns moved_to elimination_group)
+  group_requested_delta: sum(campaign_budget_delta for campaigns in group, exclude low_bid_retention_group from increase pool)
+  eliminated_campaign_release: sum(current_daily_budget - 1 for campaigns moved_to low_bid_retention_group)
   parent_requested_delta:
     expression: sum(positive group_requested_delta) - eliminated_campaign_release - other_campaign_budget_decrease
   delta_types:
@@ -370,14 +462,14 @@ delta_formulas:
 
 reallocation:
   processing_order:
-    - Step1: 计算推广组、测试组、自动广泛组的 requested_delta
+    - Step1: 计算精准主力组、精准测试组、广泛自动组的 requested_delta
     - Step2: 单独计算 eliminated_campaign_release
     - Step3: 判断父 ASIN 是否允许净增加预算
-    - Step4: 可用预算不足时按组合增量比例或加权比例压缩
+    - Step4: 可用预算不足时按组合增量比例或经营目标动态压缩
     - Step5: 输出组合预算变化与解释
 
   net_when_mixed:
-    released_budget: eliminated_campaign_release + sum(abs(group_delta) where group_delta<0 and group!=elimination_group)
+    released_budget: eliminated_campaign_release + sum(abs(group_delta) where group_delta<0 and group!=low_bid_retention_group)
     requested_increase: sum(group_delta where group_delta>0)
     net_required_increase: requested_increase - released_budget
 
@@ -387,12 +479,22 @@ reallocation:
     when: 数据健康、无强护栏、各组合都允许预算增加、仅预算重分配
 
   weighted_allocation:
-    method: weighted_by_fixed_ratio
-    fixed_ratios:
-      promotion_group: 0.60
-      testing_group: 0.20
-      auto_broad_group: 0.20
-      elimination_group: 0.0
+    method: dynamic_by_objective_and_evidence
+    required_inputs:
+      - operating_mode
+      - ad_objectives
+      - target_acos
+      - parent_target_daily_budget
+      - group_requested_positive_delta
+      - group_actual_spend_and_utilization
+    optional_human_guardrails:
+      - max_exact_push_share
+    hard_constraints:
+      - group_actual_increase <= group_requested_positive_delta
+      - sum(group_actual_increase) <= available_reallocation_budget
+      - low_bid_retention_group_actual_increase = 0
+      - exact_push_allocation_share <= max_exact_push_share when configured
+      - broad_auto_good_performance_may_receive_budget_within_parent_budget
     when:
       - parent_budget_insufficient
       - P0_P1_core_push
@@ -400,30 +502,69 @@ reallocation:
       - inventory_risk
       - high_return_low_rating
     steps:
-      - initial_allocation_i = available * group_target_ratio_i
-      - actual_i = min(requested_positive_delta_i, initial_allocation_i)
-      - leftover redistributed to groups with unmet demand by requested delta ratio
+      - 根据经营模式和广告目标生成各组优先级，不使用固定60/20/20
+      - 结合真实花费、利用率、ACOS和请求增量计算可消耗额度
+      - 推词需求明显时优先精准主力组，但受人工max_exact_push_share约束
+      - 限时修复在目标ACOS与父ASIN预算内运行，不额外设置固定组占比
+      - 积极推进时广泛自动表现好可获得预算，不因流量不稳定机械限额
+      - 未满足的剩余额度只在仍有真实消耗需求的组合间重分配
+
+# 精准组合降级路径（v3.4.0 新增，量化规则见 32号§2）
+demotion_path:
+  mild_regression:
+    action: stay_with_adjustment
+    target_group: exact_core_group      # 留组
+    condition: target_acos < acos_3d <= target_acos * 1.5 AND orders_7d > 0
+  moderate_regression:
+    action_code: demote_to_exact_testing
+    from: exact_core_group
+    to: exact_testing_group
+    must_record: demoted_at
+    condition: acos_3d > target_acos * 1.5 AND acos_3d <= target_acos * 2 AND (orders_7d == 0 OR orders_7d < previous_7d_orders) AND organic_rank_declining_or_not_improving
+    note: 降级不等于淘汰；恢复需重新完成三日验证，不能用恢复预算代替
+  severe_regression:
+    action_code: eliminate_to_low_bid_pool
+    from: exact_testing_group           # 只能从测试组进，主力组不可一步跨到低价捡漏组
+    to: low_bid_retention_group
+    observation_window:
+      demoted_origin: ">= 7 days from demoted_at"
+      native_origin: ">= 14 days from campaign_created_at（长尾可延至 21 天）"
+    required: [diagnosis_path_complete_21_section_3, not_high_priority_protected_keyword]
+  protection_override:
+    protected_types: [title_term, backend_search_term, core_selling_point_term, is_core_keyword]
+    blocks: [moderate_regression, severe_regression]
+    allowed: [bid_down, budget_down]
+    note: >
+      v3.3.0 只保护这四类词「不被否词」（ONT-RUNTIME-004），没保护它们「不被降级到低价捡漏组」。
+      21号§2 的淘汰保护只覆盖「核心词自然位连续上升」和「运营标记 Custom 核心词」，
+      覆盖不到「是标题词但自然位正在跌」—— 而这恰恰最需要保护。
 
 group_action_policies:
-  promotion_group:
+  exact_core_group:
     - core_stable_low_budget: 优先加预算
     - ranking_task: 不得断供
     - acos_within_tolerance: 可保留或小幅增加
     - acos_over_no_rank_support: 降非核心词，核心词谨慎
-  testing_group:
+  exact_testing_group:
     - new_exact_testing: 小预算观察
-    - effective_term: 提取到推广组
-    - poor_search_quality: 降预算或否词
+    - effective_term: 提取到精准主力组
+    - poor_search_quality: 精准活动不做否词；降 Bid、降预算、关闭或迁入低价捡漏组
     - budget_tight: 可压缩
-    - promotion_consuming: 测试组优先压缩
+    - promotion_consuming: 精准测试组优先压缩
   auto_broad_group:
     - valuable_search_terms: 保留预算，提词到精准
-    - high_click_no_order: 否词 → 降预算 → 降 Bid → 7天仍差可淘汰
+    - high_click_no_order: 先保护高相关词，再做否词 → 降预算 → 降 Bid；需要退出时关闭，不迁入低价捡漏组
     - cannot_spend: 先查 Bid 和词覆盖，不直接加大预算
-    - budget_tight: 优先压缩，让位推广组
-  elimination_group:
+    - budget_tight: 优先压缩，让位精准主力组
+  auto_broad_group__product_targeting_subtype:   # v3.4.3：子桶策略（父组 auto_broad_group）
+    - competitor_intercept_window: 可新建，PP 主投
+    - pp_outperforms_tos_ros: 允许 PP 方向加价（ONT-010），仍需过库存/Listing/预算护栏
+    - high_spend_no_order: 先降广告位加价 → 再降 Bid → 仍无改善评估 stop_campaign
+    - low_relevance: 降 Bid 或 stop_campaign；不做否词（无搜索词）
+    - budget_tight: 在 auto_broad_group 内**先于**广泛/词组/自动被压缩
+  low_bid_retention_group:
     - group_budget: fixed_1
-    - bid: fixed_0.20
+    - bid: min(current_bid, 0.20)
     - no_increase_allocation: true
     - no_reallocation_receive: true
     - release_source: campaign_layer_only
@@ -443,7 +584,7 @@ output_contract:
       allocation_method:
         enum:
           - proportional_by_requested_delta
-          - weighted_by_fixed_ratio
+          - dynamic_by_objective_and_evidence
       budget_reallocation_explanation: string
 
   budget_groups:
@@ -467,6 +608,7 @@ output_contract:
 
 validation_rule_refs:
   - ONT-014
+  - ONT-016
   - GROUP-001
   - GROUP-002
   - GROUP-003
@@ -475,8 +617,11 @@ validation_rule_refs:
   - GROUP-005
   - GROUP-006
   - GROUP-007
-  - GROUP-008
-  - GROUP-009
+  - GROUP-010
+  - GROUP-011
+  # 以下是 budget_principles 里的预算原则编号（与 validation_rules.yaml 的校验规则编号不同名）
+  - GROUP-BUDGET-008
+  - GROUP-BUDGET-009
 
 kb_cross_refs:
   - path: docs/knowledge_base/02-标签维度定义.md
@@ -501,8 +646,8 @@ example_case_11:
   parent_target_daily_budget: 100
   available_increase_budget: 10
   group_requested_deltas:
-    promotion_group: 20
-    testing_group: 3
+    exact_core_group: 20
+    exact_testing_group: 3
     auto_broad_group: 7
   eliminated_campaign_release: 20
   calculation:

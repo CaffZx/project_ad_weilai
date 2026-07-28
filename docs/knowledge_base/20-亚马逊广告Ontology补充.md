@@ -1,7 +1,22 @@
 # 亚马逊广告 Ontology 补充（草案）
 
+> **状态：`reference_only`**（`00号§4.2`）。本文是 Ontology 的**设计说明文档**，不注入 prompt 切片。
+> 运行时口径由 `ontology/runtime_contract.yaml`（注入 Ontology Card）与 `OntologyValidator`
+> （执行 `ONT-*` / `GROUP-*` 校验）承担。
+>
+> v3.3.0 本文连 `kb_loader._FILE_PATHS` 里都没有 fid，加载器不认识它——既不是切片也没标注，属规则悬空。
+
 > 本文件为新增补充文件，不修改原有 SOP 规则。  
 > 目的：先把 Amazon 官方业务对象、广告对象层级、投放类型、动作合法性、报表证据关系补齐，后续可再拆成独立 ontology 层。
+
+## 0. 与经营闭环 Ontology 的连接（C01）
+
+- `OperatingUnitRef`：`shop_id + site_code + parent_asin`，是广告决策与执行的业务主语。
+- `ChildScope`：只描述少数子 ASIN 例外，不替代父级经营单元。
+- `AdvertisingDecision`、`ActionOrder`、`ActionReceipt` 必须引用同一个
+  `operating_unit_id`。
+- `parent_seller_sku` 是 ERP/MCP 映射属性，不参与业务唯一键。
+- 旧 ASIN 级状态标记为 `IDENTITY_UNRESOLVED`，完成店铺和站点绑定前不可执行。
 
 ---
 
@@ -64,7 +79,7 @@
 
 | 类 | 中文名 | 说明 | 关键关系 |
 | --- | --- | --- | --- |
-| `AdBudgetGroup` | 广告预算组 | 父 ASIN 下的预算控制对象，对应精准主力组 / 精准测试组 / 自动广泛组 / 低价捡漏组 | `belongsToParentASIN` / `containsCampaign` |
+| `AdBudgetGroup` | 广告预算组 | 父 ASIN 下的预算控制对象，对应精准主力组 / 精准测试组 / 广泛自动组 / 低价捡漏组 | `belongsToParentASIN` / `containsCampaign` |
 
 补充关系：
 
@@ -90,10 +105,10 @@
 
 | campaign_type | 来源 | 允许目标 | 允许动作 | 禁止动作 | 主要用途 |
 | --- | --- | --- | --- | --- | --- |
-| `exact_keyword` | 手动关键词投放 | `KeywordTarget(match_type=EXACT)` | Bid / Budget / Placement | 大规模否词、盲目扩泛词 | 承接已验证词、推自然位、稳定转化 |
+| `exact_keyword` | 手动关键词投放 | `KeywordTarget(match_type=EXACT)` | Bid / Budget / Placement / 关闭 | 否词、盲目扩泛词 | 承接已验证词、推自然位、稳定转化 |
 | `phrase_keyword` | 手动关键词投放 | `KeywordTarget(match_type=PHRASE)` | Bid / Budget / Search Term 否词 / 提词 | Placement 调整 | 扩展中等相关搜索词 |
 | `broad_keyword` | 手动关键词投放 | `KeywordTarget(match_type=BROAD)` | Bid / Budget / Search Term 否词 / 提词 | Placement 调整 | 打开词池、获取搜索词样本 |
-| `auto_discovery` | 自动投放 | `AutoTarget` | Bid / Budget / Search Term 提取 | Placement 调整 | 发现关键词、商品和类目机会 |
+| `auto_discovery` | 自动投放 | `AutoTarget` | Target Bid / Budget / Search Term 否词与提取 | Placement 调整；缺少四投放组契约时执行 Target Bid | 发现关键词、商品和类目机会 |
 | `product_targeting` | 手动商品/类目投放 | `ProductTarget` | Bid / Budget / Placement | 关键词匹配方式调整 | 竞品截流、类目拓展、防守自家页面 |
 
 ---
@@ -150,10 +165,10 @@
 | `bid_down_for_acos` | `KeywordTarget` / `ProductTarget` / `AutoTarget` | 否 | ACOS、点击、订单、自然位影响 | SearchTerm、承担 Ranking 任务且未超容忍上限 |
 | `campaign_budget_increase` | `Campaign` | 是 | 预算利用率、ACOS、订单、库存 | 库存缺失、库存不足、高退货、核心 SKU 短缺 |
 | `campaign_budget_decrease` | `Campaign` | 否 | ACOS 趋势、花费、订单、预算利用率 | 样本不足时大幅降预算 |
-| `add_negative_search_term` | `SearchTerm -> NegativeTarget` | 否 | 搜索词点击、花费、订单、ACOS、相关性 | Listing 优化中、测试期样本不足、品牌/竞品词未人工审核 |
+| `add_negative_search_term` | `SearchTerm -> NegativeTarget` | 否 | 搜索词点击、花费、订单、ACOS、相关性、标题、后台ST、历史转化 | 精准广告；高相关词；标题词；后台ST词；历史转化词 |
 | `promote_search_term_to_keyword` | `SearchTerm -> KeywordTarget` | 是 | 搜索词订单、CVR、ACOS、相关性、词根 | 库存不足、高退货、低评分、无相关性 |
 | `placement_adjustment` | `Placement` | 是 | Placement report、ACOS、订单、点击、库存、评分退货 | 广泛/词组/自动广告、缺广告位数据 |
-| `eliminate_to_low_bid_pool` | `Campaign` | 否 | 7天花费、订单、CVR、自然位支持、诊断路径 | 新活动<3天、核心词排名支持、未完成淘汰前诊断；目标组必须为 `low_bid_retention_group` |
+| `eliminate_to_low_bid_pool` | `Campaign` | 否 | 7天花费、订单、CVR、自然位支持、诊断路径 | 广泛/词组/自动活动、新活动<3天、核心词排名支持、未完成淘汰前诊断；目标组必须为 `low_bid_retention_group` |
 | `balance_maintain_no_action` | `ASIN` / `Campaign` | 否 | 指标稳定、预算正常、库存支持 | 数据缺失导致无法判断时不得伪装为健康维持 |
 
 ---
@@ -191,7 +206,10 @@
 | ONT-011 | `Portfolio` 是广告组织对象，不等于 `AdBudgetGroup`；二者不得混用。 |
 | ONT-012 | `Campaign` 必须且只能归属 1 个 `AdBudgetGroup`。 |
 | ONT-013 | 若 `action_code=eliminate_to_low_bid_pool`，则目标组必须为 `low_bid_retention_group`。 |
-| ONT-014 | `low_bid_retention_group` 固定预算 $1、固定 Bid $0.20，且不参与增长预算分配。 |
+| ONT-014 | `low_bid_retention_group` 仅允许精准活动，组合预算固定 $1、活动 Bid 固定 $0.20，且不参与增长预算分配。 |
+| ONT-015 | 精准广告禁止创建否定词；只能调整 Target Bid、Campaign 预算/广告位或关闭。 |
+| ONT-016 | 广泛/词组/自动广告需要退出时关闭，不得迁入 `low_bid_retention_group`。 |
+| ONT-017 | 同一 Campaign 同时包含精准与非精准 Target 时，组合路由 BLOCKED；Agent 建议按匹配类型拆分，人工确认后再执行。 |
 
 ---
 

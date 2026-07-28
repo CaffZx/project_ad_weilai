@@ -215,7 +215,9 @@ class StrategyConfirmRequest(ProductIdentityMixin):
     """POST 确认战略层选择"""
     asin: str
     product_level: ProductLevel
-    product_stage: ProductStage
+    # 产品阶段不再是前端战略层的必填选择；未传时保留既有长期配置，
+    # 仍供现有 Campaign 护栏和 P3 兼容消费。
+    product_stage: ProductStage | None = None
     season_stage: SeasonStage
     operating_mode: OperatingMode | None = None
 

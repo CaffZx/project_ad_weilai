@@ -2,8 +2,12 @@
 # 来源: 20-亚马逊广告Ontology补充.md §9, 22-Ontology第一期补充内容清单.md §7
 # 版本: phase_1 + phase_1b（GROUP-* 见 budget_groups.yaml）
 
-version: phase_1
-description: Agent 输出前 ontology 合法性校验规则；预算组合规则见 budget_groups.yaml
+version: v3.4.0
+description: >
+  Agent 输出前 ontology 合法性校验规则；预算组合算术规则见 budget_groups.yaml。
+  v3.4.0：本文件由 app/core/ontology_validator.py 实际执行（v3.3.0 从未被任何代码加载，
+  ONT-* 与 GROUP-* 全部没有运行时执行者，12号 要求的 ontology_validation_status 与
+  ontology_rule_refs 只能由 LLM 自述，等于自证合法）。
 
 severity_levels:
   hard_block: 必须阻断或放入 blocked_actions，不得作为 proposed_actions 输出
@@ -198,7 +202,7 @@ validation_rules:
   # ---------------------------------------------------------------------------
   # Phase 1b — 广告组合对象边界规则（来源 20 §9 ONT-011~014）
   # 这 4 条是对象级硬约束，与 GROUP-* 预算算术校验不同：
-  #   ONT-011/012 约束对象身份混用，ONT-013/014 约束淘汰动作目标与淘汰组不变属性
+  #   ONT-011/012 约束对象身份混用，ONT-013/014 约束淘汰动作目标与低价捡漏组不变属性
   # ---------------------------------------------------------------------------
   ONT-011:
     name: portfolio_not_equal_ad_budget_group
@@ -237,41 +241,213 @@ validation_rules:
       - 23-广告组合与预算分配规则.md §3.2  # 归类优先级（冲突时只能落一个组）
 
   ONT-013:
-    name: eliminate_target_must_be_elimination_group
-    rule: eliminate_to_low_bid_pool 动作的目标组合必须是 elimination_group（低价捡漏组）
+    name: eliminate_target_must_be_low_bid_retention_group
+    rule: eliminate_to_low_bid_pool 动作的目标组合必须是 low_bid_retention_group（低价捡漏组）
     if:
       action_code: eliminate_to_low_bid_pool
       target_group_type:
         not_in:
-          - elimination_group
+          - low_bid_retention_group
     then:
       status: blocked
-      message: 淘汰动作只能移入低价捡漏组（elimination_group），不得移入推广组/测试组/自动广泛组
+      message: 淘汰动作只能移入低价捡漏组（low_bid_retention_group），不得移入精准主力组/精准测试组/广泛自动组
     severity: hard_block
     maps_to:
-      - 23-广告组合与预算分配规则.md §3.2  # 优先级：低价捡漏组 > 自动广泛组 > 精准主力组 > 精准测试组
-      - 23-广告组合与预算分配规则.md §8.4  # 淘汰组动作规则
+      - 23-广告组合与预算分配规则.md §3.2  # 优先级：低价捡漏组 > 广泛自动组 > 精准主力组 > 精准测试组
+      - 23-广告组合与预算分配规则.md §8.4  # 低价捡漏组动作规则
       - 21-淘汰广告活动规则.md:L14           # 淘汰统一使用 eliminate_to_low_bid_pool
 
   ONT-014:
-    name: elimination_group_immutable_properties
-    rule: 低价捡漏组（elimination_group）的预算固定 $1、Bid 固定 $0.20，且不参与增长预算分配；这些属性不可被任何动作覆盖
+    name: low_bid_retention_group_immutable_properties
+    rule: >
+      低价捡漏组的组合预算固定 $1；Target Bid 为 min(current_bid, 0.20)；不参与增长预算分配。
+      这些属性不可被任何动作覆盖。
     if:
       object_class: AdBudgetGroup
-      group_type: elimination_group
+      group_type: low_bid_retention_group
       any_of:
         - proposed_group_budget: "!= 1"
-        - proposed_bid: "!= 0.20"
+        - proposed_bid: "> min(current_bid, 0.20)"
         - participates_in_increase_allocation: true
     then:
       status: blocked
-      message: 低价捡漏组预算锁死 $1、Bid 锁死 $0.20，不可参与新增预算分配或二次分配接收
+      message: 低价捡漏组预算锁死 $1、Bid 不得高于 min(current_bid, 0.20)，不可参与新增或二次分配接收
+    bid_rule_note: |
+      v3.4.0 修正（C-10）：v3.3.0 写死「proposed_bid != 0.20 即 block」。
+      遇到本来 Bid = $0.15 的词，转组时会被强行抬到 $0.20 —— 等于给一个正在淘汰的词加价 33%。
+      这是真实存在的漏洞（由运营在 v3.3.0 评审中发现）。
+      同时 $0.20 被误当作全站 Bid 硬下限，阻断了所有低于 $0.20 的合法策略
+      （女装长尾里 $0.10–0.18 的 Bid 是常见的）。
+      三概念分离见 03号§8.1：全站上限 $3.00 / 全站下限 $0.02（US）/ 低价捡漏组 min(current_bid, 0.20)。
     severity: hard_block
-    note: 本规则与 GROUP-004/004A 共同构成淘汰组双层防线；ONT-014 属对象层不可变属性校验，GROUP-004/004A 属预算层算术校验
+    note: 本规则与 GROUP-004/004A 共同构成低价捡漏组双层防线；ONT-014 属对象层不可变属性校验，GROUP-004/004A 属预算层算术校验
     maps_to:
       - 20-亚马逊广告Ontology补充.md §9 ONT-014
-      - budget_groups.yaml:87-96  # elimination_group budget_trait
+      - budget_groups.yaml:87-96  # low_bid_retention_group budget_trait
       - 23-广告组合与预算分配规则.md §8.4
+
+  ONT-015:
+    name: exact_campaign_forbids_negative_action
+    rule: 精准广告不得生成否词动作
+    if:
+      campaign_match_type: EXACT
+      action_code: add_negative_search_term
+    then:
+      status: blocked
+      message: 精准广告只能调整 Target Bid、Campaign 预算/广告位、迁组或关闭，不执行否词
+      recommended_next_step:                       # v3.4.0 新增（C-19）
+        - split_campaign_by_match_type
+        - manual_campaign_level_negative_in_console
+      note: >
+        v3.3.0 只 block 不给替代路径（对比 ONT-001 是给了 allowed_alternatives 的），
+        运营看到一个没有下一步的空动作，会绕过系统直接在后台改，反而失去可观测性。
+        Amazon 的 EXACT 匹配实际会匹配近义变体（复数、拼写、词序），多关键词 EXACT
+        活动更会真实交叉抢量，这些场景运营确实需要处理手段。
+    severity: hard_block
+
+  ONT-016:
+    name: non_exact_cannot_enter_low_bid_retention
+    rule: 广泛、词组、自动、商品定投活动退出时使用 close_campaign，不得进入低价捡漏组
+    if:
+      campaign_match_type:
+        in: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]   # v3.4.0 补入 PRODUCT_TARGETING
+      target_group_type: low_bid_retention_group
+    then:
+      status: blocked
+      message: 非精准活动禁止迁入低价捡漏组
+      required_exit_action: close_campaign
+      note: >
+        低价捡漏组的语义是「保留一个已验证精准词的低成本存在感」。
+        商品定投没有关键词、捡不到漏，$0.20 的 Bid 在 ASIN 定投上基本不会有曝光，留着只是账面噪声。
+    severity: hard_block
+
+  ONT-018:
+    name: keyword_fidelity
+    rule: 所有候选词必须存在于本轮输入数据，禁止生成输入外的词（词保真，见 25号§4）
+    if:
+      any_of:
+        - keyword_not_in_input_data: true
+        - word_root_not_extractable_from_actual_search_terms: true
+    then:
+      status: blocked
+      reason_codes: [KEYWORD_NOT_IN_INPUT, WORD_ROOT_FABRICATED]
+      message: 候选词不在本轮输入数据中，或词根无法从实际搜索词提取
+    severity: hard_block
+    note: >
+      v3.4.0 实际注册。v3.3.0 里 28号§1 引用「25 号§4 词保真」，28号§7 又声称
+      「ONT-018 校验」——但 25号 文件不存在、ONT-018 也不存在，规则完全悬空。
+    maps_to:
+      - 执行规则/25-目标ACOS预算Bid推荐.md §4
+      - 执行规则/28-新增词来源相关性与场景化配额规则.md §1
+
+  ONT-019:
+    name: keyword_source_and_relevance_admission
+    rule: 扩词候选必须标注来源码与相关性档位；R4 禁止扩词；高风险来源强制人工
+    if:
+      action_code:
+        in: [expand_keywords, create_campaign, promote_search_term_to_keyword]
+      any_of:
+        - keyword_source_missing: true
+        - relevance_tier_missing: true
+        - relevance_tier: R4
+    then:
+      status: blocked
+      reason_codes: [KEYWORD_SOURCE_MISSING, RELEVANCE_TIER_MISSING, RELEVANCE_TOO_LOW]
+    if_high_risk_source:
+      keyword_source:
+        in: [SRC_COMPETITOR_ASIN, SRC_BRAND_CATEGORY]
+      then:
+        status: review_required
+        review_level: HIGH_RISK_REVIEW
+    severity: hard_block
+    note: v3.4.0 实际注册（v3.3.0 里 28号§7 只是「建议新增」）。
+    maps_to:
+      - 执行规则/28-新增词来源相关性与场景化配额规则.md §1 / §2 / §4
+
+  ONT-020:
+    name: action_code_must_be_registered
+    rule: action_code 必须在 30-动作词表与映射.md §1 注册，且与 physical_action_code / scope / campaign_type 匹配
+    if:
+      any_of:
+        - action_code_not_in_registry: true
+        - action_code_physical_code_mismatch: true
+        - action_code_scope_mismatch: true
+        - action_code_not_allowed_for_campaign_type: true
+    then:
+      status: blocked
+      reason_codes: [ACTION_NOT_REGISTERED, ACTION_CODE_MISMATCH, ACTION_SCOPE_INVALID]
+    severity: hard_block
+    maps_to:
+      - 30-动作词表与映射.md §1 / §7
+      - ontology/campaign_types.yaml allowed_actions / forbidden_actions
+
+  ONT-021:
+    name: stage_expired_testing_freezes_growth
+    rule: product_stage=testing 且已满最长测试天数时，冻结增长型动作并将阶段 ACOS 加值归零
+    if:
+      product_stage: testing
+      stage_days_elapsed: ">= 03号§2 最长测试天数"
+      action_code:
+        in_growth_actions: true
+    then:
+      status: blocked
+      reason_code: STAGE_EXPIRED_TESTING
+      required_output: manual_review_stage_confirmation
+      stage_acos_addon_override: 0
+    severity: hard_block
+    note: >
+      v3.4.0 新增（C-17）。v3.3.0 对 testing 超期没有任何规则，而 testing 同时享受
+      最高 ACOS 容忍加值（+15%）、×0.5 幅度抑制、以及免淘汰评估三项优待——
+      一个卡在 testing 不动的产品会变成永不被优化的黑洞。
+      Agent 不得自行改产品阶段标签（02号§2 权限为「仅建议」），故只能冻结 + 逼出人工确认。
+    maps_to:
+      - 03-阈值参数.md §2
+      - 执行规则/15-策略约束值规则.md §4.2
+      - 执行规则/17-问题诊断与动作优先级.md §1.2
+
+  ONT-022:
+    name: irreversible_action_requires_mature_data
+    rule: 不可逆动作（淘汰/关闭/否词/降组/升组）要求决策窗口最新数据龄 ≥ 03号§12.2 的最小龄
+    if:
+      action_code:
+        in: [eliminate_to_low_bid_pool, close_campaign, add_negative_search_term,
+             demote_to_exact_testing, promote_to_exact_core]
+      any_of:
+        - data_min_age_days: "< 03号§12.2 最小龄"
+        - data_min_age_days: missing
+    then:
+      status: blocked
+      blocked_when: data_min_age_days_below_minimum
+      blocked_when_missing: data_min_age_days_missing
+      reason_codes: [DATA_NOT_MATURE, DATA_AGE_UNKNOWN]
+      recommended_next_step:
+        - Agent 自动延后；下轮读取配置的成熟窗口后重新判断
+    exemption:
+      - action_code: add_negative_search_term
+        when: relevance_tier in [R3, R4]
+        why: 相关性驱动的否词是语义判定（31号§4 档4 无数据门槛），不依赖表现数据成熟度
+      - action_code: [eliminate_to_low_bid_pool, close_campaign]
+        when: operating_mode == immediate_exit
+        why: 立即退出由人工前置标签授权；仅豁免成熟度门，仍保留其他 Ontology 与最终执行确认
+    severity: hard_block
+    note: >
+      v3.4.1 新增。Amazon 7 天点击归因使 T+1 数据系统性低报销售，
+      未成熟窗口上的不可逆动作是方向一致的持续性错误。判定内核在
+      app/core/attribution_maturity.maturity_gate，由 OntologyValidator 执行。
+    maps_to:
+      - 03-阈值参数.md §12
+      - app/core/attribution_maturity.py
+
+  ONT-017:
+    name: mixed_match_campaign_requires_split
+    rule: 同一Campaign混有精准与非精准Target时无法归入单一组合
+    if:
+      campaign_contains_exact_and_non_exact_targets: true
+    then:
+      status: blocked
+      recommended_action: split_campaign_by_match_type
+      message: 按匹配类型拆分活动后重新分析
+    severity: hard_block
 
 # ---------------------------------------------------------------------------
 # 广告组合与预算分配（Phase 1b，来源 23-广告组合与预算分配规则.md）
@@ -317,10 +493,10 @@ group_validation_rules:
     maps_to_principle: GROUP-BUDGET-002
 
   GROUP-004:
-    name: elimination_group_no_increase_allocation
-    rule: 淘汰组不得参与新增预算分配
+    name: low_bid_retention_group_no_increase_allocation
+    rule: 低价捡漏组不得参与新增预算分配
     if:
-      group_type: elimination_group
+      group_type: low_bid_retention_group
       group_requested_positive_delta: "> 0"
     then:
       status: blocked
@@ -328,10 +504,10 @@ group_validation_rules:
     maps_to_principle: GROUP-BUDGET-005
 
   GROUP-004A:
-    name: elimination_group_fixed_budget_and_bid
-    rule: 淘汰组组合预算必须固定 $1，Bid 必须固定 $0.20
+    name: low_bid_retention_group_fixed_budget_and_bid
+    rule: 低价捡漏组组合预算必须固定 $1，Bid 必须固定 $0.20
     if:
-      group_type: elimination_group
+      group_type: low_bid_retention_group
       any_of:
         - proposed_group_budget: "!= 1"
         - proposed_bid: "!= 0.20"
@@ -340,12 +516,12 @@ group_validation_rules:
     severity: hard_block
 
   GROUP-005:
-    name: promotion_group_no_starvation
-    rule: 推广组不得因测试组或自动广泛组扩张而断供
+    name: exact_core_group_no_starvation
+    rule: 精准主力组不得因精准测试组或广泛自动组扩张而断供
     if:
-      promotion_group_protected: true
+      exact_core_group_protected: true
       testing_or_auto_increase: true
-      promotion_group_decreased: true
+      exact_core_group_decreased: true
     then:
       status: review_required
       alt_status: blocked
@@ -355,13 +531,65 @@ group_validation_rules:
 
   GROUP-006:
     name: compress_when_parent_net_increase_disallowed
-    rule: 父 ASIN 不允许净增预算时，所有正向增量必须按比例或加权比例压缩
+    rule: 父 ASIN 不允许净增预算时，所有正向增量必须按请求比例或经营目标动态压缩
     if:
       parent_net_increase_allowed: false
       positive_deltas_uncompressed: true
     then:
       status: review_required
     severity: review_required
+
+  GROUP-010:
+    name: group_overallocation_two_tier
+    rule: >
+      组合超配（活动预算总和 / 组合预算）超过 2.0 倍时分两级处理：
+      本轮动作导致跨越 → 硬阻断；存量已超 → MANUAL_REVIEW 且本轮只允许降预算动作。
+    if_crossing:
+      overallocation_ratio_before: "<= 2.0"
+      overallocation_ratio_after: "> 2.0"
+    then:
+      status: blocked
+      reason_code: OVERALLOCATION_CROSSED_BY_THIS_ROUND
+      message: 本轮动作会使活动预算总和超过组合预算 2 倍，阻断
+    if_pre_existing:
+      overallocation_ratio_before: "> 2.0"
+    then:
+      status: review_required
+      review_level: MANUAL_REVIEW
+      allowed_actions_this_round: [campaign_budget_decrease, portfolio_budget_adjust]
+      message: 组合存量超配已超 2 倍，本轮只允许降预算或提升组合预算
+    severity: hard_block
+    note: >
+      v3.4.0 新增（G2）。v3.3.0 里交接文档§8/§12 写「不得超过 2 倍」（硬阻断），
+      而 23号§4.3 与 budget_groups.health_tiers 写「> 2.0 → MANUAL_REVIEW」（人工确认），直接矛盾。
+      统一硬阻断会让历史已超配的组合陷入死锁；统一 MANUAL_REVIEW 会让预算失控的唯一防线
+      变成人工，而这类提案很多、容易被批量点过。分两级同时避免两个问题。
+    maps_to:
+      - 执行规则/23-广告组合与预算分配规则.md §4.3
+      - 10-安全护栏.md §1.9
+
+  GROUP-011:
+    name: exact_push_share_scale_threshold
+    rule: >
+      max_exact_push_share 未设置时，仅当本轮给精准主力组的加预算额 > 本轮可分配预算 × 50%
+      才要求该字段（否则 MANUAL_REVIEW）；未达此规模按动态分配正常执行。
+    if:
+      max_exact_push_share_configured: false
+      exact_core_increase_amount: "> available_reallocation_budget * 0.5"
+    then:
+      status: review_required
+      review_level: MANUAL_REVIEW
+      message: 未设置精准推进占比上限且本轮推词加预算超过可分配预算 50%，需人工确认
+    else:
+      status: allowed_with_note
+      required_field: exact_push_share_note
+    severity: review_required
+    note: >
+      v3.4.0 新增（C-18）。v3.3.0 规则是「未设置即一律 MANUAL_REVIEW」，
+      但该字段可选、实际大概率没人填 —— 结果所有 active_promotion 的预算动作全部堆到人工，
+      运营必然开始批量点过，护栏形式上存在、实质上失效。
+    maps_to:
+      - 执行规则/23-广告组合与预算分配规则.md §7.2
 
   GROUP-007:
     name: surplus_release_not_forced_allocated
@@ -403,13 +631,13 @@ acceptance_checklist:
     check: 组合变更后回算父 ASIN 总预算（proposed_total_group_budget / net_budget_change）
     rule_ref: GROUP-003
   - id: AC-10
-    check: 淘汰组组合预算 $1、Bid $0.20，且不参与增预算分配
+    check: 低价捡漏组组合预算 $1、Bid $0.20，且不参与增预算分配
     rule_ref: GROUP-004
   - id: AC-11
-    check: 推广组有稳定花费时不得被测试/广泛组挤断供
+    check: 精准主力组有稳定花费时不得被精准测试/广泛自动组挤断供
     rule_ref: GROUP-005
   - id: AC-12
-    check: 父 ASIN 不允许净增时正向增量已按比例或 60/20/20 加权压缩
+    check: 父 ASIN 不允许净增时正向增量已按请求比例或经营目标动态压缩
     rule_ref: GROUP-006
   - id: AC-13
     check: 输出含 budget_groups[] 与各组合 requested_delta / actual_delta
@@ -421,8 +649,41 @@ acceptance_checklist:
     check: 每个 Campaign 归属唯一一个 AdBudgetGroup，不出现多归属或缺失
     rule_ref: ONT-012
   - id: AC-16
-    check: eliminate_to_low_bid_pool 目标组必须是 elimination_group
+    check: eliminate_to_low_bid_pool 目标组必须是 low_bid_retention_group
     rule_ref: ONT-013
   - id: AC-17
-    check: elimination_group 预算锁死 $1 + Bid $0.20，不可参与增长分配
+    check: low_bid_retention_group 预算锁死 $1；Bid = min(current_bid, 0.20) 且不得抬高已低于 0.20 的 Bid
     rule_ref: ONT-014
+  - id: AC-18
+    check: 候选词全部存在于本轮输入数据；词根可从 ≥2 个实际搜索词提取
+    rule_ref: ONT-018
+  - id: AC-19
+    check: 扩词动作均带 keyword_source 与 relevance_tier；R4 被阻断；竞品/品牌词强制 HIGH_RISK_REVIEW
+    rule_ref: ONT-019
+  - id: AC-20
+    check: 每条动作的 action_code 已在 30号§1 注册，且与 physical_action_code / scope / campaign_type 匹配
+    rule_ref: ONT-020
+  - id: AC-21
+    check: testing 超期时增长型动作被冻结且阶段 ACOS 加值归零
+    rule_ref: ONT-021
+  - id: AC-22
+    check: 广泛/词组/自动/商品定投的退出动作为 close_campaign，且未迁入低价捡漏组
+    rule_ref: ONT-016
+  - id: AC-23
+    check: 精准活动否词被阻断且输出了 recommended_next_step
+    rule_ref: ONT-015
+  - id: AC-24
+    check: 组合超配本轮跨越 2 倍被硬阻断；存量已超时本轮只输出降预算动作
+    rule_ref: GROUP-010
+  - id: AC-25
+    check: max_exact_push_share 未设置且推词加预算 > 可分配预算 50% 时升 MANUAL_REVIEW
+    rule_ref: GROUP-011
+  - id: AC-26
+    check: PRODUCT_TARGETING 路由到 auto_broad_group + subtype=product_targeting，reason_code 可辨识（非 unknown 兜底），广告位权限仍放开（v3.4.3 子桶）
+    rule_ref: ROUTE-005 / ONT-012
+  - id: AC-27
+    check: 不可逆动作在数据龄不足或未知时被阻断并由 Agent 自动延后；R3/R4 相关性否词豁免；immediate_exit 退出动作仅豁免成熟度
+    rule_ref: ONT-022
+  - id: AC-28
+    check: 所有 ACOS 判定使用校正后指标（acos_corrected），原始值仅展示
+    rule_ref: 03号§12

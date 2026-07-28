@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from app.config.settings import settings
+from app.models.asin_data import ASINData
 from app.models.campaign import CampaignData, CampaignStrategyContext, CampaignUnit
 from app.workflow.steps import campaign as campaign_steps
 
@@ -103,3 +104,80 @@ def test_prefetched_campaign_data_still_queries_portfolio(monkeypatch):
         days=7,
         site_code="Amazon_US",
     )
+
+
+def test_strategy_context_keeps_operating_mode_without_runtime_permission():
+    ctx = campaign_steps.build_campaign_strategy_context(
+        "B0CLEARANCE",
+        ASINData(asin="B0CLEARANCE"),
+        {"operating_mode": "控制清货"},
+    )
+
+    assert ctx.operating_mode == "控制清货"
+    assert "ad_permission" not in ctx.model_dump()
+
+
+def test_strategy_context_allows_null_product_stage():
+    """历史配置的空产品阶段不得阻断 Campaign 分析入口。"""
+    ctx = campaign_steps.build_campaign_strategy_context(
+        "B0NULLSTAGE",
+        ASINData(asin="B0NULLSTAGE"),
+        {"product_stage": None},
+    )
+
+    assert ctx.product_stage == ""
+
+
+def test_clearance_permission_skips_new_and_restart_analysis(monkeypatch):
+    unit = CampaignUnit(
+        campaign_name="pooled-campaign",
+        campaign_key="pooled-campaign",
+        child_asin="B0CHILD",
+        keyword_text="pooled keyword",
+        match_type="EXACT",
+    )
+    campaign_data = CampaignData(
+        parent_asin="B0CLEARANCE",
+        total_campaigns=1,
+        campaigns=[unit],
+    )
+    new_analysis = AsyncMock()
+    restart_analysis = AsyncMock()
+    fetcher = MagicMock()
+    fetcher._last_shop_account = ""
+
+    monkeypatch.setattr(
+        campaign_steps,
+        "filter_eliminated_pool",
+        lambda _campaigns: ([], [], [unit]),
+    )
+    monkeypatch.setattr(campaign_steps, "analyze_new_campaigns", new_analysis)
+    monkeypatch.setattr(campaign_steps, "_run_restart_review", restart_analysis)
+    monkeypatch.setattr(settings, "campaign_new_enabled", True)
+    monkeypatch.setattr(settings, "campaign_restart_enabled", True)
+
+    result = asyncio.run(
+        campaign_steps._analyze_campaigns_impl(
+            fetcher=fetcher,
+            reasoner=MagicMock(),
+            parent_asin="B0CLEARANCE",
+            asin_data=MagicMock(title=""),
+            strategy_context=CampaignStrategyContext(
+                parent_asin="B0CLEARANCE",
+                operating_mode="控制清货",
+            ),
+            days=7,
+            bs=6,
+            cc=1,
+            temperature=0.3,
+            refresh=False,
+            campaign_data=campaign_data,
+            keyword_analysis={},
+            run_id="test-clearance",
+            _t=lambda _label: None,
+        )
+    )
+
+    assert result.new_campaigns == []
+    new_analysis.assert_not_awaited()
+    restart_analysis.assert_not_awaited()

@@ -42,6 +42,7 @@ from app.models.campaign import (
     CampaignStrategyContext,
     CampaignUnit,
 )
+from app.models.layers import AdPermission, OperatingMode, operating_mode_to_permission
 if TYPE_CHECKING:
     from app.llm.reasoner import LLMReasoner
     from app.workflow.context import WorkflowContext
@@ -407,6 +408,17 @@ async def _analyze_campaigns_impl(
     # 3b. 疑似已淘汰活动：Bid ≤ $0.20 且 预算 ≤ $1.00 → 不进 LLM (campaign_prefilter.filter_eliminated_pool)
     llm_campaigns, skipped_eliminated, pool_units = filter_eliminated_pool(campaign_data.campaigns)
 
+    # 广告权限是本轮 Campaign 分析的运行时派生值，不进入战略上下文或持久化模型。
+    # 新增/复活两个增长流只消费该权限，不直接以经营模式字符串做分支。
+    try:
+        mode = OperatingMode(str(strategy_context.operating_mode).strip())
+    except ValueError:
+        mode = None
+    ad_permission = operating_mode_to_permission(mode)
+    growth_analysis_enabled = (
+        ad_permission != AdPermission.CLEARANCE_ONLY
+    )
+
     if skipped_eliminated:
         logger.info("Campaign 预过滤 [%s]: 跳过 %d 个疑似已淘汰活动 (budget≈$1, bid≈$0.2)",
                      parent_asin, len(skipped_eliminated))
@@ -459,7 +471,7 @@ async def _analyze_campaigns_impl(
     # ── 淘汰复评辅助函数（全预过滤 + 正常路径共用）─────────────────────
     async def _maybe_restart_review() -> tuple[list[CampaignAdjustmentItem], set[str]]:
         """KB21§7 淘汰复评。返回 (reactivate_items, reactivated_keys)。"""
-        if not (settings.campaign_restart_enabled and pool_units):
+        if not (growth_analysis_enabled and settings.campaign_restart_enabled and pool_units):
             return [], set()
         from app.persistence.erp_writer.repository import _get_repository
         repo = _get_repository()
@@ -500,7 +512,7 @@ async def _analyze_campaigns_impl(
 
         new_campaigns: list = []
         nc_warnings: list[str] = []
-        if settings.campaign_new_enabled:
+        if settings.campaign_new_enabled and growth_analysis_enabled:
             try:
                 new_campaigns, nc_warnings, _ = await analyze_new_campaigns(
                     fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
@@ -638,7 +650,7 @@ async def _analyze_campaigns_impl(
             # 相关性锚点仅传标题（brand/category 已去除：品类太粗、会把 LLM 引向品类级误匹配，
             # 判别"短裙≠中长裙"靠标题具体属性）
             product_title=(asin_data.title or "") if asin_data else "",
-        ) if settings.campaign_new_enabled else _no_op_new_campaigns()),
+        ) if settings.campaign_new_enabled and growth_analysis_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )
 
@@ -1213,7 +1225,9 @@ def build_campaign_strategy_context(
 
     return CampaignStrategyContext(
         parent_asin=asin,
-        product_stage=long_term.get("product_stage", ""),
+        # MySQL/ERP 历史配置允许 product_stage 为 NULL；Campaign 上下文
+        # 仍以字符串承载，空值统一为 ""，避免在 LLM/护栏之前中断分析。
+        product_stage=long_term.get("product_stage") or "",
         product_level=long_term.get("product_level", ""),
         season_stage=long_term.get("season_stage", ""),
         operating_mode=operating_mode,

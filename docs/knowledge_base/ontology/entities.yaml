@@ -2,7 +2,7 @@
 # 来源: 20-亚马逊广告Ontology补充.md §2/§3/§5/§6, 22-Ontology第一期补充内容清单.md §2/§4
 # 版本: phase_1（预算组合层见 budget_groups.yaml phase_1b）
 
-version: phase_1
+version: v3.4.0
 description: 广告调整 Agent 对象层级、广告目的/方向枚举、建议输出字段
 
 # ---------------------------------------------------------------------------
@@ -112,10 +112,10 @@ ad_entities:
       - belongsToParentASIN
       - containsCampaign
     group_type_values:
-      - promotion_group
-      - testing_group
+      - exact_core_group
+      - exact_testing_group
       - auto_broad_group
-      - elimination_group
+      - low_bid_retention_group
     immutable_when_elimination:
       rule: ONT-014
       group_budget: 1.0
@@ -144,7 +144,7 @@ ad_entities:
       - belongsToAdBudgetGroup
     group_fields:
       belongs_to_group: group_type 枚举，见 budget_groups.yaml
-      group_type: promotion_group | testing_group | auto_broad_group | elimination_group
+      group_type: exact_core_group | exact_testing_group | auto_broad_group | low_bid_retention_group
       constraint: 必须且只能归属 1 个 AdBudgetGroup（ONT-012）
     allowed_actions:
       - campaign_budget_increase
@@ -152,8 +152,18 @@ ad_entities:
       - placement_adjustment
       - eliminate_to_low_bid_pool
       - balance_maintain_no_action
+    action_constraints:
+      eliminate_to_low_bid_pool:
+        allowed_match_types: [EXACT]
+      placement_adjustment:
+        allowed_match_types: [EXACT]
+      add_negative_search_term:
+        forbidden_match_types: [EXACT]
     boundary_rules:
-      - ONT-012 
+      - ONT-012
+      - ONT-015
+      - ONT-016
+      - ONT-017
 
   AdGroup:
     label_zh: 广告组
@@ -448,10 +458,10 @@ output_fields:
   group_type:
     type: enum
     allowed_values:
-      - promotion_group
-      - testing_group
+      - exact_core_group
+      - exact_testing_group
       - auto_broad_group
-      - elimination_group
+      - low_bid_retention_group
     description: Campaign 归属的广告预算组合类型
 
   group_budget_delta:

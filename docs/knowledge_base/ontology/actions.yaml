@@ -2,11 +2,15 @@
 # 来源: 20-亚马逊广告Ontology补充.md §7, 22-Ontology第一期补充内容清单.md §5/§6.3
 # 版本: phase_1
 
-version: phase_1
-description: 动作作用对象、是否增长型、必需证据、禁止场景、缺报表策略
+version: v3.4.0
+description: >
+  动作作用对象、是否增长型、必需证据、禁止场景、缺报表策略。
+  action_code 枚举与物理码映射以 docs/knowledge_base/30-动作词表与映射.md §1 为唯一权威；
+  本文件补充每个动作的证据要求与阻断场景。
 
 actions:
   bid_up_for_ranking:
+    scope: TARGET                      # 与 30号§1 的 scope 列一致
     label_zh: 提价冲排名
     target_objects:
       - KeywordTarget
@@ -42,6 +46,7 @@ actions:
       - ONT-006
 
   bid_down_for_acos:
+    scope: TARGET                      # 与 30号§1 的 scope 列一致
     label_zh: 降价优化 ACOS
     target_objects:
       - KeywordTarget
@@ -66,6 +71,7 @@ actions:
       - ONT-006
 
   campaign_budget_increase:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
     label_zh: 增加 Campaign 预算
     target_objects:
       - Campaign
@@ -95,6 +101,7 @@ actions:
       - must_recalculate_parent_asin_budget: true
 
   campaign_budget_decrease:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
     label_zh: 减少 Campaign 预算
     target_objects:
       - Campaign
@@ -118,6 +125,7 @@ actions:
       - must_recalculate_parent_asin_budget: true
 
   add_negative_search_term:
+    scope: SEARCH_TERM                      # 与 30号§1 的 scope 列一致
     label_zh: 搜索词否词
     target_objects:
       - SearchTerm
@@ -141,6 +149,7 @@ actions:
       - ONT-001
 
   promote_search_term_to_keyword:
+    scope: SEARCH_TERM                      # 与 30号§1 的 scope 列一致
     label_zh: 搜索词提词
     target_objects:
       - SearchTerm
@@ -170,6 +179,7 @@ actions:
       - ONT-009
 
   placement_adjustment:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
     label_zh: 广告位加价调整
     target_objects:
       - Placement
@@ -201,6 +211,11 @@ actions:
       - ONT-010
 
   eliminate_to_low_bid_pool:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
+    # v3.4.4：复合动作展开成多条物理动作，各自 scope 不同
+    # （move_portfolio/adjust_budget 在 CAMPAIGN，adjust_bid 在 TARGET）。
+    # 不声明跨度，校验器按单一 scope 比对会把 Bid 子动作判成 ACTION_SCOPE_INVALID。
+    sub_scopes: [CAMPAIGN, TARGET]
     label_zh: 淘汰至低 Bid 池
     target_objects:
       - Campaign
@@ -214,12 +229,15 @@ actions:
       - cvr
       - organic_rank_support
       - diagnosis_path_complete
+    physical_action_codes: [move_portfolio, adjust_budget, adjust_bid]   # 复合，展开见 30号§3.1
     forbidden_objects_or_scenes:
+      - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 close_campaign
       - campaign_age_under_3_days
       - core_keyword_ranking_support
+      - high_priority_protected_keyword        # v3.4.0：标题词/后台ST词/核心卖点词/is_core_keyword
       - pre_elimination_diagnosis_incomplete
-      - target_group_not_elimination_group
-      - elimination_group_already_full_and_budget_exceeded
+      - target_group_not_low_bid_retention_group
+      - observation_window_not_satisfied       # v3.4.0：降级型≥7天 / 原生型≥14天（32号§2.4）
     missing_report_policy: {}
     validation_rule_refs:
       - ONT-013
@@ -230,11 +248,12 @@ actions:
     post_conditions:
       - must_recalculate_ad_budget_group: true
       - must_recalculate_parent_asin_budget: true
-      - elimination_group_budget_fixed: 1.0
-      - elimination_bid_fixed: 0.20
-      - target_group_must_be: elimination_group
+      - low_bid_retention_group_budget_fixed: 1.0
+      - low_bid_retention_bid_rule: min(current_bid, 0.20)   # v3.4.0（C-10）：不得抬高已低于 0.20 的 Bid
+      - target_group_must_be: low_bid_retention_group
 
   balance_maintain_no_action:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
     label_zh: 平衡维持（无策略性大动作）
     target_objects:
       - ParentASIN
@@ -255,9 +274,269 @@ actions:
     validation_rule_refs:
       - ONT-007
 
+  close_campaign:                              # v3.4.0 新增（C-03）
+    scope: CAMPAIGN
+    label_zh: 关闭活动（退出投放）
+    target_objects:
+      - Campaign
+    physical_action_codes: [close_campaign]
+    is_growth_action: false
+    applicable_campaign_types:
+      - broad_keyword
+      - phrase_keyword
+      - auto_discovery
+      - product_targeting
+    required_reports:
+      - targeting_report
+    required_signals:
+      - spend_7d
+      - orders_7d
+      - relevance_assessment
+      - diagnosis_path_complete
+    forbidden_objects_or_scenes:
+      - campaign_match_type_exact              # EXACT 走 eliminate_to_low_bid_pool
+      - campaign_age_under_3_days
+      - pre_exit_diagnosis_incomplete          # 广泛类必须先否词再降 Bid/预算
+    post_conditions:
+      - must_recalculate_ad_budget_group: true
+      - must_recalculate_parent_asin_budget: true
+      - released_amount: current_daily_budget  # 全额释放，计入 other_campaign_budget_decrease
+    review_level: HIGH_RISK_REVIEW             # 不可降级
+    validation_rule_refs:
+      - ONT-016
+      - ONT-RUNTIME-007
+      - GROUP-002
+      - GROUP-003
+    note: >
+      与 pause_campaign 的区别见 30号§2：close 是退出投放（不可逆程度高），
+      pause 是临时停投（有明确恢复条件）。v3.3.0 没有 close 动作，
+      21号/18号/budget_groups 里写的「关闭」实际全部落成 pause，与 10号§1.6 冲突。
+
+  pause_campaign:
+    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
+    label_zh: 临时暂停活动
+    target_objects:
+      - Campaign
+    physical_action_codes: [pause]
+    is_growth_action: false
+    required_signals:
+      - explicit_resume_condition               # 必须有明确恢复条件，否则应用 close_campaign
+    forbidden_objects_or_scenes:
+      - no_explicit_resume_condition
+    review_level: HIGH_RISK_REVIEW
+    note: 极少使用。没有明确恢复条件的停投一律用 close_campaign。
+
+  demote_to_exact_testing:                     # v3.4.0 新增（32号§2.3）
+    scope: CAMPAIGN
+    # v3.4.4：复合动作展开成多条物理动作，各自 scope 不同
+    # （move_portfolio/adjust_budget 在 CAMPAIGN，adjust_bid 在 TARGET）。
+    # 不声明跨度，校验器按单一 scope 比对会把 Bid 子动作判成 ACTION_SCOPE_INVALID。
+    sub_scopes: [CAMPAIGN, TARGET]
+    label_zh: 降级至精准测试组
+    target_objects:
+      - Campaign
+    physical_action_codes: [move_portfolio, adjust_budget, adjust_bid]   # 复合，30号§3.2
+    is_growth_action: false
+    applicable_campaign_types:
+      - exact_keyword
+    required_reports:
+      - targeting_report
+      - organic_rank_signal
+    required_signals:
+      - acos_two_consecutive_3d_periods
+      - clicks_7d
+      - orders_7d
+      - orders_prev_7d
+      - organic_rank_trend
+    forbidden_objects_or_scenes:
+      - high_priority_protected_keyword        # 保护词只能降 Bid/预算，不得降级（32号§2.1）
+      - organic_rank_signal_missing            # 自然位条件无法判定 → 转 MANUAL_REVIEW
+    post_conditions:
+      - must_record: demoted_at
+      - must_recalculate_ad_budget_group: true
+      - must_recalculate_parent_asin_budget: true
+    review_level: MANUAL_REVIEW
+    validation_rule_refs:
+      - GROUP-002
+      - GROUP-003
+
+  promote_to_exact_core:                       # v3.4.0 新增（23号§3.5）
+    scope: CAMPAIGN
+    label_zh: 升入精准主力组
+    target_objects:
+      - Campaign
+    physical_action_codes: [move_portfolio]
+    is_growth_action: true
+    applicable_campaign_types:
+      - exact_keyword
+    required_reports:
+      - targeting_report
+      - inventory_status
+    required_signals:
+      - three_consecutive_complete_local_days
+      - daily_spend_each_day
+      - aggregate_acos_3d
+      - target_acos
+    forbidden_objects_or_scenes:
+      - multi_keyword_campaign
+      - exact_main_fixed_threshold_invalid     # 固定 $5 配置非法 → 阻断升组
+      - inventory_missing
+    post_conditions:
+      - must_output: validation_result         # 三日日期、每日花费、门槛值、汇总ACOS、目标ACOS
+      - must_output: natural_traffic_priority_score   # 多活动竞争时的排序依据
+    review_level: MANUAL_REVIEW
+    validation_rule_refs:
+      - ONT-004
+      - ONT-012
+
+  expand_keywords:                             # v3.4.0 补齐（评审 B12）
+    scope: CAMPAIGN
+    label_zh: 扩词（向现有广告组新增 Target）
+    target_objects:
+      - Campaign
+    physical_action_codes: [create_target]
+    is_growth_action: true
+    required_reports:
+      - search_term_report
+      - inventory_status
+      - listing_quality_signal
+    required_signals:
+      - keyword_source
+      - relevance_tier
+      - budget_utilization
+      - inventory
+    forbidden_objects_or_scenes:
+      - inventory_insufficient
+      - high_return_rate
+      - low_rating
+      - relevance_tier_r4
+      - product_stage_liquidating          # 25号§6 清仓禁扩
+      - keyword_not_in_input               # ONT-018 词保真
+    missing_report_policy:
+      search_term_report: hard_block
+      inventory_status: block_growth_actions
+    review_level: MANUAL_REVIEW
+    validation_rule_refs: [ONT-004, ONT-018, ONT-019]
+    note: >
+      v3.3.0 里 12号§三 的 action_type 枚举含 expand_keywords、28号§7 声称
+      「actions.yaml expand_keywords 动作已注册」，但本文件实际没有它 —— 三处不一致。
+
+  create_campaign:                             # v3.4.0 补齐
+    scope: CAMPAIGN
+    label_zh: 新建广告活动
+    target_objects:
+      - Campaign
+    physical_action_codes: [create_campaign]
+    is_growth_action: true
+    required_reports:
+      - inventory_status
+      - listing_quality_signal
+    required_signals:
+      - keyword_source
+      - relevance_tier
+      - trigger_scene
+    forbidden_objects_or_scenes:
+      - inventory_insufficient
+      - high_return_rate
+      - low_rating
+      - relevance_tier_r4
+      - product_stage_liquidating
+      - operating_mode_forbids_new           # immediate_exit / controlled_clearance
+      - keyword_not_in_input
+    review_level: MANUAL_REVIEW
+    validation_rule_refs: [ONT-004, ONT-018, ONT-019]
+
+  enable_campaign:                             # v3.4.0 补齐
+    scope: CAMPAIGN
+    label_zh: 启用活动
+    target_objects:
+      - Campaign
+    physical_action_codes: [enable]
+    is_growth_action: true
+    required_reports:
+      - targeting_report
+      - inventory_status
+    review_level: MANUAL_REVIEW
+
+  reactivate_budget_only:                      # 21号§7 情况一
+    scope: CAMPAIGN
+    label_zh: 捡漏组复评 — 仅恢复预算
+    target_objects:
+      - Campaign
+    physical_action_codes: [adjust_budget]
+    is_growth_action: true
+    required_signals:
+      - days_in_elimination
+      - orders_30d
+    forbidden_objects_or_scenes:
+      - days_in_elimination_under_14
+    review_level: AUTO_APPROVED
+    validation_rule_refs: [GROUP-002, GROUP-003]
+
+  reactivate_with_calibrated_bid:              # 21号§7 情况二
+    scope: CAMPAIGN
+    label_zh: 捡漏组复评 — 恢复预算 + 重新定价
+    target_objects:
+      - Campaign
+    physical_action_codes: [adjust_budget, adjust_bid]
+    is_growth_action: true
+    required_signals:
+      - days_in_elimination
+      - orders_30d
+      - avg_exact_cpc_30d
+    forbidden_objects_or_scenes:
+      - days_in_elimination_under_14
+    review_level: MANUAL_REVIEW
+    validation_rule_refs: [GROUP-002, GROUP-003]
+
+  portfolio_budget_adjust:                     # 23号§4
+    scope: PORTFOLIO
+    label_zh: 组合预算调整
+    target_objects:
+      - AdBudgetGroup
+    physical_action_codes: [adjust_budget]
+    is_growth_action: false
+    required_signals:
+      - group_actual_spend_and_utilization
+      - bottleneck_layer
+    review_level: MANUAL_REVIEW
+    validation_rule_refs: [GROUP-003, GROUP-010]
+
+  parent_budget_adjust:                        # 23号§4
+    scope: PARENT
+    label_zh: 父 ASIN 预算调整建议
+    target_objects:
+      - ParentASIN
+    physical_action_codes: [adjust_budget]
+    is_growth_action: false
+    required_signals:
+      - parent_target_daily_budget
+      - bottleneck_layer
+    review_level: MANUAL_REVIEW
+
 # 增长型动作汇总（供 ONT-004 引用）
 growth_actions:
   - bid_up_for_ranking
   - campaign_budget_increase
   - promote_search_term_to_keyword
   - placement_adjustment
+  - expand_keywords
+  - create_campaign
+  - promote_to_exact_core
+  - enable_campaign
+  - reactivate_budget_only
+  - reactivate_with_calibrated_bid
+
+# 退出类动作汇总（供 30号§2 与 ONT-RUNTIME-007 引用）
+exit_actions:
+  exact_keyword: eliminate_to_low_bid_pool
+  broad_keyword: close_campaign
+  phrase_keyword: close_campaign
+  auto_discovery: close_campaign
+  product_targeting: close_campaign
+
+# 复合动作汇总（供 ActionBundle 展开与同批回滚使用，见 30号§3）
+composite_actions:
+  eliminate_to_low_bid_pool: [move_portfolio, adjust_budget, adjust_bid]
+  demote_to_exact_testing: [move_portfolio, adjust_budget, adjust_bid]
+  reactivate_with_calibrated_bid: [adjust_budget, adjust_bid]

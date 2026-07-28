@@ -1,6 +1,7 @@
 # Ontology 第一期 — 结构化落地说明
 
-> 本目录为 Ontology 结构化文件，**不修改**现有 SOP Markdown 知识库，**不接入** Agent 运行时代码（Phase 2 再实施代码注入）。
+> 本目录为 Ontology 结构化文件。`runtime_contract.yaml` 已接入广告 Agent
+> Campaign 调整运行时；早期 Phase 1 YAML 仍作为来源资料，尚未全部转换为通用规则解释器。
 >
 > **权威部署说明**见 [部署方案.md](./部署方案.md)。
 
@@ -27,6 +28,7 @@
 | [evidence.yaml](./evidence.yaml) | 报表/信号可证明内容与可触发动作、动作→证据索引 |
 | [validation_rules.yaml](./validation_rules.yaml) | ONT-001 ~ ONT-010；GROUP-001 ~ GROUP-007（预算） |
 | [budget_groups.yaml](./budget_groups.yaml) | **Phase 1b** 四类组合、归类优先级、回算公式、输出契约 |
+| [runtime_contract.yaml](./runtime_contract.yaml) | 当前广告闭环实际加载的最小运行契约 |
 | [部署方案.md](./部署方案.md) | 分阶段路线图、Prompt 注入模板、验收清单 |
 
 ## 3. 来源映射
@@ -60,14 +62,22 @@
 - 四类组合类型与归类优先级
 - GROUP-BUDGET-001 ~ 005 与 GROUP-001 ~ 007 校验
 - `portfolio_budget_summary` / `budget_groups[]` 输出契约
-- 比例分配与 60/20/20 加权分配公式
-- 推广组保护（GROUP-BUDGET-004）按实际花费分档
+- 请求比例分配与按经营目标、真实消耗动态分配
+- 精准主力组保护（GROUP-BUDGET-004）按实际花费分档
+
+### 已接入运行时
+
+- `runtime_contract.yaml` 启动时强校验加载
+- 精准/广泛知识切片追加最小 Ontology Card
+- BROAD / PHRASE / AUTO 广告位调整在动作层和 ERP 映射层双重阻断
+- 四组合、三日精准主力验证、多关键词路由与 ActionBundle 使用统一领域枚举
 
 ### 未做（后续阶段）
 
 - Neo4j / 企业级数据血缘
-- JSON Schema 自动校验器
-- `kb_loader.py` / `reasoner.py` 注入与 GROUP 输出校验（Phase 2）
+- 覆盖全部旧 Phase 1 YAML 的通用规则解释器
+- ERP异步执行结果契约与动作级最终状态回写
+- 后台ST相关性护栏的数据接口接入
 - Memory / 因果图谱
 - OWL / RDF 标准本体
 - ERP 表结构扩展（组合级字段落库，属 WHP/DBA）
@@ -102,16 +112,21 @@
 7. 每个 Campaign 有明确 `group_type`（AC-07 / GROUP-001）
 8. Campaign 预算变更后含 `portfolio_budget_summary` 且回算组合（AC-08 / GROUP-002）
 9. 回算父 ASIN 总预算（AC-09 / GROUP-003）
-10. 淘汰组 $1 预算、$0.20 Bid，不参与增预算（AC-10 / GROUP-004）
-11. 推广组有稳定花费时不被挤断供（AC-11 / GROUP-005）
+10. 低价捡漏组 $1 预算、$0.20 Bid，不参与增预算（AC-10 / GROUP-004）
+11. 精准主力组有稳定花费时不被挤断供（AC-11 / GROUP-005）
 12. 不允许净增时已压缩正向增量（AC-12 / GROUP-006）
 13. 输出含 `budget_groups[]` 明细（AC-13）
 
 详见 [validation_rules.yaml](./validation_rules.yaml) 末尾 `acceptance_checklist`。
 
-## 7. 使用方式（本期）
+## 7. 使用方式
 
-### 人工 / Prompt 注入
+### 运行时注入
+
+`kb_loader.KnowledgeBase.build_campaign_adjustment()` 会按精准/广泛流追加
+`runtime_contract.yaml` 的最小规则卡，不整包注入全部 ontology。
+
+### 人工 / Prompt 注入（历史和调试）
 
 按任务检索相关片段，组装 **Ontology Card**（勿整包注入）。
 
@@ -130,9 +145,9 @@ allowed_actions: [bid_down_for_acos, add_negative_search_term, ...]
 ```text
 【Budget Ontology Card】
 hierarchy: ParentASIN → AdBudgetGroup → Campaign
-group_types: [promotion_group, testing_group, auto_broad_group, elimination_group]
-classification_priority: elimination > auto_broad > promotion > testing
-principles: [GROUP-BUDGET-001..005]
+group_types: [exact_core_group, exact_testing_group, auto_broad_group, low_bid_retention_group]
+classification_priority: mixed_match_block > exact_lowbid > broad_auto > exact_main > exact_testing
+principles: [dynamic_mode_allocation, group_overallocation_lte_2x, exact_only_low_bid]
 output_required: portfolio_budget_summary, budget_groups[]
 ontology_rule_refs: [GROUP-002, GROUP-003]
 ```
@@ -142,7 +157,7 @@ ontology_rule_refs: [GROUP-002, GROUP-003]
 - 输入含 `SearchTerm` → `entities.yaml` + ONT-001
 - 输入含 `campaign_type=broad_keyword` → `campaign_types.yaml` + ONT-002
 - 父 ASIN 多活动预算调整 → `budget_groups.yaml` + GROUP-002/003
-- 拟输出淘汰 → `budget_groups.yaml` elimination_group + GROUP-004/004A
+- 拟输出淘汰 → `budget_groups.yaml` low_bid_retention_group + GROUP-004/004A
 
 ### 案例
 
@@ -155,11 +170,13 @@ ontology_rule_refs: [GROUP-002, GROUP-003]
 | --- | --- | --- |
 | Phase 1 | 5 YAML + ONT-001~010 | 否 |
 | Phase 1b | budget_groups.yaml + GROUP-* + 本文档 | 否 |
-| Phase 2 | kb_loader ontology preset；输出校验 ONT+GROUP | 是 |
+| Phase 2 | runtime_contract最小卡 + 确定性硬规则 | 已部分完成 |
 | Phase 3 | 规则版本、预算回算回归用例 | 是 |
 | Phase 4 | Neo4j / GraphRAG（可选） | 是 |
 
 ## 9. 版本
 
-- Phase 1: `version: phase_1`，对齐知识库 `v3.1.0`（`kb_loader.KnowledgeBase.VERSION`）
+- 当前运行契约：`runtime_contract.yaml` → `version: amazon_ads_closure_v1`
+- 当前知识库：`v3.3.0`（`kb_loader.KnowledgeBase.VERSION`）
+- Phase 1历史来源：`validation_rules.yaml` → `version: phase_1`
 - Phase 1b: `budget_groups.yaml` → `version: phase_1b`

@@ -191,6 +191,7 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
         product_level=long_term.get("product_level", "常规产品 (P2)"),
         product_stage=long_term.get("product_stage", "推进期"),
         season_stage=long_term.get("season_stage", "淡季"),
+        operating_mode=long_term.get("operating_mode"),
     ) if strategy_saved else None
 
     layer_config = settings.layer_options_config or {}
@@ -371,6 +372,7 @@ async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7
         product_level=long_term.get("product_level", ""),
         product_stage=long_term.get("product_stage", ""),
         season_stage=long_term.get("season_stage", ""),
+        operating_mode=long_term.get("operating_mode"),
     ) if strategy_saved else None
 
     wf = ctx.state.get_workflow_state(asin)

@@ -59,7 +59,9 @@ async def run_get_strategy_options(ctx: WorkflowContext, asin: str, days: int = 
     strategy_cfg = layer_config.get("strategy", {})
 
     dimensions = []
-    for dim_key in ("product_level", "product_stage", "season_stage"):
+    # 前端战略层以经营模式替代产品阶段；产品阶段保留为历史兼容字段，
+    # 不在此处编辑或覆盖。
+    for dim_key in ("product_level", "operating_mode", "season_stage"):
         dim_cfg = strategy_cfg.get(dim_key, {})
         options = dim_cfg.get("options", [])
         dimensions.append(StrategyDimension(
@@ -77,7 +79,7 @@ async def run_get_strategy_options(ctx: WorkflowContext, asin: str, days: int = 
         dimensions=dimensions,
         current_selection={
             "product_level": current.get("product_level"),
-            "product_stage": current.get("product_stage"),
+            "operating_mode": current.get("operating_mode"),
             "season_stage": current.get("season_stage"),
         } if current else None,
         data_ok=True,
@@ -125,9 +127,14 @@ async def run_confirm_strategy(ctx: WorkflowContext, req: StrategyConfirmRequest
         "shop_id": req.shop_id,
         "parent_seller_sku": req.parent_seller_sku,
         "product_level": req.product_level,
-        "product_stage": req.product_stage,
         "season_stage": req.season_stage,
     }
+    if req.operating_mode is not None:
+        config["operating_mode"] = req.operating_mode.value
+    # 前端不再编辑产品阶段时，不传该键以保留 MySQL 中已有的历史阶段；
+    # 仅兼容旧客户端显式提交的阶段值。
+    if req.product_stage is not None:
+        config["product_stage"] = req.product_stage
     ctx.state.set_long_term_config(req.asin, config)
     ctx.state.advance_layer(
         req.asin,

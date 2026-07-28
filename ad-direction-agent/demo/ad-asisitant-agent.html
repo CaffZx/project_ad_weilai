@@ -991,7 +991,6 @@ const _erpParams = (() => {
     shopAccount: p.get('shopAccount') || '',
     parentSellerSku: p.get('parentSellerSku') || '',
     productPosition: p.get('productPosition') || '',
-    productStage: p.get('productStage') || '',
     seasonType: p.get('seasonType') || '',
     siteCode: p.get('siteCode') || '',
     userId: p.get('userId') || '',
@@ -1200,11 +1199,11 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
 
   setHTML('strategyContent',
     _snapshotRow('产品定位', _badgeHtml(s.product_level)) +
-    _snapshotRow('产品阶段', _badgeHtml(s.product_stage)) +
+    _snapshotRow('经营模式', _badgeHtml(s.operating_mode)) +
     _snapshotRow('季节阶段', _badgeHtml(s.season_stage)) +
     '<div style="font-size:11px;color:var(--muted-fg);margin-top:8px">读取自所选历史批次，当前为只读快照。</div>'
   );
-  setHTML('strategyContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
+  setHTML('strategyContext', [s.product_level, s.operating_mode, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
   show('strategyContext');
 
   setHTML('tacticsContent',
@@ -1281,7 +1280,7 @@ function renderReadonlyPreset(data, { switchDefault = true } = {}) {
 
   setHTML('diagMetrics', '<div style="padding:24px;text-align:center;color:var(--muted-fg);font-size:12px">历史批次快照不重新拉取实时数据监控</div>');
   setHTML('alertSignals', '');
-  setHTML('diagContext', [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
+  setHTML('diagContext', [s.product_level, s.operating_mode, s.season_stage].filter(Boolean).map(v => _badgeHtml(v)).join(''));
   clearTrendChart();
 
   setTabEnabled('tab1', true);
@@ -2191,22 +2190,16 @@ const _ERP_POSITION_ZH = {
   P2_PRODUCT: '常规产品 (P2)', P3_PRODUCT: '长尾产品 (P3)',
   TOP: '战略级产品 (P0)', WAIST: '常规产品 (P2)', LONG_TAIL: '长尾产品 (P3)',
 };
-const _ERP_STAGE_ZH = {
-  TESTING: '测试期', PROMOTING: '推进期', PUSHING: '推进期',
-  HARVEST_PROFIT: '收割利润期', HARVESTING: '收割利润期',
-  MAINTAINING: '维持期', LIQUIDATING: '清货期',
-};
 const _ERP_SEASON_ZH = {
   OFF_SEASON: '淡季', PEAK_SEASON_PREPARE: '旺季准备',
   BIG_PEAK_SEASON: '大旺季', LATE_PEAK_SEASON: '旺季末期',
 };
 
-// 首访时，用 ERP URL 传入的 productPosition/productStage/seasonType 预选战略层下拉。
+// 首访时，用 ERP URL 传入的 productPosition/seasonType 预选战略层下拉。
 // 仅当该维度尚未选中、且库里存在对应选项时才填；标签对不上则静默跳过(防呆)。
 function _applyUrlStrategyPrefill() {
   const want = {
     product_level: _ERP_POSITION_ZH[_erpParams.productPosition],
-    product_stage: _ERP_STAGE_ZH[_erpParams.productStage],
     season_stage: _ERP_SEASON_ZH[_erpParams.seasonType],
   };
   Object.entries(want).forEach(([dim, label]) => {
@@ -2340,12 +2333,12 @@ async function confirmStrategy() {
     const txt = qs(`.dd-btn[data-dim="${dim}"] .dd-text`);
     return txt && txt.textContent !== '请选择' ? txt.textContent : null;
   };
-  const p = g('product_level'), ps = g('product_stage'), ss = g('season_stage');
-  if (!p || !ps || !ss) { err('errSec1', '请完整选择三个维度'); return; }
+  const p = g('product_level'), om = g('operating_mode'), ss = g('season_stage');
+  if (!p || !om || !ss) { err('errSec1', '请完整选择产品定位、经营模式和季节阶段'); return; }
   hide('errSec1');
   btn.disabled = true; btn.textContent = '⏳ 保存中...';
   try {
-    const res = await callAPI('/strategy/confirm', { asin, product_level:p, product_stage:ps, season_stage:ss });
+    const res = await callAPI('/strategy/confirm', { asin, product_level:p, operating_mode:om, season_stage:ss });
     if (!res.accepted) {
       const msg = res.reject_reason === 'asin_not_found'
         ? 'ASIN 不存在于数据源，请检查后重试'
@@ -2358,8 +2351,10 @@ async function confirmStrategy() {
       btn.disabled = false; btn.textContent = '保存';
       return;
     }
+    const persisted = await callAPI(`/long-term-config/${encodeURIComponent(asin)}`, null, API_TIMEOUT.default, 'GET');
+    applyPersistedStrategySelection(persisted);
     show('sec1Done'); sec1Confirmed = true;
-    refreshStrategyContext();
+    refreshStrategyContext(persisted);
     const tact = await loadTactics();
     if (!tact.ok) {
       btn.disabled = false;
@@ -2382,8 +2377,20 @@ async function confirmStrategy() {
 }
 
 
-function refreshStrategyContext() {
-  const labels = ['product_level','product_stage','season_stage'].map(dim => {
+function applyPersistedStrategySelection(config) {
+  ['product_level','operating_mode','season_stage'].forEach(dim => {
+    const value = config && config[dim];
+    if (!value) return;
+    const option = Array.from(qsa(`.dd-option[data-dim="${dim}"]`)).find(el =>
+      el.dataset.value === value || el.querySelector('.dd-opt-label')?.textContent === value
+    );
+    if (option) selectDropdown(option);
+  });
+}
+
+function refreshStrategyContext(config = null) {
+  const labels = ['product_level','operating_mode','season_stage'].map(dim => {
+    if (config && config[dim]) return config[dim];
     const btn = qs(`.dd-btn[data-dim="${dim}"]`);
     const txt = btn?.querySelector('.dd-text');
     return txt && txt.textContent !== '请选择' ? txt.textContent : null;
@@ -2429,7 +2436,7 @@ async function loadTactics() {
   // 回填 strategy_context
   if (data.strategy_context) {
     const s = data.strategy_context;
-    setHTML('strategyContext', ['product_level','product_stage','season_stage'].map(k => s[k] ? `<span class="badge badge-gray">${s[k]}</span>` : '').join(''));
+    setHTML('strategyContext', ['product_level','operating_mode','season_stage'].map(k => s[k] ? `<span class="badge badge-gray">${s[k]}</span>` : '').join(''));
     show('strategyContext');
   }
 
@@ -2686,7 +2693,7 @@ function renderDiagnosis(data) {
   if (data.strategy_context) {
     const s = data.strategy_context;
     const acts = data.tactics_context || {};
-    let ctx = [s.product_level, s.product_stage, s.season_stage].filter(Boolean).map(v => `<span class="badge badge-gray">${v}</span>`).join('');
+    let ctx = [s.product_level, s.operating_mode, s.season_stage].filter(Boolean).map(v => `<span class="badge badge-gray">${v}</span>`).join('');
     if (acts.ad_purposes) {
       const ap = Array.isArray(acts.ad_purposes) ? acts.ad_purposes.join(', ') : acts.ad_purposes;
       ctx += `<span class="badge badge-blue">${ap}</span>`;
