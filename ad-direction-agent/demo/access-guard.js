@@ -16,7 +16,7 @@
     + '<div style="'
     + 'background:#fff;border-radius:12px;padding:40px 48px;'
     + 'max-width:420px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3);">'
-    + '<div style="font-size:48px;margin-bottom:16px;">&#x1F6AB;</div>'
+    + ''
     + '<h2 style="margin:0 0 12px;font-size:20px;color:#1F2937;">v2.1 测试环境专用</h2>'
     + '<p style="margin:0;font-size:14px;color:#6B7280;line-height:1.6;">'
     + '请到 <strong>v2</strong> 调整广告</p>'
