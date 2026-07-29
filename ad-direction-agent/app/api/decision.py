@@ -11,12 +11,36 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.api.product_identity import require_product_identity_dict
 from app.config.settings import settings
+from app.data.advert_mcp_client import AdvertMcpClient
+from app.data.campaign_fetcher import CampaignFetcher
+from app.models.layers import (
+    AdPermission,
+    OperatingMode,
+    operating_mode_to_permission,
+)
+from app.persistence.erp_writer.mappers import _batch_no
+from app.persistence.erp_writer.models import (
+    CampaignPendingCanonical,
+    CanonicalRun,
+    KeywordPendingCanonical,
+    SuggestCardCanonical,
+    stable_id,
+)
 from app.persistence.state_factory import get_state_manager
+from app.workflow.steps.advert_execution import (
+    poll_execution_result,
+    submit_execution,
+)
+from app.workflow.steps.portfolio_execution import (
+    _normalize_portfolio_list,
+    _pf_field,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -26,6 +50,909 @@ def _repo():
     """延迟导入，避免启动时 ERP 不通炸模块加载。"""
     from app.persistence.erp_writer.repository import _get_repository
     return _get_repository()
+
+
+def _validate_immediate_exit_request(
+    req: dict,
+    *,
+    state,
+) -> tuple[str, dict, dict]:
+    """校验立即退出所需 URL 上下文及已保存经营模式，不触发任何下游调用。"""
+    asin = str(req.get("asin") or "").strip()
+    require_product_identity_dict(req, asin=asin)
+
+    identity = {
+        "shop_id": int(req.get("_shopId") or req.get("shopId") or 0),
+        "parent_seller_sku": str(
+            req.get("_parentSellerSku")
+            or req.get("parent_seller_sku")
+            or ""
+        ).strip(),
+        "shop_account": str(
+            req.get("_shopAccount") or req.get("shopAccount") or ""
+        ).strip(),
+        "site_code": str(
+            req.get("_siteCode") or req.get("siteCode") or ""
+        ).strip(),
+        "operator": str(
+            req.get("_userId") or req.get("userId") or ""
+        ).strip(),
+        "run_id": str(req.get("run_id") or "").strip(),
+    }
+    missing = [key for key, value in identity.items() if not value]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"立即退出缺少必要上下文: {','.join(missing)}",
+        )
+
+    long_term = state.get_long_term_config(asin) or {}
+    try:
+        mode = OperatingMode(str(long_term.get("operating_mode") or "").strip())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="已保存经营模式无效，拒绝执行立即退出",
+        ) from exc
+    if mode is not OperatingMode.IMMEDIATE_EXIT:
+        raise HTTPException(
+            status_code=409,
+            detail="已保存经营模式不是“立即退出”，拒绝执行",
+        )
+    if operating_mode_to_permission(mode) is not AdPermission.STOP:
+        raise HTTPException(
+            status_code=409,
+            detail="经营模式未映射到停止权限，拒绝执行",
+        )
+    return asin, identity, long_term
+
+
+def _immediate_exit_decision_id(asin: str, run_id: str) -> str:
+    """同一分析事件稳定生成同一立即退出 decision_id。"""
+    return stable_id("dec", asin, run_id, 1)
+
+
+def _validate_existing_immediate_exit_decision(
+    existing: dict,
+    *,
+    asin: str,
+    identity: dict,
+) -> None:
+    """同 decision_id 只允许恢复同一产品身份，防止跨商品串批次。"""
+    expected = {
+        "parent_asin": asin,
+        "shop_id": int(identity["shop_id"]),
+        "parent_seller_sku": str(identity["parent_seller_sku"]),
+    }
+    actual = {
+        "parent_asin": str(existing.get("parent_asin") or ""),
+        "shop_id": int(existing.get("shop_id") or 0),
+        "parent_seller_sku": str(existing.get("parent_seller_sku") or ""),
+    }
+    mismatched = [
+        key for key, value in expected.items()
+        if actual[key] != value
+    ]
+    if mismatched:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "立即退出 decision_id 已属于其他产品身份: "
+                + ",".join(mismatched)
+            ),
+        )
+    existing_mode = str(existing.get("operating_mode") or "").strip()
+    if existing_mode not in {
+        OperatingMode.IMMEDIATE_EXIT.value,
+        "IMMEDIATE_EXIT",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="同 run_id 已存在非立即退出批次，拒绝恢复或自动确认",
+        )
+
+
+async def _fetch_immediate_exit_inputs(
+    *,
+    asin: str,
+    identity: dict,
+) -> dict:
+    """只拉立即退出构造动作所需的三组广告数据。"""
+    fetcher = CampaignFetcher()
+    campaign_task = asyncio.create_task(
+        fetcher._fetch_campaign_list(
+            asin,
+            identity["parent_seller_sku"],
+            identity["shop_account"],
+            strict=True,
+        )
+    )
+    keyword_task = asyncio.create_task(
+        fetcher._discover_context_from_mcp(
+            asin,
+            identity["shop_account"],
+            identity["parent_seller_sku"],
+            strict=True,
+        )
+    )
+    campaign_name_to_id, keyword_rows = await asyncio.gather(
+        campaign_task,
+        keyword_task,
+    )
+    if not campaign_name_to_id:
+        raise RuntimeError("ad_campaign_list 未返回任何活动")
+
+    id_list = sorted(campaign_name_to_id.items())
+    basic_by_name = await fetcher._fetch_basic_batch_v2(
+        id_list,
+        identity["shop_account"],
+    )
+    missing = [
+        f"{name}({campaign_id})"
+        for name, campaign_id in id_list
+        if name not in basic_by_name
+    ]
+    if missing:
+        raise RuntimeError(
+            "ad_campaign_basic_info_v2 缺少活动: " + ",".join(missing)
+        )
+    return {
+        "campaign_name_to_id": campaign_name_to_id,
+        "keyword_rows": keyword_rows,
+        "basic_by_name": basic_by_name,
+    }
+
+
+def _classify_immediate_exit_actions(inputs: dict) -> list[dict]:
+    """把全部活动确定性归类为暂停或低价处理，不调用 LLM。"""
+
+    def _decimal(value) -> Decimal:
+        try:
+            return Decimal(str(value or 0))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal("0")
+
+    campaign_name_to_id = inputs["campaign_name_to_id"]
+    campaign_id_to_name = {
+        campaign_id: campaign_name
+        for campaign_name, campaign_id in campaign_name_to_id.items()
+    }
+    positive_by_campaign: dict[str, list[dict]] = {
+        campaign_id: [] for campaign_id in campaign_id_to_name
+    }
+    seen_by_campaign: dict[str, set[tuple[str, ...]]] = {
+        campaign_id: set() for campaign_id in campaign_id_to_name
+    }
+
+    for row in inputs.get("keyword_rows") or []:
+        match_type = str(row.get("match_type") or "").strip().upper()
+        if "NEGATIVE" in match_type:
+            continue
+        campaign_id = str(row.get("campaign_id") or "").strip()
+        if not campaign_id:
+            campaign_id = str(
+                campaign_name_to_id.get(
+                    str(row.get("campaign_name") or "").strip(),
+                    "",
+                )
+            )
+        if campaign_id not in positive_by_campaign:
+            continue
+        keyword_id = str(row.get("keyword_id") or "").strip()
+        if keyword_id:
+            dedupe_key = ("id", keyword_id)
+        else:
+            dedupe_key = (
+                "text",
+                str(row.get("keyword_text") or "").strip().casefold(),
+                match_type,
+            )
+        if dedupe_key in seen_by_campaign[campaign_id]:
+            continue
+        seen_by_campaign[campaign_id].add(dedupe_key)
+        normalized = dict(row)
+        normalized["campaign_id"] = campaign_id
+        normalized["campaign_name"] = campaign_id_to_name[campaign_id]
+        normalized["match_type"] = match_type
+        positive_by_campaign[campaign_id].append(normalized)
+
+    actions: list[dict] = []
+    for campaign_name, campaign_id in campaign_name_to_id.items():
+        basic = inputs["basic_by_name"][campaign_name]
+        positive_keywords = positive_by_campaign[campaign_id]
+        match_types = {
+            str(row.get("match_type") or "").strip().upper()
+            for row in positive_keywords
+        }
+        current_budget = _decimal(basic.get("campaign_budget"))
+        current_bid = _decimal(basic.get("keyword_bid"))
+        current_state = str(basic.get("campaign_status") or "").strip()
+
+        if not positive_keywords:
+            action_kind = "LOW_BID_PRODUCT_TARGET"
+        elif match_types == {"EXACT"}:
+            action_kind = (
+                "LOW_BID_SINGLE_EXACT"
+                if len(positive_keywords) == 1
+                else "LOW_BID_MULTI_EXACT"
+            )
+        else:
+            action_kind = "PAUSE"
+
+        is_pause = action_kind == "PAUSE"
+        new_bid = None
+        if action_kind == "LOW_BID_SINGLE_EXACT":
+            if not str(positive_keywords[0].get("keyword_id") or "").strip():
+                raise RuntimeError(
+                    f"单词精准活动缺少 keywordId: {campaign_name}({campaign_id})"
+                )
+            if current_bid > 0:
+                new_bid = min(current_bid, Decimal("0.20"))
+
+        actions.append({
+            "campaign_id": campaign_id,
+            "campaign_name": campaign_name,
+            "action_kind": action_kind,
+            "current_state": current_state,
+            "new_state": "paused" if is_pause else current_state,
+            "current_budget": current_budget,
+            "new_budget": (
+                None
+                if is_pause
+                else Decimal("1.00")
+            ),
+            "current_bid": current_bid,
+            "new_bid": new_bid,
+            "positive_keywords": positive_keywords,
+        })
+    return actions
+
+
+async def _resolve_immediate_exit_low_bid_portfolio(
+    *,
+    identity: dict,
+    asin: str,
+    required: bool,
+) -> dict:
+    """按立即退出特例查询低价捡漏组；多命中取 MCP 原始顺序第一条。"""
+    if not required:
+        return {}
+
+    client = AdvertMcpClient()
+    try:
+        try:
+            raw = await client.query_portfolio_list(
+                identity["shop_id"],
+                asin,
+                identity["parent_seller_sku"],
+                portfolio_name_like="低价捡漏组",
+                current_user_id=identity["operator"],
+            )
+            portfolios = _normalize_portfolio_list(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "立即退出低价捡漏组查询失败 [%s]: %s", asin, exc,
+            )
+            return {
+                "match_count": 0,
+                "query_error": f"{type(exc).__name__}: {exc}",
+            }
+
+        matches: list[dict] = []
+        for portfolio in portfolios:
+            name = str(
+                _pf_field(
+                    portfolio,
+                    "portfolioName",
+                    "name",
+                    "portfolio_name",
+                )
+                or ""
+            ).strip()
+            if "低价捡漏组" in name:
+                matches.append(portfolio)
+        if not matches:
+            return {"match_count": 0}
+
+        selected = matches[0]
+        portfolio_id = _pf_field(selected, "portfolioId", "portfolio_id", "id")
+        result = {
+            "match_count": len(matches),
+            "portfolio_name": str(
+                _pf_field(
+                    selected,
+                    "portfolioName",
+                    "name",
+                    "portfolio_name",
+                )
+                or ""
+            ),
+        }
+        if portfolio_id not in (None, ""):
+            result["portfolio_id"] = str(portfolio_id)
+        return result
+    finally:
+        await client.aclose()
+
+
+def _build_immediate_exit_run(
+    *,
+    asin: str,
+    identity: dict,
+    long_term: dict,
+    actions: list[dict],
+    low_bid_portfolio: dict,
+) -> CanonicalRun:
+    """用既有 CanonicalRun/card/pending 模型构造立即退出确定性批次。"""
+    run_number = 1
+    run_id = identity["run_id"]
+    decision_id = _immediate_exit_decision_id(asin, run_id)
+    has_low_bid_portfolio = bool(low_bid_portfolio.get("portfolio_id"))
+    cards: list[SuggestCardCanonical] = []
+
+    for sort_order, action in enumerate(actions, start=1):
+        kind = action["action_kind"]
+        is_pause = kind == "PAUSE"
+        is_low_bid = kind.startswith("LOW_BID_")
+        positive_keywords = action.get("positive_keywords") or []
+        campaign_pending = CampaignPendingCanonical(
+            old_state=action.get("current_state"),
+            new_state=action.get("new_state") if is_pause else None,
+            old_budget=action.get("current_budget"),
+            new_budget=None if is_pause else action.get("new_budget"),
+        )
+        keyword_pending: list[KeywordPendingCanonical] = []
+        keyword = None
+        keyword_match_type = None
+        if kind == "LOW_BID_SINGLE_EXACT":
+            source_keyword = positive_keywords[0]
+            keyword_id = str(source_keyword.get("keyword_id") or "").strip()
+            if not keyword_id:
+                raise RuntimeError(
+                    "单词精准活动缺少 keywordId: "
+                    f"{action['campaign_name']}({action['campaign_id']})"
+                )
+            keyword = source_keyword.get("keyword_text")
+            keyword_match_type = "EXACT"
+            if action.get("new_bid") is not None:
+                keyword_pending.append(KeywordPendingCanonical(
+                    keyword_id=keyword_id,
+                    keyword_text=keyword,
+                    match_type="EXACT",
+                    old_state=None,
+                    new_state=None,
+                    old_bid=action.get("current_bid"),
+                    new_bid=action.get("new_bid"),
+                ))
+            description = (
+                "立即退出：单词精准活动预算调整为 $1，"
+                "有效 Bid 降至不高于 $0.20，并迁入低价捡漏组"
+            )
+        elif kind == "LOW_BID_MULTI_EXACT":
+            keyword = f"多关键词活动（{len(positive_keywords)}词）"
+            keyword_match_type = "EXACT"
+            description = (
+                "立即退出：多关键词精准活动预算调整为 $1，"
+                "并迁入低价捡漏组；本期不调整关键词 Bid"
+            )
+        elif kind == "LOW_BID_PRODUCT_TARGET":
+            keyword_match_type = "PRODUCT_TARGETING"
+            description = (
+                "立即退出：商品投放活动预算调整为 $1，"
+                "并迁入低价捡漏组；本期不调整 target Bid"
+            )
+        else:
+            if positive_keywords:
+                keyword = positive_keywords[0].get("keyword_text")
+                keyword_match_type = positive_keywords[0].get("match_type")
+            description = "立即退出：停止投放，活动状态调整为 paused"
+
+        can_mark_eliminate = (
+            kind == "LOW_BID_SINGLE_EXACT"
+            and action.get("new_bid") is not None
+            and has_low_bid_portfolio
+        )
+        if is_low_bid and not has_low_bid_portfolio:
+            description += "；当前未匹配到可用低价捡漏组，挪组暂不成立"
+
+        cards.append(SuggestCardCanonical(
+            card_id=stable_id("car", decision_id, action["campaign_id"]),
+            decision_id=decision_id,
+            campaign_id=action["campaign_id"],
+            campaign_name=action["campaign_name"],
+            asin=None,
+            keyword=keyword,
+            keyword_match_type=keyword_match_type,
+            trigger_rule="OPERATING_MODE_IMMEDIATE_EXIT",
+            suggest_category="ELIMINATE" if can_mark_eliminate else "ADJUST",
+            confidence_level="high",
+            campaign_group_type=(
+                "low_bid_retention_group" if is_low_bid else None
+            ),
+            description=description,
+            evidence="已保存经营模式=立即退出；由确定性规则生成",
+            sort_order=sort_order,
+            current_budget=action.get("current_budget"),
+            proposed_budget=action.get("new_budget"),
+            current_bid=action.get("current_bid"),
+            proposed_bid=action.get("new_bid"),
+            campaign_key=action["campaign_name"],
+            review_level="AUTO_APPROVED",
+            campaign_pending=[campaign_pending],
+            keyword_pending=keyword_pending,
+        ))
+
+    eliminate_count = sum(
+        1 for card in cards if card.suggest_category == "ELIMINATE"
+    )
+    warnings: list[str] = []
+    if any(action["action_kind"].startswith("LOW_BID_") for action in actions):
+        if low_bid_portfolio.get("query_error"):
+            warnings.append(
+                "低价捡漏组查询失败，预算/Bid pending 保留，挪组暂不成立"
+            )
+        elif not has_low_bid_portfolio:
+            warnings.append(
+                "未匹配到可用低价捡漏组，预算/Bid pending 保留，挪组暂不成立"
+            )
+        elif int(low_bid_portfolio.get("match_count") or 0) > 1:
+            warnings.append("低价捡漏组多命中，按 MCP 原始顺序采用第一条")
+
+    decision_meta = {
+        "product_position": long_term.get("product_level"),
+        "product_stage": long_term.get("product_stage"),
+        "season_type": long_term.get("season_stage"),
+        "operating_mode": long_term.get("operating_mode"),
+        "site_code": identity.get("site_code"),
+    }
+    return CanonicalRun(
+        decision_id=decision_id,
+        batch_no=_batch_no(run_id, run_number),
+        parent_asin=asin,
+        experiment_id=run_id,
+        run_number=run_number,
+        timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
+        total_campaigns=len(cards),
+        sanity_check_passed=True,
+        summary={
+            "to_eliminate": eliminate_count,
+            "to_adjust": len(cards) - eliminate_count,
+            "to_keep": 0,
+            "to_reactivate": 0,
+            "confidence_high": len(cards),
+            "confidence_medium": 0,
+            "confidence_low": 0,
+        },
+        cards=cards,
+        legacy_details=[],
+        metrics_rows=[],
+        raw_payload={
+            "warnings": warnings,
+            "immediate_exit": {
+                "low_bid_portfolio": low_bid_portfolio,
+            },
+        },
+        shop_id=identity["shop_id"],
+        parent_seller_sku=identity["parent_seller_sku"],
+        site_code=identity.get("site_code"),
+        decision_meta=decision_meta,
+    )
+
+
+def _precheck_immediate_exit_decision_sync(
+    *,
+    asin: str,
+    identity: dict,
+    repo,
+    state,
+    decision_id: str,
+) -> dict | None:
+    """在已持有 decisionId 互斥锁时，从既有数据库状态恢复。"""
+    existing = repo.get_decision_basic(decision_id)
+    if not isinstance(existing, dict):
+        return None
+
+    _validate_existing_immediate_exit_decision(
+        existing,
+        asin=asin,
+        identity=identity,
+    )
+    snapshot = repo.read_snapshot(decision_id)
+    if not snapshot:
+        raise RuntimeError("立即退出既有 decision 缺少快照，无法安全恢复")
+    if not existing.get("is_latest"):
+        repo.finalize_batch(
+            decision_id,
+            asin,
+            analysis_mode="REALTIME",
+        )
+    cleared = state.clear_analysis_session(asin)
+    if not cleared:
+        raise RuntimeError("立即退出既有批次恢复时分析事件清除失败")
+
+    pending_cards = [
+        str(card.get("id") or "")
+        for card in snapshot.get("cards") or []
+        if card.get("confirm_status") == "PENDING" and card.get("id")
+    ]
+    confirm = None
+    if pending_cards:
+        confirm = repo.confirm_decisions(
+            decision_id,
+            [
+                {"campaign_key": card_id, "decision": "approve"}
+                for card_id in pending_cards
+            ],
+            operator=identity["operator"],
+            in_progress=False,
+        )
+        if (
+            not confirm.get("ok")
+            or int(confirm.get("applied") or 0) != len(pending_cards)
+        ):
+            raise RuntimeError(f"立即退出既有批次自动确认失败: {confirm}")
+        snapshot = repo.read_snapshot(decision_id)
+        if not snapshot:
+            raise RuntimeError("立即退出既有 decision 确认后快照读取失败")
+
+    pending_rows = [
+        row
+        for key in (
+            "campaign_pending",
+            "keyword_pending",
+            "placement_pending",
+        )
+        for row in (snapshot.get(key) or [])
+        if row.get("confirm_status") == "CONFIRMED"
+    ]
+    execute_statuses = sorted({
+        str(row.get("execute_status") or "PENDING")
+        for row in pending_rows
+    })
+    needs_low_bid_portfolio = any(
+        str(card.get("campaign_group_type") or "")
+        == "low_bid_retention_group"
+        for card in snapshot.get("cards") or []
+    )
+    return {
+        "decision_id": decision_id,
+        "resumed": True,
+        "resume_execution": "PENDING" in execute_statuses,
+        "needs_low_bid_portfolio": needs_low_bid_portfolio,
+        "execute_statuses": execute_statuses,
+        "confirm": confirm,
+    }
+
+
+def _resume_existing_immediate_exit_locked(
+    *,
+    asin: str,
+    identity: dict,
+    repo,
+    state,
+    decision_id: str,
+) -> dict | None:
+    with repo.immediate_exit_lock(decision_id):
+        return _precheck_immediate_exit_decision_sync(
+            asin=asin,
+            identity=identity,
+            repo=repo,
+            state=state,
+            decision_id=decision_id,
+        )
+
+
+async def _precheck_immediate_exit_decision(
+    *,
+    asin: str,
+    identity: dict,
+    repo,
+    state,
+    decision_id: str | None = None,
+) -> dict | None:
+    """拉数前快速查重；命中后在数据库锁内完成恢复。"""
+    decision_id = decision_id or _immediate_exit_decision_id(
+        asin,
+        identity["run_id"],
+    )
+    existing = await asyncio.to_thread(
+        repo.get_decision_basic,
+        decision_id,
+    )
+    if not isinstance(existing, dict):
+        return None
+    return await asyncio.to_thread(
+        _resume_existing_immediate_exit_locked,
+        asin=asin,
+        identity=identity,
+        repo=repo,
+        state=state,
+        decision_id=decision_id,
+    )
+
+
+def _persist_and_confirm_immediate_exit_locked(
+    *,
+    run: CanonicalRun,
+    identity: dict,
+    repo,
+    state,
+) -> dict:
+    """数据库锁内二次查重，并完成首次持久化生命周期。"""
+    with repo.immediate_exit_lock(run.decision_id):
+        existing_result = _precheck_immediate_exit_decision_sync(
+            asin=run.parent_asin,
+            identity=identity,
+            repo=repo,
+            state=state,
+            decision_id=run.decision_id,
+        )
+        if existing_result is not None:
+            return existing_result
+
+        report = repo.write_immediate_exit(
+            run,
+            operator=identity["operator"],
+        )
+        repo.finalize_batch(
+            run.decision_id,
+            run.parent_asin,
+            analysis_mode="REALTIME",
+        )
+        cleared = state.clear_analysis_session(run.parent_asin)
+        if not cleared:
+            raise RuntimeError("立即退出批次已落库，但分析事件清除失败")
+
+        decisions = [
+            {"campaign_key": card.card_id, "decision": "approve"}
+            for card in run.cards
+        ]
+        confirm = repo.confirm_decisions(
+            run.decision_id,
+            decisions,
+            operator=identity["operator"],
+            in_progress=False,
+        )
+        if not confirm.get("ok"):
+            raise RuntimeError(
+                f"立即退出自动确认失败: {confirm.get('error') or 'unknown'}"
+            )
+        if int(confirm.get("applied") or 0) != len(decisions):
+            raise RuntimeError(
+                "立即退出自动确认数量不一致: "
+                f"expected={len(decisions)}, applied={confirm.get('applied') or 0}"
+            )
+        return {
+            "decision_id": run.decision_id,
+            "write_report": report.as_dict(),
+            "confirm": confirm,
+        }
+
+
+async def _persist_and_confirm_immediate_exit(
+    *,
+    run: CanonicalRun,
+    identity: dict,
+    repo,
+    state,
+) -> dict:
+    """先做无锁快速查重，再在数据库锁内二次查重并持久化。"""
+    existing_result = await _precheck_immediate_exit_decision(
+        asin=run.parent_asin,
+        identity=identity,
+        repo=repo,
+        state=state,
+        decision_id=run.decision_id,
+    )
+    if existing_result is not None:
+        return existing_result
+    return await asyncio.to_thread(
+        _persist_and_confirm_immediate_exit_locked,
+        run=run,
+        identity=identity,
+        repo=repo,
+        state=state,
+    )
+
+
+def _immediate_exit_portfolio_ids(low_bid_portfolio: dict) -> dict[str, str]:
+    portfolio_id = str(low_bid_portfolio.get("portfolio_id") or "").strip()
+    if not portfolio_id:
+        return {}
+    return {"low_bid_retention_group": portfolio_id}
+
+
+def _immediate_exit_execution_response(
+    decision_id: str,
+    execution: dict,
+) -> dict:
+    if not execution.get("ok"):
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "task_ids": execution.get("task_ids") or [],
+            "execute_status": execution.get("execute_status") or "FAIL",
+            "error": execution.get("error") or "广告执行提交失败",
+            "move_errors": execution.get("move_errors") or [],
+        }
+    if execution.get("dry_run"):
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "task_ids": [],
+            "execute_status": "DRY_RUN",
+            "error": "立即退出当前仅完成 dry-run，未真实提交广告执行",
+            "move_errors": execution.get("move_errors") or [],
+        }
+    if execution.get("already_claimed"):
+        return {
+            "ok": True,
+            "decision_id": decision_id,
+            "resumed": True,
+            "task_ids": [],
+            "execute_status": "IN_PROGRESS",
+            "move_errors": execution.get("move_errors") or [],
+        }
+    task_ids = execution.get("task_ids") or []
+    execute_status = execution.get("execute_status")
+    if not task_ids or execute_status != "IN_PROGRESS":
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "task_ids": task_ids,
+            "execute_status": execute_status or "FAIL",
+            "error": execution.get("error") or "广告执行未返回 taskId",
+            "move_errors": execution.get("move_errors") or [],
+        }
+    return {
+        "ok": True,
+        "decision_id": decision_id,
+        "task_ids": task_ids,
+        "execute_status": execute_status,
+        "move_errors": execution.get("move_errors") or [],
+    }
+
+
+async def _run_immediate_exit(
+    *,
+    asin: str,
+    identity: dict,
+    long_term: dict,
+    state,
+) -> dict:
+    """按稳定 decisionId 恢复或创建立即退出批次，再从数据库 pending 执行。"""
+    repo = _repo()
+    decision_id = _immediate_exit_decision_id(asin, identity["run_id"])
+    existing = await _precheck_immediate_exit_decision(
+        asin=asin,
+        identity=identity,
+        repo=repo,
+        state=state,
+        decision_id=decision_id,
+    )
+    if existing is not None and not existing.get("resume_execution"):
+        statuses = existing.get("execute_statuses") or []
+        execute_status = (
+            "FAIL"
+            if "FAIL" in statuses
+            else ("IN_PROGRESS" if "IN_PROGRESS" in statuses else (
+                "SUCCESS" if statuses and set(statuses) == {"SUCCESS"}
+                else "PENDING"
+            ))
+        )
+        return {
+            "ok": execute_status != "FAIL",
+            "decision_id": decision_id,
+            "resumed": True,
+            "task_ids": [],
+            "execute_status": execute_status,
+            "execute_statuses": statuses,
+            **(
+                {"error": "立即退出广告执行已失败"}
+                if execute_status == "FAIL"
+                else {}
+            ),
+        }
+
+    if existing is not None:
+        low_bid_portfolio = await _resolve_immediate_exit_low_bid_portfolio(
+            identity=identity,
+            asin=asin,
+            required=bool(existing.get("needs_low_bid_portfolio")),
+        )
+    else:
+        inputs = await _fetch_immediate_exit_inputs(
+            asin=asin,
+            identity=identity,
+        )
+        actions = _classify_immediate_exit_actions(inputs)
+        low_bid_required = any(
+            str(action.get("action_kind") or "").startswith("LOW_BID_")
+            for action in actions
+        )
+        low_bid_portfolio = await _resolve_immediate_exit_low_bid_portfolio(
+            identity=identity,
+            asin=asin,
+            required=low_bid_required,
+        )
+        run = _build_immediate_exit_run(
+            asin=asin,
+            identity=identity,
+            long_term=long_term,
+            actions=actions,
+            low_bid_portfolio=low_bid_portfolio,
+        )
+        persisted = await _persist_and_confirm_immediate_exit(
+            run=run,
+            identity=identity,
+            repo=repo,
+            state=state,
+        )
+        decision_id = run.decision_id
+        if persisted.get("resumed") and not persisted.get("resume_execution"):
+            statuses = persisted.get("execute_statuses") or []
+            return {
+                "ok": "FAIL" not in statuses,
+                "decision_id": decision_id,
+                "resumed": True,
+                "task_ids": [],
+                "execute_status": (
+                    "FAIL"
+                    if "FAIL" in statuses
+                    else (
+                        "IN_PROGRESS"
+                        if "IN_PROGRESS" in statuses
+                        else "SUCCESS"
+                    )
+                ),
+                "execute_statuses": statuses,
+                **(
+                    {"error": "立即退出广告执行已失败"}
+                    if "FAIL" in statuses
+                    else {}
+                ),
+            }
+
+    execution = await submit_execution(
+        decision_id,
+        operator=identity["operator"],
+        resolved_portfolio_ids=_immediate_exit_portfolio_ids(
+            low_bid_portfolio
+        ),
+        wait_for_terminal=True,
+    )
+    return _immediate_exit_execution_response(decision_id, execution)
+
+
+@router.post("/decision/immediate-exit")
+async def immediate_exit(req: dict):
+    """保存后的“立即退出”确定性入口：不调用 LLM，提交后等待终态查询。"""
+    state = get_state_manager()
+    asin, identity, long_term = _validate_immediate_exit_request(
+        req,
+        state=state,
+    )
+    return await _run_immediate_exit(
+        asin=asin,
+        identity=identity,
+        long_term=long_term,
+        state=state,
+    )
+
+
+@router.post("/decision/immediate-exit/status")
+async def immediate_exit_status(req: dict):
+    """查询立即退出广告执行终态，不发起任何分析或新执行。"""
+    decision_id = str(req.get("decision_id") or "").strip()
+    operator = str(
+        req.get("_userId") or req.get("userId") or ""
+    ).strip()
+    if not decision_id:
+        return {"ok": False, "error": "decision_id 必填"}
+    return await poll_execution_result(
+        decision_id,
+        operator=operator or "system",
+    )
 
 
 # ── GET /decision/context ────────────────────────────────────────────────

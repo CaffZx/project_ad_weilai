@@ -98,6 +98,13 @@ def test_clear_analysis_execution_started_reports_failure():
     assert mgr.clear_analysis_execution_started("B0TEST") is False
 
 
+def test_clear_analysis_session_reports_failure():
+    mgr = _manager()
+    mgr._execute = Mock(side_effect=RuntimeError("db down"))
+
+    assert mgr.clear_analysis_session("B0TEST") is False
+
+
 def test_mcp_adapter_carries_context_identity_into_asin_data():
     ctx = McpContext(
         parent_asin="B0TEST",

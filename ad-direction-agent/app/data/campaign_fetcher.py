@@ -270,7 +270,14 @@ class CampaignFetcher:
 
     # ── 内部方法 ──
 
-    async def _discover_context_from_mcp(self, parent_asin: str, shop_account: str, parent_seller_sku: str = "") -> list[dict]:
+    async def _discover_context_from_mcp(
+        self,
+        parent_asin: str,
+        shop_account: str,
+        parent_seller_sku: str = "",
+        *,
+        strict: bool = False,
+    ) -> list[dict]:
         """① MCP 工具 ad_campaign_product_keyword_list → 替代 Doris 两条 SQL
         (_resolve_and_fetch_listing + _fetch_campaign_context)。
         失败/返回空时返 []，调用方走 Doris 回落。
@@ -289,6 +296,10 @@ class CampaignFetcher:
                 logger.warning(
                     "_discover_context_from_mcp [%s] MCP 失败: %s", parent_asin, res.error,
                 )
+                if strict:
+                    raise RuntimeError(
+                        f"ad_campaign_product_keyword_list 调用失败: {res.error}"
+                    )
                 return []
             # MCP 响应可能多包：{content:[{type:"text", text:"{\"success\":true,...}"}]}
             val = res.value
@@ -299,6 +310,12 @@ class CampaignFetcher:
                     if isinstance(txt, str):
                         val = json.loads(txt)
                         break
+            if isinstance(val, dict) and val.get("success") is False:
+                if strict:
+                    raise RuntimeError(
+                        "ad_campaign_product_keyword_list 返回 success=false"
+                    )
+                return []
             if isinstance(val, dict) and "success" in val:
                 val = val.get("rows", [])  # rows 不存在时回退 []（而非 dict），防下游 _as_rows 误判
             raw = _as_rows(val)
@@ -311,13 +328,24 @@ class CampaignFetcher:
             )
             return normalized
         except Exception as e:  # noqa: BLE001
+            if strict:
+                if isinstance(e, RuntimeError):
+                    raise
+                raise RuntimeError(
+                    f"ad_campaign_product_keyword_list 解析失败: {e}"
+                ) from e
             logger.warning(
                 "_discover_context_from_mcp [%s] 异常: %s", parent_asin, e,
             )
             return []
 
     async def _fetch_campaign_list(
-        self, parent_asin: str, parent_seller_sku: str, shop_account: str,
+        self,
+        parent_asin: str,
+        parent_seller_sku: str,
+        shop_account: str,
+        *,
+        strict: bool = False,
     ) -> dict[str, str]:
         """调用 ad_campaign_list → 返回 {campaign_name: campaign_id}。
 
@@ -334,6 +362,8 @@ class CampaignFetcher:
                 logger.warning(
                     "_fetch_campaign_list [%s] MCP 失败: %s", parent_asin, res.error,
                 )
+                if strict:
+                    raise RuntimeError(f"ad_campaign_list 调用失败: {res.error}")
                 return {}
             name_to_id: dict[str, str] = {}
             for row in _as_rows(res.value):
@@ -346,6 +376,10 @@ class CampaignFetcher:
             )
             return name_to_id
         except Exception as e:  # noqa: BLE001
+            if strict:
+                if isinstance(e, RuntimeError):
+                    raise
+                raise RuntimeError(f"ad_campaign_list 解析失败: {e}") from e
             logger.warning("_fetch_campaign_list [%s] 异常: %s", parent_asin, e)
             return {}
 

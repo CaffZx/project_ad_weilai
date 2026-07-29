@@ -19,6 +19,7 @@ from app.core.recommender import TargetAcosRecommender
 from app.data.campaign_fetcher import CampaignFetcher
 from app.llm.reasoner import reasoner
 from app.models.campaign import CampaignAnalysisResult, CampaignConfirmRequest
+from app.models.layers import OperatingMode
 from app.persistence.erp_writer.auto_push import (
     analysis_to_kb_payload,
     push_full_to_erp,
@@ -357,6 +358,26 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                     long_term["daily_budget_override"] = _state_budget_override
                 if _cfg14.get("ad_directions"):
                     ad_directions = _cfg14["ad_directions"]
+
+        if long_term.get("operating_mode") == OperatingMode.IMMEDIATE_EXIT.value:
+            logger.info(
+                "Campaign immediate-exit [%s]: 确定性执行接口未接入，跳过数据拉取与 Campaign LLM "
+                "(analysis_mode=%s, cfg_source=%s)",
+                asin,
+                analysis_mode,
+                str(req.get("cfg_source") or "state").lower(),
+            )
+            return (
+                CampaignAnalysisResult(
+                    parent_asin=asin,
+                    days=days,
+                    run_id=effective_run_id or "",
+                    warnings=["经营模式为“立即退出”，拒绝发起 Campaign 分析"],
+                    sanity_check_passed=False,
+                    llm_rounds_completed=0,
+                ),
+                None,
+            )
 
         aggregator = DataAggregator()
         # META_TREND(product_sales) 用于 avg_daily_sales_30d → 库存天数；META_AD_PRODUCT 为广告指标。

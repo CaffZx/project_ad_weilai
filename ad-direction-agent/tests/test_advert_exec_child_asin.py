@@ -1,14 +1,7 @@
-"""回归：新建活动下发的子 ASIN 应复用库里(card.asin)，不重查数仓。
-
-bug：执行期用 lookup_top_child_attrs 重查数仓拿 child_asin 注入；数仓慢→超时→None
-→ agent_create_portfolio_campaign「子ASIN不能为空」新建全败。
-修复：build_exec_plan 优先用 card.asin；仅卡里没存才由 _fill_create_asin_fallback 兜底查。
-"""
+"""回归：新建活动下发的子 ASIN 只复用库里 card.asin，不在执行期重查数仓。"""
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
-from unittest.mock import patch
 
 from app.persistence.erp_writer.advert_exec_mapper import _num, build_exec_plan
 from app.workflow.steps import advert_execution as AE
@@ -61,23 +54,9 @@ def test_create_no_asin_when_both_empty():
     assert "asin" not in plan.create_calls[0]
 
 
-class _Plan:
-    def __init__(self, calls): self.create_calls = calls
-
-
-def test_fallback_fills_only_missing():
-    plan = _Plan([{"asin": ""}, {"asin": "B0HAS"}])
-    with patch.object(AE, "lookup_top_child_attrs", return_value={"asin": "B0FB"}):
-        asyncio.run(AE._fill_create_asin_fallback(plan, {"decision": {"parent_asin": "B0P"}}))
-    assert plan.create_calls[0]["asin"] == "B0FB"
-    assert plan.create_calls[1]["asin"] == "B0HAS"
-
-
-def test_fallback_skips_query_when_all_present():
-    plan = _Plan([{"asin": "B0HAS1"}, {"asin": "B0HAS2"}])
-    with patch.object(AE, "lookup_top_child_attrs") as m:
-        asyncio.run(AE._fill_create_asin_fallback(plan, {"decision": {"parent_asin": "B0P"}}))
-    m.assert_not_called()
+def test_execution_layer_has_no_child_asin_warehouse_fallback():
+    assert not hasattr(AE, "lookup_top_child_attrs")
+    assert not hasattr(AE, "_fill_create_asin_fallback")
 
 
 # ── bid 精度：DB Decimal → MCP keywordBid ──
@@ -115,3 +94,151 @@ def test_build_exec_plan_bid_3dp_preserved():
     plan = build_exec_plan(_adjust_pending(0.335), operator="op")
     kw_vo = plan.params_vo_list[0]["campaignVoList"][0]["keywordShowVoList"][0]
     assert kw_vo["keywordBid"] == 0.335
+
+
+def test_immediate_exit_maps_loaded_confirmed_pending_shape():
+    """Repository 已过滤后的立即退出 pending 统一复用现有 mapper。"""
+    cards = [
+        {
+            "id": "card-broad",
+            "suggest_category": "ADJUST",
+            "campaign_id": "c-broad",
+            "campaign_group_type": None,
+        },
+        {
+            "id": "card-phrase",
+            "suggest_category": "ADJUST",
+            "campaign_id": "c-phrase",
+            "campaign_group_type": None,
+        },
+        {
+            "id": "card-auto",
+            "suggest_category": "ADJUST",
+            "campaign_id": "c-auto",
+            "campaign_group_type": None,
+        },
+        {
+            "id": "card-exact-single",
+            "suggest_category": "ELIMINATE",
+            "campaign_id": "c-exact-single",
+            "campaign_group_type": "low_bid_retention_group",
+        },
+        {
+            "id": "card-exact-multi",
+            "suggest_category": "ADJUST",
+            "campaign_id": "c-exact-multi",
+            "campaign_group_type": "low_bid_retention_group",
+        },
+        {
+            "id": "card-product",
+            "suggest_category": "ADJUST",
+            "campaign_id": "c-product",
+            "campaign_group_type": "low_bid_retention_group",
+        },
+    ]
+    campaign_pending = [
+        {
+            "id": f"cp-{kind}",
+            "suggest_card_id": f"card-{kind}",
+            "campaign_id": f"c-{kind}",
+            "campaign_name": kind,
+            "new_state": "paused",
+            "new_budget": None,
+            "confirm_status": "CONFIRMED",
+            "execute_status": "PENDING",
+        }
+        for kind in ("broad", "phrase", "auto")
+    ] + [
+        {
+            "id": f"cp-{kind}",
+            "suggest_card_id": f"card-{kind}",
+            "campaign_id": f"c-{kind}",
+            "campaign_name": kind,
+            "new_state": None,
+            "new_budget": Decimal("1.00"),
+            "confirm_status": "CONFIRMED",
+            "execute_status": "PENDING",
+        }
+        for kind in ("exact-single", "exact-multi", "product")
+    ]
+    pending = {
+        "decision": {
+            "id": "dec-immediate",
+            "shop_id": 1622,
+            "parent_asin": "B0PARENT",
+            "parent_seller_sku": "SKU-1",
+        },
+        "cards": cards,
+        "campaign_pending": campaign_pending,
+        "keyword_pending": [{
+            "id": "kp-exact-single",
+            "suggest_card_id": "card-exact-single",
+            "campaign_id": "c-exact-single",
+            "campaign_name": "exact-single",
+            "keyword_id": "kw-1",
+            "keyword_text": "red dress",
+            "match_type": "EXACT",
+            "new_bid": Decimal("0.20"),
+            "confirm_status": "CONFIRMED",
+            "execute_status": "PENDING",
+        }],
+        "placement_pending": [],
+    }
+
+    plan = build_exec_plan(pending, operator="operator-1")
+
+    assert len(plan.params_vo_list) == 1
+    params_vo = plan.params_vo_list[0]
+    assert params_vo["shopId"] == 1622
+    assert params_vo["parentAsin"] == "B0PARENT"
+    assert params_vo["parentSellerSku"] == "SKU-1"
+    assert params_vo["currentUserId"] == "operator-1"
+    assert params_vo["decisionId"] == "dec-immediate"
+    assert params_vo["agentVersion"] == "V2"
+
+    campaign_vos = params_vo["campaignVoList"]
+    assert len(campaign_vos) == 6
+    assert len({row["campaignId"] for row in campaign_vos}) == 6
+    by_campaign = {row["campaignId"]: row for row in campaign_vos}
+    assert len(by_campaign) == 6
+    for campaign_id in ("c-broad", "c-phrase", "c-auto"):
+        assert by_campaign[campaign_id]["campaignState"] == "paused"
+        assert set(by_campaign[campaign_id]) == {
+            "campaignId", "campaignState",
+        }
+    for campaign_id in ("c-exact-single", "c-exact-multi", "c-product"):
+        assert by_campaign[campaign_id]["campaignBudget"] == 1.0
+        assert by_campaign[campaign_id]["campaignGroupType"] == (
+            "low_bid_retention_group"
+        )
+
+    single = by_campaign["c-exact-single"]
+    assert set(single) == {
+        "campaignId",
+        "campaignBudget",
+        "campaignGroupType",
+        "keywordShowVoList",
+    }
+    assert single["keywordShowVoList"] == [{
+        "keyword": "red dress",
+        "keywordId": "kw-1",
+        "keywordBid": 0.2,
+    }]
+    assert set(by_campaign["c-exact-multi"]) == {
+        "campaignId", "campaignBudget", "campaignGroupType",
+    }
+    assert set(by_campaign["c-product"]) == {
+        "campaignId", "campaignBudget", "campaignGroupType",
+    }
+    assert all("targetShowVoList" not in row for row in by_campaign.values())
+    assert plan.create_calls == []
+    assert plan.negative_calls == []
+    assert plan.warnings == []
+    assert len(plan.ops) == 7
+    assert {op["pending_id"] for op in plan.ops} == {
+        *(f"cp-{kind}" for kind in (
+            "broad", "phrase", "auto",
+            "exact-single", "exact-multi", "product",
+        )),
+        "kp-exact-single",
+    }

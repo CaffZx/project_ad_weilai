@@ -409,8 +409,9 @@ class StateManager:
             if fp.exists():
                 try:
                     fp.unlink()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.warning("清除分析事件失败 [%s]: %s", asin, exc)
+                    return False
         return True
 
     # ── 反馈日志 ─────────────────────────────────────────

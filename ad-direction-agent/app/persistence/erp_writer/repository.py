@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -124,6 +125,47 @@ class ErpDualWriterRepository:
 
     def _connect(self):
         return pymysql.connect(**self._conn_kwargs)
+
+    @contextmanager
+    def immediate_exit_lock(
+        self,
+        decision_id: str,
+        *,
+        timeout_seconds: int = 30,
+    ):
+        """同 decisionId 的立即退出持久化互斥；锁仅覆盖短时数据库生命周期。"""
+        lock_name = f"ad-agent:immediate-exit:{decision_id}"
+        conn = self._connect()
+        acquired = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT GET_LOCK(%s, %s) AS acquired",
+                    (lock_name, timeout_seconds),
+                )
+                row = cur.fetchone() or {}
+                acquired = int(row.get("acquired") or 0) == 1
+            if not acquired:
+                raise TimeoutError(
+                    f"获取立即退出并发锁超时: {decision_id}"
+                )
+            yield
+        finally:
+            if acquired:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT RELEASE_LOCK(%s) AS released",
+                            (lock_name,),
+                        )
+                        cur.fetchone()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "释放立即退出并发锁失败 [%s]: %s",
+                        decision_id,
+                        exc,
+                    )
+            conn.close()
 
     # ── 批次生命周期（决策批次改造方案 §一） ──────────────────────────────
 
@@ -401,7 +443,8 @@ class ErpDualWriterRepository:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no "
+                    "SELECT id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no, "
+                    "analysis_mode, is_latest, operating_mode "
                     "FROM t_advert_agent_decision WHERE id=%s",
                     (decision_id,),
                 )
@@ -428,6 +471,31 @@ class ErpDualWriterRepository:
     def insert_exec_sub_records(self, record_id: str, ops: list[dict], operator: str) -> int:
         # 不写 t_advert_agent_modify_{campaign,keyword,placement}_record（操作记录由 ERP 系统自身维护）
         return 0
+
+
+    def list_execution_task_ids(self, decision_id: str) -> list[str]:
+        """只读 ERP 执行记录中的 taskId，按创建顺序去重。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT task_id FROM t_advert_agent_modify_advert_record "
+                    "WHERE decision_id=%s AND task_id IS NOT NULL "
+                    "AND task_id<>'' ORDER BY create_time",
+                    (decision_id,),
+                )
+                rows = cur.fetchall() or []
+        finally:
+            conn.close()
+
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            task_id = str((row or {}).get("task_id") or "").strip()
+            if task_id and task_id not in seen:
+                seen.add(task_id)
+                task_ids.append(task_id)
+        return task_ids
 
 
     def insert_portfolio_records(
@@ -467,6 +535,111 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
+    def update_campaign_terminal_status(
+        self,
+        decision_id: str,
+        campaign_statuses: dict[str, str],
+        *,
+        operator: str,
+        message_by_campaign: dict[str, str] | None = None,
+    ) -> bool:
+        """在 latest 行锁内回写 pending/card；批次已过期则不写并返回 False。"""
+        valid_statuses = {"SUCCESS", "FAIL", "IN_PROGRESS"}
+        normalized = {
+            str(campaign_id).strip(): str(status).strip().upper()
+            for campaign_id, status in campaign_statuses.items()
+            if str(campaign_id).strip()
+            and str(status).strip().upper() in valid_statuses
+        }
+        if not normalized:
+            return True
+
+        messages = message_by_campaign or {}
+        tables = (
+            "t_advert_agent_modify_campaign_pending",
+            "t_advert_agent_modify_keyword_pending",
+            "t_advert_agent_modify_placement_pending",
+        )
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_latest, operating_mode "
+                    "FROM t_advert_agent_decision "
+                    "WHERE id=%s FOR UPDATE",
+                    (decision_id,),
+                )
+                decision = cur.fetchone() or {}
+                if (
+                    decision.get("is_latest") not in {1, True, "1"}
+                    or str(
+                        decision.get("operating_mode") or ""
+                    ).strip() not in {"IMMEDIATE_EXIT", "立即退出"}
+                ):
+                    conn.rollback()
+                    return False
+
+                for campaign_id, status in normalized.items():
+                    message = str(
+                        messages.get(campaign_id) or ""
+                    ).strip() or None
+                    for table in tables:
+                        cur.execute(
+                            f"UPDATE {table} SET execute_status=%s, "
+                            "execute_msg=%s, "
+                            "execute_time=CASE WHEN %s IN ('SUCCESS','FAIL') "
+                            "THEN %s ELSE execute_time END, update_time=%s "
+                            "WHERE decision_id=%s AND campaign_id=%s "
+                            "AND execute_status IN ('PENDING','IN_PROGRESS')",
+                            (
+                                status, message, status, now, now,
+                                decision_id, campaign_id,
+                            ),
+                        )
+
+                by_card: dict[str, list[str]] = {}
+                for table in tables:
+                    cur.execute(
+                        f"SELECT suggest_card_id, execute_status FROM {table} "
+                        "WHERE decision_id=%s",
+                        (decision_id,),
+                    )
+                    for row in cur.fetchall() or []:
+                        card_id = str(
+                            (row or {}).get("suggest_card_id") or ""
+                        ).strip()
+                        if not card_id:
+                            continue
+                        by_card.setdefault(card_id, []).append(
+                            str(
+                                (row or {}).get("execute_status") or "PENDING"
+                            ).strip().upper()
+                        )
+
+                for card_id, statuses in by_card.items():
+                    if "FAIL" in statuses:
+                        card_status = "FAIL"
+                    elif "IN_PROGRESS" in statuses:
+                        card_status = "IN_PROGRESS"
+                    elif statuses and set(statuses) == {"SUCCESS"}:
+                        card_status = "SUCCESS"
+                    else:
+                        card_status = "PENDING"
+                    cur.execute(
+                        "UPDATE t_advert_agent_modify_suggest_card "
+                        "SET execute_status=%s, update_time=%s "
+                        "WHERE id=%s AND decision_id=%s",
+                        (card_status, now, card_id, decision_id),
+                    )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def get_decision_preset(self, decision_id: str) -> dict | None:
         """读取某批次冻结的前置 1-4 配置（decision 行的策略/策略/P3/方向列）。"""
         conn = self._connect()
@@ -474,7 +647,7 @@ class ErpDualWriterRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, parent_asin, parent_seller_sku, shop_id, site_code, day_range, "
-                    "product_position, product_stage, season_type, advert_purposes, "
+                    "product_position, product_stage, season_type, operating_mode, advert_purposes, "
                     "target_keyword_types, target_acos_suggest, daily_budget_suggest, "
                     "advert_direction_types, analysis_mode, is_latest, "
                     "batch_no, create_time, update_time "
@@ -697,7 +870,104 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
-    def _upsert_modern_summary(self, cur, run: CanonicalRun, now: datetime) -> None:
+    def claim_pending_for_execution(
+        self,
+        ops: list[dict],
+        *,
+        operator: str = "",
+    ) -> int:
+        """原子占用本批 CONFIRMED/PENDING 行；未能全量占用则整体回滚。"""
+        by_table = {
+            "campaign": "t_advert_agent_modify_campaign_pending",
+            "keyword": "t_advert_agent_modify_keyword_pending",
+            "placement": "t_advert_agent_modify_placement_pending",
+        }
+        targets: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for op in ops:
+            table = by_table.get(op.get("record_kind"))
+            pending_id = str(op.get("pending_id") or "").strip()
+            target = (table or "", pending_id)
+            if table and pending_id and target not in seen:
+                seen.add(target)
+                targets.append((table, pending_id))
+        if not targets:
+            return 0
+
+        conn = self._connect()
+        now = datetime.now()
+        claimed = 0
+        try:
+            with conn.cursor() as cur:
+                for table, pending_id in targets:
+                    cur.execute(
+                        f"UPDATE {table} "
+                        "SET execute_status='IN_PROGRESS', execute_msg=NULL, "
+                        "update_time=%s WHERE id=%s "
+                        "AND confirm_status='CONFIRMED' "
+                        "AND execute_status='PENDING'",
+                        (now, pending_id),
+                    )
+                    claimed += int(cur.rowcount or 0)
+            if claimed != len(targets):
+                conn.rollback()
+                return 0
+            conn.commit()
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def write_immediate_exit(
+        self,
+        run: CanonicalRun,
+        *,
+        operator: str,
+    ) -> WriteReport:
+        """写立即退出最小快照：decision/config/summary/card/pending。"""
+        meta = run.decision_meta or {}
+        report = WriteReport(decision_id=run.decision_id)
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                self._upsert_decision(
+                    cur, run, meta, now, operator=operator,
+                )
+                report.decision = 1
+                self._upsert_decision_config(cur, run, meta, now)
+                report.decision_config = 1
+                self._upsert_modern_summary(
+                    cur, run, now, operator=operator,
+                )
+                report.modern_summary = 1
+                self._delete_modern_campaign_children(cur, run.decision_id)
+                (
+                    report.modern_card,
+                    report.modern_keyword_pending,
+                    report.modern_campaign_pending,
+                    report.modern_placement_pending,
+                ) = self._upsert_modern_cards_and_pending(
+                    cur, run, now, operator=operator,
+                )
+            conn.commit()
+            return report
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _upsert_modern_summary(
+        self,
+        cur,
+        run: CanonicalRun,
+        now: datetime,
+        *,
+        operator: str | None = None,
+    ) -> None:
         summary_id = stable_id("sum", run.decision_id)
         s = run.summary or {}
         eliminate_count = int(s.get("to_eliminate") or 0)
@@ -722,8 +992,16 @@ class ErpDualWriterRepository:
             total_count_to_write = declared_total
 
         bg = run.budget_groups or {}
-        op = getattr(self, "_operator", "tab5")
-        aud_int = getattr(self, "_audit_int_val", None)
+        op = (
+            operator
+            if operator is not None
+            else getattr(self, "_operator", "tab5")
+        )
+        aud_int = (
+            _audit_int(operator)
+            if operator is not None
+            else getattr(self, "_audit_int_val", None)
+        )
         sql = """
         INSERT INTO t_advert_agent_modify_suggest_summary (
             id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no,
@@ -881,7 +1159,14 @@ class ErpDualWriterRepository:
             ),
         )
 
-    def _upsert_modern_cards_and_pending(self, cur, run: CanonicalRun, now: datetime) -> tuple[int, int, int, int]:
+    def _upsert_modern_cards_and_pending(
+        self,
+        cur,
+        run: CanonicalRun,
+        now: datetime,
+        *,
+        operator: str | None = None,
+    ) -> tuple[int, int, int, int]:
         card_count = 0
         keyword_count = 0
         campaign_count = 0
@@ -992,7 +1277,11 @@ class ErpDualWriterRepository:
             update_time=VALUES(update_time)
         """
 
-        op = self._operator or None
+        op = (
+            operator
+            if operator is not None
+            else (getattr(self, "_operator", None) or None)
+        )
 
         for card in run.cards:
             cur.execute(
@@ -1341,11 +1630,23 @@ class ErpDualWriterRepository:
             count += 1
         return count
 
-    def _upsert_decision(self, cur, run: CanonicalRun, meta: dict[str, Any], now: datetime) -> None:
+    def _upsert_decision(
+        self,
+        cur,
+        run: CanonicalRun,
+        meta: dict[str, Any],
+        now: datetime,
+        *,
+        operator: str | None = None,
+    ) -> None:
         p3 = meta.get("p3") or {}
         target_acos = p3.get("target_acos") or {}
         budget_bid = p3.get("budget_bid") or {}
-        aud = getattr(self, "_audit_int_val", None)
+        aud = (
+            _audit_int(operator)
+            if operator is not None
+            else getattr(self, "_audit_int_val", None)
+        )
         # product_name 来自 listing.product_cn_name（Doris），varchar(200) 上限
         product_name = (meta.get("product_name") or "").strip()[:200] or None
         sql = """
@@ -1941,18 +2242,38 @@ class ErpDualWriterRepository:
         shop_id: int | None = None,
         shop_account: str | None = None,
         parent_sku: str | None = None,
-    ) -> None:
+        require_latest_decision: bool = False,
+    ) -> bool:
         """执行淘汰→入池：source='execution', entry_date=NOW(), exit_date=NULL。
 
-        复淘汰（同 campaign 二次淘汰）走 ON DUPLICATE KEY UPDATE：
-          重置 exit_date=NULL，刷新 entry_date/spend/source 到本次执行时刻。
+        复淘汰（同 campaign 二次淘汰）走 ON DUPLICATE KEY UPDATE。
+        同一 decision 的重复终态轮询保持 entry_date/update_time/exit_date，
+        不撤销后续离池；只有来自新 decision 的再次淘汰才重新入池并刷新时间。
         """
         if not campaign_id:
-            return
+            return False
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         conn = self._connect()
         try:
             with conn.cursor() as cur:
+                if require_latest_decision:
+                    cur.execute(
+                        "SELECT is_latest, operating_mode "
+                        "FROM t_advert_agent_decision "
+                        "WHERE id=%s FOR UPDATE",
+                        (decision_id,),
+                    )
+                    decision = cur.fetchone() or {}
+                    if (
+                        decision.get("is_latest")
+                        not in {1, True, "1"}
+                        or str(
+                            decision.get("operating_mode") or ""
+                        ).strip()
+                        not in {"IMMEDIATE_EXIT", "立即退出"}
+                    ):
+                        conn.rollback()
+                        return False
                 cur.execute(
                     """INSERT INTO t_advert_agent_pool_entry
                        (shop_id, shop_account, parent_asin, parent_sku, child_asin, campaign_id,
@@ -1961,15 +2282,27 @@ class ErpDualWriterRepository:
                         create_time, update_time)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)
                        ON DUPLICATE KEY UPDATE
-                        exit_date = NULL,
-                        entry_date = VALUES(entry_date),
+                        entry_date = IF(
+                            decision_id <=> VALUES(decision_id),
+                            entry_date,
+                            VALUES(entry_date)
+                        ),
+                        update_time = IF(
+                            decision_id <=> VALUES(decision_id),
+                            update_time,
+                            VALUES(update_time)
+                        ),
+                        exit_date = IF(
+                            decision_id <=> VALUES(decision_id),
+                            exit_date,
+                            NULL
+                        ),
                         eliminate_spend_7d = VALUES(eliminate_spend_7d),
                         source = VALUES(source),
                         decision_id = VALUES(decision_id),
                         shop_id = VALUES(shop_id),
                         shop_account = VALUES(shop_account),
-                        parent_sku = VALUES(parent_sku),
-                        update_time = VALUES(update_time)""",
+                        parent_sku = VALUES(parent_sku)""",
                     (
                         shop_id, shop_account, parent_asin, parent_sku,
                         child_asin or "", campaign_id,
@@ -1979,6 +2312,7 @@ class ErpDualWriterRepository:
                     ),
                 )
             conn.commit()
+            return True
         except Exception:
             conn.rollback()
             raise

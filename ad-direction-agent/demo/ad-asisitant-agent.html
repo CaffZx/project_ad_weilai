@@ -982,6 +982,10 @@ const tabState = { tab1: false, tab2: false, tab3: false, tab4: false, tab5: fal
 let activeTab = null;
 window._p3data = null;
 const SESSION_START = new Date().toISOString();
+const _STRATEGY_DIM_LABELS = {
+  product_level: '产品定位', operating_mode: '经营模式', season_stage: '季节阶段',
+};
+let _savedStrategy = { product_level: null, operating_mode: null, season_stage: null };
 
 // ═══════════════ ERP 跳转参数 ═══════════════
 const _erpParams = (() => {
@@ -2158,6 +2162,8 @@ async function loadStrategy() {
   }
   hide('errGlobal');
 
+  _setSavedStrategyBaseline(data.current_selection);
+
   const prefilled = data.current_selection && data.current_selection.product_level;
   if (prefilled) { show('sec1Done'); sec1Confirmed = true; }
 
@@ -2318,9 +2324,25 @@ function restoreManualInputs(snapshot) {
 }
 
 // 消费前拦截：运行执行层分析前，有未保存字段则拦下
+function _setSavedStrategyBaseline(config) {
+  _savedStrategy = Object.fromEntries(
+    Object.keys(_STRATEGY_DIM_LABELS).map(dim => [dim, config?.[dim] || null])
+  );
+}
+
+function _strategyPendingFields() {
+  return Object.entries(_STRATEGY_DIM_LABELS).flatMap(([dim, label]) => {
+    const text = qs(`.dd-btn[data-dim="${dim}"] .dd-text`);
+    const value = text && text.textContent !== '请选择' ? text.textContent : null;
+    return !value || value !== _savedStrategy[dim] ? [label] : [];
+  });
+}
+
 function guardUnsavedBeforeRun() {
+  const strategyPending = _strategyPendingFields();
   const d = Object.keys(_dirty).filter(k => _dirty[k]).map(k => _FIELD_CN[k]);
-  if (d.length) { showToast('⚠ 有未保存的修改：' + d.join('、') + ' — 请先保存或放弃后，再运行执行层分析。', 'warn', 4000); return false; }
+  const pending = [...strategyPending, ...d];
+  if (pending.length) { showToast('⚠ 有未保存或未完整的配置：' + pending.join('、') + ' — 请先保存后，再运行执行层分析。', 'warn', 4000); return false; }
   return true;
 }
 function resetSaveTags() {
@@ -2362,8 +2384,31 @@ async function confirmStrategy() {
     }
     const persisted = await callAPI(`/long-term-config/${encodeURIComponent(asin)}`, null, API_TIMEOUT.default, 'GET');
     applyPersistedStrategySelection(persisted);
+    _setSavedStrategyBaseline(persisted);
     show('sec1Done'); sec1Confirmed = true;
     refreshStrategyContext(persisted);
+    if (om === '立即退出') {
+      const runId = ((_decisionContext || {}).in_progress || '').trim();
+      if (!runId) throw new Error('未找到当前分析事件，无法启动立即退出流程');
+      const exitResult = await callAPI('/decision/immediate-exit', { asin, run_id: runId });
+      const isDryRun = exitResult.execute_status === 'DRY_RUN';
+      if (!exitResult.ok && !isDryRun) {
+        throw new Error(exitResult.error || '立即退出执行失败');
+      }
+      showToast(
+        isDryRun
+          ? '立即退出操作记录已生成，广告调整暂未实际下发（当前为预览模式）'
+          : '立即退出已提交确定性执行流程',
+        isDryRun ? 'info' : 'success',
+        5000,
+      );
+      await refreshDecisionContext();
+      await loadAll(true);
+      if (exitResult.execute_status === 'IN_PROGRESS') {
+        startImmediateExitStatusPolling(exitResult.decision_id);
+      }
+      return;
+    }
     const tact = await loadTactics();
     if (!tact.ok) {
       btn.disabled = false;
@@ -3438,6 +3483,32 @@ function showReasonPopup(el) {
   document.body.appendChild(overlay);
 }
 
+async function startImmediateExitStatusPolling(decisionId) {
+  for (let attempt = 0; attempt < 12; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    let result;
+    try {
+      result = await callAPI('/decision/immediate-exit/status', { decision_id: decisionId });
+    } catch (e) {
+      console.warn('立即退出终态查询失败', e);
+      return;
+    }
+    if (!result.ok) {
+      showToast(result.error || '立即退出执行状态查询失败', 'error', 5000);
+      return;
+    }
+    await window._mountCampaignBatch({ decision_id: decisionId, executable: false });
+    if (result.execute_status === 'SUCCESS') {
+      showToast('立即退出广告调整已执行完成', 'success', 5000);
+      return;
+    }
+    if (result.execute_status === 'FAIL') {
+      showToast(result.error || '立即退出广告调整执行失败', 'error', 5000);
+      return;
+    }
+  }
+}
+
 function showImmediateExitConfirm() {
   return new Promise(resolve => {
     const overlay = document.createElement('div');
@@ -3445,7 +3516,7 @@ function showImmediateExitConfirm() {
     overlay.innerHTML = `<div class="reason-popup">
       <h4 style="color:var(--danger)">高危操作：立即退出</h4>
       <div style="font-size:13px;line-height:1.6;color:var(--foreground)">
-        确认后会按“立即退出”经营模式保存配置。专用确定性执行接口接入后，该模式将跳过常规策略层配置和 Campaign 分析，直接执行退出操作。
+        确认后会保存”立即退出”经营模式，所有广告活动将按规则暂停或降为最低预算出价，不再进行 AI 分析。
       </div>
       <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
         <button class="btn btn-secondary btn-sm">取消</button>

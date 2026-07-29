@@ -16,6 +16,7 @@ from app.data.advert_mcp_client import AdvertMcpClient
 from app.persistence.erp_writer.advert_exec_mapper import (
     build_exec_plan,
     extract_task_ids,
+    parse_batch_update_terminal,
     parse_result_envelope,
 )
 from app.persistence.erp_writer.repository import _get_repository
@@ -27,6 +28,33 @@ from app.workflow.steps.portfolio_execution import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _upsert_eliminate_pool_entry(
+    *,
+    repo,
+    decision: dict,
+    card: dict,
+    campaign_id: str,
+    require_latest_decision: bool = False,
+) -> None:
+    parent_asin = str(decision.get("parent_asin") or "")
+    repo.upsert_pool_entry(
+        parent_asin,
+        campaign_id=campaign_id,
+        child_asin=str(card.get("asin") or "") or None,
+        campaign_key=str(card.get("campaign_key") or "") or None,
+        campaign_name=str(card.get("campaign_name") or "") or "",
+        keyword_text=str(card.get("keyword") or "") or None,
+        decision_id=str(decision.get("id") or "") or None,
+        eliminate_spend_7d=_perf_json_cost(card.get("perf_json")),
+        shop_id=int(decision.get("shop_id") or 0) or None,
+        shop_account=None,
+        parent_sku=str(
+            decision.get("parent_seller_sku") or ""
+        ) or None,
+        require_latest_decision=require_latest_decision,
+    )
 
 
 def _sync_pool_entries_from_exec(
@@ -51,11 +79,6 @@ def _sync_pool_entries_from_exec(
     if not mcp_async_ok:
         return  # MCP 没真跑成功，不写池表
 
-    shop_id = int(dec.get("shop_id") or 0) or None
-    shop_account = ""  # decision 行未含，由 sync_pool_entries 路径在分析时补；执行钩子无新源
-    parent_sku = str(dec.get("parent_seller_sku") or "") or None
-    decision_id = str(dec.get("id") or "") or None
-
     cards = {str(c.get("id")): c for c in (pending.get("cards") or [])}
     camp_pendings = pending.get("campaign_pending") or []
 
@@ -76,18 +99,11 @@ def _sync_pool_entries_from_exec(
 
         if category == "ELIMINATE":
             try:
-                repo.upsert_pool_entry(
-                    parent_asin,
+                _upsert_eliminate_pool_entry(
+                    repo=repo,
+                    decision=dec,
+                    card=card,
                     campaign_id=campaign_id,
-                    child_asin=str(card.get("asin") or "") or None,
-                    campaign_key=str(card.get("campaign_key") or "") or None,
-                    campaign_name=str(card.get("campaign_name") or "") or "",
-                    keyword_text=str(card.get("keyword") or "") or None,
-                    decision_id=decision_id,
-                    eliminate_spend_7d=_perf_json_cost(card.get("perf_json")),
-                    shop_id=shop_id,
-                    shop_account=shop_account or None,
-                    parent_sku=parent_sku,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("upsert_pool_entry 失败 [%s/%s]: %s", parent_asin, campaign_id, e)
@@ -116,6 +132,91 @@ def _perf_json_cost(perf_json) -> float | None:
         return float(v) if v is not None else None
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+def _campaign_statuses_from_snapshot(snapshot: dict) -> dict[str, str]:
+    """从三类 pending 读取每个活动当前已持久化的聚合状态。"""
+    by_campaign: dict[str, list[str]] = {}
+    for key in (
+        "campaign_pending", "keyword_pending", "placement_pending",
+    ):
+        for row in snapshot.get(key) or []:
+            campaign_id = str(row.get("campaign_id") or "").strip()
+            if campaign_id:
+                by_campaign.setdefault(campaign_id, []).append(
+                    str(
+                        row.get("execute_status") or "PENDING"
+                    ).strip().upper()
+                )
+
+    result: dict[str, str] = {}
+    for campaign_id, statuses in by_campaign.items():
+        if "FAIL" in statuses:
+            result[campaign_id] = "FAIL"
+        elif statuses and set(statuses) == {"SUCCESS"}:
+            result[campaign_id] = "SUCCESS"
+        else:
+            result[campaign_id] = "IN_PROGRESS"
+    return result
+
+
+def _aggregate_campaign_statuses(statuses: dict[str, str]) -> str:
+    values = set(statuses.values())
+    if "FAIL" in values:
+        return "FAIL"
+    if values and values == {"SUCCESS"}:
+        return "SUCCESS"
+    return "IN_PROGRESS"
+
+
+def _sync_terminal_eliminate_pool(
+    snapshot: dict,
+    campaign_statuses: dict[str, str],
+    *,
+    repo,
+) -> None:
+    """仅对最终有效状态为 SUCCESS 的 ELIMINATE 活动写入低价池。"""
+    successful = {
+        campaign_id
+        for campaign_id, status in campaign_statuses.items()
+        if status == "SUCCESS"
+    }
+    if not successful:
+        return
+
+    decision = snapshot.get("decision") or {}
+    if not str(decision.get("parent_asin") or "").strip():
+        return
+    card_to_campaign = {
+        str(row.get("suggest_card_id") or ""): str(
+            row.get("campaign_id") or ""
+        ).strip()
+        for row in snapshot.get("campaign_pending") or []
+        if row.get("suggest_card_id") and row.get("campaign_id")
+    }
+    for card in snapshot.get("cards") or []:
+        if str(card.get("suggest_category") or "").upper() != "ELIMINATE":
+            continue
+        card_id = str(card.get("id") or "")
+        campaign_id = (
+            card_to_campaign.get(card_id)
+            or str(card.get("campaign_id") or "").strip()
+        )
+        if campaign_id not in successful:
+            continue
+        try:
+            _upsert_eliminate_pool_entry(
+                repo=repo,
+                decision=decision,
+                card=card,
+                campaign_id=campaign_id,
+                require_latest_decision=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "立即退出终态入池失败 [%s/%s]: %s",
+                decision.get("parent_asin"), campaign_id, e,
+            )
 
 
 async def _resolve_create_portfolios(
@@ -158,6 +259,7 @@ async def _resolve_create_portfolios(
 
 async def _resolve_modify_portfolios(
     client, plan, *, shop_id: int, parent_asin: str, parent_sku: str, operator: str,
+    resolved_portfolio_ids: dict[str, str] | None = None,
 ) -> None:
     """为 MODIFY 路径注入 portfolioId（挪组）。
 
@@ -176,6 +278,9 @@ async def _resolve_modify_portfolios(
     if not all_vos:
         return
 
+    if not any(vo.get("campaignGroupType") for vo in all_vos):
+        return
+
     # 从 ops 建 campaign_id → campaign_name 映射（不污染 campaignVo）
     campaign_names: dict[str, str] = {}
     for op in plan.ops:
@@ -184,19 +289,21 @@ async def _resolve_modify_portfolios(
         if cid and cname:
             campaign_names[cid] = str(cname)
 
-    try:
-        res = await client.query_portfolio_list(
-            shop_id, parent_asin, parent_sku, current_user_id=operator)
-        portfolios = _normalize_portfolio_list(res)
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "query_portfolio_list 失败 [%s/%s]，已跳过挪组，其他调整继续: %s",
-            parent_asin, parent_sku, e)
-        plan.warnings.append(
-            f"组合列表查询失败，已跳过挪组，其他调整继续下发：{type(e).__name__}: {e}")
-        for vo in all_vos:
-            vo.pop("campaignGroupType", None)
-        return
+    portfolios: list[dict] | None = None
+    if resolved_portfolio_ids is None:
+        try:
+            res = await client.query_portfolio_list(
+                shop_id, parent_asin, parent_sku, current_user_id=operator)
+            portfolios = _normalize_portfolio_list(res)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "query_portfolio_list 失败 [%s/%s]，已跳过挪组，其他调整继续: %s",
+                parent_asin, parent_sku, e)
+            plan.warnings.append(
+                f"组合列表查询失败，已跳过挪组，其他调整继续下发：{type(e).__name__}: {e}")
+            for vo in all_vos:
+                vo.pop("campaignGroupType", None)
+            return
 
     by_pid: dict[str, list[dict]] = {}
     no_pid: list[dict] = []
@@ -211,8 +318,12 @@ async def _resolve_modify_portfolios(
             vo.pop("campaignGroupType", None)
             no_pid.append(vo)
             continue
-        pf, match_count = _match_portfolio(zh, portfolios)
-        pid = _pf_field(pf, "portfolioId") if pf else None
+        if resolved_portfolio_ids is None:
+            pf, match_count = _match_portfolio(zh, portfolios or [])
+            pid = _pf_field(pf, "portfolioId") if pf else None
+        else:
+            pid = resolved_portfolio_ids.get(group_code)
+            match_count = 1 if pid else 0
         if pid:
             vo.pop("campaignGroupType", None)
             by_pid.setdefault(str(pid), []).append(vo)
@@ -246,7 +357,13 @@ async def _resolve_modify_portfolios(
     plan.params_vo_list = new_list
 
 
-async def submit_execution(decision_id: str, *, operator: str) -> dict:
+async def submit_execution(
+    decision_id: str,
+    *,
+    operator: str,
+    resolved_portfolio_ids: dict[str, str] | None = None,
+    wait_for_terminal: bool = False,
+) -> dict:
     """执行一个批次已确认(CONFIRMED)的调整。返回汇总 dict。"""
     if not settings.advert_mcp_enabled:
         return {"ok": False, "error": "广告调整执行通道未启用（advert_mcp_enabled=false）"}
@@ -275,37 +392,81 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
         request_params_json=request_json,
     )
 
+    if wait_for_terminal:
+        claimable_ids = {
+            str(op.get("pending_id"))
+            for op in plan.ops
+            if op.get("pending_id")
+            and op.get("record_kind") in {
+                "campaign", "keyword", "placement",
+            }
+        }
+        claimed = repo.claim_pending_for_execution(
+            plan.ops,
+            operator=operator,
+        )
+        if claimed != len(claimable_ids):
+            return {
+                "ok": True,
+                "already_claimed": True,
+                "task_ids": [],
+                "execute_status": "IN_PROGRESS",
+                "ops": len(plan.ops),
+                "warnings": plan.warnings,
+                "move_errors": plan.move_errors,
+            }
+
+    client = AdvertMcpClient()
+    try:
+        await _resolve_modify_portfolios(
+            client, plan,
+            shop_id=int(dec.get("shop_id") or 0),
+            parent_asin=str(dec.get("parent_asin") or ""),
+            parent_sku=str(dec.get("parent_seller_sku") or ""),
+            operator=operator,
+            resolved_portfolio_ids=resolved_portfolio_ids,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("portfolio 解析失败 [%s]: %s", decision_id, e)
+        plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
+
     # ── DRY-RUN：只落记录，不调 MCP ──
     if settings.advert_exec_dry_run:
-        for op in plan.ops:
-            op["modify_result"] = "DRY_RUN"
-            op["execute_status"] = "DRY_RUN"
-        repo.insert_exec_sub_records(record_id, plan.ops, operator)
-        repo.update_pending_execute_status(plan.ops, "DRY_RUN", operator=operator, msg="dry_run")
-        repo.update_advert_record_result(record_id, response_params_json=json_dumps({"dry_run": True}))
-        logger.info("Advert exec DRY-RUN [%s] record=%s ops=%d", decision_id, record_id, len(plan.ops))
+        try:
+            for op in plan.ops:
+                op["modify_result"] = "DRY_RUN"
+                op["execute_status"] = "DRY_RUN"
+            repo.insert_exec_sub_records(record_id, plan.ops, operator)
+            repo.update_pending_execute_status(
+                plan.ops, "DRY_RUN", operator=operator, msg="dry_run",
+            )
+            repo.update_advert_record_result(
+                record_id,
+                response_params_json=json_dumps({"dry_run": True}),
+            )
+            logger.info(
+                "Advert exec DRY-RUN [%s] record=%s ops=%d",
+                decision_id, record_id, len(plan.ops),
+            )
+        finally:
+            try:
+                await client.aclose()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Advert MCP client 关闭失败 [%s]: %s",
+                    decision_id, e,
+                )
         return {"ok": True, "dry_run": True, "record_id": record_id,
-                "ops": len(plan.ops), "warnings": plan.warnings}
+                "ops": len(plan.ops), "warnings": plan.warnings,
+                "move_errors": plan.move_errors}
 
     # ── 真实执行 ──
-    client = AdvertMcpClient()
     results: dict = {"async": None, "create": [], "negative": []}
     task_ids: list[str] = []
     errors: list[str] = []
+    async_status: str | None = None
+    async_error = ""
     try:
-        # 挪组：MODIFY 路径注入 portfolioId（先于 MCP 调用）
-        try:
-            await _resolve_modify_portfolios(
-                client, plan,
-                shop_id=int(dec.get("shop_id") or 0),
-                parent_asin=str(dec.get("parent_asin") or ""),
-                parent_sku=str(dec.get("parent_seller_sku") or ""),
-                operator=operator,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("portfolio 解析失败 [%s]: %s", decision_id, e)
-            plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
-
         if plan.params_vo_list:
             try:
                 res = await client.async_batch_update(plan.params_vo_list)
@@ -313,19 +474,30 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
                 task_ids = extract_task_ids(res)
                 ok, msg = parse_result_envelope(res)
                 # 异步：提交成功 → IN_PROGRESS（待 poll 终态）；提交失败 → FAIL
-                st = "IN_PROGRESS" if (ok and task_ids) else ("IN_PROGRESS" if ok else "FAIL")
+                st = "IN_PROGRESS" if (ok and task_ids) else "FAIL"
+                async_status = st
+                async_error = (
+                    ""
+                    if st == "IN_PROGRESS"
+                    else (msg or "异步提交未返回 taskId")
+                )
+                if st == "FAIL":
+                    errors.append(f"async:{async_error}")
                 for op in plan.ops:
                     if not op.get("is_create") and not op.get("is_negative"):
                         op["modify_result"] = "PENDING" if st == "IN_PROGRESS" else "FAIL"
                         op["execute_status"] = st
                         if st == "FAIL":
-                            op["error_msg"] = msg
+                            op["error_msg"] = async_error
             except Exception as e:  # noqa: BLE001
                 logger.exception("async_batch_update 失败 [%s]: %s", decision_id, e)
+                async_status = "FAIL"
+                async_error = f"{type(e).__name__}: {e}"
+                errors.append(f"async:{async_error}")
                 for op in plan.ops:
                     if not op.get("is_create") and not op.get("is_negative"):
                         op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
-                        op["error_msg"] = f"{type(e).__name__}: {e}"
+                        op["error_msg"] = async_error
 
         skip_create = await _resolve_create_portfolios(
             client, plan,
@@ -381,7 +553,13 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
                             op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
                             op["error_msg"] = f"{type(e).__name__}: {e}"
     finally:
-        await client.aclose()
+        try:
+            await client.aclose()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Advert MCP client 关闭失败 [%s]: %s",
+                decision_id, e,
+            )
 
     repo.insert_exec_sub_records(record_id, plan.ops, operator)
     repo.update_pending_execute_status(plan.ops, "IN_PROGRESS", operator=operator)
@@ -396,14 +574,151 @@ async def submit_execution(decision_id: str, *, operator: str) -> dict:
     async_ok = bool(results.get("async")) and not any(
         str(e).startswith("async:") for e in errors
     )
-    if async_ok:
+    if async_ok and not wait_for_terminal:
         _sync_pool_entries_from_exec(
             pending, plan, mcp_async_ok=True, repo=repo,
         )
 
-    return {"ok": True, "record_id": record_id, "task_ids": task_ids,
-            "ops": len(plan.ops), "warnings": plan.warnings,
-            "move_errors": plan.move_errors}
+    response_ok = not (
+        wait_for_terminal
+        and async_status == "FAIL"
+    )
+    return {
+        "ok": response_ok,
+        "record_id": record_id,
+        "task_ids": task_ids,
+        "execute_status": async_status,
+        "error": async_error if not response_ok else "",
+        "ops": len(plan.ops),
+        "warnings": plan.warnings,
+        "move_errors": plan.move_errors,
+    }
+
+
+async def poll_execution_result(
+    decision_id: str,
+    *,
+    operator: str,
+) -> dict:
+    """从 ERP 回读 taskId，查询活动终态并回写既有 pending/card。"""
+    repo = _get_repository()
+    decision = repo.get_decision_basic(decision_id)
+    if not decision:
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": [],
+            "campaign_statuses": {},
+            "error": "立即退出决策不存在",
+        }
+    operating_mode = str(
+        decision.get("operating_mode") or ""
+    ).strip()
+    if operating_mode not in {"IMMEDIATE_EXIT", "立即退出"}:
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": [],
+            "campaign_statuses": {},
+            "error": "该批次不是立即退出决策，拒绝查询并回写",
+        }
+    if decision.get("is_latest") not in {1, True, "1"}:
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": [],
+            "campaign_statuses": {},
+            "error": "该立即退出批次已不是最新批次，拒绝查询并回写",
+        }
+
+    task_ids = repo.list_execution_task_ids(decision_id)
+    if not task_ids:
+        return {
+            "ok": True,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": [],
+            "campaign_statuses": {},
+        }
+
+    snapshot = repo.read_snapshot(decision_id)
+    if not snapshot:
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": task_ids,
+            "campaign_statuses": {},
+            "error": "立即退出决策快照不存在",
+        }
+    client = AdvertMcpClient()
+    try:
+        raw = await client.batch_update_result(task_ids)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("广告执行终态查询失败 [%s]: %s", decision_id, e)
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": task_ids,
+            "campaign_statuses": _campaign_statuses_from_snapshot(
+                snapshot
+            ),
+            "error": f"{type(e).__name__}: {e}",
+        }
+    finally:
+        try:
+            await client.aclose()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Advert MCP client 关闭失败 [%s]: %s",
+                decision_id, e,
+            )
+
+    message_by_campaign: dict[str, str] = {}
+    queried_statuses = parse_batch_update_terminal(
+        raw,
+        message_by_campaign=message_by_campaign,
+    )
+    persisted_statuses = _campaign_statuses_from_snapshot(snapshot)
+    campaign_statuses = dict(persisted_statuses)
+    for campaign_id, status in queried_statuses.items():
+        if persisted_statuses.get(campaign_id) in {"SUCCESS", "FAIL"}:
+            continue
+        campaign_statuses[campaign_id] = status
+
+    updated = repo.update_campaign_terminal_status(
+        decision_id,
+        campaign_statuses,
+        operator=operator,
+        message_by_campaign=message_by_campaign,
+    )
+    if updated is False:
+        return {
+            "ok": False,
+            "decision_id": decision_id,
+            "execute_status": "IN_PROGRESS",
+            "task_ids": task_ids,
+            "campaign_statuses": persisted_statuses,
+            "error": "该立即退出批次已不再是最新批次，拒绝终态回写",
+        }
+    _sync_terminal_eliminate_pool(
+        snapshot,
+        campaign_statuses,
+        repo=repo,
+    )
+    return {
+        "ok": True,
+        "decision_id": decision_id,
+        "execute_status": _aggregate_campaign_statuses(
+            campaign_statuses
+        ),
+        "task_ids": task_ids,
+        "campaign_statuses": campaign_statuses,
+    }
 
 
 async def submit_execution_direct(

@@ -732,8 +732,9 @@ class MySQLStateManager:
             try:
                 self.ensure_schema()
                 self._execute("DELETE FROM analysis_session WHERE asin=%s", (asin,))
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("清除分析事件失败 [%s]: %s", asin, exc)
+                return False
         return True
 
     def save_feedback(self, submission) -> bool:

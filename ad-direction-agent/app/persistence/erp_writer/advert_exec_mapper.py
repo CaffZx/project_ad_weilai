@@ -358,3 +358,102 @@ def extract_task_ids(res: Any) -> list[str]:
     if isinstance(data, dict):
         return extract_task_ids(data)
     return []
+
+
+def parse_batch_update_terminal(
+    res: object,
+    *,
+    message_by_campaign: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """解析异步广告调整查询结果，返回 campaign_id -> 执行状态。"""
+    if isinstance(res, dict):
+        envelopes = [res]
+    elif isinstance(res, list):
+        envelopes = [item for item in res if isinstance(item, dict)]
+    else:
+        return {}
+
+    status_rank = {"SUCCESS": 1, "IN_PROGRESS": 2, "FAIL": 3}
+    statuses: dict[str, str] = {}
+    success_states = {"success", "succeeded"}
+    failure_states = {
+        "fail", "failed", "failure", "error", "rejected",
+    }
+    message_keys = (
+        "errorMsg", "updateCampaignMsg", "campaignMsg", "msg", "message",
+    )
+
+    for envelope in envelopes:
+        result = envelope.get("result")
+        if not isinstance(result, dict):
+            result = envelope
+        details = result.get("detailVoList")
+        if not isinstance(details, list):
+            continue
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            campaign_rows = detail.get("campaignResList")
+            if not isinstance(campaign_rows, list):
+                continue
+            for row in campaign_rows:
+                if not isinstance(row, dict):
+                    continue
+                campaign_id = str(row.get("campaignId") or "").strip()
+                if not campaign_id:
+                    continue
+                raw_state = str(
+                    row.get("updateCampaignState") or ""
+                ).strip().lower()
+                message = next((
+                    str(row.get(key) or "").strip()
+                    for key in message_keys
+                    if str(row.get(key) or "").strip()
+                ), "")
+                lowered_message = message.lower()
+                not_found_message = (
+                    "未找到相关记录" in message
+                    or "not found" in lowered_message
+                )
+                negated_error_message = any(
+                    marker in lowered_message
+                    for marker in (
+                        "no error", "0 failed", "zero failed",
+                        "无错误", "没有错误", "未失败",
+                    )
+                )
+                has_error_message = (
+                    not not_found_message
+                    and not negated_error_message
+                    and bool(
+                        str(row.get("errorMsg") or "").strip()
+                        or any(
+                            marker in lowered_message
+                            for marker in (
+                                "fail", "error", "exception", "reject",
+                                "失败", "错误", "异常", "拒绝",
+                            )
+                        )
+                    )
+                )
+                if not_found_message:
+                    status = "IN_PROGRESS"
+                elif raw_state in failure_states or has_error_message:
+                    status = "FAIL"
+                elif raw_state in success_states:
+                    status = "SUCCESS"
+                else:
+                    status = "IN_PROGRESS"
+                if (
+                    status == "FAIL"
+                    and message
+                    and message_by_campaign is not None
+                ):
+                    message_by_campaign[campaign_id] = message
+                current = statuses.get(campaign_id)
+                if (
+                    current is None
+                    or status_rank[status] > status_rank[current]
+                ):
+                    statuses[campaign_id] = status
+    return statuses

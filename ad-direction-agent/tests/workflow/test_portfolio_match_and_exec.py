@@ -13,7 +13,11 @@ from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.api import decision as decision_api
 from app.models.campaign import CampaignPerf, CampaignUnit
+from app.persistence.erp_writer.advert_exec_mapper import (
+    parse_batch_update_terminal,
+)
 from app.workflow.steps import advert_execution as AE
 from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_BROAD,
@@ -23,6 +27,561 @@ from app.workflow.steps.campaign_portfolio import (
     classify,
 )
 from app.workflow.steps.portfolio_execution import _match_portfolio, _pf_field
+
+
+def test_parse_batch_update_terminal_maps_campaign_results():
+    result = parse_batch_update_terminal([
+        {
+            "result": {
+                "detailVoList": [{
+                    "campaignResList": [
+                        {
+                            "campaignId": "camp-success",
+                            "updateCampaignState": "success",
+                        },
+                        {
+                            "campaignId": "camp-fail",
+                            "updateCampaignState": "fail",
+                            "errorMsg": "活动状态修改失败",
+                        },
+                        {
+                            "campaignId": "camp-wait",
+                            "updateCampaignState": "submitted",
+                        },
+                    ],
+                }],
+            },
+        },
+    ])
+
+    assert result == {
+        "camp-success": "SUCCESS",
+        "camp-fail": "FAIL",
+        "camp-wait": "IN_PROGRESS",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        [],
+        {"errorMsg": "未找到相关记录"},
+        [{"result": {}}],
+        [{"result": {"detailVoList": []}}],
+        [{
+            "result": {
+                "detailVoList": [{
+                    "campaignResList": [{
+                        "campaignId": "camp-1",
+                        "updateCampaignState": "unknown",
+                    }],
+                }],
+            },
+        }],
+    ],
+)
+def test_parse_batch_update_terminal_does_not_guess_missing_or_unknown(raw):
+    result = parse_batch_update_terminal(raw)
+
+    if raw and isinstance(raw, list) and "campaignResList" in str(raw):
+        assert result == {"camp-1": "IN_PROGRESS"}
+    else:
+        assert result == {}
+
+
+def test_parse_batch_update_terminal_error_message_is_explicit_failure():
+    result = parse_batch_update_terminal({
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-1",
+                    "updateCampaignMsg": "预算修改失败",
+                }],
+            }],
+        },
+    })
+
+    assert result == {"camp-1": "FAIL"}
+
+
+def test_parse_batch_update_terminal_error_message_overrides_success_state():
+    result = parse_batch_update_terminal({
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-1",
+                    "updateCampaignState": "success",
+                    "errorMsg": "部分字段修改失败",
+                }],
+            }],
+        },
+    })
+
+    assert result == {"camp-1": "FAIL"}
+
+
+def test_parse_batch_update_terminal_success_message_is_not_failure():
+    result = parse_batch_update_terminal({
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-1",
+                    "updateCampaignState": "success",
+                    "updateCampaignMsg": "修改成功",
+                }],
+            }],
+        },
+    })
+
+    assert result == {"camp-1": "SUCCESS"}
+
+
+@pytest.mark.parametrize("message_key", ["updateCampaignMsg", "errorMsg"])
+def test_parse_batch_update_terminal_not_found_message_stays_in_progress(
+    message_key,
+):
+    result = parse_batch_update_terminal({
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-1",
+                    "updateCampaignState": "unknown",
+                    message_key: "未找到相关记录",
+                }],
+            }],
+        },
+    })
+
+    assert result == {"camp-1": "IN_PROGRESS"}
+
+
+@pytest.mark.parametrize("message", ["no error", "0 failed", "无错误"])
+def test_parse_batch_update_terminal_negated_error_stays_success(message):
+    result = parse_batch_update_terminal({
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-1",
+                    "updateCampaignState": "success",
+                    "errorMsg": message,
+                }],
+            }],
+        },
+    })
+
+    assert result == {"camp-1": "SUCCESS"}
+
+
+def _terminal_snapshot() -> dict:
+    return {
+        "decision": {
+            "id": "dec-1",
+            "shop_id": 1622,
+            "parent_asin": "B0PARENT",
+            "parent_seller_sku": "SKU-1",
+            "operating_mode": "IMMEDIATE_EXIT",
+        },
+        "cards": [
+            {
+                "id": "card-success",
+                "campaign_id": "camp-success",
+                "suggest_category": "ELIMINATE",
+                "campaign_name": "exact-success",
+                "campaign_key": "exact-success-key",
+                "asin": "B0CHILD",
+            },
+            {
+                "id": "card-fail",
+                "campaign_id": "camp-fail",
+                "suggest_category": "ELIMINATE",
+                "campaign_name": "exact-fail",
+            },
+            {
+                "id": "card-wait",
+                "campaign_id": "camp-wait",
+                "suggest_category": "ADJUST",
+                "campaign_name": "broad-wait",
+            },
+        ],
+        "campaign_pending": [
+            {
+                "suggest_card_id": "card-success",
+                "campaign_id": "camp-success",
+                "execute_status": "IN_PROGRESS",
+            },
+            {
+                "suggest_card_id": "card-fail",
+                "campaign_id": "camp-fail",
+                "execute_status": "IN_PROGRESS",
+            },
+            {
+                "suggest_card_id": "card-wait",
+                "campaign_id": "camp-wait",
+                "execute_status": "IN_PROGRESS",
+            },
+        ],
+        "keyword_pending": [],
+        "placement_pending": [],
+    }
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_without_erp_task_id_stays_in_progress(
+    mock_client_cls,
+    mock_repo,
+):
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = []
+    mock_repo.return_value = repo
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result == {
+        "ok": True,
+        "decision_id": "dec-1",
+        "execute_status": "IN_PROGRESS",
+        "task_ids": [],
+        "campaign_statuses": {},
+    }
+    repo.read_snapshot.assert_not_called()
+    repo.update_campaign_terminal_status.assert_not_called()
+    mock_client_cls.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_updates_each_campaign_and_only_pools_success(
+    mock_client_cls,
+    mock_repo,
+):
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = _terminal_snapshot()
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.batch_update_result = AsyncMock(return_value=[{
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [
+                    {
+                        "campaignId": "camp-success",
+                        "updateCampaignState": "success",
+                    },
+                    {
+                        "campaignId": "camp-fail",
+                        "updateCampaignState": "fail",
+                        "errorMsg": "修改失败",
+                    },
+                ],
+            }],
+        },
+    }])
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result == {
+        "ok": True,
+        "decision_id": "dec-1",
+        "execute_status": "FAIL",
+        "task_ids": ["task-1"],
+        "campaign_statuses": {
+            "camp-success": "SUCCESS",
+            "camp-fail": "FAIL",
+            "camp-wait": "IN_PROGRESS",
+        },
+    }
+    repo.update_campaign_terminal_status.assert_called_once_with(
+        "dec-1",
+        {
+            "camp-success": "SUCCESS",
+            "camp-fail": "FAIL",
+            "camp-wait": "IN_PROGRESS",
+        },
+        operator="42",
+        message_by_campaign={"camp-fail": "修改失败"},
+    )
+    repo.upsert_pool_entry.assert_called_once()
+    assert repo.upsert_pool_entry.call_args.kwargs["campaign_id"] == "camp-success"
+    client.batch_update_result.assert_awaited_once_with(["task-1"])
+    client.aclose.assert_awaited_once()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_not_found_retries_persisted_success_pool(
+    mock_client_cls,
+    mock_repo,
+):
+    snapshot = _terminal_snapshot()
+    snapshot["campaign_pending"][0]["execute_status"] = "SUCCESS"
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = snapshot
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.batch_update_result = AsyncMock(
+        return_value={"errorMsg": "未找到相关记录"}
+    )
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result["execute_status"] == "IN_PROGRESS"
+    assert result["campaign_statuses"] == {
+        "camp-success": "SUCCESS",
+        "camp-fail": "IN_PROGRESS",
+        "camp-wait": "IN_PROGRESS",
+    }
+    repo.upsert_pool_entry.assert_called_once()
+    assert repo.upsert_pool_entry.call_args.kwargs["campaign_id"] == "camp-success"
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_rejects_non_immediate_exit_decision(
+    mock_client_cls,
+    mock_repo,
+):
+    snapshot = _terminal_snapshot()
+    snapshot["decision"]["operating_mode"] = "STABLE_OPERATION"
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "STABLE_OPERATION",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = snapshot
+    mock_repo.return_value = repo
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result == {
+        "ok": False,
+        "decision_id": "dec-1",
+        "execute_status": "IN_PROGRESS",
+        "task_ids": [],
+        "campaign_statuses": {},
+        "error": "该批次不是立即退出决策，拒绝查询并回写",
+    }
+    mock_client_cls.assert_not_called()
+    repo.list_execution_task_ids.assert_not_called()
+    repo.read_snapshot.assert_not_called()
+    repo.update_campaign_terminal_status.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_rejects_non_immediate_before_task_id_lookup(
+    mock_client_cls,
+    mock_repo,
+):
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "STABLE_OPERATION",
+    }
+    mock_repo.return_value = repo
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result["ok"] is False
+    assert "不是立即退出决策" in result["error"]
+    repo.list_execution_task_ids.assert_not_called()
+    repo.read_snapshot.assert_not_called()
+    mock_client_cls.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_rejects_non_latest_immediate_exit(
+    mock_client_cls,
+    mock_repo,
+):
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-old",
+        "is_latest": 0,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    mock_repo.return_value = repo
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-old",
+        operator="42",
+    ))
+
+    assert result == {
+        "ok": False,
+        "decision_id": "dec-old",
+        "execute_status": "IN_PROGRESS",
+        "task_ids": [],
+        "campaign_statuses": {},
+        "error": "该立即退出批次已不是最新批次，拒绝查询并回写",
+    }
+    repo.list_execution_task_ids.assert_not_called()
+    repo.read_snapshot.assert_not_called()
+    mock_client_cls.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_existing_fail_blocks_later_success_pool(
+    mock_client_cls,
+    mock_repo,
+):
+    snapshot = _terminal_snapshot()
+    snapshot["campaign_pending"][0]["execute_status"] = "FAIL"
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = snapshot
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.batch_update_result = AsyncMock(return_value=[{
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-success",
+                    "updateCampaignState": "success",
+                }],
+            }],
+        },
+    }])
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result["execute_status"] == "FAIL"
+    assert result["campaign_statuses"]["camp-success"] == "FAIL"
+    repo.upsert_pool_entry.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_all_adjust_success_without_pool_write(
+    mock_client_cls,
+    mock_repo,
+):
+    snapshot = _terminal_snapshot()
+    snapshot["cards"] = [snapshot["cards"][2]]
+    snapshot["campaign_pending"] = [snapshot["campaign_pending"][2]]
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = snapshot
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.batch_update_result = AsyncMock(return_value=[{
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-wait",
+                    "updateCampaignState": "success",
+                }],
+            }],
+        },
+    }])
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result["execute_status"] == "SUCCESS"
+    assert result["campaign_statuses"] == {"camp-wait": "SUCCESS"}
+    repo.upsert_pool_entry.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+def test_poll_execution_result_stops_when_latest_changes_during_mcp(
+    mock_client_cls,
+    mock_repo,
+):
+    snapshot = _terminal_snapshot()
+    repo = MagicMock()
+    repo.get_decision_basic.return_value = {
+        "id": "dec-1",
+        "is_latest": 1,
+        "operating_mode": "IMMEDIATE_EXIT",
+    }
+    repo.list_execution_task_ids.return_value = ["task-1"]
+    repo.read_snapshot.return_value = snapshot
+    repo.update_campaign_terminal_status.return_value = False
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.batch_update_result = AsyncMock(return_value=[{
+        "result": {
+            "detailVoList": [{
+                "campaignResList": [{
+                    "campaignId": "camp-success",
+                    "updateCampaignState": "success",
+                }],
+            }],
+        },
+    }])
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.poll_execution_result(
+        "dec-1",
+        operator="42",
+    ))
+
+    assert result["ok"] is False
+    assert result["execute_status"] == "IN_PROGRESS"
+    assert "不再是最新批次" in result["error"]
+    repo.upsert_pool_entry.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -91,6 +650,248 @@ def test_match_multiple_fields_fallback():
     pf = {"portfolioName": "test-精准主力组"}
     nm = _pf_field(pf, "name", "portfolioName")
     assert nm == "test-精准主力组"
+
+
+def test_immediate_exit_low_bid_portfolio_not_queried_when_not_required():
+    """没有精准/商品低价动作时，不占用组合查询 MCP。"""
+    with patch.object(decision_api, "AdvertMcpClient") as client_cls:
+        result = asyncio.run(
+            decision_api._resolve_immediate_exit_low_bid_portfolio(
+                identity={
+                    "shop_id": 1,
+                    "parent_seller_sku": "SKU",
+                    "operator": "op",
+                },
+                asin="B0TEST",
+                required=False,
+            )
+        )
+
+    assert result == {}
+    client_cls.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("portfolios", "expected_id", "expected_count"),
+    [
+        ([], None, 0),
+        (
+            [{"name": "US-产品-低价捡漏组", "portfolioId": "p-1"}],
+            "p-1",
+            1,
+        ),
+        (
+            [
+                {"name": "US-产品A-低价捡漏组", "portfolioId": "p-first"},
+                {"name": "US-产品B-低价捡漏组", "portfolioId": "p-second"},
+            ],
+            "p-first",
+            2,
+        ),
+    ],
+)
+def test_immediate_exit_low_bid_portfolio_uses_first_raw_match(
+    portfolios, expected_id, expected_count,
+):
+    """零命中返回空；多命中按已确认口径取 MCP 原始顺序第一条。"""
+    client = MagicMock()
+    client.query_portfolio_list = AsyncMock(return_value=portfolios)
+    client.aclose = AsyncMock()
+
+    with patch.object(decision_api, "AdvertMcpClient", return_value=client):
+        result = asyncio.run(
+            decision_api._resolve_immediate_exit_low_bid_portfolio(
+                identity={
+                    "shop_id": 1,
+                    "parent_seller_sku": "SKU",
+                    "operator": "op",
+                },
+                asin="B0TEST",
+                required=True,
+            )
+        )
+
+    client.query_portfolio_list.assert_awaited_once_with(
+        1,
+        "B0TEST",
+        "SKU",
+        portfolio_name_like="低价捡漏组",
+        current_user_id="op",
+    )
+    client.aclose.assert_awaited_once()
+    assert result.get("portfolio_id") == expected_id
+    assert result["match_count"] == expected_count
+
+
+def test_build_immediate_exit_run_uses_existing_card_and_pending_models():
+    """一活动一卡；单词精准才写 keyword_pending，其余动作只写 campaign_pending。"""
+    actions = [
+        {
+            "campaign_id": "c-1",
+            "campaign_name": "exact-single",
+            "action_kind": "LOW_BID_SINGLE_EXACT",
+            "current_state": "enabled",
+            "new_state": "enabled",
+            "current_budget": decision_api.Decimal("10"),
+            "new_budget": decision_api.Decimal("1.00"),
+            "current_bid": decision_api.Decimal("0.5"),
+            "new_bid": decision_api.Decimal("0.20"),
+            "positive_keywords": [{
+                "keyword_id": "k-1",
+                "keyword_text": "red dress",
+                "match_type": "EXACT",
+            }],
+        },
+        {
+            "campaign_id": "c-2",
+            "campaign_name": "exact-multi",
+            "action_kind": "LOW_BID_MULTI_EXACT",
+            "current_state": "enabled",
+            "new_state": "enabled",
+            "current_budget": decision_api.Decimal("8"),
+            "new_budget": decision_api.Decimal("1.00"),
+            "current_bid": decision_api.Decimal("0.6"),
+            "new_bid": None,
+            "positive_keywords": [
+                {"keyword_id": "k-2", "keyword_text": "blue", "match_type": "EXACT"},
+                {"keyword_id": "k-3", "keyword_text": "green", "match_type": "EXACT"},
+            ],
+        },
+        {
+            "campaign_id": "c-3",
+            "campaign_name": "product-target",
+            "action_kind": "LOW_BID_PRODUCT_TARGET",
+            "current_state": "enabled",
+            "new_state": "enabled",
+            "current_budget": decision_api.Decimal("7"),
+            "new_budget": decision_api.Decimal("1.00"),
+            "current_bid": decision_api.Decimal("0"),
+            "new_bid": None,
+            "positive_keywords": [],
+        },
+        {
+            "campaign_id": "c-4",
+            "campaign_name": "auto-one",
+            "action_kind": "PAUSE",
+            "current_state": "enabled",
+            "new_state": "paused",
+            "current_budget": decision_api.Decimal("6"),
+            "new_budget": None,
+            "current_bid": decision_api.Decimal("0"),
+            "new_bid": None,
+            "positive_keywords": [{
+                "keyword_id": "",
+                "keyword_text": "",
+                "match_type": "AUTO",
+            }],
+        },
+    ]
+
+    run = decision_api._build_immediate_exit_run(
+        asin="B0TEST",
+        identity={
+            "shop_id": 1622,
+            "parent_seller_sku": "SKU-1",
+            "site_code": "US",
+            "run_id": "20260728T120000Z",
+        },
+        long_term={
+            "product_level": "P1重点",
+            "season_stage": "旺季",
+            "operating_mode": "立即退出",
+        },
+        actions=actions,
+        low_bid_portfolio={"portfolio_id": "p-1", "match_count": 1},
+    )
+
+    assert run.decision_id == decision_api.stable_id(
+        "dec", "B0TEST", "20260728T120000Z", 1,
+    )
+    assert run.total_campaigns == 4
+    assert len(run.cards) == 4
+    assert sum(len(card.campaign_pending) for card in run.cards) == 4
+    assert sum(len(card.keyword_pending) for card in run.cards) == 1
+    by_campaign = {card.campaign_id: card for card in run.cards}
+    assert by_campaign["c-1"].suggest_category == "ELIMINATE"
+    assert by_campaign["c-1"].campaign_group_type == "low_bid_retention_group"
+    assert by_campaign["c-2"].suggest_category == "ADJUST"
+    assert by_campaign["c-2"].keyword == "多关键词活动（2词）"
+    assert by_campaign["c-3"].keyword_match_type == "PRODUCT_TARGETING"
+    assert by_campaign["c-4"].campaign_pending[0].new_state == "paused"
+    assert run.summary["to_eliminate"] == 1
+    assert run.summary["to_adjust"] == 3
+    assert run.decision_meta["operating_mode"] == "立即退出"
+
+
+def test_build_immediate_exit_run_keeps_bid_and_budget_without_portfolio():
+    """低价组零命中只影响挪组标记，不丢预算和单词 Bid pending。"""
+    action = {
+        "campaign_id": "c-1",
+        "campaign_name": "exact-single",
+        "action_kind": "LOW_BID_SINGLE_EXACT",
+        "current_state": "enabled",
+        "new_state": "enabled",
+        "current_budget": decision_api.Decimal("10"),
+        "new_budget": decision_api.Decimal("1.00"),
+        "current_bid": decision_api.Decimal("0.5"),
+        "new_bid": decision_api.Decimal("0.20"),
+        "positive_keywords": [{
+            "keyword_id": "k-1",
+            "keyword_text": "red dress",
+            "match_type": "EXACT",
+        }],
+    }
+    run = decision_api._build_immediate_exit_run(
+        asin="B0TEST",
+        identity={
+            "shop_id": 1622,
+            "parent_seller_sku": "SKU-1",
+            "site_code": "US",
+            "run_id": "20260728T120000Z",
+        },
+        long_term={"operating_mode": "立即退出"},
+        actions=[action],
+        low_bid_portfolio={},
+    )
+
+    card = run.cards[0]
+    assert card.suggest_category == "ADJUST"
+    assert card.campaign_pending[0].new_budget == decision_api.Decimal("1.00")
+    assert card.keyword_pending[0].new_bid == decision_api.Decimal("0.20")
+
+
+def test_build_immediate_exit_run_rejects_single_exact_without_keyword_id():
+    """CanonicalRun 构建层再次拒绝无 keywordId 的单词精准 Bid pending。"""
+    action = {
+        "campaign_id": "c-1",
+        "campaign_name": "exact-single",
+        "action_kind": "LOW_BID_SINGLE_EXACT",
+        "current_state": "enabled",
+        "new_state": "enabled",
+        "current_budget": decision_api.Decimal("10"),
+        "new_budget": decision_api.Decimal("1.00"),
+        "current_bid": decision_api.Decimal("0.5"),
+        "new_bid": decision_api.Decimal("0.20"),
+        "positive_keywords": [{
+            "keyword_id": "",
+            "keyword_text": "red dress",
+            "match_type": "EXACT",
+        }],
+    }
+
+    with pytest.raises(RuntimeError, match="keywordId"):
+        decision_api._build_immediate_exit_run(
+            asin="B0TEST",
+            identity={
+                "shop_id": 1622,
+                "parent_seller_sku": "SKU-1",
+                "site_code": "US",
+                "run_id": "20260728T120000Z",
+            },
+            long_term={"operating_mode": "立即退出"},
+            actions=[action],
+            low_bid_portfolio={"portfolio_id": "p-1", "match_count": 1},
+        )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -254,6 +1055,84 @@ def test_resolve_modify_portfolios_no_group_type_skips():
     assert len(plan.move_errors) == 0
 
 
+def test_resolve_modify_portfolios_uses_pre_resolved_id_without_query():
+    plan = _FakePlan(params_vo_list=[{
+        "shopId": 1,
+        "campaignVoList": [{
+            "campaignId": "c1",
+            "campaignBudget": 1.0,
+            "campaignGroupType": "low_bid_retention_group",
+        }],
+    }])
+    plan.ops = [{"campaign_id": "c1", "campaign_name": "精准活动"}]
+    client = _fake_client([])
+
+    asyncio.run(AE._resolve_modify_portfolios(
+        client,
+        plan,
+        shop_id=1,
+        parent_asin="B0X",
+        parent_sku="SKU",
+        operator="op",
+        resolved_portfolio_ids={"low_bid_retention_group": "pf-1"},
+    ))
+
+    client.query_portfolio_list.assert_not_awaited()
+    assert plan.params_vo_list == [{
+        "shopId": 1,
+        "portfolioId": "pf-1",
+        "campaignVoList": [{
+            "campaignId": "c1",
+            "campaignBudget": 1.0,
+        }],
+    }]
+    assert plan.move_errors == []
+
+
+def test_resolve_modify_portfolios_empty_pre_resolved_keeps_other_actions():
+    plan = _FakePlan(params_vo_list=[{
+        "shopId": 1,
+        "campaignVoList": [{
+            "campaignId": "c1",
+            "campaignBudget": 1.0,
+            "keywordShowVoList": [{
+                "keywordId": "kw-1",
+                "keywordBid": 0.2,
+            }],
+            "campaignGroupType": "low_bid_retention_group",
+        }],
+    }])
+    plan.ops = [{"campaign_id": "c1", "campaign_name": "精准活动"}]
+    client = _fake_client([])
+
+    asyncio.run(AE._resolve_modify_portfolios(
+        client,
+        plan,
+        shop_id=1,
+        parent_asin="B0X",
+        parent_sku="SKU",
+        operator="op",
+        resolved_portfolio_ids={},
+    ))
+
+    client.query_portfolio_list.assert_not_awaited()
+    campaign_vo = plan.params_vo_list[0]["campaignVoList"][0]
+    assert campaign_vo == {
+        "campaignId": "c1",
+        "campaignBudget": 1.0,
+        "keywordShowVoList": [{
+            "keywordId": "kw-1",
+            "keywordBid": 0.2,
+        }],
+    }
+    assert plan.move_errors == [{
+        "campaign_id": "c1",
+        "campaign_name": "精准活动",
+        "group": "低价捡漏组",
+        "reason": "不存在",
+    }]
+
+
 # ═══════════════════════════════════════════════════════════════
 # submit_execution dry_run → 调 portfolio 解析 + 返回 move_errors
 # ═══════════════════════════════════════════════════════════════
@@ -277,6 +1156,255 @@ def _pending_with_group(group_code: str) -> dict:
         "keyword_pending": [],
         "placement_pending": [],
     }
+
+
+def _immediate_exit_pending() -> dict:
+    return {
+        "decision": {
+            "id": "dec-immediate",
+            "shop_id": 1622,
+            "parent_asin": "B0X",
+            "parent_seller_sku": "SKU",
+        },
+        "cards": [{
+            "id": "card-1",
+            "campaign_group_type": "low_bid_retention_group",
+            "campaign_id": "cid-1",
+            "campaign_name": "精准活动",
+            "suggest_category": "ELIMINATE",
+        }],
+        "campaign_pending": [{
+            "id": "cp-1",
+            "suggest_card_id": "card-1",
+            "campaign_id": "cid-1",
+            "campaign_name": "精准活动",
+            "new_budget": 1.0,
+        }],
+        "keyword_pending": [{
+            "id": "kp-1",
+            "suggest_card_id": "card-1",
+            "campaign_id": "cid-1",
+            "campaign_name": "精准活动",
+            "keyword_id": "kw-1",
+            "keyword_text": "red dress",
+            "match_type": "EXACT",
+            "new_bid": 0.2,
+        }],
+        "placement_pending": [],
+    }
+
+
+@patch.object(AE, "_sync_pool_entries_from_exec")
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_immediate_exit_submit_marks_in_progress_only_with_task_id(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+    mock_sync_pool,
+):
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = False
+    repo = MagicMock()
+    repo.load_confirmed_pending.return_value = _immediate_exit_pending()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 2
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.async_batch_update = AsyncMock(return_value={
+        "state": "success",
+        "taskId": "task-1",
+    })
+    client.query_portfolio_list = AsyncMock()
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.submit_execution(
+        "dec-immediate",
+        operator="operator-1",
+        resolved_portfolio_ids={"low_bid_retention_group": "pf-1"},
+        wait_for_terminal=True,
+    ))
+
+    repo.load_confirmed_pending.assert_called_once_with("dec-immediate")
+    client.query_portfolio_list.assert_not_awaited()
+    payload = client.async_batch_update.await_args.args[0]
+    assert payload[0]["portfolioId"] == "pf-1"
+    assert "campaignGroupType" not in payload[0]["campaignVoList"][0]
+    assert result["ok"] is True
+    assert result["task_ids"] == ["task-1"]
+    assert result["execute_status"] == "IN_PROGRESS"
+    assert {
+        op["execute_status"] for op in repo.update_pending_execute_status.call_args.args[0]
+    } == {"IN_PROGRESS"}
+    mock_sync_pool.assert_not_called()
+    repo.upsert_pool_entry.assert_not_called()
+
+
+@patch.object(AE, "_sync_pool_entries_from_exec")
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_immediate_exit_submit_accepts_task_id_only_envelope(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+    mock_sync_pool,
+):
+    """真实异步工具可仅返回 taskId；taskId 本身就是成功提交凭证。"""
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = False
+    repo = MagicMock()
+    repo.load_confirmed_pending.return_value = _immediate_exit_pending()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 2
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.async_batch_update = AsyncMock(return_value={"taskId": "task-1"})
+    client.query_portfolio_list = AsyncMock()
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.submit_execution(
+        "dec-immediate",
+        operator="operator-1",
+        resolved_portfolio_ids={},
+        wait_for_terminal=True,
+    ))
+
+    assert result["ok"] is True
+    assert result["task_ids"] == ["task-1"]
+    assert result["execute_status"] == "IN_PROGRESS"
+    mock_sync_pool.assert_not_called()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_immediate_exit_submit_claim_lost_does_not_call_mcp(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+):
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    repo = MagicMock()
+    repo.load_confirmed_pending.return_value = _immediate_exit_pending()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 0
+    mock_repo.return_value = repo
+
+    result = asyncio.run(AE.submit_execution(
+        "dec-immediate",
+        operator="operator-1",
+        resolved_portfolio_ids={},
+        wait_for_terminal=True,
+    ))
+
+    mock_client_cls.assert_not_called()
+    assert result == {
+        "ok": True,
+        "already_claimed": True,
+        "task_ids": [],
+        "execute_status": "IN_PROGRESS",
+        "ops": 2,
+        "warnings": [],
+        "move_errors": [],
+    }
+
+
+@patch.object(AE, "_sync_pool_entries_from_exec")
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_immediate_exit_submit_close_error_does_not_hide_task_id(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+    mock_sync_pool,
+):
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = False
+    repo = MagicMock()
+    repo.load_confirmed_pending.return_value = _immediate_exit_pending()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 2
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.async_batch_update = AsyncMock(return_value={"taskId": "task-1"})
+    client.query_portfolio_list = AsyncMock()
+    client.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.submit_execution(
+        "dec-immediate",
+        operator="operator-1",
+        resolved_portfolio_ids={},
+        wait_for_terminal=True,
+    ))
+
+    assert result["ok"] is True
+    assert result["task_ids"] == ["task-1"]
+    repo.update_pending_execute_status.assert_called_once()
+    mock_sync_pool.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("response", "side_effect", "expected_error"),
+    [
+        ({"state": "success"}, None, "未返回 taskId"),
+        ({"state": "fail", "errorMsg": "ERP rejected"}, None, "ERP rejected"),
+        (None, RuntimeError("MCP boom"), "MCP boom"),
+    ],
+)
+@patch.object(AE, "_sync_pool_entries_from_exec")
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_immediate_exit_submit_failure_marks_fail(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+    mock_sync_pool,
+    response,
+    side_effect,
+    expected_error,
+):
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = False
+    repo = MagicMock()
+    repo.load_confirmed_pending.return_value = _immediate_exit_pending()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 2
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.async_batch_update = AsyncMock(
+        return_value=response,
+        side_effect=side_effect,
+    )
+    client.query_portfolio_list = AsyncMock()
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+
+    result = asyncio.run(AE.submit_execution(
+        "dec-immediate",
+        operator="operator-1",
+        resolved_portfolio_ids={},
+        wait_for_terminal=True,
+    ))
+
+    assert result["ok"] is False
+    assert result["execute_status"] == "FAIL"
+    assert expected_error in result["error"]
+    ops = repo.update_pending_execute_status.call_args.args[0]
+    assert {op["execute_status"] for op in ops} == {"FAIL"}
+    assert all(expected_error in op["error_msg"] for op in ops)
+    mock_sync_pool.assert_not_called()
 
 
 @patch.object(AE, "_get_repository")
