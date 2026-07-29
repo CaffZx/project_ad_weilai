@@ -229,6 +229,8 @@ class Settings(BaseSettings):
     advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
     advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
+    campaign_sanity_enabled: bool = True                 # Sanity check（分析后校验）
+    campaign_synthesis_enabled: bool = False             # 汇总合成 LLM
     campaign_negative_keyword_exec_enabled: bool = True   # 否词执行开关
 
     # ── 核心词判定（离线，7 天一次）──

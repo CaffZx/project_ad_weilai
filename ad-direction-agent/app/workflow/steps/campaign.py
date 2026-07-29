@@ -58,9 +58,6 @@ LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
 # Sanity / Synthesis 开关（2026-06-01 恢复）
 # 修复方式：去掉外层 asyncio.wait_for（Windows 取消不生效），改用 chat(timeout_override=)
 # 由 httpx socket 层超时接管，不依赖 asyncio 取消
-_SANITY_CHECK_ENABLED = True
-_SYNTHESIS_ENABLED = False  # 临时禁用汇总 LLM（2026-07-01）
-
 # keyword_class 上游有两种拼写,查表前统一 .lower() 归一:
 #  - purpose-agent LLM 输出首字母大写 (Broad/Long-tail/Competitor/Brand/Custom)
 #  - KB 权威拼写为 generic (大词);兜底都收
@@ -915,7 +912,7 @@ async def _analyze_campaigns_impl(
     # gather 省墙钟（约 20-55s）。各自吞异常 + 返回自身 warnings，避免并发改 warnings_list。
     async def _run_sanity() -> tuple[list[str], bool]:
         # sanity_ok 默认 False：未运行/有批次失败都按"未通过"展示，仅全批次成功才 True
-        if not _SANITY_CHECK_ENABLED:
+        if not settings.campaign_sanity_enabled:
             logger.info("Campaign sanity check 已禁用 [%s]", parent_asin)
             return [], False
         try:
@@ -932,7 +929,7 @@ async def _analyze_campaigns_impl(
 
     async def _run_synth() -> tuple[dict | None, list[str]]:
         # timeout_override=55：httpx socket 层自断，不依赖 asyncio 取消
-        if not (_SYNTHESIS_ENABLED and adjustments):
+        if not (settings.campaign_synthesis_enabled and adjustments):
             if adjustments:
                 logger.info("Campaign synthesis 已禁用 [%s]", parent_asin)
             return None, []
