@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   // 访问控制补丁 — 删除本文件即自动失效
-  var ALLOWED = ['1064', '1063', '1089'];
+  var ALLOWED = ['1064', '1063', '1089', '268', '404', '1079'];
   var uid = (new URL(location.href)).searchParams.get('userId') || '';
   if (ALLOWED.indexOf(uid) !== -1) return;
 

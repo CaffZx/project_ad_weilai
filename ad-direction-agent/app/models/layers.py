@@ -162,6 +162,68 @@ class TargetKeywordStrategy(StrEnum):
     CUSTOM = "自定义"
 
 
+# ── 配置枚举单一权威映射：任意来源 → 中文权威值 ──────────────────────────
+# 覆盖：产品阶段 / 季节 / 经营模式 / 广告目的 / 广告方向 / 关键词策略
+# 键含三类：中文值（直通）、KB 英文 token、ERP code。值统一为中文权威值。
+# text_utils.normalize_enum 与 kb_loader.ENUM_MAP 均从此派生，禁止在他处复制维护。
+CONFIG_ENUM_TO_ZH: dict[str, str] = {
+    # 产品定位 ─────────────────────────────────────────
+    "战略级产品 (P0)": "战略级产品 (P0)", "重点产品 (P1)": "重点产品 (P1)",
+    "常规产品 (P2)": "常规产品 (P2)", "长尾产品 (P3)": "长尾产品 (P3)",
+    "战略级产品": "战略级产品 (P0)", "重点产品": "重点产品 (P1)",
+    "常规产品": "常规产品 (P2)", "长尾产品": "长尾产品 (P3)",
+    "P0_PRODUCT": "战略级产品 (P0)", "P1_PRODUCT": "重点产品 (P1)",
+    "P2_PRODUCT": "常规产品 (P2)", "P3_PRODUCT": "长尾产品 (P3)",
+    "头部": "战略级产品 (P0)", "腰部": "常规产品 (P2)", "长尾": "长尾产品 (P3)",
+    # 产品阶段 ─────────────────────────────────────────
+    "测试期": "测试期", "推进期": "推进期", "收割利润期": "收割利润期",
+    "维持期": "维持期", "清货期": "清货期",
+    "testing": "测试期", "pushing": "推进期", "harvesting": "收割利润期",
+    "maintaining": "维持期", "liquidating": "清货期",
+    "TESTING": "测试期", "PROMOTING": "推进期", "HARVEST_PROFIT": "收割利润期",
+    "MAINTAINING": "维持期",
+    # 季节 ─────────────────────────────────────────────
+    "淡季": "淡季", "旺季准备": "旺季准备", "大旺季": "大旺季", "旺季末期": "旺季末期",
+    "off_season": "淡季", "peak_preparation": "旺季准备", "pre_peak": "旺季准备",
+    "peak": "大旺季", "post_peak": "旺季末期",
+    "OFF_SEASON": "淡季", "PEAK_SEASON_PREPARE": "旺季准备",
+    "BIG_PEAK_SEASON": "大旺季", "LATE_PEAK_SEASON": "旺季末期",
+    # 经营模式 ─────────────────────────────────────────
+    "立即退出": "立即退出", "控制清货": "控制清货", "限时修复": "限时修复",
+    "稳定经营": "稳定经营", "积极推进": "积极推进", "获取利润": "获取利润",
+    "immediate_exit": "立即退出", "controlled_clearance": "控制清货",
+    "limited_repair": "限时修复", "stable_operation": "稳定经营",
+    "active_promotion": "积极推进", "profit_harvest": "获取利润",
+    "IMMEDIATE_EXIT": "立即退出", "CONTROLLED_CLEARANCE": "控制清货",
+    "LIMITED_REPAIR": "限时修复", "STABLE_OPERATION": "稳定经营",
+    "ACTIVE_PROMOTION": "积极推进", "PROFIT_HARVEST": "获取利润",
+    # 广告目的 ─────────────────────────────────────────
+    "引流型": "引流型", "转化型": "转化型", "排名型": "排名型", "盈利型": "盈利型",
+    "traffic": "引流型", "conversion": "转化型", "ranking": "排名型", "profit": "盈利型",
+    "Traffic": "引流型", "Conversion": "转化型", "Ranking": "排名型", "Profit": "盈利型",
+    "TRAFFIC": "引流型", "CONVERSION": "转化型", "RANKING": "排名型", "PROFIT": "盈利型",
+    # 广告方向 ─────────────────────────────────────────
+    "推进自然位": "推进自然位", "新增扩词": "新增扩词", "优化ACOS": "优化ACOS", "平衡维持": "平衡维持",
+    "push_natural_rank": "推进自然位", "expand_keywords": "新增扩词",
+    "optimize_acos": "优化ACOS", "balance_maintain": "平衡维持",
+    "PUSH_NATURAL": "推进自然位", "EXPAND_KEYWORDS": "新增扩词",
+    "OPTIMIZE_ACOS": "优化ACOS",
+    # 关键词策略 ─────────────────────────────────────────
+    "大词": "大词", "长尾词": "长尾词", "竞品词": "竞品词", "品牌词": "品牌词", "自定义": "自定义",
+    "broad": "大词", "long_tail": "长尾词", "long-tail": "长尾词",
+    "competitor": "竞品词", "brand": "品牌词", "custom": "自定义",
+    "GENERIC": "大词", "LONG_TAIL": "长尾词", "COMPETITOR": "竞品词",
+    "BRAND": "品牌词", "CUSTOM": "自定义",
+}
+
+
+def normalize_config_enum(value: str) -> str:
+    """配置枚举归一化：中文/KB英文/ERP code → 中文权威值；未命中返回原值。"""
+    if not value:
+        return ""
+    return CONFIG_ENUM_TO_ZH.get(value.strip(), value.strip())
+
+
 # ── 选项定义 — 前端用 ──────────────────────────────────────
 
 

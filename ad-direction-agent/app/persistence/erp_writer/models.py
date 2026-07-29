@@ -77,6 +77,7 @@ class CampaignPendingCanonical:
     new_state: str | None
     old_budget: Decimal | None
     new_budget: Decimal | None
+    target_campaign_group_type: str | None = None
 
 
 @dataclass(slots=True)

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from app.models.layers import CONFIG_ENUM_TO_ZH
+
 logger = logging.getLogger(__name__)
 
 # 编号标题切块：支持 "## 1. 标题" / "## 7A. 标题"，以及
@@ -57,12 +59,13 @@ class KnowledgeBase:
     PRESETS: dict[str, list[str]] = {
         # 策略层：广告目的 + 关键词类型推荐（purpose-agent）
         "purpose_tactics":     ["01", "02", "03", "04", "06", "09", "10", "14"],
-        # 执行层：方向推荐（去掉 18，22 §1 已覆盖类型判定；§2 11 步流程是开发者编排指南）
-        "execution_direction": ["01", "02", "03", "04", "05", "09", "14", "22"],
+        # 执行层：方向推荐。KB01 是元信息非业务规则，03 只留定位/阶段/目的阈值，
+        # 22 只留 §0 核心原则（其余 §1-5 是活动级调整流程）。
+        "execution_direction": ["02", "03:1,2,4", "04", "05", "09", "14", "22:0"],
         # P3：目标 ACOS + 预算/Bid 推荐（ASIN 级）。
-        # 2026-06-18 修复4：移除 19（KB19 是活动级数值矩阵：预算+20%/-10% 等，对 ASIN 级日预算/目标ACOS
-        # 是粒度错配、且"ACOS上限/目标"易引发幻觉）。ASIN 级上限/预算锚由 KB03 提供。
-        "p3_recommend":        ["01", "03", "05", "09", "10", "11", "14"],
+        # 01/05/10/11 移除（01=元信息，05/10/11=活动级粒度错配）。
+        # 补 25号 §1-3,5（ASIN 级目标ACOS/幅度/数量/日预算推荐）。
+        "p3_recommend":        ["03:1,2,4,5", "09", "14", "25:1,2,3,5"],
         # 综合分析报告
         "analyze_report":      ["02", "05", "09", "12", "14"],
         # AI 聊天（demo）
@@ -89,13 +92,13 @@ class KnowledgeBase:
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,3,4",
             "19:1,2,3,4,5,6,9", "22:0,2", "21:0,1,2,3,4",
             "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
-            "action_vocab", "exact_grade",
+            "30", "32",
         ],
         "campaign_adjustment_broad": [
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,4",
             "19:1,2,3,4,6,7,8", "22:0", "21:0,1,2,3,4",
             "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
-            "action_vocab", "broad_auto",
+            "30", "31",
         ],
         # Campaign 策略总览(执行总纲)
         "campaign_overview":    ["02", "04", "09"],
@@ -110,42 +113,13 @@ class KnowledgeBase:
         "semantic_core":        ["29:1,2,3", "28:2"],
     }
 
-    # KB 英文 enum → 项目中文 enum（与 layer_options.toml 对齐）
+    # KB 英文 enum → 项目中文 enum（从 app.models.layers.CONFIG_ENUM_TO_ZH 派生的子集）。
     # 翻译时长串优先 + 整词边界，避免 traffic 误匹配 traffic_opportunity
+    # 权威映射在 app.models.layers.CONFIG_ENUM_TO_ZH；这里只筛选 KB 英文 token 子集，
+    # 不复制中文值或 ERP code，避免双源漂移。
     ENUM_MAP: dict[str, str] = {
-        # product_stage
-        "testing": "测试期",
-        "pushing": "推进期",
-        "harvesting": "收割利润期",
-        "maintaining": "维持期",
-        "liquidating": "清货期",            # KB 有，config 暂无，保留中文化兜底
-        # ad_purpose
-        "traffic": "引流型",
-        "conversion": "转化型",
-        "ranking": "排名型",
-        "profit": "盈利型",
-        # 注意：clearance/清货型 不是广告目的，也不是核心策略标签。
-        # 广告目的由 ad-purpose-agent 权威产出，只有 4 个：traffic/conversion/ranking/profit。
-        # 清货是场景(scenario=clearance「清仓止损」)与产品阶段(liquidating/清货期)。
-        # 已从 KB 12-输出规范.md 枚举中移除 Clearance(2026-06-05)；此处不翻译，双重防止它混入广告目的语境。
-        # season（KB 英文 → config 中文）
-        "off_season": "淡季",
-        "peak_preparation": "旺季准备",
-        "pre_peak": "旺季准备",
-        "peak": "大旺季",
-        "post_peak": "旺季末期",
-        # ad_direction
-        "push_natural_rank": "推进自然位",
-        "expand_keywords": "新增扩词",
-        "optimize_acos": "优化ACOS",
-        "balance_maintain": "平衡维持",
-        # target_keyword_strategy
-        "broad": "大词",
-        "long_tail": "长尾词",
-        "long-tail": "长尾词",
-        "competitor": "竞品词",
-        "brand": "品牌词",
-        "custom": "自定义",
+        f"{k}": v for k, v in CONFIG_ENUM_TO_ZH.items()
+        if k.isascii() and k.islower()
     }
 
     _DIRECTION_ACTION_SECTIONS: dict[str, str] = {
@@ -187,10 +161,9 @@ class KnowledgeBase:
         "25": "25-目标ACOS预算Bid推荐.md",
         "28": "执行规则/28-新增词来源相关性与场景化配额规则.md",
         "29": "执行规则/29-核心词定义规则.md",
-        # v3.4.8 新 KB 文件
-        "action_vocab":  "30-动作词表与映射.md",
-        "broad_auto":    "执行规则/31-广泛自动词组调整规则.md",
-        "exact_grade":   "执行规则/32-精准组合升降级规则.md",
+        "30": "30-动作词表与映射.md",
+        "31": "执行规则/31-广泛自动词组调整规则.md",
+        "32": "执行规则/32-精准组合升降级规则.md",
     }
 
     def __init__(self):

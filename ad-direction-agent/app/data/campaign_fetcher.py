@@ -14,10 +14,9 @@ from app.data.mcp_db_context import McpDbContext, _coerce_int, resolve_mcp_conte
 from app.data.mcp_mapping import make_date_window
 from app.models.campaign import CampaignData, CampaignPerf, CampaignUnit
 from app.workflow.steps.campaign_portfolio import (
-    PORTFOLIO_BROAD,
-    PORTFOLIO_ELIMINATE,
-    PORTFOLIO_MAIN,
-    PORTFOLIO_TEST,
+    GROUP_LABEL_TO_CODE,
+    PORTFOLIO_GROUP_MATCH_ORDER,
+    find_portfolio_group_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,16 +87,27 @@ class CampaignFetcher:
         shop_account = db_ctx.shop_account or ""
         raw_campaigns: list[dict] = []
         campaign_name_to_id: dict[str, str] = {}
+        campaign_catalog: dict[str, dict[str, str]] = {}
         if settings.mcp_discover_campaigns:
             # 并行：ad_campaign_list (活动清单) + ad_campaign_product_keyword_list (关键词数据)
             list_task = asyncio.create_task(
-                self._fetch_campaign_list(parent_asin, parent_seller_sku, shop_account),
+                self._fetch_campaign_list(
+                    parent_asin,
+                    parent_seller_sku,
+                    shop_account,
+                    include_portfolio=True,
+                ),
             )
             kw_task = asyncio.create_task(
                 self._discover_context_from_mcp(parent_asin, shop_account, parent_seller_sku),
             )
             raw_campaigns = await kw_task
-            campaign_name_to_id = await list_task
+            campaign_catalog = await list_task
+            campaign_name_to_id = {
+                name: entry["campaign_id"]
+                for name, entry in campaign_catalog.items()
+                if entry.get("campaign_id")
+            }
             if raw_campaigns:
                 logger.info(
                     "_discover_context [%s]: %d rows (MCP)", parent_asin, len(raw_campaigns),
@@ -122,6 +132,9 @@ class CampaignFetcher:
 
         # ③ 代码硬过滤
         surviving, excluded = filter_campaigns(raw_campaigns)
+        for row in surviving + excluded:
+            entry = campaign_catalog.get(str(row.get("campaign_name") or "")) or {}
+            row["current_portfolio_name"] = str(entry.get("portfolio_name") or "")
         logger.info(
             "Campaign prefilter [%s]: %d surviving, %d excluded",
             parent_asin, len(surviving), len(excluded),
@@ -243,6 +256,19 @@ class CampaignFetcher:
             )
             surviving = _kept
 
+        # ④¾ D-1 单日快照写入 ERP（非阻塞）
+        try:
+            await self._write_d1_metric_snapshot(
+                parent_asin=parent_asin,
+                site_code=site_code,
+                shop_account=shop_account,
+                surviving=surviving,
+                campaign_name_to_id=campaign_name_to_id,
+                rank_map=rank_map,
+            )
+        except Exception as e:
+            logger.warning("D-1 metric snapshot [%s] 非阻塞异常: %s", parent_asin, e)
+
         # ⑤ 组装 CampaignUnit
         campaigns: list[CampaignUnit] = []
         for camp in surviving:
@@ -346,10 +372,12 @@ class CampaignFetcher:
         shop_account: str,
         *,
         strict: bool = False,
-    ) -> dict[str, str]:
-        """调用 ad_campaign_list → 返回 {campaign_name: campaign_id}。
+        include_portfolio: bool = False,
+    ) -> dict[str, str] | dict[str, dict[str, str]]:
+        """调用 ad_campaign_list。
 
-        与 _discover_context_from_mcp 并行调用；返回只有 2 字段，秒回。
+        默认返回 {campaign_name: campaign_id}，保持立即退出等既有调用兼容；
+        include_portfolio=True 时返回 campaign_id + 当前广告组合名称（待 MCP 补字段后生效）。
         """
         try:
             res = await self._mcp().campaign_call_tool(
@@ -366,15 +394,21 @@ class CampaignFetcher:
                     raise RuntimeError(f"ad_campaign_list 调用失败: {res.error}")
                 return {}
             name_to_id: dict[str, str] = {}
+            catalog: dict[str, dict[str, str]] = {}
             for row in _as_rows(res.value):
                 n = str(row.get("广告活动名称") or "").strip()
                 cid = str(row.get("广告活动id") or "").strip()
                 if n and cid:
                     name_to_id[n] = cid
+                    # 广告组合名称字段待 MCP 同事补字段后生效；当前为空串
+                    catalog[n] = {
+                        "campaign_id": cid,
+                        "portfolio_name": str(row.get("广告组合名称") or "").strip(),
+                    }
             logger.info(
                 "_fetch_campaign_list [%s]: %d 活动 (MCP)", parent_asin, len(name_to_id),
             )
-            return name_to_id
+            return catalog if include_portfolio else name_to_id
         except Exception as e:  # noqa: BLE001
             if strict:
                 if isinstance(e, RuntimeError):
@@ -422,6 +456,7 @@ class CampaignFetcher:
                                 "keyword_bid": _to_float(row.get("关键词BID")) or 0.0,
                                 "campaign_status": str(row.get("状态") or ""),
                                 "days_online": _to_days_online(row.get("活动上线天数")),
+                                "campaign_created_at": str(row.get("广告活动创建日期") or ""),
                                 "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
                                 "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
                                 "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
@@ -865,10 +900,6 @@ class CampaignFetcher:
 
     # ── 广告组合预算拉取 (ad_portfolio_list, 2026-07-09) ──
 
-    _PORTFOLIO_GROUP_KEYWORDS: tuple[str, ...] = (
-        PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE,
-    )
-
     async def fetch_portfolio_list(
         self,
         parent_asin: str,
@@ -919,24 +950,21 @@ class CampaignFetcher:
             return {}
 
         def _group_rows(rows: list[dict]) -> dict[str, list[dict]]:
-            grouped: dict[str, list[dict]] = {g: [] for g in self._PORTFOLIO_GROUP_KEYWORDS}
+            grouped: dict[str, list[dict]] = {g: [] for g in PORTFOLIO_GROUP_MATCH_ORDER}
             for row in rows:
                 name = str(row.get("广告组合名称") or "").strip()
                 if not name:
                     continue
-                matched: str | None = None
-                for keyword in self._PORTFOLIO_GROUP_KEYWORDS:
-                    if keyword in name:
-                        if matched is not None:
-                            logger.warning(
-                                "portfolio 行 [%s] 同时匹配 [%s] 和 [%s]，取首次命中 [%s]",
-                                name, matched, keyword, matched,
-                            )
-                        else:
-                            matched = keyword
-                if matched is None:
+                matches = find_portfolio_group_matches(name)
+                if not matches:
                     logger.warning("portfolio 行 [%s] 未能匹配任何组合类型，已跳过", name)
                     continue
+                matched = matches[0]
+                for keyword in matches[1:]:
+                    logger.warning(
+                        "portfolio 行 [%s] 同时匹配 [%s] 和 [%s]，取首次命中 [%s]",
+                        name, matched, keyword, matched,
+                    )
                 grouped[matched].append(row)
             return grouped
 
@@ -956,7 +984,7 @@ class CampaignFetcher:
             return sum(vals) if vals else None
 
         result: dict[str, dict] = {}
-        for group in self._PORTFOLIO_GROUP_KEYWORDS:
+        for group in PORTFOLIO_GROUP_MATCH_ORDER:
             m7 = grouped_7d.get(group) or []
             if not m7:
                 logger.warning("组合 [%s] 未匹配到 portfolio，预算按 $0、花费无数据", group)
@@ -1082,6 +1110,114 @@ class CampaignFetcher:
         logger.info("自然排名 [%s]: %d 词命中 (child+own)", parent_asin, len(rank_map))
         return rank_map
 
+    # ── D-1 单日快照写入 ERP ──
+
+    async def _write_d1_metric_snapshot(
+        self,
+        *,
+        parent_asin: str,
+        site_code: str,
+        shop_account: str,
+        surviving: list[dict],
+        campaign_name_to_id: dict[str, str],
+        rank_map: dict[str, dict],
+    ) -> None:
+        """拉取 D-1 单日效果并写入 ERP campaign_metric_daily（非阻塞）。
+
+        仅处理 EXACT 活动；失败不阻塞主流程。
+        """
+        try:
+            from app.persistence.erp_writer.repository import _get_repository
+        except Exception as e:
+            logger.warning(
+                "_write_d1_metric_snapshot: 导入 _get_repository 失败: %s (跳过)", e,
+            )
+            return
+
+        try:
+            d1_start, d1_end = make_date_window(1, site_code)
+            repo = _get_repository()
+            shop_id = self._last_shop_id
+
+            exact_campaigns = [
+                c for c in surviving
+                if str(c.get("match_type") or "") == "EXACT"
+            ]
+            if not exact_campaigns:
+                logger.info(
+                    "_write_d1_metric_snapshot [%s]: 无 EXACT 活动，跳过", parent_asin,
+                )
+                return
+
+            # 并行拉取 D-1 效果
+            perf_raw = await asyncio.gather(*[
+                self._fetch_perf_one(
+                    str(c.get("campaign_name") or ""), shop_account, d1_start, d1_end,
+                )
+                for c in exact_campaigns
+            ], return_exceptions=True)
+
+            written = 0
+            for camp, res in zip(exact_campaigns, perf_raw):
+                if isinstance(res, BaseException):
+                    logger.debug(
+                        "_write_d1_metric_snapshot: 拉取异常 [%s]: %s",
+                        camp.get("campaign_name"), res,
+                    )
+                    continue
+                name, call_result = res
+                if not call_result.ok or not isinstance(call_result.value, dict):
+                    continue
+
+                v = call_result.value
+                # campaign_id：优先用 campaign_name_to_id 映射，再从行内取
+                campaign_id = campaign_name_to_id.get(name, "")
+                if not campaign_id:
+                    campaign_id = str(camp.get("campaign_id") or "")
+                if not campaign_id:
+                    logger.debug(
+                        "_write_d1_metric_snapshot: %s 无 campaign_id，跳过", name,
+                    )
+                    continue
+
+                # natural_rank：EXACT 活动按 keyword 小写查 rank_map
+                keyword_text = str(camp.get("keyword_text") or "").strip()
+                natural_rank = None
+                if keyword_text:
+                    rk = rank_map.get(keyword_text.lower()) or {}
+                    raw_rank = rk.get("natural_rank")
+                    if raw_rank is not None:
+                        natural_rank = int(raw_rank)
+
+                try:
+                    repo.upsert_campaign_metric_daily(
+                        shop_id=shop_id,
+                        site_code=site_code,
+                        parent_asin=parent_asin,
+                        campaign_id=campaign_id,
+                        stat_date=d1_start,
+                        spend=float(v.get("cost") or 0),
+                        sales=float(v.get("sale") or 0),
+                        orders=int(v.get("orders") or 0),
+                        clicks=int(v.get("clicks") or 0),
+                        natural_rank=natural_rank,
+                    )
+                    written += 1
+                except Exception as e:
+                    logger.debug(
+                        "_write_d1_metric_snapshot: upsert 失败 [%s/%s]: %s",
+                        name, campaign_id, e,
+                    )
+
+            logger.info(
+                "_write_d1_metric_snapshot [%s]: %d/%d EXACT 写入 D-1=%s",
+                parent_asin, written, len(exact_campaigns), d1_start,
+            )
+        except Exception as e:
+            logger.warning(
+                "_write_d1_metric_snapshot [%s] 非阻塞异常: %s", parent_asin, e,
+            )
+
     # ── 组装 ──
 
     def _assemble(
@@ -1141,6 +1277,7 @@ class CampaignFetcher:
             # status 优先 Doris 英文值（ENABLED）；MCP basic_info 返回中文"启用"，机读不一致
             campaign_status=str(ctx.get("campaign_status") or basic.get("campaign_status") or ""),
             days_online=days_online,
+            campaign_created_at=str(basic.get("campaign_created_at") or ""),
             perf_7d=perf_7d,
             placements={},
             placement_data_available=False,
@@ -1150,6 +1287,8 @@ class CampaignFetcher:
             natural_rank=rk.get("natural_rank"),
             near_natural_rank=rk.get("near_natural_rank"),
             rank_change=rk.get("rank_change"),
+            current_portfolio_name=str(ctx.get("current_portfolio_name") or ""),
+            current_group_type=self._resolve_group_type(str(ctx.get("current_portfolio_name") or "")),
             source=source,
             flags=[],
         )
@@ -1160,6 +1299,14 @@ class CampaignFetcher:
         if self._mcp_adapter is None:
             self._mcp_adapter = McpAdapter()
         return self._mcp_adapter
+
+    @staticmethod
+    def _resolve_group_type(portfolio_name: str) -> str:
+        """组合名称 → 组类型代码（exact_core_group / auto_broad_group / ... / UNKNOWN）。"""
+        matches = find_portfolio_group_matches(portfolio_name)
+        if not matches:
+            return "UNKNOWN"
+        return GROUP_LABEL_TO_CODE.get(matches[0], "UNKNOWN")
 
 
 # ── 模块级工具 ──

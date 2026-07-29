@@ -59,6 +59,7 @@ class CampaignUnit(BaseModel):
     current_budget: float = 0.0              # MCP basic_info -> Doris 回落
     campaign_status: str = ""                # MCP basic_info -> Doris 回落
     days_online: int = -1                    # MCP basic_info；-1=未知(拿不到)，勿当"新活动"
+    campaign_created_at: str = ""            # MCP basic_info「广告活动创建日期」；供 32号§2.4 原生型观察窗
     perf_7d: CampaignPerf = Field(default_factory=CampaignPerf)   # MCP product_report(7d)
     placements: dict[str, dict] = Field(default_factory=dict)     # MCP placement_report (懒加载)
     placement_data_available: bool = False   # 懒加载前为空
@@ -73,6 +74,9 @@ class CampaignUnit(BaseModel):
     # 组合分类(AI 自造 4 类逻辑分类,非亚马逊后台 Portfolio):
     #   精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组；空串=未分类
     portfolio: str = ""
+    # ad_campaign_list 返回的当前真实广告组合名称；用于尊重运营手动挪组。
+    current_portfolio_name: str = ""
+    current_group_type: str = ""          # 由 current_portfolio_name 经公共 helper 解析；UNKNOWN=未识别
     # 元数据
     source: str = "mcp"
     flags: list[str] = Field(default_factory=list)
@@ -117,6 +121,11 @@ class CampaignStrategyContext(BaseModel):
     inventory_days: float | None = None          # ← 计算: qty / avg_daily_sales
     avg_daily_sales_30d: float | None = None
     target_acos: int | None = None
+    # ── ACOS 约束预计算（15号§4 + 03号§7，build_campaign_strategy_context 后立即填充）──
+    effective_acos_tolerance: float | None = None   # 有效容忍上限（百分点），不是倍率
+    tolerance_components: dict[str, float] = Field(default_factory=dict)  # 每个加/减项明细
+    target_cpa: float | None = None                 # 目标 CPA = 平均订单金额 × target_acos
+    avg_order_value: float | None = None            # 平均订单金额（7日 sales/orders）；无订单时 None
     daily_budget: float | None = None            # 目标/当前每日预算基准：long_term daily_budget_override → asin_data.daily_budget → 兜底
     daily_budget_source: str = ""                # "override" | "asin_data" | "fallback_spend_x1.15" | "" (全失败)
     warning_flags: list[str] = Field(default_factory=list)
@@ -155,6 +164,8 @@ class CampaignAdjustmentItem(BaseModel):
     review_level: str = "MANUAL_REVIEW"
     # 组合分类(AI 自造 4 类,非后台 Portfolio): 精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组
     ai_portfolio_class: str = ""
+    # 代码规则判定的活动级目标组 ERP 码；空值表示本轮不执行挪组。
+    target_campaign_group_type: str = ""
     # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
     portfolio_or_group: str = ""
     # 逐活动 7 天指标快照(代码回填自 CampaignUnit.perf_7d)→ 落 card.perf_json;

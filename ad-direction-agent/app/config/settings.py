@@ -173,6 +173,8 @@ class Settings(BaseSettings):
 
     # 淘汰活动复评（重启）— KB 21 §7，确定性规则引擎，无 LLM
     campaign_restart_enabled: bool = True             # 总开关
+    # §0.1 精准组合升降级：开关开启后精准规则生成 target_group_type
+    exact_transition_enabled: bool = True
     campaign_restart_review_days: int = 14            # 入池 ≥N 天才复评 (KB §7)
     campaign_restart_budget: float = 3.0              # 恢复后日预算 (KB §7 情况一/二)
     campaign_restart_bid_floor: float = 0.20          # 情况一 Bid 维持值 / 情况二下限

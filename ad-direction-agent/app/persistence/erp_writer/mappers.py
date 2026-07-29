@@ -423,7 +423,11 @@ def canonicalize_payload(
         evidence_text = "\n".join(str(x) for x in evidence_list if x)
         description = primary_adj.get("reason")
         portfolio_label = (primary_adj.get("ai_portfolio_class") or primary_adj.get("portfolio") or "").strip()
-        campaign_group_type = map_campaign_group_type(portfolio_label)
+        target_campaign_group_type = map_campaign_group_type(
+            (primary_adj.get("target_campaign_group_type") or "").strip()
+        )
+        # 卡片展示代码判定出的目标组；没有挪组时仍展示本轮归组，但不据此创建 pending。
+        campaign_group_type = target_campaign_group_type or map_campaign_group_type(portfolio_label)
 
         keyword_pending: list[KeywordPendingCanonical] = []
         campaign_pending: list[CampaignPendingCanonical] = []
@@ -491,6 +495,19 @@ def canonicalize_payload(
                     content_json=json.dumps(legacy_content, ensure_ascii=False),
                 )
             )
+
+        # 目标组是活动级动作：即使本轮不改预算/状态，也必须生成一条
+        # campaign_pending，供确认、执行和状态回写复用既有活动级链路。
+        if target_campaign_group_type:
+            if not campaign_pending:
+                campaign_pending.append(CampaignPendingCanonical(
+                    old_state=None,
+                    new_state=None,
+                    old_budget=None,
+                    new_budget=None,
+                ))
+            for pending in campaign_pending:
+                pending.target_campaign_group_type = target_campaign_group_type
 
         cards.append(
             SuggestCardCanonical(

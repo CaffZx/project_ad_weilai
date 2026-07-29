@@ -14,19 +14,171 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from app.api import decision as decision_api
-from app.models.campaign import CampaignPerf, CampaignUnit
+from app.models.campaign import CampaignAdjustmentItem, CampaignPerf, CampaignUnit
 from app.persistence.erp_writer.advert_exec_mapper import (
     parse_batch_update_terminal,
 )
 from app.workflow.steps import advert_execution as AE
+from app.workflow.steps import campaign as campaign_step
 from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
     classify,
+    find_portfolio_matches,
+    find_portfolio_group_matches,
+    target_group_code_if_current_mismatch,
 )
 from app.workflow.steps.portfolio_execution import _match_portfolio, _pf_field
+
+
+def test_find_portfolio_matches_keeps_mcp_order_for_special_selection_policy():
+    portfolios = [
+        {"portfolioId": "pf-second", "portfolioName": "低价捡漏组-第二"},
+        {"portfolioId": "pf-first", "portfolioName": "低价捡漏组-第一"},
+        {"portfolioId": "pf-other", "portfolioName": "精准主力组"},
+    ]
+
+    matches = find_portfolio_matches("低价捡漏组", portfolios)
+
+    assert [item["portfolioId"] for item in matches] == ["pf-second", "pf-first"]
+
+
+def test_find_portfolio_group_matches_keeps_existing_budget_group_priority():
+    """组合预算归类沿用旧顺序：主力 → 测试 → 广泛 → 低价。"""
+    assert find_portfolio_group_matches("US-精准测试组-自动广泛组") == [
+        PORTFOLIO_TEST,
+        PORTFOLIO_BROAD,
+    ]
+    assert find_portfolio_group_matches("US-未知组合") == []
+
+
+def test_target_group_code_only_when_current_portfolio_is_confirmed_mismatch():
+    assert target_group_code_if_current_mismatch(
+        "US-自动广泛组", PORTFOLIO_BROAD,
+    ) == ""
+    assert target_group_code_if_current_mismatch(
+        "US-精准测试组", PORTFOLIO_BROAD,
+    ) == "auto_broad_group"
+    assert target_group_code_if_current_mismatch("", PORTFOLIO_BROAD) == ""
+
+
+def test_reconcile_portfolio_targets_only_moves_broad_campaigns_outside_broad_group():
+    existing_broad = CampaignAdjustmentItem(
+        campaign_name="broad-existing",
+        campaign_key="broad-existing-key",
+        campaign_id="broad-existing-id",
+        match_type="BROAD",
+        action="adjust_bid",
+        current_bid=0.8,
+        proposed_bid=0.7,
+    )
+    existing_exact = CampaignAdjustmentItem(
+        campaign_name="exact-legacy",
+        campaign_key="exact-legacy-key",
+        campaign_id="exact-legacy-id",
+        match_type="EXACT",
+        action="keep",
+        target_campaign_group_type="exact_testing_group",
+    )
+    units = [
+        CampaignUnit(
+            campaign_name="broad-existing", campaign_key="broad-existing-key",
+            campaign_id="broad-existing-id", child_asin="B0CHILD",
+            keyword_text="broad kw", match_type="BROAD",
+            current_portfolio_name="US-精准测试组",
+        ),
+        CampaignUnit(
+            campaign_name="broad-already", campaign_key="broad-already-key",
+            campaign_id="broad-already-id", child_asin="B0CHILD",
+            keyword_text="already kw", match_type="PHRASE",
+            current_portfolio_name="US-自动广泛组",
+        ),
+        CampaignUnit(
+            campaign_name="exact-legacy", campaign_key="exact-legacy-key",
+            campaign_id="exact-legacy-id", child_asin="B0CHILD",
+            keyword_text="exact kw", match_type="EXACT",
+            current_portfolio_name="US-精准主力组",
+        ),
+    ]
+    excluded = [{
+        "campaign_name": "broad-multi",
+        "campaign_id": "broad-multi-id",
+        "child_asin": "B0CHILD",
+        "keyword_text": "多关键词活动",
+        "match_type": "AUTO",
+        "current_portfolio_name": "US-精准主力组",
+    }]
+
+    items = [existing_broad, existing_exact]
+    campaign_step._reconcile_portfolio_targets(items, units, excluded)
+
+    assert existing_broad.target_campaign_group_type == "auto_broad_group"
+    assert existing_broad.proposed_bid == 0.7
+    assert existing_exact.target_campaign_group_type == ""
+    assert existing_exact.ai_portfolio_class == PORTFOLIO_MAIN
+    added = [item for item in items if item.campaign_id == "broad-multi-id"]
+    assert len(added) == 1
+    assert added[0].action == "keep"
+    assert added[0].target_campaign_group_type == "auto_broad_group"
+    assert not any(item.campaign_id == "broad-already-id" for item in items)
+
+
+def test_reconcile_portfolio_targets_does_not_use_clearance_permission_as_move_rule():
+    """控制清货是护栏权限，不能单独授权精准活动迁入低价组。"""
+    exact_to_eliminate = CampaignAdjustmentItem(
+        campaign_name="exact-clearance",
+        campaign_key="exact-clearance-key",
+        campaign_id="exact-clearance-id",
+        match_type="EXACT",
+        action="eliminate_to_low_bid_pool",
+    )
+    exact_already_low_bid = CampaignAdjustmentItem(
+        campaign_name="exact-already-low-bid",
+        campaign_key="exact-already-low-bid-key",
+        campaign_id="exact-already-low-bid-id",
+        match_type="EXACT",
+        action="eliminate_to_low_bid_pool",
+    )
+    broad_to_eliminate = CampaignAdjustmentItem(
+        campaign_name="broad-clearance",
+        campaign_key="broad-clearance-key",
+        campaign_id="broad-clearance-id",
+        match_type="BROAD",
+        action="eliminate_to_low_bid_pool",
+    )
+    units = [
+        CampaignUnit(
+            campaign_name="exact-clearance", campaign_key="exact-clearance-key",
+            campaign_id="exact-clearance-id", child_asin="B0CHILD",
+            keyword_text="exact kw", match_type="EXACT",
+            current_portfolio_name="US-精准主力组",
+        ),
+        CampaignUnit(
+            campaign_name="exact-already-low-bid", campaign_key="exact-already-low-bid-key",
+            campaign_id="exact-already-low-bid-id", child_asin="B0CHILD",
+            keyword_text="exact low", match_type="EXACT",
+            current_portfolio_name="US-低价捡漏组",
+        ),
+        CampaignUnit(
+            campaign_name="broad-clearance", campaign_key="broad-clearance-key",
+            campaign_id="broad-clearance-id", child_asin="B0CHILD",
+            keyword_text="broad kw", match_type="BROAD",
+            current_portfolio_name="US-精准主力组",
+        ),
+    ]
+
+    campaign_step._reconcile_portfolio_targets(
+        [exact_to_eliminate, exact_already_low_bid, broad_to_eliminate],
+        units,
+        [],
+    )
+
+    assert exact_to_eliminate.target_campaign_group_type == ""
+    assert exact_already_low_bid.target_campaign_group_type == ""
+    # 广泛/词组/自动始终归自动广泛组，不能因控制清货进入低价组。
+    assert broad_to_eliminate.target_campaign_group_type == "auto_broad_group"
 
 
 def test_parse_batch_update_terminal_maps_campaign_results():
@@ -814,6 +966,15 @@ def test_build_immediate_exit_run_uses_existing_card_and_pending_models():
     by_campaign = {card.campaign_id: card for card in run.cards}
     assert by_campaign["c-1"].suggest_category == "ELIMINATE"
     assert by_campaign["c-1"].campaign_group_type == "low_bid_retention_group"
+    assert by_campaign["c-1"].campaign_pending[0].target_campaign_group_type == (
+        "low_bid_retention_group"
+    )
+    assert by_campaign["c-2"].campaign_pending[0].target_campaign_group_type == (
+        "low_bid_retention_group"
+    )
+    assert by_campaign["c-3"].campaign_pending[0].target_campaign_group_type == (
+        "low_bid_retention_group"
+    )
     assert by_campaign["c-2"].suggest_category == "ADJUST"
     assert by_campaign["c-2"].keyword == "多关键词活动（2词）"
     assert by_campaign["c-3"].keyword_match_type == "PRODUCT_TARGETING"
@@ -924,10 +1085,10 @@ def test_classify_broad_low_bid_has_orders_not_eliminate():
     assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_BROAD
 
 
-def test_classify_no_orders_and_low_budget_eliminate():
-    """无出单 + budget=$1 → 归淘汰。"""
+def test_classify_broad_low_budget_no_orders_stays_broad():
+    """广泛活动即使零订单且预算触底，也只能归自动广泛组。"""
     cu = _cu("BROAD", bid=0.50, budget=1.00, orders=0)
-    assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_ELIMINATE
+    assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_BROAD
 
 
 def test_classify_core_broad_low_budget_no_orders_stays_broad():
@@ -941,17 +1102,24 @@ def test_classify_core_broad_low_budget_no_orders_stays_broad():
     ) == PORTFOLIO_BROAD
 
 
-def test_classify_no_orders_and_low_bid_eliminate():
-    """无出单 + bid=$0.10 → 归淘汰。"""
-    cu = _cu("BROAD", bid=0.10, budget=10.00, orders=0)
-    assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_ELIMINATE
+def test_classify_phrase_low_bid_no_orders_stays_broad():
+    """词组活动即使零订单且 Bid 触底，也只能归自动广泛组。"""
+    cu = _cu("PHRASE", bid=0.10, budget=10.00, orders=0)
+    assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_BROAD
 
 
-def test_classify_llm_eliminate_overrides_orders():
-    """LLM 判淘汰 → 无论出单多少都归淘汰。"""
+def test_classify_broad_ignores_llm_elimination_action():
+    """旧 LLM 的淘汰动作不得再决定广泛活动的目标组。"""
     cu = _cu("BROAD", bid=0.50, budget=10.00, orders=100)
     assert classify(cu, llm_action="eliminate_to_low_bid_pool",
-                    perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_ELIMINATE
+                    perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_BROAD
+
+
+def test_classify_exact_ignores_llm_elimination_action():
+    """精准活动的淘汰/升降组交给新规则引擎，旧 LLM 动作不得消费。"""
+    cu = _cu("EXACT", bid=1.00, budget=10.00, orders=10)
+    assert classify(cu, llm_action="eliminate_to_low_bid_pool",
+                    perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_MAIN
 
 
 def test_classify_exact_high_budget_main():
@@ -964,11 +1132,10 @@ def test_classify_exact_low_budget_test():
     assert classify(cu, perf_7d_orders=cu.perf_7d.orders) == PORTFOLIO_TEST
 
 
-def test_classify_default_perf_7d_orders():
-    """不传 perf_7d_orders 时默认 0，行为与改前兼容。"""
+def test_classify_broad_does_not_depend_on_perf_7d_orders():
+    """广泛活动归组不再依赖旧的低价池订单判定。"""
     cu = _cu("BROAD", bid=0.50, budget=1.00, orders=5)
-    # 不传 → orders=0 → 归淘汰（与旧行为一致）
-    assert classify(cu) == PORTFOLIO_ELIMINATE
+    assert classify(cu) == PORTFOLIO_BROAD
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1151,7 +1318,7 @@ def _pending_with_group(group_code: str) -> dict:
         "campaign_pending": [{
             "id": "cp-1", "suggest_card_id": "c1",
             "campaign_id": "cid-1", "campaign_name": "精准-测试活动",
-            "new_budget": 5.0,
+            "new_budget": 5.0, "target_campaign_group_type": group_code,
         }],
         "keyword_pending": [],
         "placement_pending": [],
@@ -1179,6 +1346,7 @@ def _immediate_exit_pending() -> dict:
             "campaign_id": "cid-1",
             "campaign_name": "精准活动",
             "new_budget": 1.0,
+            "target_campaign_group_type": "low_bid_retention_group",
         }],
         "keyword_pending": [{
             "id": "kp-1",

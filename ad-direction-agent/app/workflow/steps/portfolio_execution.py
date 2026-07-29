@@ -22,6 +22,7 @@ from app.persistence.erp_writer.advert_exec_mapper import (
 )
 from app.persistence.erp_writer.repository import _get_repository
 from app.persistence.erp_writer.text_utils import json_dumps
+from app.workflow.steps.campaign_portfolio import match_unique_portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -57,27 +58,8 @@ def _normalize_portfolio_list(res: Any) -> list[dict]:
 
 
 def _match_portfolio(group_name: str, portfolios: list[dict]) -> tuple[dict | None, int]:
-    """组合分组名(精准主力组…) → (MCP portfolio, 匹配数)。仅子串包含匹配，必须唯一。
-
-    - 恰好 1 个 → (portfolio, 1)
-    - 0 个     → (None, 0)
-    - ≥2 个   → (None, match_count)  — ambiguous
-    """
-    g = (group_name or "").strip()
-    matches: list[dict] = []
-    for pf in portfolios:
-        nm = str(_pf_field(pf, "portfolioName", "name", "portfolio_name") or "").strip()
-        if g and nm and g in nm:
-            matches.append(pf)
-    if len(matches) == 1:
-        return matches[0], 1
-    if len(matches) >= 2:
-        logger.warning(
-            "portfolio 子串匹配不唯一 [%s]: 命中 %d 个 (%s)，跳过",
-            g, len(matches),
-            ", ".join(str(_pf_field(m, "portfolioName", "name")) for m in matches[:5]),
-        )
-    return None, len(matches)
+    """兼容旧导入；实际匹配逻辑统一由 campaign_portfolio 维护。"""
+    return match_unique_portfolio(group_name, portfolios)
 
 
 async def execute_portfolio_budget(

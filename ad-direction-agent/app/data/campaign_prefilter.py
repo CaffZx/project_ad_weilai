@@ -3,7 +3,8 @@
 硬过滤规则（排除不进 LLM）:
   - 否定词 (match_type 含 negative) — 静默丢弃
   - 多关键词活动 (本期暂不处理，后续迭代启用 suggest_split)
-  - 已入淘汰池 (Bid ≤ $0.20 且 Budget ≤ $1.00) — 不进 LLM
+  - 已入淘汰池 (Bid ≤ $0.20 且 Budget ≤ $1.00) 的精准活动 — 不进 LLM
+    广泛/词组/自动活动仍进入广泛流，由代码收拢至自动广泛组。
 """
 
 from __future__ import annotations
@@ -109,6 +110,9 @@ def filter_eliminated_pool(
     pool_units: list[CampaignUnit] = []
 
     for cu in units:
+        if (cu.match_type or "").upper() in {"BROAD", "PHRASE", "AUTO"}:
+            surviving.append(cu)
+            continue
         if is_strictly_in_low_bid_pool(cu.current_bid, cu.current_budget):
             pool_units.append(cu)
             skipped.append({

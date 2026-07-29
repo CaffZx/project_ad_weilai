@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from app.config.settings import settings
+from app.core.acos_constraints import compute_acos_tolerance
 from app.core.core_keyword_policy import normalize_core_keyword
 from app.data.campaign_fetcher import CampaignFetcher
 from app.data.campaign_prefilter import filter_eliminated_pool
@@ -24,9 +25,11 @@ from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.steps.campaign_portfolio import (
     LOW_BID_MAX,
     LOW_BUDGET_MAX,
+    PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
-    classify as _classify_portfolio,
+    find_portfolio_group_matches,
     is_strictly_in_low_bid_pool,
+    target_group_code_if_current_mismatch,
 )
 from app.workflow.steps.campaign_restart import analyze_eliminated_restart
 from app.workflow.steps.campaign_new import (
@@ -573,11 +576,14 @@ async def _analyze_campaigns_impl(
     broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
     _t(f"split: exact={len(exact_list)} broad={len(broad_list)}")
 
-    # 4.1 组合预分类 (主推/广泛自动/测试新增,无 llm_action 时淘汰组用"已在池中"判定)
-    #     分析前先填,分析后再用 llm_action 在 adjustments 上补一遍。
+    # 4.1 组合预分类只反映当前真实归属；不再用旧 $5 规则推导精准活动的迁移目标。
     if settings.campaign_portfolio_enabled:
         for cu in llm_campaigns:
-            cu.portfolio = _classify_portfolio(cu, perf_7d_orders=cu.perf_7d.orders)
+            current_groups = find_portfolio_group_matches(cu.current_portfolio_name)
+            if (cu.match_type or "").upper() in {"BROAD", "PHRASE", "AUTO"}:
+                cu.portfolio = PORTFOLIO_BROAD
+            else:
+                cu.portfolio = current_groups[0] if current_groups else ""
         # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
         for s in skipped_eliminated:
             s["portfolio"] = PORTFOLIO_ELIMINATE
@@ -744,6 +750,15 @@ async def _analyze_campaigns_impl(
         cid = (item.campaign_id or "").strip()
         item.days_since_reactivation = recent_reactivated.get(cid, -1)
 
+    # 6d. 精准确定性规则（32号）：覆盖 EXACT 单关键词活动的迁组/诊断结果
+    #     在 LLM 结果合并后、护栏前执行；护栏不重算分组。
+    #     §0.1 冻结门禁：未验收前不生成 target_group_type；日快照仍正常积累。
+    if getattr(settings, "exact_transition_enabled", False):
+        _apply_exact_transition_rules(
+            adjustments, unit_by_key, strategy_context,
+            campaign_data, core_keyword_set,
+        )
+
     # 7. 护栏 + R3/R4 重试编排
     #    任意护栏修正都会按 campaign_key 带真实告警回灌给 LLM；R4 后不再 R5，由最终护栏兜底。
     retry_rounds = ((3, "R3"), (4, "R4"))
@@ -877,23 +892,15 @@ async def _analyze_campaigns_impl(
             _guardrail_snapshot(adjustments, set(_build_guardrail_alerts(guardrail_pass))),
         )
 
-    # 7b. 终态组合分类（KB23 §3.1B/§3.5/§3.7：升降组按【本轮建议预算 proposed】跨 $5 阈值判）。
-    # 必须在预算冲突裁决后（proposed 已定稿）、gather 之前（回算 _group_of 读 ai_portfolio_class）。
-    # 同一 ai_portfolio_class 供显示气泡 / ERP campaign_group_type / 预算回算共用，不解耦。
+    # 7b. 组合目标收拢：广泛/词组/自动固定进入自动广泛组；精准活动暂不走旧 $5 迁移。
+    # 必须在护栏后、落库前：已有调整项保留其预算/Bid，仅补活动级 target；
+    # 未被 LLM 返回的广泛活动则补一条纯挪组项。执行侧只消费 pending 的 target 字段。
     if settings.campaign_portfolio_enabled:
-        for item in adjustments:
-            cu = unit_by_key.get(item.campaign_key)
-            if cu is None:
-                continue
-            eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
-            item.ai_portfolio_class = _classify_portfolio(
-                cu,
-                llm_action=item.action,
-                effective_budget=eff,
-                perf_7d_orders=cu.perf_7d.orders,
-                is_core=item.is_core,
-            )
-            cu.portfolio = item.ai_portfolio_class
+        _reconcile_portfolio_targets(
+            adjustments,
+            campaign_data.campaigns,
+            campaign_data.excluded or [],
+        )
 
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
     #   位置关键：必须在 _resolve_budget_conflicts(§7) 之后——否则"低价捡漏强制淘汰兜底"会因
@@ -1105,6 +1112,9 @@ async def run_campaign_analysis(
             rec = TargetAcosRecommender().recommend(asin_data, ad_purposes)
             strat_ctx.target_acos = int(rec.recommended_target)
 
+    # ── 15号§4 有效容忍上限 + 03号§7 目标 CPA 预计算 ──
+    fill_acos_constraints(strat_ctx, asin_data)
+
     fetcher = CampaignFetcher()
     temp = temperature if temperature is not None else settings.campaign_llm_temperature
 
@@ -1138,6 +1148,152 @@ _AD_DIRECTION_ID_ZH = {
 
 def _zh_ad_direction(d) -> str:
     return _AD_DIRECTION_ID_ZH.get(str(d).strip().lower(), str(d))
+
+
+def _apply_exact_transition_rules(
+    adjustments: list[CampaignAdjustmentItem],
+    unit_by_key: dict[str, CampaignUnit],
+    strat_ctx: CampaignStrategyContext,
+    campaign_data: CampaignData,
+    core_keyword_set: set[str],
+) -> None:
+    """精准确定性规则（32号）：对 EXACT 单关键词活动覆盖迁组/诊断结果。
+
+    在 LLM 结果合并后、护栏前执行。LLM 的分组结论不消费。
+    """
+    from app.workflow.steps.campaign_exact_transition import evaluate_exact_transition
+
+    if not strat_ctx.effective_acos_tolerance:
+        return
+
+    shop_id = campaign_data.shop_id or 0
+    site_code = campaign_data.site_code or ""
+    parent_asin = campaign_data.parent_asin or ""
+    if not shop_id or not site_code or not parent_asin:
+        return
+
+    repo = None
+    try:
+        from app.persistence.erp_writer.repository import _get_repository
+        repo = _get_repository()
+    except Exception:
+        return
+
+    for item in adjustments:
+        cu = unit_by_key.get(item.campaign_key)
+        if not cu:
+            continue
+        # 只处理单关键词 EXACT
+        if cu.match_type != "EXACT" or not cu.keyword_id:
+            continue
+        campaign_id = cu.campaign_id or item.campaign_id or ""
+        if not campaign_id:
+            continue
+
+        try:
+            metric_daily = repo.list_campaign_metric_daily(
+                shop_id=shop_id, site_code=site_code,
+                parent_asin=parent_asin, campaign_id=campaign_id,
+                limit=21,
+            )
+            lifecycle = repo.get_exact_lifecycle(
+                shop_id=shop_id, site_code=site_code, campaign_id=campaign_id,
+            )
+            is_core = (cu.keyword_text or "").strip().lower() in {
+                kw.strip().lower() for kw in core_keyword_set
+            }
+
+            decision = evaluate_exact_transition(
+                current_group_type=cu.current_group_type,
+                match_type=cu.match_type,
+                keyword_id=cu.keyword_id,
+                metric_daily=metric_daily,
+                lifecycle=lifecycle,
+                target_acos=float(strat_ctx.target_acos or 0),
+                effective_acos_tolerance=strat_ctx.effective_acos_tolerance,
+                current_bid=cu.current_bid,
+                is_core_keyword=is_core,
+            )
+            if not decision.triggered:
+                continue
+
+            # 覆写 adjustment
+            item.target_campaign_group_type = decision.target_group_type
+            item.action = decision.action
+            if decision.proposed_budget is not None:
+                item.proposed_budget = decision.proposed_budget
+            if decision.proposed_bid is not None:
+                item.proposed_bid = decision.proposed_bid
+            if decision.proposed_placement:
+                item.placement_adjustments = [decision.proposed_placement]
+            item.review_level = decision.review_level
+            item.triggered_rule = f"EXACT_TRANSITION:{decision.transition_type}"
+            item.reason = "; ".join(decision.evidence)
+            item.evidence = decision.evidence
+
+            logger.info(
+                "精准规则 [%s] %s: %s → %s (%s)",
+                parent_asin, cu.keyword_text, cu.current_group_type,
+                decision.target_group_type, decision.transition_type,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "精准规则异常 [%s/%s]: %s", campaign_id, cu.keyword_text, e,
+                exc_info=True,
+            )
+
+
+def fill_acos_constraints(
+    strat_ctx: CampaignStrategyContext, asin_data: ASINData,
+) -> None:
+    """target_acos 确定后立即调用：填充 effective_acos_tolerance / target_cpa / components。
+
+    两项修正在此处完成，不委托给 compute_acos_tolerance：
+    1. 测试期超 60 天 → 阶段加值归零（15号§4.2 C-17）
+    2. PRC-005：毛利率<25% 且退货率≥25% → 女装修正 −5pp
+    """
+    if strat_ctx.target_acos is None:
+        return
+
+    # ── avg_order_value ──
+    ad = getattr(asin_data, "ad_data", None)
+    avg_order_value: float | None = None
+    if ad:
+        sales = getattr(ad, "sales", None)
+        orders = getattr(ad, "orders", None)
+        if sales is not None and orders is not None and orders > 0:
+            avg_order_value = round(sales / orders, 2)
+
+    # ── 15号§4.2 C-17：测试期超 60 天 → 阶段加值归零 ──
+    product_stage = strat_ctx.product_stage
+    days_since_launch = getattr(asin_data, "days_since_launch", None)
+    if product_stage == "测试期" and days_since_launch is not None and days_since_launch > 60:
+        product_stage = "维持期"
+
+    # ── 24号 PRC-005：小数比例，margin<0.25 且 refund_rate>=0.25 ──
+    margin = getattr(asin_data, "margin", None)
+    refund_rate = getattr(asin_data, "refund_rate", None)
+    is_women_clothing_refund = (
+        margin is not None
+        and refund_rate is not None
+        and margin < 0.25
+        and refund_rate >= 0.25
+    )
+
+    result = compute_acos_tolerance(
+        target_acos=float(strat_ctx.target_acos),
+        product_stage=product_stage,
+        operating_mode=strat_ctx.operating_mode,
+        ad_purposes=strat_ctx.ad_purposes,
+        season_stage=strat_ctx.season_stage,
+        avg_order_value=avg_order_value,
+        is_promotion=False,  # TODO(promotion-context): 促销信号暂不可用
+        is_women_clothing_refund=is_women_clothing_refund,
+    )
+    strat_ctx.effective_acos_tolerance = result.effective_tolerance
+    strat_ctx.tolerance_components = result.components
+    strat_ctx.target_cpa = result.target_cpa
+    strat_ctx.avg_order_value = result.avg_order_value
 
 
 def build_campaign_strategy_context(
@@ -1932,10 +2088,144 @@ def _backfill_campaign_adjustment_context(
         item.natural_rank = cu.natural_rank
         item.near_natural_rank = cu.near_natural_rank
         item.rank_change = cu.rank_change
+        item.portfolio_or_group = cu.current_portfolio_name
         if cu.match_type == "EXACT":
             line = rank_evidence_line(cu)
             if line and line not in item.evidence:
                 item.evidence.append(line)
+
+
+_BROAD_PORTFOLIO_MATCH_TYPES = frozenset({"BROAD", "PHRASE", "AUTO"})
+
+
+def _reconcile_portfolio_targets(
+    adjustments: list[CampaignAdjustmentItem],
+    units: list[CampaignUnit],
+    excluded: list[dict],
+) -> None:
+    """在落库前生成唯一可信的活动级挪组 target。
+
+    广泛/词组/自动不依赖 LLM 输出：当前组合确认不属于自动广泛组才写 target。
+    精准活动仅消费 Rule 32 等明确分组规则的结果；均须确认当前组合与目标组
+    不一致才写 target。经营模式只能影响前序分析与护栏，不参与此处迁组授权。
+    """
+    units_by_id = {
+        str(unit.campaign_id or "").strip(): unit
+        for unit in units
+        if str(unit.campaign_id or "").strip()
+    }
+    units_by_key = {unit.campaign_key: unit for unit in units if unit.campaign_key}
+
+    adjusted_campaign_ids: set[str] = set()
+    for item in adjustments:
+        campaign_id = str(item.campaign_id or "").strip()
+        unit = units_by_id.get(campaign_id) or units_by_key.get(item.campaign_key)
+        if unit is None:
+            # LLM / 旧分类都不能直接授权挪组；缺少当前真实组合时也不写 target。
+            item.target_campaign_group_type = ""
+            continue
+
+        current_groups = find_portfolio_group_matches(unit.current_portfolio_name)
+        match_type = (unit.match_type or item.match_type or "").upper()
+        if match_type in _BROAD_PORTFOLIO_MATCH_TYPES:
+            item.ai_portfolio_class = PORTFOLIO_BROAD
+            item.target_campaign_group_type = target_group_code_if_current_mismatch(
+                unit.current_portfolio_name,
+                PORTFOLIO_BROAD,
+            )
+            unit.portfolio = PORTFOLIO_BROAD
+        else:
+            # 精准旧 $5 分类及 LLM 遗留字段都不能直接授权挪组；
+            # 仅明确分组规则的结果才可写 pending target。
+            is_exact_transition = str(item.triggered_rule or "").startswith(
+                "EXACT_TRANSITION:"
+            )
+            if match_type == "EXACT" and is_exact_transition:
+                item.target_campaign_group_type = target_group_code_if_current_mismatch(
+                    unit.current_portfolio_name,
+                    item.target_campaign_group_type,
+                )
+            else:
+                item.target_campaign_group_type = ""
+            # 当前真实归属仍可供展示/预算回算读取。
+            item.ai_portfolio_class = current_groups[0] if current_groups else ""
+            unit.portfolio = item.ai_portfolio_class
+
+        if campaign_id:
+            adjusted_campaign_ids.add(campaign_id)
+
+    # 广泛活动可能没有 LLM 返回（包括多关键词预过滤活动）；每个 campaign_id 最多补一条纯挪组项。
+    candidates: list[tuple[str, str, str, str, str, str, str, float | None, float | None, dict]] = []
+    seen_candidates: set[str] = set()
+    for unit in units:
+        campaign_id = str(unit.campaign_id or "").strip()
+        if not campaign_id or campaign_id in seen_candidates:
+            continue
+        seen_candidates.add(campaign_id)
+        if (unit.match_type or "").upper() not in _BROAD_PORTFOLIO_MATCH_TYPES:
+            continue
+        candidates.append((
+            campaign_id, unit.campaign_name, unit.campaign_key, unit.child_asin,
+            unit.keyword_text, unit.match_type, unit.current_portfolio_name,
+            unit.current_budget, unit.current_bid,
+            unit.perf_7d.model_dump() if unit.perf_7d else {},
+        ))
+    for row in excluded:
+        campaign_id = str(row.get("campaign_id") or "").strip()
+        if not campaign_id or campaign_id in seen_candidates:
+            continue
+        seen_candidates.add(campaign_id)
+        match_type = str(row.get("match_type") or "").upper()
+        if match_type not in _BROAD_PORTFOLIO_MATCH_TYPES:
+            continue
+        candidates.append((
+            campaign_id,
+            str(row.get("campaign_name") or campaign_id),
+            f"portfolio-reconcile:{campaign_id}",
+            str(row.get("child_asin") or ""),
+            str(row.get("keyword_text") or ""),
+            match_type,
+            str(row.get("current_portfolio_name") or ""),
+            None,
+            None,
+            {},
+        ))
+
+    added = 0
+    for (
+        campaign_id, campaign_name, campaign_key, child_asin, keyword_text,
+        match_type, current_portfolio_name, current_budget, current_bid, perf_7d,
+    ) in candidates:
+        if campaign_id in adjusted_campaign_ids:
+            continue
+        target = target_group_code_if_current_mismatch(
+            current_portfolio_name,
+            PORTFOLIO_BROAD,
+        )
+        if not target:
+            continue
+        adjustments.append(CampaignAdjustmentItem(
+            campaign_name=campaign_name,
+            campaign_key=campaign_key,
+            campaign_id=campaign_id,
+            child_asin=child_asin,
+            keyword_text=keyword_text,
+            match_type=match_type,
+            action="keep",
+            triggered_rule="BROAD_PORTFOLIO_RECONCILIATION",
+            reason="当前广告组合不属于自动广泛组，按分组规则迁入自动广泛组",
+            evidence=[f"当前广告组合：{current_portfolio_name}"],
+            current_budget=current_budget,
+            current_bid=current_bid,
+            ai_portfolio_class=PORTFOLIO_BROAD,
+            target_campaign_group_type=target,
+            portfolio_or_group=current_portfolio_name,
+            perf_7d=perf_7d,
+        ))
+        added += 1
+
+    if added:
+        logger.info("Campaign portfolio reconciliation: added %d broad move-only items", added)
 
 
 # ── 懒加载 enrichment ────────────────────────────────────────────────────────

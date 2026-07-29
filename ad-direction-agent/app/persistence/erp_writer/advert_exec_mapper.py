@@ -125,13 +125,19 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
     # 按 campaign_id 聚合成 campaignVo；同一 parent 下汇成一个 paramsVo。
     camp_vo: dict[str, dict] = {}
 
-    def _ensure_vo(campaign_id: str, campaign_name: str, card: dict | None) -> dict:
+    def _ensure_vo(
+        campaign_id: str,
+        target_group_type: str | None = None,
+    ) -> dict:
         vo = camp_vo.get(campaign_id)
         if vo is None:
             vo = {"campaignId": campaign_id}
-            if card and card.get("campaign_group_type"):
-                vo["campaignGroupType"] = card["campaign_group_type"]
+            if target_group_type:
+                vo["campaignGroupType"] = target_group_type
             camp_vo[campaign_id] = vo
+        elif target_group_type:
+            # pending 是已确认、待执行的权威动作；卡片组别只保留展示兼容。
+            vo["campaignGroupType"] = target_group_type
         return vo
 
     for r in camp_rows:
@@ -142,7 +148,11 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
         if not campaign_id:
             plan.warnings.append(f"campaign_pending 缺 campaign_id（card={cid}），跳过")
             continue
-        vo = _ensure_vo(campaign_id, str(r.get("campaign_name") or ""), cards.get(cid))
+        target_group_type = r.get("target_campaign_group_type")
+        vo = _ensure_vo(
+            campaign_id,
+            target_group_type,
+        )
         budget = _num(r.get("new_budget"))
         state = _norm_state(r.get("new_state"))
         if budget is not None:
@@ -154,6 +164,7 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
             "campaign_name": r.get("campaign_name"), "pending_id": r.get("id"),
             "old_budget": _num(r.get("old_budget")), "new_budget": budget,
             "old_state": r.get("old_state"), "new_state": r.get("new_state"),
+            "target_campaign_group_type": target_group_type,
         })
 
     for r in kw_rows:
@@ -164,7 +175,7 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
         if not campaign_id:
             plan.warnings.append(f"keyword_pending 缺 campaign_id（card={cid}），跳过")
             continue
-        vo = _ensure_vo(campaign_id, str(r.get("campaign_name") or ""), cards.get(cid))
+        vo = _ensure_vo(campaign_id)
         bid = _num(r.get("new_bid"))
         kstate = _norm_state(r.get("new_state"))
         kw_vo: dict[str, Any] = {"keyword": r.get("keyword_text")}
@@ -193,7 +204,7 @@ def build_exec_plan(pending: dict, *, operator: str, child_asin: str | None = No
         new_pct = _num(r.get("new_percent"))
         if not campaign_id or not field_name or new_pct is None:
             continue
-        vo = _ensure_vo(campaign_id, str(r.get("campaign_name") or ""), cards.get(cid))
+        vo = _ensure_vo(campaign_id)
         vo[field_name] = new_pct
         plan.ops.append({
             "record_kind": "placement", "suggest_card_id": cid, "campaign_id": campaign_id,

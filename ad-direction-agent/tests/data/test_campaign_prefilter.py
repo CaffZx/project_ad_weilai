@@ -83,7 +83,7 @@ def test_empty_list():
 
 # ── 混合列表 ──
 
-def test_mixed_split():
+def test_mixed_split_keeps_broad_low_bid_campaign_out_of_elimination_prefilter():
     units = [
         _unit("elim1", bid=0.20, budget=1.00, campaign_key="e1", child_asin="A1",
               match_type="EXACT", keyword_text="kw1"),
@@ -94,34 +94,28 @@ def test_mixed_split():
     ]
     surviving, skipped, pool = filter_eliminated_pool(units)
 
-    assert len(surviving) == 2
-    assert len(skipped) == 2
-    assert len(pool) == 2
+    assert len(surviving) == 3
+    assert len(skipped) == 1
+    assert len(pool) == 1
 
     assert surviving[0].campaign_name == "keep1"
-    assert surviving[1].campaign_name == "keep2"
+    assert surviving[1].campaign_name == "elim2"
+    assert surviving[2].campaign_name == "keep2"
 
     assert skipped[0]["campaign_name"] == "elim1"
     assert skipped[0]["campaign_key"] == "e1"
     assert skipped[0]["child_asin"] == "A1"
     assert skipped[0]["match_type"] == "EXACT"
     assert skipped[0]["keyword_text"] == "kw1"
-    assert skipped[1]["campaign_name"] == "elim2"
-
     assert pool[0].campaign_name == "elim1"
-    assert pool[1].campaign_name == "elim2"
 
 
 # ── skipped dict 字段完整性 ──
 
-def test_skipped_dict_fields():
+def test_phrase_low_bid_campaign_is_not_prefiltered_as_eliminated():
     units = [_unit("full", bid=0.20, budget=1.00, campaign_key="fk",
                     child_asin="B0XX", match_type="PHRASE", keyword_text="test kw")]
-    _, skipped, _ = filter_eliminated_pool(units)
-    s = skipped[0]
-    assert s["campaign_key"] == "fk"
-    assert s["campaign_name"] == "full"
-    assert s["child_asin"] == "B0XX"
-    assert s["match_type"] == "PHRASE"
-    assert s["keyword_text"] == "test kw"
-    assert "__prefiltered" in s
+    surviving, skipped, pool = filter_eliminated_pool(units)
+    assert surviving == units
+    assert skipped == []
+    assert pool == []

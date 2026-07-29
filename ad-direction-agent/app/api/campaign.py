@@ -31,6 +31,7 @@ from app.persistence.state_factory import get_state_manager
 from app.workflow.steps.campaign import (
     analyze_campaigns,
     build_campaign_strategy_context,
+    fill_acos_constraints,
 )
 from app.api.campaign_viewmodel import from_db_snapshot
 
@@ -402,6 +403,9 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                     asin_data, long_term.get("ad_purposes", []),
                 )
                 strat_ctx.target_acos = int(rec.recommended_target)
+
+        # ── 15号§4 有效容忍上限 + 03号§7 目标 CPA 预计算（与 run_campaign_analysis 同义）──
+        fill_acos_constraints(strat_ctx, asin_data)
 
         effective_temp = float(temp) if temp is not None else settings.campaign_llm_temperature
 

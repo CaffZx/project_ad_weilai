@@ -8,11 +8,10 @@
 # ⚠️ "测试/新增"组是【活动层面】的测试 — 即"新建活动还在跑数据的阶段",
 #    与 ASIN 级产品阶段 (KB 02 ProductStage 的"测试期") 完全无关,不读 product_stage。
 
-# 判定优先级 (命中即止) - 2026-06-04 对齐 KB23 §3.1:
-#   1. 淘汰      — 非核心词且 (LLM action=eliminate_to_low_bid_pool OR 低价捡漏档)
-#   2. 广泛/自动 — match_type ∈ {BROAD, PHRASE, AUTO}
-#   3. 测试/新增 — EXACT AND current_budget < $5 (KB23 精准测试组)
-#   4. 主推      — EXACT AND current_budget ≥ $5 (KB23 精准主力组)
+# 迁移期基础分类只负责按匹配类型给出保底组：
+#   1. 广泛/词组/自动 → 自动广泛组
+#   2. EXACT → 旧预算分界的临时归类，待 32 号确定性规则引擎覆盖
+# 低价捡漏、精准升降组不再由 LLM action 或低价阈值在这里决定。
 
 # 为什么把广泛/自动提前到测试/新增之前?
 #   - 广泛/自动 是按 match_type 的硬归类 (业务上"测词广告"),
@@ -22,18 +21,17 @@
 #
 # 数据来源:
 #   - current_budget : MCP basic_info → Doris 回落 (主推/测试分界 $5)
-#   - current_bid    : MCP ad_campaign_basic_info「关键词BID」(淘汰池判定用)
 #   - match_type     : Doris 上下文
-#   - llm_action     : 本批 LLM 输出 (合并后才有)
 #   注: days_online 不再参与分类 (改前用 14 天判"新建", 现按 KB23 §3.1 纯预算阈值 $5)
-#
-# 依据:
-#   - KB 21 §6   : 淘汰池固定 $1.00 / $0.20
-#   - KB 23 §3.1 : 精准主力组 = EXACT 且预算≥$5; 精准测试组 = EXACT 且预算<$5
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from app.models.campaign import CampaignUnit
+
+logger = logging.getLogger(__name__)
 
 # 组合标签常量 (中文 — 前端直接显示)；归一化映射表，其他文件从此 import 避免漂移。
 # 2026-06-04 改名：主推→精准主力组 / 广泛自动→自动广泛组 / 测试新增→精准测试组 / 淘汰→低价捡漏组
@@ -43,6 +41,15 @@ PORTFOLIO_TEST = "精准测试组"
 PORTFOLIO_ELIMINATE = "低价捡漏组"
 
 ALL_PORTFOLIOS = (PORTFOLIO_MAIN, PORTFOLIO_BROAD, PORTFOLIO_TEST, PORTFOLIO_ELIMINATE)
+
+# 组合预算回算此前的匹配优先级。它不同于 ALL_PORTFOLIOS 的展示/分配顺序，
+# 单独保留以避免同名包含多个组标签时改变既有归类。
+PORTFOLIO_GROUP_MATCH_ORDER = (
+    PORTFOLIO_MAIN,
+    PORTFOLIO_TEST,
+    PORTFOLIO_BROAD,
+    PORTFOLIO_ELIMINATE,
+)
 
 # DB 码 ↔ 中文标签双向映射（归一化唯一来源，campaign_viewmodel / text_utils 从此 import）
 GROUP_CODE_TO_LABEL = {
@@ -64,6 +71,66 @@ _MAIN_BUDGET_MIN = 5.0
 
 # 广泛流匹配类型 (与 campaign.py 分流口径一致)
 _BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
+
+
+def find_portfolio_group_matches(portfolio_name: str) -> list[str]:
+    """按既有组合预算口径，返回名称命中的逻辑组标签及其优先顺序。"""
+    name = (portfolio_name or "").strip()
+    if not name:
+        return []
+    return [group for group in PORTFOLIO_GROUP_MATCH_ORDER if group in name]
+
+
+def find_portfolio_matches(group_name: str, portfolios: list[dict]) -> list[dict]:
+    """按组合名子串匹配，保留 MCP 返回顺序。
+
+    此处是所有广告活动挪组的唯一匹配实现。调用方根据业务口径选择：
+    常规分组迁移要求唯一命中；立即退出保持既有的多命中取第一条。
+    """
+    group = (group_name or "").strip()
+    if not group:
+        return []
+    matches: list[dict] = []
+    for portfolio in portfolios:
+        if not isinstance(portfolio, dict):
+            continue
+        name = str(
+            portfolio.get("portfolioName")
+            or portfolio.get("name")
+            or portfolio.get("portfolio_name")
+            or ""
+        ).strip()
+        if name and group in name:
+            matches.append(portfolio)
+    return matches
+
+
+def match_unique_portfolio(group_name: str, portfolios: list[dict]) -> tuple[dict | None, int]:
+    """普通分组迁移只接受唯一命中，返回 (portfolio, match_count)。"""
+    matches = find_portfolio_matches(group_name, portfolios)
+    if len(matches) == 1:
+        return matches[0], 1
+    if len(matches) > 1:
+        logger.warning(
+            "portfolio 子串匹配不唯一 [%s]: 命中 %d 个，跳过",
+            (group_name or "").strip(),
+            len(matches),
+        )
+    return None, len(matches)
+
+
+def target_group_code_if_current_mismatch(
+    current_portfolio_name: str,
+    target_group: str,
+) -> str:
+    """仅在当前真实组合可识别且与目标组不同时返回目标 ERP 码。"""
+    label = GROUP_CODE_TO_LABEL.get(target_group, target_group)
+    target_code = GROUP_LABEL_TO_CODE.get(label, "")
+    if not target_code or not (current_portfolio_name or "").strip():
+        return ""
+    if find_portfolio_matches(label, [{"portfolioName": current_portfolio_name}]):
+        return ""
+    return target_code
 
 
 def _is_exact_testing(unit: CampaignUnit, effective_budget: float | None = None) -> bool:
@@ -100,20 +167,11 @@ def classify(
                     (对齐 _p3_force_eliminate 语义),有出单的触底活动不归淘汰。
         is_core: 核心词保护标记。核心词不得归低价捡漏组，后续按匹配类型归类。
     """
-    # 1. 淘汰 (非核心词且 LLM 标记 OR (已在淘汰池 AND 无出单))。
-    #    核心词保护优先于淘汰归组；护栏外再设一层终态分类防线。
-    in_pool = _is_in_elimination_pool(unit.current_bid, unit.current_budget)
-    if not is_core and (
-        llm_action == "eliminate_to_low_bid_pool"
-        or (in_pool and perf_7d_orders == 0)
-    ):
-        return PORTFOLIO_ELIMINATE
     mt = (unit.match_type or "").upper()
-    # 2. 广泛 / 自动 (BROAD/PHRASE/AUTO) —— 业务上"测词广告",硬归类
-    #    一个 BROAD 即使刚上线/小预算,本质仍是测词,不算"测试新活动"
+    # 广泛 / 词组 / 自动的目标组唯一为自动广泛组。
     if mt in _BROAD_MATCH_TYPES:
         return PORTFOLIO_BROAD
-    # 3. 精准流: 预算 ≥ $5 入主推, < $5 入测试 (KB23 §3.1;终态按 proposed)
+    # 精准完整规则接入前，旧预算分界仅作迁移期保底。
     if mt == "EXACT":
         return PORTFOLIO_TEST if _is_exact_testing(unit, effective_budget) else PORTFOLIO_MAIN
     # 兜底: 未知 match_type → 归广泛 (与 campaign.py 既有口径一致)

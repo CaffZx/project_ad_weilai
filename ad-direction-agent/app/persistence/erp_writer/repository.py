@@ -1241,9 +1241,10 @@ class ErpDualWriterRepository:
         INSERT INTO t_advert_agent_modify_campaign_pending (
             id, shop_id, parent_asin, parent_seller_sku, decision_id, suggest_card_id, batch_no, site_code,
             campaign_id, campaign_name, old_state, new_state, old_budget, new_budget,
+            target_campaign_group_type,
             submit_user_id, submit_user_name, confirm_status, execute_status, create_time, update_time
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING','PENDING',%s,%s
         )
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
@@ -1252,6 +1253,7 @@ class ErpDualWriterRepository:
             new_state=VALUES(new_state),
             old_budget=VALUES(old_budget),
             new_budget=VALUES(new_budget),
+            target_campaign_group_type=VALUES(target_campaign_group_type),
             submit_user_id=VALUES(submit_user_id),
             submit_user_name=VALUES(submit_user_name),
             update_time=VALUES(update_time)
@@ -1380,6 +1382,7 @@ class ErpDualWriterRepository:
                         c.new_state,
                         c.old_budget,
                         c.new_budget,
+                        c.target_campaign_group_type,
                         op, op,
                         now,
                         now,
@@ -2754,6 +2757,247 @@ class ErpDualWriterRepository:
         finally:
             if conn:
                 conn.close()
+
+    # ── 精准组合升降级：日指标事实 + 生命周期 ──────────────────────────────
+
+    def upsert_campaign_metric_daily(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        parent_asin: str,
+        campaign_id: str,
+        stat_date: str,
+        spend: float,
+        sales: float,
+        orders: int,
+        clicks: int,
+        natural_rank: int | None = None,
+    ) -> bool:
+        """D-1 日指标 UPSERT：同日同行覆盖更新。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_campaign_metric_daily
+                       (shop_id, site_code, parent_asin, campaign_id, stat_date,
+                        spend, sales, orders, clicks, natural_rank)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                        spend=VALUES(spend), sales=VALUES(sales),
+                        orders=VALUES(orders), clicks=VALUES(clicks),
+                        natural_rank=VALUES(natural_rank)""",
+                    (shop_id, site_code, parent_asin, campaign_id, stat_date,
+                     spend, sales, orders, clicks, natural_rank),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            logger.warning("upsert_campaign_metric_daily 失败 [%s/%s]", campaign_id, stat_date, exc_info=True)
+            return False
+        finally:
+            conn.close()
+
+    def list_campaign_metric_daily(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        parent_asin: str,
+        campaign_id: str,
+        limit: int = 21,
+    ) -> list[dict]:
+        """按 campaign 查最近 N 个自然日的指标快照（含 NULL 行）。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT stat_date, spend, sales, orders, clicks, natural_rank
+                       FROM t_advert_agent_campaign_metric_daily
+                       WHERE shop_id=%s AND site_code=%s
+                         AND parent_asin=%s AND campaign_id=%s
+                       ORDER BY stat_date DESC LIMIT %s""",
+                    (shop_id, site_code, parent_asin, campaign_id, limit),
+                )
+                return cur.fetchall() or []
+        finally:
+            conn.close()
+
+    def get_exact_lifecycle(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        campaign_id: str,
+    ) -> dict | None:
+        """读取单活动生命周期行。不存在返回 None。"""
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT * FROM t_advert_agent_campaign_exact_lifecycle
+                       WHERE shop_id=%s AND site_code=%s AND campaign_id=%s
+                       LIMIT 1""",
+                    (shop_id, site_code, campaign_id),
+                )
+                return cur.fetchone()
+        finally:
+            conn.close()
+
+    def upsert_exact_lifecycle_observation(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        parent_asin: str,
+        campaign_id: str,
+        keyword_id: str,
+        campaign_created_at: str,
+        testing_origin: str,
+        last_seen_budget: float | None = None,
+        last_seen_keyword_bid: float | None = None,
+        last_seen_placement_top_pct: int | None = None,
+        last_seen_placement_product_pct: int | None = None,
+        last_seen_placement_rest_pct: int | None = None,
+        last_seen_campaign_state: str | None = None,
+    ) -> bool:
+        """初始化或更新生命周期配置观察基线。"""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO t_advert_agent_campaign_exact_lifecycle
+                       (shop_id, site_code, parent_asin, campaign_id, keyword_id,
+                        campaign_created_at, testing_origin,
+                        last_seen_budget, last_seen_keyword_bid,
+                        last_seen_placement_top_pct, last_seen_placement_product_pct,
+                        last_seen_placement_rest_pct, last_seen_campaign_state,
+                        last_config_observed_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                        keyword_id=VALUES(keyword_id),
+                        campaign_created_at=VALUES(campaign_created_at),
+                        testing_origin=CASE
+                            WHEN VALUES(testing_origin)='NATIVE' AND testing_origin IN ('DEMOTED','NATIVE')
+                            THEN testing_origin
+                            ELSE VALUES(testing_origin)
+                        END,
+                        last_seen_budget=VALUES(last_seen_budget),
+                        last_seen_keyword_bid=VALUES(last_seen_keyword_bid),
+                        last_seen_placement_top_pct=VALUES(last_seen_placement_top_pct),
+                        last_seen_placement_product_pct=VALUES(last_seen_placement_product_pct),
+                        last_seen_placement_rest_pct=VALUES(last_seen_placement_rest_pct),
+                        last_seen_campaign_state=VALUES(last_seen_campaign_state),
+                        last_config_observed_at=VALUES(last_config_observed_at)""",
+                    (shop_id, site_code, parent_asin, campaign_id, keyword_id,
+                     campaign_created_at, testing_origin,
+                     last_seen_budget, last_seen_keyword_bid,
+                     last_seen_placement_top_pct, last_seen_placement_product_pct,
+                     last_seen_placement_rest_pct, last_seen_campaign_state,
+                     now),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            logger.warning("upsert_exact_lifecycle_observation 失败 [%s]", campaign_id, exc_info=True)
+            return False
+        finally:
+            conn.close()
+
+    def record_exact_agent_action_success(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        campaign_id: str,
+        field: str,
+        target_value: str | float | int,
+    ) -> bool:
+        """Agent 动作终态 SUCCESS 后，写对应字段级确认锚点。"""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        target_col = f"last_agent_{field}_target"
+        confirmed_col = f"last_agent_{field}_confirmed_at"
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""UPDATE t_advert_agent_campaign_exact_lifecycle
+                        SET {target_col}=%s, {confirmed_col}=%s
+                        WHERE shop_id=%s AND site_code=%s AND campaign_id=%s""",
+                    (target_value, now, shop_id, site_code, campaign_id),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            logger.warning("record_exact_agent_action_success 失败 [%s/%s]", campaign_id, field, exc_info=True)
+            return False
+        finally:
+            conn.close()
+
+    def update_exact_transition(
+        self,
+        *,
+        shop_id: int,
+        site_code: str,
+        campaign_id: str,
+        demoted_at: str | None = None,
+        testing_origin: str | None = None,
+        diagnosis_path: str | None = None,
+        diagnosis_stage: str | None = None,
+        diagnosis_stage_source: str | None = None,
+        diagnosis_stage_at: str | None = None,
+        qualified_gentle_action_count: int | None = None,
+        last_gentle_action_type: str | None = None,
+        last_gentle_action_source: str | None = None,
+        last_gentle_action_verdict: str | None = None,
+        last_group_transition_type: str | None = None,
+        last_group_transition_at: str | None = None,
+    ) -> bool:
+        """迁组/诊断/温和动作状态更新（仅更新传入的非 None 字段）。"""
+        sets: list[str] = []
+        vals: list = []
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for col, val in [
+            ("demoted_at", demoted_at),
+            ("testing_origin", testing_origin),
+            ("diagnosis_path", diagnosis_path),
+            ("diagnosis_stage", diagnosis_stage),
+            ("diagnosis_stage_source", diagnosis_stage_source),
+            ("diagnosis_stage_at", diagnosis_stage_at),
+            ("qualified_gentle_action_count", qualified_gentle_action_count),
+            ("last_gentle_action_type", last_gentle_action_type),
+            ("last_gentle_action_source", last_gentle_action_source),
+            ("last_gentle_action_verdict", last_gentle_action_verdict),
+            ("last_group_transition_type", last_group_transition_type),
+            ("last_group_transition_at", last_group_transition_at),
+        ]:
+            if val is not None:
+                sets.append(f"{col}=%s")
+                vals.extend([val])
+        if not sets:
+            return False
+        vals.extend([shop_id, site_code, campaign_id])
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""UPDATE t_advert_agent_campaign_exact_lifecycle
+                        SET {', '.join(sets)}
+                        WHERE shop_id=%s AND site_code=%s AND campaign_id=%s""",
+                    vals,
+                )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            logger.warning("update_exact_transition 失败 [%s]", campaign_id, exc_info=True)
+            return False
+        finally:
+            conn.close()
 
 
 # ── 模块级 repository 单例（决策批次端点复用） ──────────────────────────

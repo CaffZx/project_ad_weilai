@@ -41,6 +41,7 @@ from app.workflow.steps.portfolio_execution import (
     _normalize_portfolio_list,
     _pf_field,
 )
+from app.workflow.steps.campaign_portfolio import find_portfolio_matches
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -338,19 +339,7 @@ async def _resolve_immediate_exit_low_bid_portfolio(
                 "query_error": f"{type(exc).__name__}: {exc}",
             }
 
-        matches: list[dict] = []
-        for portfolio in portfolios:
-            name = str(
-                _pf_field(
-                    portfolio,
-                    "portfolioName",
-                    "name",
-                    "portfolio_name",
-                )
-                or ""
-            ).strip()
-            if "低价捡漏组" in name:
-                matches.append(portfolio)
+        matches = find_portfolio_matches("低价捡漏组", portfolios)
         if not matches:
             return {"match_count": 0}
 
@@ -400,6 +389,11 @@ def _build_immediate_exit_run(
             new_state=action.get("new_state") if is_pause else None,
             old_budget=action.get("current_budget"),
             new_budget=None if is_pause else action.get("new_budget"),
+            target_campaign_group_type=(
+                "low_bid_retention_group"
+                if is_low_bid and has_low_bid_portfolio
+                else None
+            ),
         )
         keyword_pending: list[KeywordPendingCanonical] = []
         keyword = None

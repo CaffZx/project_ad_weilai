@@ -190,6 +190,48 @@ def test_fetch_campaign_list_strict_raises_on_mcp_failure():
             )
 
 
+def test_fetch_campaign_list_include_portfolio_returns_current_group_name():
+    f = CampaignFetcher.__new__(CampaignFetcher)
+    mock_mcp = MagicMock()
+    mock_mcp.campaign_call_tool = AsyncMock(return_value=SimpleNamespace(
+        ok=True,
+        value={"rows": [{
+            "广告活动名称": "broad-campaign",
+            "广告活动id": "campaign-1",
+            "广告组合名称": "US-自动广泛组",
+        }]},
+    ))
+    f._mcp_adapter = mock_mcp
+
+    with patch.object(f, "_mcp", return_value=mock_mcp):
+        catalog = asyncio.run(f._fetch_campaign_list(
+            "B0TEST", "SKU-1", "am_test", include_portfolio=True,
+        ))
+
+    assert catalog == {
+        "broad-campaign": {
+            "campaign_id": "campaign-1",
+            "portfolio_name": "US-自动广泛组",
+        },
+    }
+
+
+def test_assemble_propagates_current_portfolio_name_to_campaign_unit():
+    f = CampaignFetcher.__new__(CampaignFetcher)
+
+    unit = f._assemble({
+        "campaign_name": "broad-campaign",
+        "campaign_id": "campaign-1",
+        "child_asin": "B0CHILD",
+        "keyword_id": "keyword-1",
+        "keyword_text": "red dress",
+        "match_type": "BROAD",
+        "current_portfolio_name": "US-自动广泛组",
+    }, {}, {})
+
+    assert unit.current_portfolio_name == "US-自动广泛组"
+
+
 def test_immediate_exit_fetches_two_discovery_tools_in_parallel_then_basic():
     """只并行拉活动清单与关键词清单，之后按活动 ID 补 basic_info_v2。"""
     fetcher = MagicMock()

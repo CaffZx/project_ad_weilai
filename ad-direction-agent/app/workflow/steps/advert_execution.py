@@ -21,8 +21,8 @@ from app.persistence.erp_writer.advert_exec_mapper import (
 )
 from app.persistence.erp_writer.repository import _get_repository
 from app.persistence.erp_writer.text_utils import json_dumps, unmap_campaign_group_type
+from app.workflow.steps.campaign_portfolio import match_unique_portfolio
 from app.workflow.steps.portfolio_execution import (
-    _match_portfolio,
     _normalize_portfolio_list,
     _pf_field,
 )
@@ -245,7 +245,7 @@ async def _resolve_create_portfolios(
     for call in plan.create_calls:
         cid = str(call.get("_card_id") or "")
         zh = unmap_campaign_group_type(call.get("_group_type"))
-        pf, _ = _match_portfolio(zh, portfolios) if zh else (None, 0)
+        pf, _ = match_unique_portfolio(zh, portfolios) if zh else (None, 0)
         pid = _pf_field(pf, "portfolioId") if pf else None
         if pid:
             call["portfolioId"] = str(pid)
@@ -319,7 +319,7 @@ async def _resolve_modify_portfolios(
             no_pid.append(vo)
             continue
         if resolved_portfolio_ids is None:
-            pf, match_count = _match_portfolio(zh, portfolios or [])
+            pf, match_count = match_unique_portfolio(zh, portfolios or [])
             pid = _pf_field(pf, "portfolioId") if pf else None
         else:
             pid = resolved_portfolio_ids.get(group_code)
@@ -355,6 +355,51 @@ async def _resolve_modify_portfolios(
         new_list.append({**base_meta, "campaignVoList": no_pid})
 
     plan.params_vo_list = new_list
+
+
+def _record_exact_lifecycle_on_submit(
+    pending: dict, plan, repo,
+) -> None:
+    """MCP 提交成功后，为有 target_campaign_group_type 的 campaign_pending 写 Agent 锚点。
+
+    只在 async_batch_update 提交成功（非终态确认）时调用。
+    终态 SUCCESS/FAIL 的精确回写由 ERP 轮询路径处理，本函数是乐观写入。
+    """
+    dec = pending.get("decision") or {}
+    shop_id = int(dec.get("shop_id") or 0)
+    site_code = str(dec.get("site_code") or "")
+    if not shop_id or not site_code:
+        return
+    campaign_pendings = pending.get("campaign_pending") or []
+    for cp in campaign_pendings:
+        target_group = str(cp.get("target_campaign_group_type") or "").strip()
+        if not target_group:
+            continue
+        campaign_id = str(cp.get("campaign_id") or "")
+        if not campaign_id:
+            continue
+        try:
+            # 写 group_type 归因锚点
+            repo.record_exact_agent_action_success(
+                shop_id=shop_id, site_code=site_code,
+                campaign_id=campaign_id,
+                field="group",
+                target_value=target_group,
+            )
+            # 写 budget 归因锚点（如果有预算变更）
+            new_budget = cp.get("new_budget")
+            if new_budget is not None:
+                repo.record_exact_agent_action_success(
+                    shop_id=shop_id, site_code=site_code,
+                    campaign_id=campaign_id,
+                    field="budget",
+                    target_value=float(new_budget),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "record_exact_lifecycle_on_submit 失败 [%s/%s]: %s",
+                campaign_id, target_group, e,
+            )
 
 
 async def submit_execution(
@@ -833,6 +878,7 @@ async def submit_execution_direct(
                            decision_id, i, len(errors), str(e)[:500])
 
     # ★ 执行钩子：async_batch_update 成功 → 写/删 池表。新建/否词路径不影响池表。
+    # 精准 lifecycle 锚点不在提交时写——必须等异步终态 SUCCESS 才写（§0.6）。
     async_ok = bool(results.get("async")) and not any(
         str(e).startswith("async:") for e in errors
     )

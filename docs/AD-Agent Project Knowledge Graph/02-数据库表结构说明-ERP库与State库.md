@@ -34,6 +34,9 @@
 | 执行映射 | `erp_writer/advert_exec_mapper.py:82` `build_exec_plan()` | pending 到 Advert MCP payload |
 | 核心词批次写入 | `repository.py` `write_core_keyword_task()` | `t_advert_agent_core_keyword_task` + `label` 表 |
 | 核心词标签读取 | `repository.py` `fetch_core_keyword_set()` | 按三元组读最近 DONE 批次的 `is_core=1` 集合 |
+| Campaign 日指标写入 | 待实现：活动分析周期性采集脚本 | `t_advert_agent_campaign_metric_daily` UPSERT |
+| 精准生命周期写入 | 待实现：Campaign 分析执行成功回调 | `t_advert_agent_campaign_exact_lifecycle` UPDATE |
+| 精准生命周期读取 | 待实现：32号规则判定入口 | 读 `t_advert_agent_campaign_exact_lifecycle` + `metric_daily` 窗口聚合 |
 
 ## 数据库定位
 
@@ -57,7 +60,7 @@ State 库：
 
 | 表 | 主键/粒度 | 责任 |
 | --- | --- | --- |
-| `strategy_config` | `asin` | 产品等级、阶段、季节阶段等战略层长期配置 |
+| `strategy_config` | `asin` | 产品定位、**经营模式**、季节阶段、产品阶段等战略层长期配置 |
 | `tactics_config` | `asin` | 广告目的、关键词策略等策略层长期配置 |
 | `acos_override` | `asin` | 临时目标 ACOS 覆盖值，带过期时间 |
 | `budget_override` | `asin` | 临时预算覆盖值，带过期时间 |
@@ -68,6 +71,217 @@ State 库：
 | `workflow_meta` | `asin` | 当前层级、已完成层级、执行选择 |
 | `feedback` | `id` | 用户反馈 JSON |
 | `analysis_session` | `asin` | 当前分析会话 run_id 和开始时间 |
+| `t_advert_agent_campaign_metric_daily` | `shop_id + site_code + campaign_id + stat_date` | 活动日指标事实表：每日花费/销售/订单/点击/自然位，供 32号规则 3/7/前7天窗口计算 |
+| `t_advert_agent_campaign_exact_lifecycle` | `shop_id + site_code + campaign_id` | 精准活动生命周期与配置观察表：测试锚点、配置归因、诊断链路、保护词温和动作 |
+
+### State 库完整 DDL
+
+来源：`ad-direction-agent/app/persistence/schema.sql`（权威源）
+
+```sql
+-- 长期状态库 schema（独立 MySQL，与 Doris 业务库分离）
+CREATE DATABASE IF NOT EXISTS ad_agent_state DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE ad_agent_state;
+
+CREATE TABLE IF NOT EXISTS strategy_config (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    product_level VARCHAR(32),
+    product_stage VARCHAR(32),
+    season_stage VARCHAR(32),
+    operating_mode VARCHAR(32) NULL COMMENT '经营模式（立即退出/控制清货/有限修复/稳定经营/积极推进/获取利润）',
+    updated_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS tactics_config (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    ad_purposes JSON,
+    target_keyword_strategy JSON,
+    updated_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS acos_override (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    value INT NOT NULL,
+    created_at DATETIME(6) NOT NULL,
+    expires_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS budget_override (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    value DOUBLE NOT NULL,
+    created_at DATETIME(6) NOT NULL,
+    expires_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS adjustment_history (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    asin VARCHAR(20) NOT NULL,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    record_date DATE NOT NULL,
+    target_acos INT,
+    daily_budget DOUBLE,
+    operated_at DATETIME(6) NOT NULL,
+    UNIQUE KEY uq_asin_date (asin, record_date),
+    INDEX idx_asin (asin)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS p3_recommendation (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    payload JSON NOT NULL,
+    created_at DATETIME(6) NOT NULL,
+    expires_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS keyword_analysis (
+    asin VARCHAR(20) NOT NULL,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    days INT NOT NULL,
+    payload JSON NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (asin, days)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS target_scores (
+    asin VARCHAR(20) NOT NULL,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    days INT NOT NULL,
+    payload JSON NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (asin, days)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS workflow_meta (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    current_layer VARCHAR(32) NOT NULL DEFAULT 'strategy',
+    layers_completed JSON,
+    execution_selection JSON,
+    updated_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id VARCHAR(64) PRIMARY KEY,
+    asin VARCHAR(20) NOT NULL,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    payload JSON NOT NULL,
+    submitted_at DATETIME(6) NOT NULL,
+    INDEX idx_feedback_asin (asin)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS analysis_session (
+    asin VARCHAR(20) PRIMARY KEY,
+    shop_id BIGINT NULL,
+    parent_seller_sku VARCHAR(128) NULL,
+    run_id VARCHAR(64) NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    execution_started_at DATETIME(6) NULL
+) ENGINE=InnoDB;
+
+-- ── 活动生命周期表（v3.4.0 新增，32号规则支撑） ──
+
+CREATE TABLE IF NOT EXISTS t_advert_agent_campaign_metric_daily (
+    id                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    shop_id             BIGINT NOT NULL,
+    site_code           VARCHAR(32) NOT NULL,
+    parent_asin         VARCHAR(32) NOT NULL,
+    campaign_id         VARCHAR(64) NOT NULL,
+    stat_date           DATE NOT NULL,
+    spend               DECIMAL(18,4) NOT NULL,
+    sales               DECIMAL(18,4) NOT NULL,
+    orders              INT UNSIGNED NOT NULL,
+    clicks              INT UNSIGNED NOT NULL,
+    natural_rank        INT NULL,
+    is_complete_day     TINYINT(1) NOT NULL DEFAULT 0,
+    create_time         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_campaign_day (shop_id, site_code, campaign_id, stat_date),
+    KEY idx_asin_date (shop_id, site_code, parent_asin, stat_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS t_advert_agent_campaign_exact_lifecycle (
+    id                                    BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    shop_id                               BIGINT NOT NULL,
+    site_code                             VARCHAR(32) NOT NULL,
+    parent_asin                           VARCHAR(32) NOT NULL,
+    campaign_id                           VARCHAR(64) NOT NULL,
+    keyword_id                            VARCHAR(64) NOT NULL,
+    -- 测试周期锚点
+    campaign_created_at                   DATETIME NOT NULL,
+    testing_origin                        VARCHAR(16) NOT NULL,
+    demoted_at                            DATETIME NULL,
+    -- 每轮分析时读取 basic_info_v2 后写入的"上次看到的真实值"
+    last_seen_budget                      DECIMAL(18,4) NULL,
+    last_seen_keyword_bid                 DECIMAL(18,4) NULL,
+    last_seen_placement_top_pct           SMALLINT UNSIGNED NULL,
+    last_seen_placement_product_pct       SMALLINT UNSIGNED NULL,
+    last_seen_placement_rest_pct          SMALLINT UNSIGNED NULL,
+    last_seen_campaign_state              VARCHAR(32) NULL,
+    last_config_observed_at               DATETIME NULL,
+    -- Agent 字段级归因锚点（区分"Agent改的"还是"运营改的"）
+    last_agent_budget_target              DECIMAL(18,4) NULL,
+    last_agent_budget_confirmed_at        DATETIME NULL,
+    last_agent_keyword_bid_target         DECIMAL(18,4) NULL,
+    last_agent_keyword_bid_confirmed_at   DATETIME NULL,
+    last_agent_placement_top_target       SMALLINT UNSIGNED NULL,
+    last_agent_placement_top_confirmed_at DATETIME NULL,
+    last_agent_placement_product_target   SMALLINT UNSIGNED NULL,
+    last_agent_placement_product_confirmed_at DATETIME NULL,
+    last_agent_placement_rest_target      SMALLINT UNSIGNED NULL,
+    last_agent_placement_rest_confirmed_at DATETIME NULL,
+    last_agent_campaign_state_target      VARCHAR(32) NULL,
+    last_agent_campaign_state_confirmed_at DATETIME NULL,
+    -- 21号诊断路径状态
+    diagnosis_path                        VARCHAR(32) NOT NULL DEFAULT 'UNDECIDED',
+    diagnosis_path_reason                 VARCHAR(48) NULL,
+    diagnosis_path_checked_at             DATETIME NULL,
+    diagnosis_stage                       VARCHAR(32) NOT NULL DEFAULT 'NOT_STARTED',
+    diagnosis_stage_source                VARCHAR(24) NULL,
+    diagnosis_stage_at                    DATETIME NULL,
+    diagnosis_decision_id                 VARCHAR(64) NULL,
+    -- 诊断开始时的配置快照（观察期内检测控制变量是否被改动）
+    diagnosis_budget                      DECIMAL(18,4) NULL,
+    diagnosis_keyword_bid                 DECIMAL(18,4) NULL,
+    diagnosis_placement_top_pct           SMALLINT UNSIGNED NULL,
+    diagnosis_placement_product_pct       SMALLINT UNSIGNED NULL,
+    diagnosis_placement_rest_pct          SMALLINT UNSIGNED NULL,
+    diagnosis_campaign_state              VARCHAR(32) NULL,
+    -- 32号§2.1A 保护词温和动作
+    qualified_gentle_action_count         SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    last_gentle_action_type               VARCHAR(32) NULL,
+    last_gentle_action_source             VARCHAR(24) NULL,
+    last_gentle_action_detected_at        DATETIME NULL,
+    last_gentle_bid_before                DECIMAL(18,4) NULL,
+    last_gentle_bid_after                 DECIMAL(18,4) NULL,
+    last_gentle_budget_before             DECIMAL(18,4) NULL,
+    last_gentle_budget_after              DECIMAL(18,4) NULL,
+    last_gentle_action_verdict            VARCHAR(32) NOT NULL DEFAULT 'NONE',
+    last_gentle_action_verdict_at         DATETIME NULL,
+    -- 最近一次跨组迁移（不包含 stay_with_adjustment）
+    last_group_transition_type           VARCHAR(32) NULL,
+    last_group_transition_at             DATETIME NULL,
+    create_time                           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time                           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_exact_campaign (shop_id, site_code, campaign_id),
+    KEY idx_asin_campaign (shop_id, site_code, parent_asin, campaign_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
 
 ## ERP 库表
 
@@ -648,6 +862,7 @@ CREATE TABLE `t_advert_agent_modify_campaign_pending` (
   `new_state` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改后状态',
   `old_budget` decimal(18,4) DEFAULT NULL COMMENT '修改前Budget',
   `new_budget` decimal(18,4) DEFAULT NULL COMMENT '修改后Budget',
+  `target_campaign_group_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '目标逻辑组(exact_core_group/exact_testing_group/auto_broad_group/low_bid_retention_group)；NULL=不涉及挪组',
   `submit_user_id` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '提交人ID',
   `submit_user_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '提交人姓名',
   `confirm_status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'PENDING' COMMENT '确认状态',

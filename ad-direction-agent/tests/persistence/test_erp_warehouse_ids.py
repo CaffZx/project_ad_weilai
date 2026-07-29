@@ -36,6 +36,61 @@ def test_pending_uses_doris_ids_not_stable_hash():
     assert not card.keyword_pending[0].keyword_id.startswith("kwd")
 
 
+def test_target_group_creates_campaign_pending_without_budget_change():
+    """纯挪组是活动级操作，必须落在 campaign_pending 而非只留在卡片。"""
+    payload = {
+        "parent_asin": "B0TEST",
+        "experiment_id": "exp-target-group",
+        "run_number": 1,
+        "timestamp": "2026-06-03T00:00:00+00:00",
+        "summary": {},
+        "adjustments": [{
+            "campaign_name": "exact-testing-campaign",
+            "campaign_id": "111222333",
+            "keyword_id": "999888777",
+            "keyword_text": "fishnet tights",
+            "match_type": "EXACT",
+            "action": "keep",
+            # 旧 LLM 输出不能决定下游挪组；代码写入的 target 才是权威。
+            "ai_portfolio_class": "低价捡漏组",
+            "target_campaign_group_type": "exact_testing_group",
+        }],
+    }
+
+    run = canonicalize_payload(payload, shop_id=1622)
+
+    assert len(run.cards) == 1
+    card = run.cards[0]
+    assert card.campaign_group_type == "exact_testing_group"
+    assert len(card.campaign_pending) == 1
+    assert card.campaign_pending[0].old_budget is None
+    assert card.campaign_pending[0].new_budget is None
+    assert card.campaign_pending[0].target_campaign_group_type == "exact_testing_group"
+
+
+def test_legacy_ai_portfolio_class_does_not_create_move_pending():
+    payload = {
+        "parent_asin": "B0TEST",
+        "experiment_id": "exp-no-target-group",
+        "run_number": 1,
+        "timestamp": "2026-06-03T00:00:00+00:00",
+        "summary": {},
+        "adjustments": [{
+            "campaign_name": "exact-campaign",
+            "campaign_id": "111222333",
+            "keyword_id": "999888777",
+            "keyword_text": "fishnet tights",
+            "match_type": "EXACT",
+            "action": "keep",
+            "ai_portfolio_class": "低价捡漏组",
+        }],
+    }
+
+    run = canonicalize_payload(payload, shop_id=1622)
+
+    assert run.cards[0].campaign_pending == []
+
+
 def test_skip_card_when_campaign_id_missing():
     payload = {
         "parent_asin": "B0TEST",

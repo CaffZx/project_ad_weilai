@@ -96,6 +96,94 @@ def test_build_exec_plan_bid_3dp_preserved():
     assert kw_vo["keywordBid"] == 0.335
 
 
+def test_build_exec_plan_emits_move_only_campaign_from_pending_target_group():
+    pending = {
+        "decision": {
+            "id": "dec-move-only",
+            "shop_id": 1,
+            "parent_asin": "B0X",
+            "parent_seller_sku": "SKU",
+        },
+        "cards": [{
+            "id": "card-1",
+            "campaign_id": "campaign-1",
+            "campaign_name": "broad-campaign",
+            # 卡片只用于展示；执行目标必须从 pending 读取。
+            "campaign_group_type": "low_bid_retention_group",
+        }],
+        "campaign_pending": [{
+            "id": "campaign-pending-1",
+            "suggest_card_id": "card-1",
+            "campaign_id": "campaign-1",
+            "campaign_name": "broad-campaign",
+            "old_budget": None,
+            "new_budget": None,
+            "old_state": None,
+            "new_state": None,
+            "target_campaign_group_type": "auto_broad_group",
+        }],
+        "keyword_pending": [],
+        "placement_pending": [],
+    }
+
+    plan = build_exec_plan(pending, operator="operator-1")
+
+    assert plan.params_vo_list[0]["campaignVoList"] == [{
+        "campaignId": "campaign-1",
+        "campaignGroupType": "auto_broad_group",
+    }]
+    assert plan.ops == [{
+        "record_kind": "campaign",
+        "suggest_card_id": "card-1",
+        "campaign_id": "campaign-1",
+        "campaign_name": "broad-campaign",
+        "pending_id": "campaign-pending-1",
+        "old_budget": None,
+        "new_budget": None,
+        "old_state": None,
+        "new_state": None,
+        "target_campaign_group_type": "auto_broad_group",
+    }]
+
+
+def test_build_exec_plan_does_not_move_when_pending_has_no_target_group():
+    pending = {
+        "decision": {
+            "id": "dec-no-move",
+            "shop_id": 1,
+            "parent_asin": "B0X",
+            "parent_seller_sku": "SKU",
+        },
+        "cards": [{
+            "id": "card-1",
+            # 卡片展示组别不是执行授权。
+            "campaign_group_type": "auto_broad_group",
+            "campaign_id": "campaign-1",
+            "campaign_name": "broad-campaign",
+        }],
+        "campaign_pending": [{
+            "id": "campaign-pending-1",
+            "suggest_card_id": "card-1",
+            "campaign_id": "campaign-1",
+            "campaign_name": "broad-campaign",
+            "old_budget": 5.0,
+            "new_budget": 4.0,
+            "old_state": None,
+            "new_state": None,
+            "target_campaign_group_type": None,
+        }],
+        "keyword_pending": [],
+        "placement_pending": [],
+    }
+
+    plan = build_exec_plan(pending, operator="operator-1")
+
+    assert plan.params_vo_list[0]["campaignVoList"] == [{
+        "campaignId": "campaign-1",
+        "campaignBudget": 4.0,
+    }]
+
+
 def test_immediate_exit_maps_loaded_confirmed_pending_shape():
     """Repository 已过滤后的立即退出 pending 统一复用现有 mapper。"""
     cards = [
@@ -154,9 +242,10 @@ def test_immediate_exit_maps_loaded_confirmed_pending_shape():
             "suggest_card_id": f"card-{kind}",
             "campaign_id": f"c-{kind}",
             "campaign_name": kind,
-            "new_state": None,
-            "new_budget": Decimal("1.00"),
-            "confirm_status": "CONFIRMED",
+                "new_state": None,
+                "new_budget": Decimal("1.00"),
+                "target_campaign_group_type": "low_bid_retention_group",
+                "confirm_status": "CONFIRMED",
             "execute_status": "PENDING",
         }
         for kind in ("exact-single", "exact-multi", "product")

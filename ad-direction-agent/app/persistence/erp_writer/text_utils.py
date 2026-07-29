@@ -205,68 +205,52 @@ def map_purpose_target(value: str | None) -> str | None:
     return map_ad_purpose(value)
 
 
-# ── 反向 mapper：ERP enum code → 内部(prompt)格式。从 decision_config 读回 1-4 用。──
-# 目标格式与 state 库/LLM prompt 一致（中文值）。与 decision.py:_translate_preset 同口径。
-_PRODUCT_POSITION_REVERSE = {
-    "P0_PRODUCT": "战略级产品 (P0)", "P1_PRODUCT": "重点产品 (P1)",
-    "P2_PRODUCT": "常规产品 (P2)", "P3_PRODUCT": "长尾产品 (P3)",
-}
-_PRODUCT_STAGE_REVERSE = {
-    "HARVEST_PROFIT": "收割利润期", "TESTING": "测试期",
-    "PROMOTING": "推进期", "MAINTAINING": "维持期",
-}
-_SEASON_TYPE_REVERSE = {
-    "OFF_SEASON": "淡季", "PEAK_SEASON_PREPARE": "旺季准备",
-    "BIG_PEAK_SEASON": "大旺季", "LATE_PEAK_SEASON": "旺季末期",
-}
-_OPERATING_MODE_REVERSE = {
-    "IMMEDIATE_EXIT": "立即退出",
-    "CONTROLLED_CLEARANCE": "控制清货",
-    "LIMITED_REPAIR": "限时修复",
-    "STABLE_OPERATION": "稳定经营",
-    "ACTIVE_PROMOTION": "积极推进",
-    "PROFIT_HARVEST": "获取利润",
-}
-_AD_PURPOSE_REVERSE = {
-    "TRAFFIC": "引流型", "CONVERSION": "转化型", "RANKING": "排名型", "PROFIT": "盈利型",
-}
-_TARGET_KEYWORD_TYPE_REVERSE = {
-    "GENERIC": "大词", "LONG_TAIL": "长尾词", "COMPETITOR": "竞品词",
-    "BRAND": "品牌词", "CUSTOM": "自定义",
-}
+# ── 反向 mapper：ERP enum code / KB 英文 → 中文。从 decision_config 读回 + 规则消费。──
+# 统一消费 layers.CONFIG_ENUM_TO_ZH（单一权威源）；此处保留 None/空值语义包装。
+
+from app.models.layers import normalize_config_enum
 
 
-def _unmap_single(value: str | None, table: dict) -> str | None:
+def _unmap_single(value: str | None, table: dict | None = None) -> str | None:
+    """None / 空串 → None；有 table 时查表，否则委托 normalize_config_enum。"""
     if value is None:
         return None
     raw = str(value).strip()
     if not raw:
         return None
-    return table.get(raw, raw)
+    if table is not None:
+        return table.get(raw, raw)
+    return normalize_config_enum(raw)
 
 
 def unmap_product_position(value: str | None) -> str | None:
-    return _unmap_single(value, _PRODUCT_POSITION_REVERSE)
+    return _unmap_single(value)
 
 
 def unmap_product_stage(value: str | None) -> str | None:
-    return _unmap_single(value, _PRODUCT_STAGE_REVERSE)
+    return _unmap_single(value)
 
 
 def unmap_season_type(value: str | None) -> str | None:
-    return _unmap_single(value, _SEASON_TYPE_REVERSE)
+    return _unmap_single(value)
 
 
 def unmap_operating_mode(value: str | None) -> str | None:
-    return _unmap_single(value, _OPERATING_MODE_REVERSE)
+    return _unmap_single(value)
 
 
 def unmap_ad_purpose(value: str | None) -> str | None:
-    return _unmap_single(value, _AD_PURPOSE_REVERSE)
+    return _unmap_single(value)
 
 
 def unmap_target_keyword_type(value: str | None) -> str | None:
-    return _unmap_single(value, _TARGET_KEYWORD_TYPE_REVERSE)
+    return _unmap_single(value)
+
+
+def normalize_enum(value: str) -> str:
+    """配置枚举归一化（兼容入口）：转调 app.models.layers.normalize_config_enum。"""
+    from app.models.layers import normalize_config_enum
+    return normalize_config_enum(value)
 
 
 _CAMPAIGN_GROUP_TYPE_REVERSE = {
