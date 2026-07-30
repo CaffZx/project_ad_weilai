@@ -379,11 +379,19 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         #    实时分析不带该开关，仍读 state 缓存（未落库），完成后照常落 config。
         #    _cfg14 一并透传给落库，保证决策记录/回写 config 与分析一致、幂等不踩踏。──
         _cfg14 = None
-        if str(req.get("cfg_source") or "").lower() == "config":
+        if str(req.get("cfg_source") or "").lower() in {"config", "batch_config"}:
             try:
-                from app.data.decision_config_reader import load_layer14
-                _cfg14 = load_layer14(
-                    asin, parent_seller_sku=(erp_override or {}).get("parent_seller_sku"))
+                if str(req.get("cfg_source") or "").lower() == "batch_config":
+                    from app.data.decision_config_reader import load_batch_layer14
+                    _cfg14 = load_batch_layer14(
+                        asin,
+                        parent_seller_sku=(erp_override or {}).get("parent_seller_sku"),
+                        shop_id=(erp_override or {}).get("shop_id"),
+                    )
+                else:
+                    from app.data.decision_config_reader import load_layer14
+                    _cfg14 = load_layer14(
+                        asin, parent_seller_sku=(erp_override or {}).get("parent_seller_sku"))
             except Exception:  # noqa: BLE001
                 _cfg14 = None
             if _cfg14 and _cfg14.get("long_term"):

@@ -50,7 +50,7 @@ RETRY_DELAY = 30.0
 log = logging.getLogger("batch")
 
 
-def fetch_asin_list_from_erp() -> list[str]:
+def fetch_asin_list_from_erp() -> list[dict]:
     """从生产 ERP t_advert_agent_decision_config 拉 ASIN 列表（同 prod 逻辑）。"""
     if ERP_CONN is None:
         raise RuntimeError(
@@ -73,15 +73,17 @@ def fetch_asin_list_from_erp() -> list[str]:
         cur = conn.cursor()
         cur.execute("SET SESSION group_concat_max_len = 1048576")
         cur.execute(
-            "SELECT GROUP_CONCAT(DISTINCT parent_asin) "
+            "SELECT DISTINCT parent_asin, parent_seller_sku, shop_id "
             "FROM t_advert_agent_decision_config "
             "WHERE parent_seller_sku IS NOT NULL AND parent_seller_sku != ''"
         )
-        r = cur.fetchone()
+        rows = cur.fetchall()
     finally:
         conn.close()
-    raw = (r[0] or "") if r else ""
-    return [a.strip() for a in raw.split(",") if a.strip()]
+    return [
+        {"asin": str(r[0]).strip(), "parent_seller_sku": str(r[1] or "").strip(), "shop_id": r[2]}
+        for r in rows if r and r[0]
+    ]
 
 
 class StatusWriter:
@@ -114,7 +116,7 @@ class StatusWriter:
 
 async def analyze_one(
     client: httpx.AsyncClient,
-    asin: str,
+    target: dict,
     sem: asyncio.Semaphore,
     retries: int,
     status: StatusWriter,
@@ -123,6 +125,7 @@ async def analyze_one(
     total: int,
 ) -> None:
     async with sem:
+        asin = target["asin"]
         entry: dict = {
             "asin": asin,
             "started_at": datetime.now(timezone.utc).isoformat(),
@@ -141,7 +144,9 @@ async def analyze_one(
                     "analysis_mode": "SCHEDULED",
                     "write_erp": True,
                     "_userId": "batch-cron",
-                    "cfg_source": "config",  # 批量定时统一走 decision_config 读 1-4
+                    "cfg_source": "batch_config",
+                    "_parentSellerSku": target.get("parent_seller_sku") or "",
+                    "_shopId": target.get("shop_id"),
                 }
                 resp = await client.post(API, json=body, timeout=HTTP_TIMEOUT_PER_ASIN)
                 elapsed = time.time() - t0
@@ -224,7 +229,8 @@ async def amain() -> int:
     )
 
     if args.asins:
-        asins = [a.strip() for a in args.asins.split(",") if a.strip()]
+        asins = [{"asin": a.strip(), "parent_seller_sku": "", "shop_id": None}
+                 for a in args.asins.split(",") if a.strip()]
         log.info("ASIN 列表来源: --asins 参数 (%d 个)", len(asins))
     else:
         log.info("从生产 ERP t_advert_agent_decision_config 拉 ASIN ...")
@@ -257,8 +263,8 @@ async def amain() -> int:
 
     async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
         tasks = [
-            analyze_one(client, asin, sem, args.retries, status, lock, i, len(asins))
-            for i, asin in enumerate(asins, start=1)
+            analyze_one(client, target, sem, args.retries, status, lock, i, len(asins))
+            for i, target in enumerate(asins, start=1)
         ]
         await asyncio.gather(*tasks)
 

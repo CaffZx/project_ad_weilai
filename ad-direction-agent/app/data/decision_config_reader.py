@@ -25,6 +25,50 @@ from app.persistence.erp_writer.text_utils import (
 logger = logging.getLogger(__name__)
 
 
+def agent_config_row_to_layer14(row: dict) -> dict:
+    """仅转换新表承载的战略层三项；其余层仍以旧表为准。"""
+    return {
+        "product_level": unmap_product_position(row.get("product_position")) or "",
+        "operating_mode": unmap_operating_mode(row.get("operating_mode")) or "",
+        "season_stage": unmap_season_type(row.get("season_type")) or "",
+    }
+
+
+def load_batch_layer14(asin: str, parent_seller_sku: str | None, shop_id: int | None) -> dict | None:
+    """定时批跑：战略层三项优先新表，其余配置固定读旧表。"""
+    asin = (asin or "").strip()
+    sku = (parent_seller_sku or "").strip()
+    try:
+        sid = int(shop_id)
+    except (TypeError, ValueError):
+        sid = 0
+    legacy = load_layer14(asin, sku or None)
+    if not legacy:
+        return None
+    legacy["config_source"] = "decision_config"
+    if asin and sku and sid > 0:
+        conn = None
+        try:
+            conn = _get_repository()._connect()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT product_position, operating_mode, season_type FROM t_advet_agent_config "
+                    "WHERE parent_asin=%s AND parent_seller_sku=%s AND shop_id=%s LIMIT 1",
+                    (asin, sku, sid),
+                )
+                row = cur.fetchone()
+            if row:
+                legacy["long_term"].update(agent_config_row_to_layer14(row))
+                legacy["config_source"] = "agent_config_strategy"
+                return legacy
+        except Exception as e:  # noqa: BLE001
+            logger.warning("agent_config 批跑读取失败 [%s]: %s", asin, e)
+        finally:
+            if conn:
+                conn.close()
+    return legacy
+
+
 def load_layer14(asin: str, parent_seller_sku: str | None = None) -> dict | None:
     """读 decision_config 的 1-4 配置，反向映射成内部(中文)格式。
 
