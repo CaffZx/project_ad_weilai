@@ -438,18 +438,47 @@ class StateManager:
                 logger.warning("请求取消分析事件失败 [%s][%s]: %s", asin, run_id, e)
                 return False
 
+    def cancel_and_release_analysis_session(self, asin: str, run_id: str) -> bool:
+        """JSON fallback：先写取消墓碑，再释放当前 session。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            tombstone_fp = self._asin_dir(asin) / "analysis_cancelled_runs.json"
+            if not fp.exists():
+                return False
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or data.get("run_id") != run_id:
+                    return False
+                tombstones = {}
+                if tombstone_fp.exists():
+                    tombstones = json.loads(tombstone_fp.read_text(encoding="utf-8"))
+                if not isinstance(tombstones, dict):
+                    tombstones = {}
+                tombstones[run_id] = datetime.now(timezone.utc).isoformat()
+                tombstone_fp.write_text(json.dumps(tombstones, ensure_ascii=False), encoding="utf-8")
+                fp.unlink()
+                return True
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("取消并释放分析事件失败 [%s][%s]: %s", asin, run_id, e)
+                return False
+
     def is_analysis_run_active(self, asin: str, run_id: str) -> bool:
-        """仅当当前行属于该 run 且尚未请求取消时返回 True。"""
+        """仅当当前 session 属于该 run 且该 run 未被取消墓碑围栏时返回 True。"""
         with self._get_lock(asin):
             fp = self._asin_dir(asin) / "analysis_session.json"
             if not fp.exists():
                 return False
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
+                tombstone_fp = self._asin_dir(asin) / "analysis_cancelled_runs.json"
+                tombstones = {}
+                if tombstone_fp.exists():
+                    tombstones = json.loads(tombstone_fp.read_text(encoding="utf-8"))
                 return (
                     isinstance(data, dict)
                     and data.get("run_id") == run_id
                     and not data.get("cancel_requested_at")
+                    and run_id not in tombstones
                 )
             except (json.JSONDecodeError, OSError):
                 return False

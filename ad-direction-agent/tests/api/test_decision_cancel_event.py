@@ -7,19 +7,23 @@ class _FakeState:
     def __init__(self):
         self.calls = []
 
-    def clear_analysis_execution_started(self, asin):
-        self.calls.append(("clear_execution_started", asin))
+    def get_analysis_session(self, asin):
+        self.calls.append(("get_session", asin))
+        return {"run_id": "RUN-1"}
 
-    def clear_analysis_session(self, asin):
-        self.calls.append(("clear_session", asin))
+    def cancel_and_release_analysis_session(self, asin, run_id):
+        self.calls.append(("cancel_and_release", asin, run_id))
         return True
 
 
-def test_cancel_event_clears_session_without_redundant_execution_clear(monkeypatch):
+def test_cancel_event_tombstones_and_releases_current_run_for_immediate_restart(monkeypatch):
     state = _FakeState()
     monkeypatch.setattr(decision, "get_state_manager", lambda: state)
 
     res = asyncio.run(decision.cancel_decision_event({"asin": "B0TEST"}))
 
-    assert res == {"ok": True}
-    assert state.calls == [("clear_session", "B0TEST")]
+    assert res == {"ok": True, "run_id": "RUN-1", "status": "FINISHED"}
+    assert state.calls == [
+        ("get_session", "B0TEST"),
+        ("cancel_and_release", "B0TEST", "RUN-1"),
+    ]

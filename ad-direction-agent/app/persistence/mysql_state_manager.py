@@ -765,13 +765,41 @@ class MySQLStateManager:
                 logger.warning("请求取消分析事件失败 [%s][%s]: %s", asin, run_id, e)
                 return False
 
+    def cancel_and_release_analysis_session(self, asin: str, run_id: str) -> bool:
+        """同一事务写取消墓碑并释放当前 session，允许立即创建后继 run。"""
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                conn = pymysql.connect(**self._connect_kwargs())
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO analysis_cancelled_run (asin, run_id, cancelled_at) "
+                            "VALUES (%s, %s, %s) "
+                            "ON DUPLICATE KEY UPDATE cancelled_at=VALUES(cancelled_at)",
+                            (asin, run_id, self._now()),
+                        )
+                        released = cur.execute(
+                            "DELETE FROM analysis_session WHERE asin=%s AND run_id=%s",
+                            (asin, run_id),
+                        )
+                    conn.commit()
+                    return released > 0
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("取消并释放分析事件失败 [%s][%s]: %s", asin, run_id, e)
+                return False
+
     def is_analysis_run_active(self, asin: str, run_id: str) -> bool:
-        """仅当当前行属于该 run 且尚未请求取消时返回 True。"""
+        """仅当当前 session 属于该 run 且该 run 未被取消墓碑围栏时返回 True。"""
         try:
             self.ensure_schema()
             row = self._execute(
-                "SELECT 1 FROM analysis_session "
-                "WHERE asin=%s AND run_id=%s AND cancel_requested_at IS NULL",
+                "SELECT 1 FROM analysis_session s "
+                "WHERE s.asin=%s AND s.run_id=%s AND s.cancel_requested_at IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM analysis_cancelled_run c "
+                "                WHERE c.asin=s.asin AND c.run_id=s.run_id)",
                 (asin, run_id),
                 "one",
             )

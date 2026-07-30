@@ -1331,32 +1331,29 @@ async function onCancelEventClick({ skipConfirm = false } = {}) {
     return;
   }
   const run_id = res.run_id;
-  if (res.status === 'FINISHED' || !run_id) {
-    await _restoreAfterCancel();
-    return;
+  if (run_id) {
+    window._cancelledCampaignRunIds = window._cancelledCampaignRunIds || new Set();
+    window._cancelledCampaignRunIds.add(run_id);
   }
-  window._cancelledCampaignRunIds = window._cancelledCampaignRunIds || new Set();
-  window._cancelledCampaignRunIds.add(run_id);
-  const root = document.getElementById('campPanelRoot');
-  if (root) root.innerHTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;"><div style="font-weight:600;color:var(--fg);margin-bottom:6px;">正在取消分析</div><div>取消请求已发送，等待后台任务在最近安全点退出…</div></div>';
-  showToast('取消请求已发送，等待后台退出后自动恢复', 'info', 4000);
-  let attempts = 0;
-  const maxAttempts = 120;
-  const poll = setInterval(async () => {
-    attempts++;
-    try {
-      const s = await callAPI('/decision/session-status?asin=' + encodeURIComponent(asin) + '&run_id=' + encodeURIComponent(run_id), null, 5000, 'GET');
-      if (!s || !s.ok || s.status === 'FINISHED' || !s.active) { clearInterval(poll); await _restoreAfterCancel(); return; }
-    } catch (e) {
-      if (attempts >= maxAttempts) { clearInterval(poll); showToast('取消状态查询超时，请刷新页面', 'error', 6000); }
-      return;
-    }
-    if (attempts >= maxAttempts) { clearInterval(poll); showToast('等待取消超时，请刷新页面', 'error', 6000); }
-  }, 2500);
+  if (window._campaignPanelAPI) {
+    try { window._campaignPanelAPI.unmount(); } catch (_) {}
+    window._campaignPanelAPI = null;
+  }
+  // UI 立即回到 B 态；后端仍保留 cancel_requested_at，直到旧 run 在安全点退出。
+  setDecisionContext({
+    ...(_decisionContext || {}),
+    in_progress: null,
+    cancelling: false,
+    cancel_requested_at: null,
+    execution_started_at: null,
+    execution_running: false,
+  });
+  renderBatchBar('B', _decisionContext);
+  await _restoreAfterCancel({ refresh: false });
 }
 
-async function _restoreAfterCancel() {
-  await refreshDecisionContext();
+async function _restoreAfterCancel({ refresh = true } = {}) {
+  if (refresh) await refreshDecisionContext();
   const ctx = _decisionContext || {};
   applyBatchBarFromCtx(ctx);
   const latestId = ctx.latest_completed_id;
@@ -3898,7 +3895,7 @@ window._mountCampaignBatch = async function({ decision_id = '', executable = fal
   }
   root.innerHTML = _CAMP_LOADING_HTML;
   try {
-    window._campaignPanelAPI = await mountCampaignPanel(root, {
+    const panelApi = await mountCampaignPanel(root, {
       asin, days, mode: 'readonly', decision_id, executable,
     });
   } catch (e) {
@@ -3939,6 +3936,7 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
       write_erp: true,
       analysis_mode: 'REALTIME',
       onComplete: async (vm) => {
+        if (window._cancelledCampaignRunIds && window._cancelledCampaignRunIds.has(run_id)) return;
         const write = vm && vm.erp_write;
         if (write && write.ok && write.decision_id) {
           await refreshDecisionContext();
@@ -3964,7 +3962,13 @@ window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
         }
       },
     });
+    if (window._cancelledCampaignRunIds && window._cancelledCampaignRunIds.has(run_id)) {
+      panelApi.unmount();
+      return;
+    }
+    window._campaignPanelAPI = panelApi;
   } catch (e) {
+    if (window._cancelledCampaignRunIds && window._cancelledCampaignRunIds.has(run_id)) return;
     root.innerHTML = '';
     const msg = document.createElement('div');
     msg.style.cssText = 'color:var(--danger);padding:20px;';

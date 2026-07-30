@@ -13,7 +13,7 @@ import logging
 import random
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from app.config.settings import settings
 from app.core.acos_constraints import compute_acos_tolerance
@@ -22,6 +22,7 @@ from app.data.campaign_fetcher import CampaignFetcher
 from app.data.campaign_prefilter import filter_eliminated_pool
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
+from app.workflow.analysis_run_guard import AnalysisRunCancelled
 from app.workflow.steps.campaign_portfolio import (
     LOW_BID_MAX,
     LOW_BUDGET_MAX,
@@ -643,11 +644,13 @@ async def _analyze_campaigns_impl(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
+            cancel_check=cancel_check,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
+            cancel_check=cancel_check,
         ),
         (analyze_new_campaigns(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
@@ -667,6 +670,7 @@ async def _analyze_campaigns_impl(
             # 相关性锚点仅传标题（brand/category 已去除：品类太粗、会把 LLM 引向品类级误匹配，
             # 判别"短裙≠中长裙"靠标题具体属性）
             product_title=(asin_data.title or "") if asin_data else "",
+            cancel_check=cancel_check,
         ) if settings.campaign_new_enabled and growth_analysis_enabled else _no_op_new_campaigns()),
         return_exceptions=True,
     )
@@ -680,6 +684,8 @@ async def _analyze_campaigns_impl(
         strategic_overview = _ov_holder.get("overview")
 
     def _unpack_stream(r, label):
+        if isinstance(r, AnalysisRunCancelled):
+            raise r
         if isinstance(r, BaseException):
             logger.exception("Stream %s 异常 [%s]: %s", label, parent_asin, r)
             warnings_list.append(f"{label} 流分析异常: {type(r).__name__}: {r}")
@@ -836,6 +842,7 @@ async def _analyze_campaigns_impl(
                     _build_batches(retry_summaries, settings.campaign_batch_size, seed=round_number),
                     ctx_dict, temperature, retry_sem, round_number,
                     task_type=task_type_name,
+                    cancel_check=cancel_check,
                 )
                 returned_keys: set[str] = set()
                 for br in results:
@@ -848,6 +855,8 @@ async def _analyze_campaigns_impl(
                     sorted(returned_keys), sorted(expected_keys - returned_keys),
                     sorted(returned_keys - expected_keys),
                 )
+            except AnalysisRunCancelled:
+                raise
             except Exception as e:  # noqa: BLE001
                 logger.warning("Guardrail %s retry failed [%s|%s]: %s", round_label, parent_asin, task_type_name, e)
             finally:
@@ -1518,6 +1527,7 @@ async def _analyze_one_stream(
     overview_gate: "asyncio.Task | None" = None,
     *,
     core_keyword_set: set[str] | None = None,
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
     _core_set: set[str] = core_keyword_set or set()
     """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1+R2 → 投票 → (R3) → 合并。
@@ -1527,6 +1537,10 @@ async def _analyze_one_stream(
     """
     if not campaigns:
         return [], {}, [], []
+
+    async def _cancel() -> None:
+        if cancel_check:
+            await cancel_check()
     t0 = time.monotonic()
     _st = lambda label: logger.info("Stream timing [%s|%s] +%.1fs: %s", parent_asin, task_type, time.monotonic() - t0, label)
 
@@ -1552,6 +1566,7 @@ async def _analyze_one_stream(
             fetcher, parent_asin, days, summaries, unit_lookup,
         )
     _st(f"DONE prefetch ({len(campaigns)} campaigns)")
+    await _cancel()
 
     # LLM 轮前等策略总览 gate：保证 ctx_dict 已含 posture_brief（与上面的 prefetch 重叠跑，不串行）
     if overview_gate is not None:
@@ -1562,7 +1577,7 @@ async def _analyze_one_stream(
         batches = _build_batches(summaries, batch_size, seed=1)
         r1 = await _run_round(
             reasoner, parent_asin, batches, ctx_dict, temperature, sem, 1,
-            task_type=task_type,
+            task_type=task_type, cancel_check=cancel_check,
         )
         adjustments: list[CampaignAdjustmentItem] = []
         for br in r1:
@@ -1579,10 +1594,11 @@ async def _analyze_one_stream(
     r1_batches = _build_batches(summaries, batch_size, seed=1)
     r2_batches = _build_batches(summaries, batch_size, seed=2)
     r1_results, r2_results = await asyncio.gather(
-        _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, sem, 1, task_type=task_type),
-        _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, sem, 2, task_type=task_type),
+        _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, sem, 1, task_type=task_type, cancel_check=cancel_check),
+        _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, sem, 2, task_type=task_type, cancel_check=cancel_check),
     )
     _st(f"DONE R1+R2 ({len(r1_batches)}+{len(r2_batches)} batches)")
+    await _cancel()
     rd: dict = {
         "round1": _round_stats(r1_results),
         "round2": _round_stats(r2_results),
@@ -1599,6 +1615,7 @@ async def _analyze_one_stream(
                 reasoner, parent_asin,
                 _build_batches(tiebreaker_summaries, batch_size, seed=3),
                 ctx_dict, temperature, sem, 3, task_type=task_type,
+                cancel_check=cancel_check,
             )
             _resolve_tiebreaker(votes, r3_results, needs_tiebreaker)
             rd["round3"] = {
@@ -1661,10 +1678,13 @@ async def _run_round(
     sem: asyncio.Semaphore,
     round_number: int,
     task_type: str = "exact",
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> list[CampaignBatchResult]:
     """执行一轮 LLM 调用 (所有 batch 并发，Semaphore 由调用方注入)。"""
 
     async def _call_one(batch_idx: int, batch: list[dict]) -> CampaignBatchResult:
+        if cancel_check:
+            await cancel_check()
         # 纵深防御 1: per-stream 信号量获取超时 (防 TCP 半开 batch 占槽后其他 batch 在 sem 门前饿死)。
         # 全局 LLM 并发已由 client 层信号量接管，此处仅控单轮内公平限流。
         sem_timeout = settings.campaign_sem_acquire_timeout
@@ -1692,6 +1712,8 @@ async def _run_round(
                     ),
                     timeout=LLM_TIMEOUT,
                 )
+                if cancel_check:
+                    await cancel_check()
 
                 if not isinstance(result, dict):
                     raise ValueError(f"recommend_campaign_batch 返回非 dict: {type(result).__name__}")

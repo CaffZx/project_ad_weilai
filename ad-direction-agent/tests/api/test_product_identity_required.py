@@ -356,7 +356,7 @@ def test_persist_immediate_exit_orders_write_finalize_clear_confirm():
         or {"ok": True, "applied": 2, "skipped": 0}
     )
     state = MagicMock()
-    state.clear_analysis_session.side_effect = lambda asin: (
+    state.clear_analysis_session_if_run.side_effect = lambda asin, run_id: (
         events.append("clear") or True
     )
     run = SimpleNamespace(
@@ -415,7 +415,7 @@ def test_persist_immediate_exit_does_not_clear_or_confirm_after_write_failure():
         )
 
     repo.finalize_batch.assert_not_called()
-    state.clear_analysis_session.assert_not_called()
+    state.clear_analysis_session_if_run.assert_not_called()
     repo.confirm_decisions.assert_not_called()
 
 
@@ -446,7 +446,7 @@ def test_persist_immediate_exit_same_decision_resumes_without_rewrite():
         "placement_pending": [],
     }
     state = MagicMock()
-    state.clear_analysis_session.side_effect = lambda asin: (
+    state.clear_analysis_session_if_run.side_effect = lambda asin, run_id: (
         events.append("clear") or True
     )
     run = SimpleNamespace(
@@ -557,7 +557,7 @@ def test_persist_immediate_exit_concurrent_same_run_writes_once():
 
     repo = _ConcurrentRepo()
     state = MagicMock()
-    state.clear_analysis_session.return_value = True
+    state.clear_analysis_session_if_run.return_value = True
     run = SimpleNamespace(
         decision_id="dec-1",
         parent_asin="B0TEST",

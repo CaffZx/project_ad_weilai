@@ -111,3 +111,11 @@ CREATE TABLE IF NOT EXISTS analysis_session (
     execution_started_at DATETIME(6) NULL,
     cancel_requested_at DATETIME(6) NULL
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS analysis_cancelled_run (
+    asin VARCHAR(20) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    cancelled_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (asin, run_id),
+    INDEX idx_analysis_cancelled_run_time (cancelled_at)
+) ENGINE=InnoDB;

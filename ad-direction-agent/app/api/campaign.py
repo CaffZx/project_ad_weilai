@@ -34,20 +34,39 @@ from app.workflow.steps.campaign import (
     fill_acos_constraints,
 )
 from app.api.campaign_viewmodel import from_db_snapshot
-from app.workflow.analysis_run_guard import AnalysisRunCancelled
+from app.workflow.analysis_run_guard import (
+    AnalysisRunCancelled,
+    ensure_analysis_run_active,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-async def _clear_execution_started(state, asin: str) -> None:
-    if state and hasattr(state, "clear_analysis_execution_started") and asin:
+async def _clear_execution_started(state, asin: str, run_id: str) -> None:
+    """只清理本 run 的执行启动标记，绝不按 ASIN 误伤后继 run。"""
+    if state and run_id and hasattr(state, "clear_analysis_execution_started_if_run") and asin:
         try:
-            ok = await asyncio.to_thread(state.clear_analysis_execution_started, asin)
+            ok = await asyncio.to_thread(
+                state.clear_analysis_execution_started_if_run,
+                asin,
+                run_id,
+            )
             if ok is False:
-                logger.warning("清执行层分析启动标记未成功 [%s]", asin)
+                logger.warning("清执行层分析启动标记未成功 [%s] run_id=%s", asin, run_id)
         except Exception as e:  # noqa: BLE001
-            logger.warning("清执行层分析启动标记失败 [%s]: %s", asin, e)
+            logger.warning("清执行层分析启动标记失败 [%s] run_id=%s: %s", asin, run_id, e)
+
+
+def _build_analysis_cancel_check(state, asin: str, run_id: str | None):
+    """仅实时分析事件有可取消的 State run；定时批跑返回 None。"""
+    if not state or not run_id:
+        return None
+
+    async def _cancel_check() -> None:
+        await ensure_analysis_run_active(state, asin, run_id)
+
+    return _cancel_check
 
 
 async def _maybe_push_erp(
@@ -115,7 +134,8 @@ async def _maybe_push_erp(
             await asyncio.to_thread(
                 _get_repository().finalize_batch, report.decision_id, asin, analysis_mode,
             )
-            await asyncio.to_thread(state.clear_analysis_session_if_run, asin, run_id)
+            if run_id:
+                await asyncio.to_thread(state.clear_analysis_session_if_run, asin, run_id)
         except Exception as fe:
             logger.warning("finalize_batch/清进行中 失败 [%s] %s: %s (非阻塞)", asin, report.decision_id, fe)
         return out
@@ -183,7 +203,7 @@ async def campaign_viewmodel(req: dict):
 
     result, extra = await _do_analyze(req)
     if extra is None:                       # 分析本身失败（超时/异常/缺 asin）
-        await _clear_execution_started(state, asin)
+        await _clear_execution_started(state, asin, run_id)
         return _failure_vm(result)
 
     # 实时轨强制落库（本路径落库是硬约束，不看请求的 write_erp 位）。
@@ -200,8 +220,11 @@ async def campaign_viewmodel(req: dict):
         operator=extra.get("operator", "tab5"),
         run_id=extra.get("run_id", ""),
     )
+    decision_id = erp.get("decision_id")
     if not erp.get("ok") or not decision_id:
-        await _clear_execution_started(extra.get("state"), extra["asin"])
+        await _clear_execution_started(
+            extra.get("state"), extra["asin"], str(extra.get("run_id") or ""),
+        )
         reason = erp.get("error") or erp.get("skipped") or "未知原因"
         vm = _failure_vm(result, extra_warnings=[f"执行层落库失败，无法操作：{reason}"])
         vm["erp_write"] = erp
@@ -214,7 +237,9 @@ async def campaign_viewmodel(req: dict):
         logger.exception("read_snapshot 回读失败 [%s] %s", decision_id, e)
         snap = None
     if not snap:
-        await _clear_execution_started(extra.get("state"), extra["asin"])
+        await _clear_execution_started(
+            extra.get("state"), extra["asin"], str(extra.get("run_id") or ""),
+        )
         vm = _failure_vm(
             result,
             extra_warnings=[f"落库成功但快照回读失败（decision_id={decision_id}）"],
@@ -342,6 +367,9 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         sess = state.get_analysis_session(asin)
         session_run_id = str((sess or {}).get("run_id") or "").strip()
         effective_run_id = requested_run_id or session_run_id or None
+        cancel_check = _build_analysis_cancel_check(state, asin, effective_run_id)
+        if cancel_check:
+            await cancel_check()
         long_term = state.get_long_term_config(asin) or {}
         wf = state.get_workflow_state(asin) or {}
         keyword_analysis = wf.get("keyword_analysis", {})
@@ -426,9 +454,6 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         # 淘汰复评（KB21§7）入池日期/淘汰前花费：现走 state 库 t_advert_agent_pool_entry
         # （由 campaign.py 在复评前 sync 后再读取最新状态，api 层不再提前取 → 避免取旧快照）。
         fetcher = CampaignFetcher()
-        async def _cancel_check():
-            from app.workflow.analysis_run_guard import ensure_analysis_run_active
-            await ensure_analysis_run_active(state, asin, effective_run_id)
 
         result = await asyncio.wait_for(
             analyze_campaigns(
@@ -443,7 +468,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                 keyword_analysis=keyword_analysis,
                 run_id=effective_run_id,
                 erp_override=erp_override,
-                cancel_check=_cancel_check,
+                cancel_check=cancel_check,
             ),
             timeout=settings.campaign_total_timeout,
         )

@@ -15,7 +15,7 @@ import asyncio
 import logging
 import re
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from app.config.settings import settings
 from app.models.campaign import (
@@ -24,6 +24,7 @@ from app.models.campaign import (
     NewCampaignItem,
 )
 from app.workflow.steps.campaign_portfolio import PORTFOLIO_BROAD, PORTFOLIO_TEST
+from app.workflow.analysis_run_guard import AnalysisRunCancelled
 
 if TYPE_CHECKING:
     from app.data.campaign_fetcher import CampaignFetcher
@@ -279,6 +280,7 @@ async def analyze_new_campaigns(
     sem: asyncio.Semaphore | None = None,
     overview_gate: "asyncio.Task | None" = None,
     product_title: str = "",          # 相关性锚点（来自 asin_data.title；brand/category 已去除：太粗易引品类级误匹配）
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
     """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings, search_volume_map)。
 
@@ -289,6 +291,12 @@ async def analyze_new_campaigns(
     """
     warnings: list[str] = []
     search_volume_map: dict[str, int] = {}
+
+    async def _cancel() -> None:
+        if cancel_check:
+            await cancel_check()
+
+    await _cancel()
 
     # 0. ASIN 级阻断 (KB 16 §6)
     block = _is_blocked_by_asin(strategy_context)
@@ -322,6 +330,7 @@ async def analyze_new_campaigns(
         search_volume_map = kw_data.search_volume_map
         if kw_data.errors:
             warnings.extend(kw_data.errors)
+        await _cancel()
     except Exception as e:  # noqa: BLE001
         if comp_task is not None:
             comp_task.cancel()
@@ -424,14 +433,17 @@ async def analyze_new_campaigns(
         batches = [ordered[i:i + batch_size] for i in range(0, len(ordered), batch_size)]
 
         async def _call_one(batch):
+            await _cancel()
             async with round_sem:
-                return await reasoner.recommend_new_campaigns(
+                result = await reasoner.recommend_new_campaigns(
                     asin=parent_asin, candidates=batch,
                     strategy_context=ctx_dict,           # 含 posture_brief
                     temperature=temperature, timeout_override=55,
                     product_title=product_title,
                     existing_keywords=sorted(existing_keywords),  # 相关性参照锚点
                 )
+            await _cancel()
+            return result
 
         # 轮内批次并行（对齐主流 _run_round 的 gather 模式）
         results = await asyncio.gather(
@@ -440,6 +452,8 @@ async def analyze_new_campaigns(
         out: dict[str, dict] = {}
         any_success = False  # 本轮至少一个批次成功执行 → 区分"失败"与"真判都不建"
         for res in results:
+            if isinstance(res, AnalysisRunCancelled):
+                raise res
             if isinstance(res, BaseException):
                 warnings.append(f"new_campaigns 批次异常: {type(res).__name__}: {res}")
                 continue
@@ -460,6 +474,7 @@ async def analyze_new_campaigns(
     # LLM 轮前等策略总览 gate：保证 ctx_dict 含 posture_brief（候选词发现已跑完，不串行）
     if overview_gate is not None:
         await overview_gate
+    await _cancel()
 
     # ③ 建议竞价与 LLM 并行（LLM 不消费 bid）
     async def _fill_suggested_bids() -> None:
@@ -484,6 +499,9 @@ async def analyze_new_campaigns(
     bid_task = asyncio.create_task(_fill_suggested_bids())
     try:
         (r1, r1_ok), (r2, r2_ok) = await asyncio.gather(_run_round(1), _run_round(2))
+    except AnalysisRunCancelled:
+        bid_task.cancel()
+        raise
     except Exception as e:  # noqa: BLE001
         bid_task.cancel()
         logger.warning("new_campaigns 双轮 LLM 异常 [%s]: %s", parent_asin, e)

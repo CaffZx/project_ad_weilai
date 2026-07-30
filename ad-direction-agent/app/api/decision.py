@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -560,7 +561,8 @@ def _precheck_immediate_exit_decision_sync(
             asin,
             analysis_mode="REALTIME",
         )
-    cleared = state.clear_analysis_session_if_run(asin, run_id) if (run_id := existing.get("run_id")) else False
+    run_id = str(identity.get("run_id") or "").strip()
+    cleared = state.clear_analysis_session_if_run(asin, run_id) if run_id else False
     if not cleared:
         raise RuntimeError("立即退出既有批次恢复时分析事件清除失败")
 
@@ -693,8 +695,8 @@ def _persist_and_confirm_immediate_exit_locked(
             run.parent_asin,
             analysis_mode="REALTIME",
         )
-        sess = state.get_analysis_session(run.parent_asin)
-        cleared = state.clear_analysis_session_if_run(run.parent_asin, sess["run_id"]) if sess else True
+        run_id = str(identity.get("run_id") or "").strip()
+        cleared = state.clear_analysis_session_if_run(run.parent_asin, run_id) if run_id else False
         if not cleared:
             raise RuntimeError("立即退出批次已落库，但分析事件清除失败")
 
@@ -1056,7 +1058,7 @@ async def new_decision_event(req: dict):
         or req.get("parentSellerSku")
         or req.get("parent_seller_sku")
     )
-    # 幂等:已有进行中事件则复用；已取消则拒绝（等旧 session 退出后再试）
+    # 幂等：仅当前未取消 session 复用；已取消 run 已由取消端点释放，不阻塞新事件。
     existing = state.get_analysis_session(asin)
     if existing and existing.get("run_id"):
         if existing.get("cancel_requested_at"):
@@ -1066,12 +1068,7 @@ async def new_decision_event(req: dict):
         return {"ok": True, "run_id": existing["run_id"],
                 "analysis_mode": analysis_mode, "reused": True}
 
-    if hasattr(state, "clear_analysis_execution_started"):
-        ok = state.clear_analysis_execution_started(asin)
-        if ok is False:
-            logger.warning("清执行层分析启动标记未成功 [%s]", asin)
-
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     if not state.set_analysis_session(
         asin,
         run_id,
@@ -1105,7 +1102,7 @@ async def new_decision_event(req: dict):
 
 @router.post("/decision/cancel-event")
 async def cancel_decision_event(req: dict):
-    """放弃进行中分析事件 → 写 cancel_requested_at 标记，后台任务协作退出后按 run_id 清理。"""
+    """放弃进行中分析事件：写取消墓碑并立即释放 session，允许立即新建事件。"""
     asin = str(req.get("asin", "")).strip()
     if not asin:
         return {"ok": False, "error": "asin 必填"}
@@ -1116,11 +1113,12 @@ async def cancel_decision_event(req: dict):
             logger.info("取消事件 幂等 [%s] 无进行中 session", asin)
             return {"ok": True, "run_id": "", "status": "FINISHED"}
         run_id = session["run_id"]
-        cancelled = state.request_analysis_cancel(asin, run_id)
+        cancelled = state.cancel_and_release_analysis_session(asin, run_id)
         if not cancelled:
             logger.warning("取消事件 未匹配 [%s] run_id=%s（session 已切换？）", asin, run_id)
-        logger.info("分析事件已请求取消 [%s] run_id=%s", asin, run_id)
-        return {"ok": True, "run_id": run_id, "status": "CANCELLING"}
+            return {"ok": False, "error": "分析事件已切换，请刷新后重试"}
+        logger.info("分析事件已取消并释放 [%s] run_id=%s", asin, run_id)
+        return {"ok": True, "run_id": run_id, "status": "FINISHED"}
     except Exception as e:
         logger.exception("取消事件失败 [%s]: %s", asin, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}

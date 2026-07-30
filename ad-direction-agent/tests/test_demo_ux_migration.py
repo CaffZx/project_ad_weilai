@@ -31,6 +31,32 @@ def test_demo_cancel_event_remounts_latest_campaign_snapshot():
     assert "showToast('已放弃本次分析，已恢复最近一次历史数据'" in html
 
 
+def test_cancel_event_immediately_restores_local_b_state_without_waiting_for_session_exit():
+    html = read(DEMO)
+    cancel = html[
+        html.index("async function onCancelEventClick"):
+        html.index("async function _restoreAfterCancel")
+    ]
+
+    assert "in_progress: null" in cancel
+    assert "renderBatchBar('B', _decisionContext)" in cancel
+    assert "await _restoreAfterCancel({ refresh: false })" in cancel
+    assert "/decision/session-status" not in cancel
+
+
+def test_cancelled_realtime_run_cannot_render_a_late_completion():
+    html = read(DEMO)
+    realtime_start = html.index("window._mountCampaignRealtime")
+    waiting_start = html.index("window._mountCampaignWaiting")
+    realtime = html[realtime_start:waiting_start]
+    complete_start = realtime.index("onComplete: async (vm) =>")
+    complete = realtime[complete_start:]
+
+    assert "window._campaignPanelAPI.unmount()" in html[html.index("async function onCancelEventClick"):html.index("async function _restoreAfterCancel")]
+    assert "window._cancelledCampaignRunIds.has(run_id)" in complete
+    assert "window._cancelledCampaignRunIds.has(run_id)" in realtime[realtime.index("catch (e)"):]
+
+
 def test_campaign_panel_has_native_density_and_card_selection():
     css = read(PANEL_CSS)
     events = read(PANEL_EVENTS)
