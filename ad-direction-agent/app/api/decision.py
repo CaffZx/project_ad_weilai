@@ -560,7 +560,7 @@ def _precheck_immediate_exit_decision_sync(
             asin,
             analysis_mode="REALTIME",
         )
-    cleared = state.clear_analysis_session(asin)
+    cleared = state.clear_analysis_session_if_run(asin, run_id) if (run_id := existing.get("run_id")) else False
     if not cleared:
         raise RuntimeError("立即退出既有批次恢复时分析事件清除失败")
 
@@ -693,7 +693,8 @@ def _persist_and_confirm_immediate_exit_locked(
             run.parent_asin,
             analysis_mode="REALTIME",
         )
-        cleared = state.clear_analysis_session(run.parent_asin)
+        sess = state.get_analysis_session(run.parent_asin)
+        cleared = state.clear_analysis_session_if_run(run.parent_asin, sess["run_id"]) if sess else True
         if not cleared:
             raise RuntimeError("立即退出批次已落库，但分析事件清除失败")
 
@@ -972,6 +973,8 @@ async def decision_context(asin: str = "", shopId: str = ""):
         sess = state.get_analysis_session(asin)
         in_progress = sess.get("run_id") if sess else None
         execution_started_at = sess.get("execution_started_at") if sess else None
+        cancel_requested_at = sess.get("cancel_requested_at") if sess else None
+        cancelling = bool(cancel_requested_at)
 
         # 2. ERP DB 已完成批次列表（容错: DB 不通不崩）
         #    has_config 以 ERP 历史记录为准：有已完成批次即视为已配置（与 state 库无关）。
@@ -989,6 +992,7 @@ async def decision_context(asin: str = "", shopId: str = ""):
             return {
                 "has_config": False,
                 "in_progress": in_progress,
+                "cancelling": cancelling,
                 "execution_started_at": execution_started_at,
                 "execution_running": bool(execution_started_at),
                 "latest_completed_id": None,
@@ -1012,6 +1016,8 @@ async def decision_context(asin: str = "", shopId: str = ""):
         return {
             "has_config": has_config,
             "in_progress": in_progress,
+            "cancelling": cancelling,
+            "cancel_requested_at": cancel_requested_at,
             "execution_started_at": execution_started_at,
             "execution_running": bool(execution_started_at),
             "latest_completed_id": latest_id,
@@ -1050,9 +1056,12 @@ async def new_decision_event(req: dict):
         or req.get("parentSellerSku")
         or req.get("parent_seller_sku")
     )
-    # 幂等:已有进行中事件则复用
+    # 幂等:已有进行中事件则复用；已取消则拒绝（等旧 session 退出后再试）
     existing = state.get_analysis_session(asin)
     if existing and existing.get("run_id"):
+        if existing.get("cancel_requested_at"):
+            return {"ok": False, "error": "旧分析正在取消，请等待退出后重试",
+                    "run_id": existing["run_id"], "cancelling": True}
         logger.info("复用现存进行中事件 [%s] run_id=%s", asin, existing["run_id"])
         return {"ok": True, "run_id": existing["run_id"],
                 "analysis_mode": analysis_mode, "reused": True}
@@ -1096,18 +1105,42 @@ async def new_decision_event(req: dict):
 
 @router.post("/decision/cancel-event")
 async def cancel_decision_event(req: dict):
-    """放弃进行中分析事件 → 清 state 库标记，旧批次执行权自动恢复。"""
+    """放弃进行中分析事件 → 写 cancel_requested_at 标记，后台任务协作退出后按 run_id 清理。"""
     asin = str(req.get("asin", "")).strip()
     if not asin:
         return {"ok": False, "error": "asin 必填"}
     try:
         state = get_state_manager()
-        state.clear_analysis_session(asin)
+        session = state.get_analysis_session(asin)
+        if not session:
+            logger.info("取消事件 幂等 [%s] 无进行中 session", asin)
+            return {"ok": True, "run_id": "", "status": "FINISHED"}
+        run_id = session["run_id"]
+        cancelled = state.request_analysis_cancel(asin, run_id)
+        if not cancelled:
+            logger.warning("取消事件 未匹配 [%s] run_id=%s（session 已切换？）", asin, run_id)
+        logger.info("分析事件已请求取消 [%s] run_id=%s", asin, run_id)
+        return {"ok": True, "run_id": run_id, "status": "CANCELLING"}
     except Exception as e:
-        logger.exception("清进行中事件失败 [%s]: %s", asin, e)
+        logger.exception("取消事件失败 [%s]: %s", asin, e)
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    logger.info("取消事件 [%s]", asin)
-    return {"ok": True}
+
+
+# ── GET /decision/session-status ─────────────────────────────────────────
+
+
+@router.get("/decision/session-status")
+async def session_status(asin: str, run_id: str):
+    """查询指定 run 的当前状态（RUNNING / CANCELLING / FINISHED）。"""
+    state = get_state_manager()
+    session = state.get_analysis_session(asin)
+    if not session:
+        return {"ok": True, "asin": asin, "run_id": run_id, "status": "FINISHED", "active": False}
+    if session.get("run_id") != run_id:
+        return {"ok": True, "asin": asin, "run_id": run_id, "status": "FINISHED", "active": False}
+    if session.get("cancel_requested_at"):
+        return {"ok": True, "asin": asin, "run_id": run_id, "status": "CANCELLING", "active": True}
+    return {"ok": True, "asin": asin, "run_id": run_id, "status": "RUNNING", "active": True}
 
 
 # ── GET /decision/{id}/preset ────────────────────────────────────────────

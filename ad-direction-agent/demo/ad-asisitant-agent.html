@@ -7,8 +7,8 @@
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@5.1.0/marked.min.js"></script>
-<!-- 访问控制补丁：删除 access-guard.js 即自动失效 -->
-<script src="access-guard.js"></script>
+<!-- 访问控制已切除 -->
+<!-- <script src="access-guard.js"></script> -->
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1318,7 +1318,7 @@ async function onNewEventClick() {
 }
 
 async function onCancelEventClick({ skipConfirm = false } = {}) {
-  if (!skipConfirm && !confirm('确认放弃本次进行中的分析吗？\n\n放弃后将恢复到最近一次已完成批次的可执行状态。')) return;
+  if (!skipConfirm && !confirm('确认放弃本次进行中的分析吗？\n\n取消请求发送后需等待后台任务在最近安全点退出，可能需要数分钟。')) return;
   let res;
   try {
     res = await callAPI('/decision/cancel-event', { asin });
@@ -1326,23 +1326,50 @@ async function onCancelEventClick({ skipConfirm = false } = {}) {
     showToast('放弃失败: ' + (e.message || '未知错误'), 'error', 5000);
     return;
   }
-  if (res && res.ok) {
-    // 放弃后切 B 态：只刷批次栏 + 加载最近一次已完成快照，不走 loadAll（避免全量 MCP 重拉）
-    await refreshDecisionContext();
-    const ctx = _decisionContext || {};
-    applyBatchBarFromCtx(ctx);
-    const latestId = ctx.latest_completed_id;
-    // 回到快照态，清除所有 tab 上的 blocked/degraded/partial 残留告警
-    ['dataStatusTab1','dataStatusTab2','dataStatusTab3','dataStatusTab4'].forEach(id => hide(id));
-    if (latestId && !ctx.in_progress) {
-      await renderReadonlyDecisionPreset(latestId, { switchDefault: false });
-      if (window._mountCampaignBatch) {
-        await window._mountCampaignBatch({ decision_id: latestId });
-      }
-      showToast('已放弃本次分析，已恢复最近一次历史数据', 'success');
-    }
-  } else {
+  if (!res || !res.ok) {
     showToast('放弃失败: ' + ((res && res.error) || '未知错误'), 'error', 5000);
+    return;
+  }
+  const run_id = res.run_id;
+  if (res.status === 'FINISHED' || !run_id) {
+    await _restoreAfterCancel();
+    return;
+  }
+  window._cancelledCampaignRunIds = window._cancelledCampaignRunIds || new Set();
+  window._cancelledCampaignRunIds.add(run_id);
+  const root = document.getElementById('campPanelRoot');
+  if (root) root.innerHTML = '<div style="text-align:center;padding:60px;color:var(--muted-fg);line-height:1.7;"><div style="font-weight:600;color:var(--fg);margin-bottom:6px;">正在取消分析</div><div>取消请求已发送，等待后台任务在最近安全点退出…</div></div>';
+  showToast('取消请求已发送，等待后台退出后自动恢复', 'info', 4000);
+  let attempts = 0;
+  const maxAttempts = 120;
+  const poll = setInterval(async () => {
+    attempts++;
+    try {
+      const s = await callAPI('/decision/session-status?asin=' + encodeURIComponent(asin) + '&run_id=' + encodeURIComponent(run_id), null, 5000, 'GET');
+      if (!s || !s.ok || s.status === 'FINISHED' || !s.active) { clearInterval(poll); await _restoreAfterCancel(); return; }
+    } catch (e) {
+      if (attempts >= maxAttempts) { clearInterval(poll); showToast('取消状态查询超时，请刷新页面', 'error', 6000); }
+      return;
+    }
+    if (attempts >= maxAttempts) { clearInterval(poll); showToast('等待取消超时，请刷新页面', 'error', 6000); }
+  }, 2500);
+}
+
+async function _restoreAfterCancel() {
+  await refreshDecisionContext();
+  const ctx = _decisionContext || {};
+  applyBatchBarFromCtx(ctx);
+  const latestId = ctx.latest_completed_id;
+  ['dataStatusTab1','dataStatusTab2','dataStatusTab3','dataStatusTab4'].forEach(id => hide(id));
+  const root = document.getElementById('campPanelRoot');
+  if (latestId && !ctx.in_progress) {
+    await renderReadonlyDecisionPreset(latestId, { switchDefault: false });
+    if (window._mountCampaignBatch) {
+      await window._mountCampaignBatch({ decision_id: latestId });
+    }
+    showToast('已放弃本次分析，已恢复最近一次历史数据', 'success');
+  } else {
+    if (root) root.innerHTML = '';
   }
 }
 
@@ -3886,6 +3913,11 @@ window._mountCampaignBatch = async function({ decision_id = '', executable = fal
 window._mountCampaignRealtime = async function({ run_id = '' } = {}) {
   const root = document.getElementById('campPanelRoot');
   if (!root || !asin) return;
+  // 已取消的 run，拒绝迟到渲染
+  if (run_id && window._cancelledCampaignRunIds && window._cancelledCampaignRunIds.has(run_id)) {
+    console.log('[cancel-guard] 拒绝已取消 run 的渲染:', run_id);
+    return;
+  }
   if (!guardUnsavedBeforeRun()) return;   // 消费前拦截：有未保存修改先拦下
   if (window._campaignPanelAPI) {
     try { window._campaignPanelAPI.unmount(); } catch (_) {}

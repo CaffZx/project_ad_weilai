@@ -337,7 +337,7 @@ class StateManager:
     # ── 进行中分析事件（run_id 作批次句柄）─────────
 
     def get_analysis_session(self, asin: str) -> dict | None:
-        """返回该 ASIN 进行中的实时分析事件 {run_id, started_at}，无则 None。"""
+        """返回该 ASIN 进行中的实时分析事件 {run_id, started_at, cancel_requested_at}，无则 None。"""
         with self._get_lock(asin):
             fp = self._asin_dir(asin) / "analysis_session.json"
             if not fp.exists():
@@ -351,7 +351,9 @@ class StateManager:
                     try:
                         started = datetime.fromisoformat(str(st))
                         if (datetime.now(timezone.utc) - started).total_seconds() > 12 * 3600:
-                            self.clear_analysis_session(asin)
+                            expired_run_id = data.get("run_id")
+                            if expired_run_id:
+                                self.clear_analysis_session_if_run(asin, str(expired_run_id))
                             return None
                     except (ValueError, TypeError):
                         pass
@@ -363,6 +365,9 @@ class StateManager:
         with self._get_lock(asin):
             self._ensure_asin_dir(asin)
             fp = self._asin_dir(asin) / "analysis_session.json"
+            if fp.exists():
+                logger.warning("set_analysis_session 拒绝覆盖已有 session [%s]", asin)
+                return False
             try:
                 fp.write_text(json.dumps(
                     {"run_id": run_id, "started_at": datetime.now(timezone.utc).isoformat()},
@@ -381,6 +386,8 @@ class StateManager:
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
                 if not isinstance(data, dict) or data.get("run_id") != run_id:
+                    return False
+                if data.get("cancel_requested_at"):
                     return False
                 data["execution_started_at"] = datetime.now(timezone.utc).isoformat()
                 fp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -413,6 +420,71 @@ class StateManager:
                     logger.warning("清除分析事件失败 [%s]: %s", asin, exc)
                     return False
         return True
+
+    def request_analysis_cancel(self, asin: str, run_id: str) -> bool:
+        """仅当 asin 当前仍是该 run 时写 cancel_requested_at；不删除 session。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return False
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or data.get("run_id") != run_id:
+                    return False
+                data.setdefault("cancel_requested_at", datetime.now(timezone.utc).isoformat())
+                fp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                return True
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("请求取消分析事件失败 [%s][%s]: %s", asin, run_id, e)
+                return False
+
+    def is_analysis_run_active(self, asin: str, run_id: str) -> bool:
+        """仅当当前行属于该 run 且尚未请求取消时返回 True。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return False
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                return (
+                    isinstance(data, dict)
+                    and data.get("run_id") == run_id
+                    and not data.get("cancel_requested_at")
+                )
+            except (json.JSONDecodeError, OSError):
+                return False
+
+    def clear_analysis_session_if_run(self, asin: str, run_id: str) -> bool:
+        """仅删除当前仍属于该 run 的 session；run 不匹配视为幂等成功。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return True
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("run_id") != run_id:
+                    return True
+                fp.unlink()
+                return True
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("清除分析事件(按run)失败 [%s][%s]: %s", asin, run_id, exc)
+                return False
+
+    def clear_analysis_execution_started_if_run(self, asin: str, run_id: str) -> bool:
+        """仅清理该 run 的 execution_started_at。"""
+        with self._get_lock(asin):
+            fp = self._asin_dir(asin) / "analysis_session.json"
+            if not fp.exists():
+                return True
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("run_id") == run_id:
+                    data.pop("execution_started_at", None)
+                    fp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                return True
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("清除执行标记(按run)失败 [%s][%s]: %s", asin, run_id, exc)
+                return False
 
     # ── 反馈日志 ─────────────────────────────────────────
 

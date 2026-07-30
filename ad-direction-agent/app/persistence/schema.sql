@@ -108,5 +108,6 @@ CREATE TABLE IF NOT EXISTS analysis_session (
     parent_seller_sku VARCHAR(128) NULL,
     run_id VARCHAR(64) NOT NULL,
     started_at DATETIME(6) NOT NULL,
-    execution_started_at DATETIME(6) NULL
+    execution_started_at DATETIME(6) NULL,
+    cancel_requested_at DATETIME(6) NULL
 ) ENGINE=InnoDB;

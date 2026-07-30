@@ -24,7 +24,7 @@ def build_metrics_from_asin_data(data, days: int = 7) -> dict:
 async def recommend_tactics_from_purpose(
     data,
     position: str,
-    stage: str,
+    operating_mode: str,
     season: str,
     days: int = 7,
 ) -> dict:
@@ -77,7 +77,7 @@ async def recommend_tactics_from_purpose(
         result = await determine_ad_targets_from_metrics(
             metrics=metrics,
             position=position,
-            stage=stage,
+            operating_mode=operating_mode,
             season=season,
             days=days,
             keywords=keywords,

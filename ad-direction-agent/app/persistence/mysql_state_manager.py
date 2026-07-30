@@ -634,26 +634,30 @@ class MySQLStateManager:
         try:
             self.ensure_schema()
             row = self._execute(
-                "SELECT run_id, started_at, execution_started_at FROM analysis_session WHERE asin=%s", (asin,), "one"
+                "SELECT run_id, started_at, execution_started_at, cancel_requested_at "
+                "FROM analysis_session WHERE asin=%s", (asin,), "one"
             )
             if not row or not row.get("run_id"):
                 return None
             st = row.get("started_at")
             ex_st = row.get("execution_started_at")
-            # MySQL datetime 列读出来是 naive；self._now() 是 aware UTC
-            # （set_analysis_session 写入时也是 _now() 的 UTC 值），
-            # 比较时显式补 tzinfo，避免 "can't subtract offset-naive and offset-aware datetimes"。
+            cr_st = row.get("cancel_requested_at")
             if st and st.tzinfo is None:
                 st = st.replace(tzinfo=timezone.utc)
             if ex_st and ex_st.tzinfo is None:
                 ex_st = ex_st.replace(tzinfo=timezone.utc)
-            # TTL 12h：超期自动清，防止运营执行权永久冻结
+            if cr_st and cr_st.tzinfo is None:
+                cr_st = cr_st.replace(tzinfo=timezone.utc)
+            # TTL 12h：超期自动清，防止运营执行权永久冻结（run_id 围栏）
             if st and (self._now() - st).total_seconds() > 12 * 3600:
-                self.clear_analysis_session(asin)
+                expired_run_id = row.get("run_id")
+                if expired_run_id:
+                    self.clear_analysis_session_if_run(asin, str(expired_run_id))
                 return None
             return {"run_id": row["run_id"],
                     "started_at": st.isoformat() if hasattr(st, "isoformat") else st,
-                    "execution_started_at": ex_st.isoformat() if hasattr(ex_st, "isoformat") else ex_st}
+                    "execution_started_at": ex_st.isoformat() if hasattr(ex_st, "isoformat") else ex_st,
+                    "cancel_requested_at": cr_st.isoformat() if hasattr(cr_st, "isoformat") and cr_st else cr_st}
         except Exception as e:  # noqa: BLE001
             logger.warning("读取分析事件标记失败 [%s]: %s", asin, e)
             return None
@@ -673,15 +677,17 @@ class MySQLStateManager:
                 self._execute(
                     "INSERT INTO analysis_session "
                     "(asin, shop_id, parent_seller_sku, run_id, started_at) "
-                    "VALUES (%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
-                    "shop_id=COALESCE(VALUES(shop_id), shop_id), "
-                    "parent_seller_sku=COALESCE(VALUES(parent_seller_sku), parent_seller_sku), "
-                    "run_id=VALUES(run_id), started_at=VALUES(started_at)",
+                    "VALUES (%s,%s,%s,%s,%s)",
                     (asin, shop_id, parent_seller_sku, run_id, self._now()),
                 )
                 return True
-            except Exception as e:  # noqa: BLE001
-                logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
+            except Exception as e:
+                if "Duplicate entry" in str(e) or "duplicate" in str(e).lower():
+                    logger.warning(
+                        "set_analysis_session 拒绝覆盖已有 session [%s]", asin
+                    )
+                else:
+                    logger.error("写入分析事件标记失败 [%s]: %s", asin, e)
                 return False
 
     def mark_analysis_execution_started(
@@ -703,7 +709,7 @@ class MySQLStateManager:
                             "UPDATE analysis_session SET execution_started_at=%s, "
                             "shop_id=COALESCE(%s, shop_id), "
                             "parent_seller_sku=COALESCE(%s, parent_seller_sku) "
-                            "WHERE asin=%s AND run_id=%s",
+                            "WHERE asin=%s AND run_id=%s AND cancel_requested_at IS NULL",
                             (self._now(), shop_id, parent_seller_sku, asin, run_id),
                         )
                     conn.commit()
@@ -736,6 +742,72 @@ class MySQLStateManager:
                 logger.warning("清除分析事件失败 [%s]: %s", asin, exc)
                 return False
         return True
+
+    def request_analysis_cancel(self, asin: str, run_id: str) -> bool:
+        """仅当 asin 当前仍是该 run 时写 cancel_requested_at；不删除 session。"""
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                conn = pymysql.connect(**self._connect_kwargs())
+                try:
+                    with conn.cursor() as cur:
+                        affected = cur.execute(
+                            "UPDATE analysis_session "
+                            "SET cancel_requested_at = COALESCE(cancel_requested_at, %s) "
+                            "WHERE asin=%s AND run_id=%s",
+                            (self._now(), asin, run_id),
+                        )
+                    conn.commit()
+                    return affected > 0
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("请求取消分析事件失败 [%s][%s]: %s", asin, run_id, e)
+                return False
+
+    def is_analysis_run_active(self, asin: str, run_id: str) -> bool:
+        """仅当当前行属于该 run 且尚未请求取消时返回 True。"""
+        try:
+            self.ensure_schema()
+            row = self._execute(
+                "SELECT 1 FROM analysis_session "
+                "WHERE asin=%s AND run_id=%s AND cancel_requested_at IS NULL",
+                (asin, run_id),
+                "one",
+            )
+            return row is not None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("检查分析事件状态失败 [%s][%s]: %s", asin, run_id, e)
+            return False
+
+    def clear_analysis_session_if_run(self, asin: str, run_id: str) -> bool:
+        """仅删除当前仍属于该 run 的 session；受影响 0 行也视为幂等成功。"""
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute(
+                    "DELETE FROM analysis_session WHERE asin=%s AND run_id=%s",
+                    (asin, run_id),
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("清除分析事件(按run)失败 [%s][%s]: %s", asin, run_id, exc)
+                return False
+
+    def clear_analysis_execution_started_if_run(self, asin: str, run_id: str) -> bool:
+        """仅清理该 run 的 execution_started_at。"""
+        with self._get_lock(asin):
+            try:
+                self.ensure_schema()
+                self._execute(
+                    "UPDATE analysis_session SET execution_started_at=NULL "
+                    "WHERE asin=%s AND run_id=%s",
+                    (asin, run_id),
+                )
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("清除执行标记(按run)失败 [%s][%s]: %s", asin, run_id, e)
+                return False
 
     def save_feedback(self, submission) -> bool:
         asin = submission.parent_asin

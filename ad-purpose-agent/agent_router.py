@@ -35,9 +35,9 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
 - `targets`: level="推荐" 的目标数组。无合格时返回 []。
 - `target_scores`: 全部 4 个目标（Traffic/Conversion/Ranking/Profit），各含 level + reason。reason 必须三段：【决策依据】（知识库规则匹配）【建议】【后续关注】。所有目标都必须写完整三段，禁止写"不适用"。
 - `level` 判定规则（严格遵循知识库，禁止主观打分）：
-  - "推荐": 知识库触发条件命中（04-触发规则.md）且无阻断（guardrail、stage constraint 全通过）
+  - "推荐": 知识库触发条件命中（04-触发规则.md）且无阻断（guardrail 全通过）
   - "可选": 触发条件未命中但未被阻断，或部分条件满足
-  - "不推荐": 被知识库硬护栏（10-安全护栏.md，如CPC>毛利）、产品阶段约束、或触发规则中的阻断条件明确排除
+  - "不推荐": 被知识库硬护栏（10-安全护栏.md，如CPC>毛利）或触发规则中的阻断条件明确排除
 - `keyword_analysis`: 每个关键词的 keyword_class（识别的关键词类别: Broad/Long-tail/Competitor/Brand/Custom）和 action（中文）。
 - `chart_metrics`: 从 ["acos", "cvr", "ctr", "cpc", "natural_ratio", "orders", "spend"] 中选 2-3 个最值得关注的。
 
@@ -46,7 +46,7 @@ _PURPOSE_OUTPUT_RULES = """## 输出要求
 
 
 async def determine_ad_targets_from_metrics(
-    metrics: dict, position: str, stage: str, season: str,
+    metrics: dict, position: str, operating_mode: str, season: str,
     days: int = 7, keywords: list | None = None,
     trend_history: list | None = None,
     competitor_price: float | None = None,
@@ -123,8 +123,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 
 [Current Product Data] (All below are {days}-day window aggregates unless noted otherwise)
 - 产品定位: {product_level_with_code(position) if position else '?'}
-# [产品阶段] 已由经营模式替代，不再注入 LLM prompt
-# - 产品阶段: {stage}
+- 经营模式: {operating_mode or '?'}
 - 淡旺季: {season}
 - {days}日平均自然排名: {(metrics.get('avg_nature_rank') or 100):.1f}
 - {days}日平均评分: {(metrics.get('avg_star') or 4.0):.1f}
@@ -151,7 +150,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 
    【决策依据】— Match against knowledge base rules using this decision tree, then cite evidence with proper formatting:
          (a) STEP 1 — Trigger check: scan knowledge base trigger conditions (04-触发规则.md). Does any trigger match? Examples: 新品/低样本→Traffic, 订单不足→Conversion, 排名机会→Ranking, 效率稳定→Profit.
-         (b) STEP 2 — Guardrail check: scan knowledge base guardrails (10-安全护栏.md) and stage constraints (02-标签维度定义.md). Is this target blocked? Examples: CPC>margin blocks Traffic, CVR<category×30% blocks Traffic, push-stage suppresses Profit, harvest-stage blocks Traffic.
+         (b) STEP 2 — Guardrail check: scan knowledge base guardrails (10-安全护栏.md). Is this target blocked? Examples: CPC>margin blocks Traffic, CVR<category×30% blocks Traffic.
          (c) STEP 3 — Assign level:
              - trigger matched AND no guardrail blocked → level="推荐"
              - trigger NOT matched AND no guardrail blocked → level="可选"
@@ -164,7 +163,7 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
    【后续关注】— 1-2 conditions that would change this level on re-evaluation.
 
    Examples:
-   - 【不推荐】{{"target": "Traffic", "level": "不推荐", "reason": "【决策依据】STEP1触发检查：产品阶段=推进期，引流型未被阶段约束阻断。STEP2护栏检查：{days}日平均CPC $[CPC] > 单均毛利$[毛利]，触碰知识库 CPC>毛利 硬阻断规则。STEP3结论：level=不推荐。\\n【建议】当前不应开启引流型广告，每次引流都在亏损。优先通过转化型广告巩固CVR优势，待CPC降至$[毛利]以下再重新评估。\\n【后续关注】每日监控CPC与毛利差值。若CPC连续3日低于$[毛利]，重新评估引流型level。"}}
+   - 【不推荐】{{"target": "Traffic", "level": "不推荐", "reason": "【决策依据】STEP1触发检查：推进期引流型未被阻断。STEP2护栏检查：{days}日平均CPC $[CPC] > 单均毛利$[毛利]，触碰知识库 CPC>毛利 硬阻断规则。STEP3结论：level=不推荐。\\n【建议】当前不应开启引流型广告，每次引流都在亏损。优先通过转化型广告巩固CVR优势，待CPC降至$[毛利]以下再重新评估。\\n【后续关注】每日监控CPC与毛利差值。若CPC连续3日低于$[毛利]，重新评估引流型level。"}}
    - 【可选】{{"target": "Ranking", "level": "可选", "reason": "【决策依据】STEP1触发检查：{days}日自然排名第[XX]位，7日排名上升[XX]位，排名机会触发条件部分满足。STEP2护栏检查：{days}日平均ACOS [XX]%在推进期容忍上限[XX]%内，未被阻断。但7日预算利用率仅[XX]%，未达60%门槛，不满足完整触发条件。STEP3结论：level=可选。\\n【建议】排名上升趋势存在但预算利用率不足。可小幅加投测试排名反应，若预算利用率升至60%以上且ACOS不恶化，level可升至推荐。\\n【后续关注】每日监控预算利用率和ACOS联动变化。"}}
 
 3. For each keyword in the core keywords list, determine its strategy type and put into `keyword_analysis` array. The `action` MUST be in Chinese and differentiate based on the 7d trend AND whether the keyword has a natural ranking:
@@ -285,7 +284,7 @@ Please output strictly in JSON format.
 
 
 async def determine_ad_targets(parent_asin: str, shop_account: str, days: int,
-                                position: str, stage: str, season: str) -> dict:
+                                position: str, operating_mode: str, season: str) -> dict:
     """AI diagnosis function (DB query wrapper). Delegates to determine_ad_targets_from_metrics."""
     _t_db_start = time.time()
     adapter = McpAdapter()
@@ -331,7 +330,7 @@ async def determine_ad_targets(parent_asin: str, shop_account: str, days: int,
 
     result = await determine_ad_targets_from_metrics(
         metrics=metrics,
-        position=position, stage=stage, season=season, days=days,
+        position=position, operating_mode=operating_mode, season=season, days=days,
         keywords=kw_top, trend_history=trend_history,
         competitor_price=competitor_price, stock_days=stock_days,
     )

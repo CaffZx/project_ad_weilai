@@ -270,6 +270,7 @@ async def analyze_campaigns(
     run_id: str | None = None,
     erp_override: dict | None = None,
     elimination_entry_dates: dict | None = None,  # deprecated: 现由内部 sync 后从 state 库读取，外部传 None 即可
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> CampaignAnalysisResult:
     """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
 
@@ -304,6 +305,7 @@ async def analyze_campaigns(
             campaign_data=campaign_data, keyword_analysis=keyword_analysis,
             run_id=run_id, _t=_t, erp_override=erp_override,
             elimination_entry_dates=elimination_entry_dates,
+            cancel_check=cancel_check,
         )
         return result
     finally:
@@ -328,7 +330,15 @@ async def _analyze_campaigns_impl(
     _t,
     erp_override: dict | None = None,
     elimination_entry_dates: dict | None = None,  # deprecated/unused: 内部 sync 后从 state 库读取
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> CampaignAnalysisResult:
+
+    async def _cancel():
+        if cancel_check:
+            await cancel_check()
+
+    # ① 获取活动数据前
+    await _cancel()
 
     # Portfolio 每次分析都重新拉取；这里只缓存 CampaignData。
     portfolio_data: dict | None = None
@@ -347,6 +357,8 @@ async def _analyze_campaigns_impl(
                 )
                 await _save_cached_campaigns(parent_asin, days, campaign_data)
                 _t("DONE fetch_campaigns (fetched)")
+                # ② 拉完活动数据后
+                await _cancel()
             except asyncio.TimeoutError:
                 logger.warning("fetch_campaigns 超时 [%s] >300s", parent_asin)
                 return CampaignAnalysisResult(
@@ -624,6 +636,8 @@ async def _analyze_campaigns_impl(
     async def _no_op_new_campaigns():
         return [], [], {}
 
+    # ③ LLM 分批前
+    await _cancel()
     stream_results = await asyncio.gather(
         _analyze_one_stream(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
@@ -1005,6 +1019,8 @@ async def _analyze_campaigns_impl(
             logger.exception("预算回算 agent 异常 [%s]: %s", parent_asin, e)
             return _fallback(f"{type(e).__name__}: {e}")
 
+    # ④ 汇总 LLM 前
+    await _cancel()
     sanity_res, synth_res, realloc_res = await asyncio.gather(
         _run_sanity(), _run_synth(), _run_realloc(), return_exceptions=True,
     )

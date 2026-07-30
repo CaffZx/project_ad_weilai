@@ -34,6 +34,7 @@ from app.workflow.steps.campaign import (
     fill_acos_constraints,
 )
 from app.api.campaign_viewmodel import from_db_snapshot
+from app.workflow.analysis_run_guard import AnalysisRunCancelled
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ async def _maybe_push_erp(
     resolved_daily_budget: float | None = None,
     operator: str = "tab5",
     cfg_override: dict | None = None,
+    run_id: str = "",
 ) -> dict:
     """分析成功后可选写入 ERP；失败不抛异常。"""
     enabled = write_erp or settings.erp_auto_write
@@ -83,6 +85,12 @@ async def _maybe_push_erp(
         cfg_override=cfg_override,
     )
     kb_payload = analysis_to_kb_payload(result, temperature=temperature)
+    # 取消检查：run_id 已标记取消 → 不落库
+    if run_id and hasattr(state, "is_analysis_run_active"):
+        active = await asyncio.to_thread(state.is_analysis_run_active, asin, run_id)
+        if not active:
+            logger.info("ERP push 已跳过 [%s] run_id=%s（分析已取消）", asin, run_id)
+            return {"attempted": True, "ok": False, "skipped": "analysis_cancelled"}
     try:
         report = await asyncio.to_thread(
             push_full_to_erp,
@@ -107,7 +115,7 @@ async def _maybe_push_erp(
             await asyncio.to_thread(
                 _get_repository().finalize_batch, report.decision_id, asin, analysis_mode,
             )
-            await asyncio.to_thread(state.clear_analysis_session, asin)
+            await asyncio.to_thread(state.clear_analysis_session_if_run, asin, run_id)
         except Exception as fe:
             logger.warning("finalize_batch/清进行中 失败 [%s] %s: %s (非阻塞)", asin, report.decision_id, fe)
         return out
@@ -143,6 +151,7 @@ async def campaign_analyze(req: dict):
             resolved_daily_budget=extra.get("resolved_daily_budget"),
             operator=extra.get("operator", "tab5"),
             cfg_override=extra.get("cfg_override"),
+            run_id=extra.get("run_id", ""),
         )
     return body
 
@@ -189,8 +198,8 @@ async def campaign_viewmodel(req: dict):
         resolved_target_acos=extra.get("resolved_target_acos"),
         resolved_daily_budget=extra.get("resolved_daily_budget"),
         operator=extra.get("operator", "tab5"),
+        run_id=extra.get("run_id", ""),
     )
-    decision_id = erp.get("decision_id")
     if not erp.get("ok") or not decision_id:
         await _clear_execution_started(extra.get("state"), extra["asin"])
         reason = erp.get("error") or erp.get("skipped") or "未知原因"
@@ -417,6 +426,10 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
         # 淘汰复评（KB21§7）入池日期/淘汰前花费：现走 state 库 t_advert_agent_pool_entry
         # （由 campaign.py 在复评前 sync 后再读取最新状态，api 层不再提前取 → 避免取旧快照）。
         fetcher = CampaignFetcher()
+        async def _cancel_check():
+            from app.workflow.analysis_run_guard import ensure_analysis_run_active
+            await ensure_analysis_run_active(state, asin, effective_run_id)
+
         result = await asyncio.wait_for(
             analyze_campaigns(
                 fetcher=fetcher,
@@ -430,6 +443,7 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
                 keyword_analysis=keyword_analysis,
                 run_id=effective_run_id,
                 erp_override=erp_override,
+                cancel_check=_cancel_check,
             ),
             timeout=settings.campaign_total_timeout,
         )
@@ -470,9 +484,23 @@ async def _do_analyze(req: dict) -> tuple[CampaignAnalysisResult, dict | None]:
             "resolved_daily_budget": strat_ctx.daily_budget,
             "operator": operator,
             "cfg_override": _cfg14,
+            "run_id": effective_run_id,
         }
         return (result, extra)
 
+    except AnalysisRunCancelled as e:
+        logger.info("Campaign 已取消 [%s] run_id=%s", asin, e.run_id)
+        await asyncio.to_thread(state.clear_analysis_session_if_run, asin, e.run_id)
+        return (
+            CampaignAnalysisResult(
+                parent_asin=asin, days=days,
+                run_id=getattr(e, "run_id", ""),
+                warnings=[f"分析已取消"],
+                sanity_check_passed=False,
+                llm_rounds_completed=0,
+            ),
+            None,
+        )
     except asyncio.TimeoutError as e:
         logger.warning("Campaign analyze 超时 [%s]: %s", asin, e)
         return (

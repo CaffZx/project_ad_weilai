@@ -132,7 +132,7 @@ async def _run_purpose_and_cache(
             recommend_tactics_from_purpose(
                 data=data,
                 position=strategy_context.product_level,
-                stage=strategy_context.product_stage,
+                operating_mode=strategy_context.operating_mode,
                 season=strategy_context.season_stage,
                 days=days,
             ),
@@ -469,7 +469,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
             recommend_tactics_from_purpose(
                 data=data,
                 position=long_term.get("product_level", "常规产品 (P2)"),
-                stage=long_term.get("product_stage"),
+                operating_mode=long_term.get("operating_mode"),
                 season=long_term.get("season_stage", "淡季"),
                 days=days,
             ),
