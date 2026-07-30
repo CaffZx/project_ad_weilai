@@ -301,6 +301,7 @@ CREATE TABLE IF NOT EXISTS t_advert_agent_campaign_exact_lifecycle (
 | `t_advert_agent_data_metrics` | 每个 decision 的 SUMMARY/DAILY 指标快照 | 我方 AD-Agent | `repository.py:1188 _upsert_legacy_metrics()` |
 | `t_advert_agent_decision` | 一次广告分析决策批次主表，含产品/阶段/季节/目标等快照 | 我方 AD-Agent | `repository.py:1234 _upsert_decision()` |
 | `t_advert_agent_decision_config` | 运营配置、定时分析开关及 ASIN 来源；最近决策回写字段也在此表 | 混合：ERP/运营维护配置，我方回写运行状态 | 读取：`app/data/decision_config_reader.py`；写入：`repository.py:1297 _upsert_decision_config()` |
+| `t_advet_agent_config` | **新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型），独立于分析事件，无 decision_id 绑定 | 我方 AD-Agent | 待接入 |
 | `t_advert_agent_decision_config_bak_drop_codex` | `decision_config` 的历史备份表（当前生产库仍存在） | ERP/运维备份 | 本项目无读写锚点 |
 | `t_advert_agent_direction_recommend` | 前置方向推荐主表（结论 JSON） | 我方 AD-Agent | `repository.py:1112 _upsert_legacy_recommend()`；兼容路径 `:1520 _upsert_wizard_direction()` |
 | `t_advert_agent_direction_recommend_detail` | 前置方向推荐明细 | 我方 AD-Agent | `repository.py:1150 _upsert_legacy_details()`；兼容路径 `:1520 _upsert_wizard_direction()` |
@@ -669,6 +670,43 @@ CREATE TABLE `t_advert_agent_decision_config` (
   KEY `idx_shop_id` (`shop_id`) USING BTREE,
   KEY `idx_parent_asin` (`parent_asin`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='agent决策配置表'
+```
+
+#### `t_advet_agent_config`
+
+- 功能：**新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型）
+- 与旧表区别：主键为 `BIGINT AUTO_INCREMENT`，无 `decision_id` 绑定，独立于分析事件；去掉了 `product_stage`（已由 `operating_mode` 替代）
+- 写入/维护方：我方 AD-Agent
+- 代码锚点：待接入
+
+```sql
+CREATE TABLE `t_advet_agent_config` (
+  `id`                  bigint       NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `shop_id`             bigint       DEFAULT NULL COMMENT '店铺ID',
+  `shop_account`        varchar(100) DEFAULT NULL COMMENT '店铺账号',
+  `parent_asin`         varchar(50)  DEFAULT NULL COMMENT '父ASIN',
+  `parent_seller_sku`   varchar(100) DEFAULT NULL COMMENT '卖家SKU',
+  `site_code`           varchar(20)  DEFAULT NULL COMMENT '站点',
+  `day_range`           varchar(50)  DEFAULT NULL COMMENT '分析天数',
+  `product_position`    varchar(100) DEFAULT NULL COMMENT '产品定位',
+  `operating_mode`      varchar(100) DEFAULT NULL COMMENT '经营模式',
+  `season_type`         varchar(100) DEFAULT NULL COMMENT '淡旺季',
+  `advert_purposes`     varchar(500) DEFAULT NULL COMMENT '广告目的，逗号分隔',
+  `target_keyword_types` varchar(500) DEFAULT NULL COMMENT '目标关键词类型，逗号分隔',
+  `target_acos_suggest` int          DEFAULT NULL COMMENT '推荐ACOS',
+  `daily_budget_suggest` decimal(12,2) DEFAULT NULL COMMENT '推荐每日预算',
+  `advert_direction_types` varchar(512) DEFAULT NULL COMMENT '广告方向，JSON数组',
+  `enabled`             tinyint(1)   DEFAULT '1' COMMENT '是否启用定时',
+  `frequency`           varchar(16)  DEFAULT 'DAILY' COMMENT '调度频率',
+  `create_by`           int          DEFAULT NULL COMMENT '创建人',
+  `editor_by`           int          DEFAULT NULL COMMENT '修改人ID',
+  `creator_id`          bigint       DEFAULT NULL COMMENT '创建人',
+  `editor_id`           bigint       DEFAULT NULL COMMENT '修改人',
+  `create_time`         datetime     DEFAULT NULL,
+  `update_time`         datetime     DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_asin_sku_shop` (`parent_asin`,`parent_seller_sku`,`shop_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='策略配置（无decision_id绑定，独立于分析事件）'
 ```
 
 #### `t_advert_agent_decision_config_bak_drop_codex`

@@ -71,7 +71,7 @@ async def run_get_diagnosis(ctx: WorkflowContext, asin: str, refresh: bool = Fal
     strategy_ctx = StrategyConfirmRequest(
         asin=asin,
         product_level=long_term.get("product_level", "常规产品 (P2)"),
-        product_stage=long_term.get("product_stage", "推进期"),
+        product_stage=long_term.get("product_stage"),
         season_stage=long_term.get("season_stage", "淡季"),
         operating_mode=long_term.get("operating_mode"),
     ) if long_term else None

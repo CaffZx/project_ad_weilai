@@ -659,7 +659,7 @@ class TargetAcosRecommender:
         violations = []
 
         # Step 1: 目标ACOS 取值区间（阶段×层级上限 + 目的下限）→ 基准取区间中点
-        stage = data.product_stage or "推进期"
+        stage = data.product_stage  # 缺失时回退产品层级默认值
         acos_floor, acos_ceiling = compute_target_acos_band(
             self.cfg, stage, data.product_level, ad_purposes)
         target = (acos_floor + acos_ceiling) / 2
@@ -770,7 +770,7 @@ class TargetAcosRecommender:
                 ))
 
         # Step 6: Relative change constraint — 非测试期，相对变化 ≤ 40%
-        stage = data.product_stage or "推进期"
+        stage = data.product_stage  # 缺失时回退产品层级默认值
         current_acos = data.ad_data.acos if data.ad_data and data.ad_data.acos else None
         if current_acos is not None and current_acos > 0 and stage not in ("测试期",):
             rel_change = abs(target - current_acos) / current_acos
@@ -864,7 +864,7 @@ class BudgetBidRecommender:
         spend_7d = data.ad_data.spend or 0
         daily_budget = spend_7d / 7 if spend_7d > 0 else (data.ad_data.daily_budget or 50)
         suggested_budget = daily_budget
-        stage = data.product_stage or "推进期"
+        stage = data.product_stage  # 缺失时回退产品层级默认值
         stage_budgets = self.cfg.get("stage_budgets", {})
         budget_range = stage_budgets.get(stage, {"min": 20, "max": 80})
         reasons.append(

@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends
 
+from app.api.config_mirror import mirror_agent_config
 from app.api.deps import get_workflow_orchestrator
 from app.api.product_identity import require_product_identity
 from app.core.workflow_orchestrator import WorkflowOrchestrator
@@ -43,4 +44,16 @@ async def tactics_confirm(
 ):
     """确认策略层选择，持久化为长期默认配置"""
     require_product_identity(req)
-    return await orchestrator.confirm_tactics(req)
+    result = await orchestrator.confirm_tactics(req)
+    if result.config_saved:
+        await mirror_agent_config(
+            req=req,
+            patch={
+                "advert_purposes": [value.value for value in req.ad_purposes],
+                "target_keyword_types": [
+                    value.value for value in req.target_keyword_strategy
+                ],
+            },
+            operation="tactics_confirm",
+        )
+    return result

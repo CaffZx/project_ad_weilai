@@ -123,7 +123,8 @@ Please strictly follow the knowledge base rules to diagnose this ASIN:
 
 [Current Product Data] (All below are {days}-day window aggregates unless noted otherwise)
 - 产品定位: {product_level_with_code(position) if position else '?'}
-- 产品阶段: {stage}
+# [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+# - 产品阶段: {stage}
 - 淡旺季: {season}
 - {days}日平均自然排名: {(metrics.get('avg_nature_rank') or 100):.1f}
 - {days}日平均评分: {(metrics.get('avg_star') or 4.0):.1f}

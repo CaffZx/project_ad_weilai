@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-25（版本日志见文末，最新 v3.21：战略层经营模式 + 新增活动选词重构 + MCP registry）
-> **版本**: v2.0
+> **最后更新**: 2026-07-30（版本日志见文末，最新 v3.22：精准组合确定性升降级 + ACOS约束模块 + KB v2.0 重构收尾）
+> **版本**: v3.22
 > **分支**: chenv3.2
 
 ---
@@ -10,7 +10,7 @@
 
 ### 1.1 背景
 
-**项目**：广告方向决策子智能体（Ad Direction Agent），面向亚马逊广告运营的 AI 辅助决策系统。
+**项目**：广告活动调整 Agent，面向亚马逊广告运营的 AI 辅助决策系统（原名"广告方向决策子智能体"，已过时；该项目已扩展为综合性的 Campaign/Target/Portfolio/Budget 全维度调整 Agent）。
 
 **数据源**：纯 MCP StarRocks 网关（2026-06-30 已切除 Doris，失败返零值不回落）。
 
@@ -21,7 +21,7 @@
 自动化分析和调整所有广告活动（Campaign），核心能力：
 
 - **自动发现**：从 MCP 获取 ASIN 下所有广告活动的维度信息
-- **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21/29，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
+- **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21/31/32，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
 - **分流策略**：精准广告（EXACT）和广泛广告（BROAD/PHRASE/AUTO）使用不同的调整维度
 - **多轮投票**：R1+R2 并行 → 投票比对 → R3 tiebreaker（分歧时触发），保证决策可靠性
 - **AI 汇总**：将 N 条单活动建议合成为按共同原因分组的运营叙事
@@ -44,8 +44,7 @@ purpose-agent 负责策略层 LLM 调用（`determine_ad_targets_from_metrics()`
 ```
 parent_asin
   ├─ MCP 上下文查询 → 维度字段 (campaign_name/campaign_id/child_asin/keyword_text/match_type/keyword_bid)
-  ├─ 代码硬过滤 → 排除 non-ENABLED / 无数据 / 多关键词活动
-  ├─ Campaign 预过滤 → 排除 budget≈$1 & bid≈$0.2 的疑似已淘汰活动
+  ├─ Campaign 预过滤 → 排除 budget≈$1 & bid≈$0.2 的疑似已淘汰活动 + 多关键词活动 + 否定词
   ├─ MCP basic_info + product_report 并行
   ├─ 组装 CampaignUnit[] (campaign_key = "活动名 × 子ASIN#匹配类型#关键词ID"，关键词级)
   ├─ ★核心词标签注入: 读 ERP 核心词表 → 回填 is_core (v3.18 新增)
@@ -97,6 +96,8 @@ parent_asin
 | `adjust_bid` | 调整出价 | placement_adjustments | negative_keywords |
 | `adjust_budget` | 调整预算 | placement_adjustments | negative_keywords |
 | `adjust_placement` | 调整广告位分配（仅精准） | placement_adjustments | — |
+| `reactivate_budget_only` | 复评：仅恢复预算（不改 Bid） | — | — |
+| `reactivate_with_calibrated_bid` | 复评：恢复预算+标定 Bid | placement_adjustments | — |
 | `keep` | 保持现状 | — | — |
 
 ---
@@ -105,34 +106,41 @@ parent_asin
 
 ### 3.1 核心文件总览
 
-> 行数为 2026-07-12 实测（`wc -l`）。行号易漂移，引用 `file:line` 前请先 Grep 实测。
+> 行数为 2026-07-30 实测（`wc -l`）。行号易漂移，引用 `file:line` 前请先 Grep 实测。
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | 2489 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；护栏委托 guardrails + R3/R4 重试编排 |
-| `app/workflow/steps/campaign_guardrails.py` | 491 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 11 条规则含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
-| `app/llm/reasoner.py` | 2239 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入 |
-| `app/llm/kb_loader.py` | 234 | KB 加载器。preset 全集：`campaign_overview` / `campaign_adjustment_exact`(18/17/15/19/22/21) / `campaign_adjustment_broad`(18/17/15/19/22/21) / `budget_reallocation`(KB23) / `new_campaign`(16/06/08/28) / **`semantic_core`(KB29, v3.18)** |
-| `app/models/campaign.py` | 269 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary) |
-| `app/data/campaign_fetcher.py` | 1159 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算） |
-| `app/data/campaign_prefilter.py` | 92 | 硬过滤纯函数（多词去重+补维度字段+`__prefiltered` 标记，供前端预过滤卡展示） |
-| `app/api/campaign.py` | 566 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
-| `app/api/campaign_viewmodel.py` | 297 | DB 快照→ViewModel 反向 mapper；审核等级转中文标签（`_REVIEW_LEVEL_LABELS`），兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL` |
+| `app/workflow/steps/campaign.py` | 2846 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；`_resolve_budget_conflicts` 预算冲突修正 + 护栏 `_apply_campaign_guardrails` 附加校验 + R3/R4 LLM 重试编排；operating_mode 接入；`campaign_exact_transition` 调度 |
+| `app/workflow/steps/campaign_guardrails.py` | 504 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 12 条规则（P0-P11）含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
+| `app/workflow/steps/campaign_exact_transition.py` | — | ★精准组合确定性升降级（v3.22 新增）：EXACT 活动四组升降级逻辑，ACOS 约束驱动 |
+| `app/core/acos_constraints.py` | — | ★ACOS 约束核心模块（v3.22 新增）：目标 ACOS/预算的硬约束计算 |
+| `app/llm/reasoner.py` | 2295 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入 |
+| `app/llm/kb_loader.py` | 327 | KB 加载器。**权威预设定义见 `docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md` §4.1（KB v3.4.8）**。完整 preset 清单：`campaign_overview`(02/04/09)、`campaign_adjustment_exact`(18/17/15/19/22/21/10/03/14/30/29)、`campaign_adjustment_broad`(18/17/15/19/22/21/10/03/14/30/31/28)、`campaign_adjustment_product_targeting`(18/17/15/19/22/08/07/30)、`budget_reallocation`(23/30)、`portfolio_degrade`(32/21/23/30)、`new_campaign`(16/06/02/28/24)、`semantic_core`(29/28/24)、`p3_recommend`(01/03/05/09/10/11/14/25)、`purpose_tactics`(01/02/03/04/06/09/14)、`execution_direction`(01/02/03/04/05/09/14/22)、`analyze_report`(02/05/09/12/14)、`chat`(02/14)。大部分预设使用节级切片（如 `18:1,3`），非整文件注入。 |
+| `app/models/campaign.py` | 336 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary/NewCampaignCandidate/NewKeywordCandidate) |
+| `app/data/campaign_fetcher.py` | 1433 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算 + spend 多周期窗口）；**v3.22 增强**：补 search_term 数据源+三日验证数据 |
+| `app/data/campaign_prefilter.py` | 130 | 硬过滤纯函数（`filter_campaigns` 多词去重+否定词排除+补维度字段+`__prefiltered` 标记 + `filter_eliminated_pool` 淘汰池预过滤，供前端预过滤卡展示） |
+| `app/api/campaign.py` | 634 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
+| `app/api/campaign_viewmodel.py` | 376 | DB 快照→ViewModel 反向 mapper；审核等级转中文标签（`_REVIEW_LEVEL_LABELS`），兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL` |
 | `app/llm/client.py` | 275 | DeepSeek API 客户端 + KeyPool 轮询(Rlock) |
 | `app/config/settings.py` | 283 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关 + `meta_filter_dashboard_light`) |
-| `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护） |
+| `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护/经营模式 radio 组） |
+| `demo/access-guard.js` | — | ★前端入口守卫（v3.22 新增）：页面加载前校验 product identity 三元组 |
 | `app/data/mcp_adapter.py` | 536 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点；meta_filter 透传 |
 | `app/data/mcp_mapping.py` | 258 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09)；`bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap |
-| `app/workflow/steps/campaign_portfolio.py` | 103 | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
-| `app/workflow/steps/campaign_budget_summary.py` | 103 | ★预算汇总：3 组约束分配 (主推/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
-| `app/workflow/steps/campaign_new.py` | 624 | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN (详见 §9/§22/§24) |
+| `app/data/mcp_registry.py` | — | ★MCP 工具注册集中化（v3.21 新增）：单一真源管理 MCP 工具定义，`mcp_adapter` 适配 |
+| `app/workflow/steps/campaign_portfolio.py` | — | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
+| `app/workflow/steps/campaign_budget_summary.py` | — | ★预算汇总：3 组约束分配 (主力/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
+| `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN。**v3.21 减负**：多源发现委托 `new_keyword_fetcher.py` |
+| `app/data/new_keyword_fetcher.py` | — | ★多源候选词发现统一编排器（v3.21 新增）：flow_keywords/own_keyword_flow/competitor_reverse 三源并行 + 配额分配 + 来源合并去重 |
 | `app/workflow/steps/campaign_budget_reallocation.py` | 304 | ★组合预算回算（KB23）：优先 MCP portfolio 真实值 > 60/20/20 兜底；`available_for_increase` 增量约束；validate 加正增长额度校验 |
-| `app/workflow/steps/portfolio_execution.py` | 206 | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
-| `app/workflow/steps/advert_execution.py` | 324 | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表） |
+| `app/workflow/steps/portfolio_execution.py` | — | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
+| `app/workflow/steps/advert_execution.py` | — | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表）；**v3.22 增强**：immediate_exit 确定性执行 + 灰度卡执行钩子 |
+| `app/persistence/erp_writer/advert_exec_mapper.py` | — | ★ERP 执行硬护栏 + 请求映射唯一真源 |
+| `app/persistence/erp_writer/repository.py` | — | ★ERP 读写仓库；**v3.22 增强**：灰度卡读写+池表同步+组合执行记录 |
 | `app/data/core_keyword_fetcher.py` | 414 | ★核心词发现数据编排器（v3.18 新增）：MCP 拉关键词+listing→LLM semantic_core 判定→落库 ERP `t_advert_agent_core_keyword` |
 | `app/workflow/steps/core_keyword.py` | 309 | ★核心词语义判定工作流（v3.18 新增）：数据编排+语义判定+批量落库+主流程 is_core 回填 |
 | `app/api/core_keyword.py` | 62 | ★核心词 API 端点（v3.18 新增，v3.19 扩展）：`POST /analyze` 离线分析 + `/status` `/enable` `/disable` `/groups` 管理接口 |
-| `app/core_keyword_policy.py` | 25 | ★核心词策略引擎（v3.19 新增）：按 campaign 分组聚合 semantics 判定结果 |
+| `app/core/core_keyword_policy.py` | 25 | ★核心词策略引擎（v3.19 新增）：按 campaign 分组聚合 semantics 判定结果 |
 | `scripts/erp_db/migrate_core_keyword.sql` | 45 | ★核心词表 DDL（v3.18 新增） |
 | `batch_core_keyword.py` / `batch_core_keyword.sh` | — | ★离线批跑脚本（v3.18 新增） |
 | `tests/workflow/test_core_keyword.py` | 627 | ★核心词全链路单测（v3.18 新增） |
@@ -301,7 +309,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-10 | **护栏独立模块 + 组合映射归一化** | ★ `campaign_guardrails.py`（新，384 行）：从 `_resolve_budget_conflicts` 提取全部护栏逻辑为 `apply_all()`，含淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏；阈值常量+谓词为 `campaign_portfolio` 侧单一真相源。`campaign_portfolio.py`：新增 `GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE` 双向映射；`campaign_viewmodel.py`/`text_utils.py` 删除本地硬编码映射改为 import。`campaign.py`：`_resolve_budget_conflicts` 委托给 guardrails，新增 `inventory_days`/`refund_rate`/`rating` 参数。`reasoner.py`：精准/广泛 prompt 示例输出删 child_asin/keyword_text/match_type/current_budget/current_bid（cid 句柄已回填）；`recommend_new_campaigns` 加 JSONDecodeError 重试+max_tokens 4096→8192。阈值修正：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率阻断 25%→30% |
 | 07-10 | **KB 阈值同步 + 审核等级统一** | 全部 17 个执行规则 KB 文件阈值对齐：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率 25%→30%。`campaign_new.py`/`campaign_restart.py`：`AUTO_BATCHABLE`→`AUTO_APPROVED`（与 ERP pending 表消费端约定统一） |
 | 07-10 | **审核等级中文标签** | `campaign_viewmodel.py`：新增 `_REVIEW_LEVEL_LABELS` 映射（`AUTO_APPROVED`→可直接执行、`MANUAL_REVIEW`→需人工审核、`HIGH_RISK_REVIEW`→高风险审核、`BLOCKED`→应阻断执行）；兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL`；`from_db_snapshot` 的 `review_level` 输出中文标签 |
-| 07-10 | **★ 护栏优先级重构 + R3/R4 LLM 重试编排** | `campaign_guardrails.py`：全部 11 条规则新增 `retry_instruction`+`campaign_key` 字段；P3 硬淘汰（无单且 bid≤$0.10/budget≤$1）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3；P4/P7/P8/P10/P11 修复边界 bug；提取 `_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词。`campaign.py`：R3/R4 重试编排循环——护栏拦截后按 campaign_key 带告警回灌 LLM 重判，最多 R3→R4 两轮，R4 后不再 R5，最终护栏兜底；`_apply_campaign_guardrails` 返回 `(GuardrailPass, warnings)`；`_backfill_campaign_adjustment_context` 提取复用。`reasoner.py`：`_guardrail_instruction` 注入批次提示 + `_guardrail_alert` 注入单活动告警。新增 `test_campaign_guardrails.py`(497行) + `test_campaign_guardrail_retry.py`(210行)；`test_campaign_resolve_conflicts.py` 更新 P3>P1 预期。6 files +1206/-111。 |
+| 07-10 | **★ 护栏优先级重构 + R3/R4 LLM 重试编排** | `campaign_guardrails.py`：全部 12 条规则新增 `retry_instruction`+`campaign_key` 字段；P3 硬淘汰（无单且 bid≤$0.10/budget≤$1）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3；P4/P7/P8/P10/P11 修复边界 bug；提取 `_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词。`campaign.py`：R3/R4 重试编排循环——护栏拦截后按 campaign_key 带告警回灌 LLM 重判，最多 R3→R4 两轮，R4 后不再 R5，最终护栏兜底；`_apply_campaign_guardrails` 返回 `(GuardrailPass, warnings)`；`_backfill_campaign_adjustment_context` 提取复用。`reasoner.py`：`_guardrail_instruction` 注入批次提示 + `_guardrail_alert` 注入单活动告警。新增 `test_campaign_guardrails.py`(497行) + `test_campaign_guardrail_retry.py`(210行)；`test_campaign_resolve_conflicts.py` 更新 P3>P1 预期。6 files +1206/-111。 |
 | 07-11 | **★ 秒开优化：策略层轻量化 + meta_filter 分级缓存** | `tactics.py`：`run_get_tactics_options` 替换为纯缓存+长期配置读取版本，零 MCP/LLM 调用（旧版保存为 `_run_get_tactics_options_legacy`）。`diagnosis.py`：删除关键词 AI 分类自动回访逻辑（25行），避免缓存 miss 时触发重量级 MCP 拉取。`workflow_orchestrator.py`：缓存 key 加入 `meta_filter` 维度（`_data_task_key`），不同 filter 组合独立缓存不互串。`mcp_mapping.py`：BOOTSTRAP_TOOLS 拆为 `BASIC_BOOTSTRAP_TOOLS` + `CAMPAIGN_KEYWORD_BOOTSTRAP_TOOLS`；新增 `bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap。`settings.py`：新增 `meta_filter_dashboard_light` = [META_AD_PRODUCT, META_TREND]。新增 `test_lightweight_loading.py`(116行) + MCP 诊断文档 2 篇。18 files +466/-64。 |
 | 07-11 | **护栏告警仅用 retry_instruction** | `_build_guardrail_alerts` 不再回落 `message`（含规则编号的内部消息不应灌入 LLM prompt），`retry_instruction` 为空时直接跳过。test 补空值断言。2 files +25/-4。 |
 | 07-12 | **挪组 portfolioId 解析重构** | `advert_execution.py`：`_resolve_modify_portfolios` 移回 MCP 调用前执行，按 portfolioId 拆分 paramsVoList，匹配失败写入 `move_errors` 分类（不存在/多个/ID缺失），失败活动移除 campaignGroupType 后其他字段继续下发。`ExecPlan` 新增 `move_errors` 字段，confirm API 透传。`_match_portfolio` 改为单向子串匹配 + 返回 `(match, count)` 元组。`state.js` 前端按 group+reason 去重展示 sticky toast 含具体活动名。6+4+1 files。 |
@@ -322,6 +330,11 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-25 | **MCP registry 集中化 + 新增活动选词重构** | `mcp_registry.py`(新)：MCP 工具注册收口到单文件，`mcp_adapter` 适配。`new_keyword_fetcher.py`(新)：多源候选词发现统一编排器，`campaign_new.py` -130 行委托给 fetcher。`models/campaign.py`：新增 `NewKeywordCandidate` 模型含 priority_caps。`campaign_portfolio.py`：补混合匹配冲突阻断 filter 调用。`test_new_keyword_priority_caps.py`(新) + `test_portfolio_match_and_exec.py` 补冲突用例。18 files。 |
 | 07-25 | **★ 战略层新增经营模式(operating_mode)** | `layers.py`：`OperatingMode`(6值)+`AdPermission`(3级)+`operating_mode_to_permission()` 纯函数。`layer_options.toml`：第 4 个 radio 组。`text_utils.py`：`map_operating_mode`/`unmap_operating_mode` 中英文互转。`repository`/`auto_push`/`decision_config_reader`：ERP 决策表读写。`decision`/`long_term_config`：API 透传。`mysql_state_manager`/`schema.sql`：state DB 加列。`campaign.py`：`build_campaign_strategy_context` 接入 operating_mode。`migrate_operating_mode.sql` + `migrate_state_schema_columns.sql`(新)。test 5 个。28 files +524/-178。 |
 | 07-25 | **.gitignore + core_keyword limit 扩大** | `.gitignore` 加 `logs/` 目录。`repository.py`：核心词策略查询 limit 30→60。 |
+| 07-28 | **★ KB v2.0 重构：总纲+ontology 补全+切片矩阵** | KB 知识库全面重组：新增 `00-知识库总纲与切片覆盖矩阵.md`（KB 全景索引+切片矩阵）、`30-动作词表与映射.md`；新增 ontology `runtime_contract.yaml`（运行时契约）、`evidence.yaml`（证据类型）；全部 01-32 号 KB 文件+7 个 ontology YAML 大范围更新；`kb_loader.py` preset 切片粒度调整（+63/-28）。前端 `ad-asisitant-agent.html` 新增 operating_mode radio 组；`layers.py` AdPermission 枚举+operating_mode_to_permission 纯函数；全部 5 个工作流 step（strategy/tactics/diagnosis/execution/wizard）同步接入 operating_mode。9+4 files +4741/-685。 |
+| 07-28 | **KB 旧切片清理** | 删除 3 个已过时/重复的 KB 执行规则文件：`30-广泛广告否词与搜索词治理规则.md`（内容已迁移）、`31-样本窗口与生命周期状态规则.md`（合并到新 31）、`32-自动广告调整规则.md`（合并到新 32）。新增统一版 `25-目标ACOS预算Bid推荐.md`（从执行规则升到 KB 根目录）、`31-广泛自动词组调整规则.md`、`32-精准组合升降级规则.md`。5 个 ontology YAML + 13 个 KB 切片同步更新。31 files +189/-1015。 |
+| 07-28 | **★ ERP 执行状态管理+测试大面积扩展** | `advert_execution.py`（+439）：immediate_exit 确定性执行链路。`repository.py`（+368）：灰度卡读写+池表同步+组合执行记录。`advert_exec_mapper.py`（+99）：ERP 硬护栏增强。`decision.py`（+929）：决策流程重构。`campaign_fetcher.py`（+38）：补三日验证数据。测试大面积扩展：`test_portfolio_match_and_exec.py`（+1128）、`test_product_identity_required.py`（+908）、`test_erp_gray_cards.py`（+359）、`test_mcp_campaign_discover.py`（+338）、`test_advert_exec_child_asin.py`（+177）。前端 `ad-asisitant-agent.html`（+75）。新增实施方案文档 `2026-07-28-immediate-exit-deterministic-execution.md`。17 files +6161/-114。 |
+| 07-28 | **kb_loader 预设精简 + access-guard.js** | `kb_loader.py`：切片预设精简（-28 行冗余）。新增 `demo/access-guard.js`：前端入口守卫，页面加载前校验 product identity 三元组。`settings.py`（+2）、`campaign.py` 微调。5 files +44/-28。 |
+| 07-29 | **★ 精准组合确定性升降级** | `acos_constraints.py`（新）：ACOS 约束核心模块。`campaign_exact_transition.py`（新）：精准组合升降级逻辑（EXACT 活动四组升降级判定）。`campaign_fetcher.py`（+201）：增强数据编排。`campaign.py`（+330）：策略上下文扩展 + 升降级调度。`repository.py`（+246）：ERP 读写增强。`text_utils.py`（+58/-20）：映射表扩展。`campaign_portfolio.py`（+102）：组合路由增强。`advert_execution.py`（+52）、`portfolio_execution.py`（+24）：执行链路同步。`layers.py`（+62）、`campaign.py` models（+11）：模型扩展。测试：5 个文件 +420。新增 `docs/精准组合确定性升降级实施方案.md`。27 files +2616/-235。 |
 
 ---
 
@@ -339,7 +352,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 任务 | 优先级 | 说明 |
 |------|--------|------|
 | ~~策略总览(执行总纲)恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `campaign_overview_enabled=True`，并改造为"判断驱动"(去现状数字复述)。详见 §7.1 |
-| ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `_SYNTHESIS_ENABLED=True`，并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
+| ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `settings.campaign_synthesis_enabled=True`（当前默认 False），并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
 | R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
 | ~~**新增广告活动分析**~~ | ✅ 已完成（2026-06-10/11） | 三股并行独立分析线。**剩余子项**（2026-07-04 核实）：① suggestedBid 数据源仍未接入（bid 占位 $0.30，改 `_calc_initial_bid` 一处即可）；② KEYWORD_PROMOTED_FROM_BROAD 等 5 个触发场景确认仅作展示标签、不做门禁（设计决策，非待办）；③ ~~新增活动预算接入组合回算~~ → ✅ 已实现（`campaign_budget_reallocation.py:160-178`，new_campaigns 整笔 proposed 入组 delta）；④ ERP 写入 → 已通过 `write_full` 统一落库 |
@@ -438,850 +451,261 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 
 ---
 
-## 7. 2026-06-08/09 迭代：总览/汇总恢复 + 前端重构 + 免跑加载
+## 7. 历史迭代摘要（2026-06-08 ~ 06-25）
 
-### 7.1 overview + synthesis 恢复并改造
+> 以下为早期迭代的关键成果摘要，详细逐日记录已移除。完整 git 历史见 `git log --oneline`。
 
-**恢复**：`campaign_overview_enabled=True`(settings.py)、`_SYNTHESIS_ENABLED=True`(campaign.py)。禁用根因(Windows asyncio 取消挂死)已由 `main.py` SelectorEventLoopPolicy 根治；两者均带 `timeout_override=55` + fail-open(失败仅 warning，不影响明细)。
+### 7.1 核心架构形成（06-08 ~ 06-11）
 
-**synthesis 改造**(`reasoner.py recommend_campaign_synthesis` / `_CAMPAIGN_SYNTHESIS_PROMPT`)：
-- **删 KB**：synthesis 只做"读已有 action/reason → 语义聚类 → 写叙事"，不做广告判断，不需要 `campaign_adjustment` 那 26K KB；降 token / 延迟 / 超时风险。
-- **reason 完整不截断**(原 `[:80]`)——理由是分组命脉。
-- **max_tokens 4096→8192**——容纳 100 个 campaign_key 互斥铺到各组 + 叙事。
-- **组数 "5-7 组"**：按实际共同原因数决定，不为凑满硬拆、不把不同原因硬并；严禁产出理由实质相同的冗余组。
-- **special_cases 硬编码"控制在 5-15 条"**(运营反馈特殊调整 20-30 条处理不过来；曾试动态 ≤总数10%，最终改回硬编码)。
+- **总览 + 汇总恢复**：`campaign_overview_enabled=True`(settings.py) + `campaign_synthesis_enabled`(settings.py，当前默认 False)。overview 从"现状数字复述"改为"KB×现状 → 判断 → 定调"；synthesis 只做语义聚类写叙事，不重复加载 KB。
+- **新增活动分析线**：三股并行（精准流/广泛流/新增流），候选词发现→硬过滤→双轮 LLM 取交集→代码补齐 bid/budget/placement。`campaign_new.py` 独立模块。
+- **广告位加价比例**：MCP 字段接入 + 代码回填 `current_pct`（LLM 只判方向、代码算数值）。
+- **前端合并**：`campaign-panel/` ES module 独立模块，挂载到主看板第 5 tab。原 `demo/campaign_test.html` / `demo/campaign_sample.json` 已删除（2026-07-10）。
+- **预过滤可见化**：淘汰池/多词活动打 `__prefiltered` 标记，前端灰卡展示。
 
-**overview 改造**(`reasoner.py` + `campaign.py _run_overview` + `models/campaign.py`)：
-- 从"现状数字复述"改为 **"KB×现状 → 判断 → 定调"**。
-- 输出字段 `status/purpose/direction` → **`assessment`(判断) + `direction`(方向) + `posture_brief`(给后续逐活动 LLM 的指令基准)**；模型 `CampaignStrategicOverview` 删 `status_text/purpose_text`、加 `assessment_text`。
-- prompt 硬约束：重判断轻数字、**禁复述现状数字**、缺数据(N/A)不臆测。
-- `_build_overview_facts` **补 `target_keyword_strategy`**——让 `facts` 成为前端"当前状态(只读)"面板的**统一数据源**(原缺该字段)。
+### 7.2 决策批次 + 执行层（06-12 ~ 06-15）
 
-### 7.2 前端重构(`demo/campaign_test.html`)
+- **决策批次状态机**：A/B/C 三态页面（首访/快照只读/进行中锁定），`run_id` 批次句柄，`decision_id` ERP 主键。
+- **快照回读**：`campaign_viewmodel.from_db_snapshot` 21 表→ViewModel 反向映射。
+- **Part 6 真实执行**：confirm → MCP 6 工具 → 4 张 `_record` 表。默认 `dry_run=true` 安全闸。
+- **ERP 全链路落库**：cards + summary + synthesis + pending 完整写回。
+- **双轨读回**：Tab1(核心词)/Tab3(P3)/Tab4(方向) 快照富化。
+- **自然排名接入**：`_fetch_keyword_ranks` 旁路拉取（纯 MCP、纯精准），超时 45s fail-open。
 
-- **双 Tab**：策略总览(执行总纲) + 分析概览 **固定顶部**(不随 tab 切换)；其下「明细 / 汇总」tab(`switchCampaignTab`)。明细=多维筛选+组合气泡+批量审核+活动列表；汇总=AI 汇总叙事。
-- **组合预算汇总卡移到固定区**(原在汇总 tab)——勾选时实时可见；配套修复"重跑清场漏 `hide('campaignBudgetSummary')` 导致旧数据残留"。
-- 总览只展示「判断 + 方向」，`posture_brief` 不展示给运营(它是写给后续 LLM 的，注入各批 preamble)。
-- 明细卡 Bid/Budget 由左右两列改 **单列紧凑**(原分太开，运营视线飘)。
+### 7.3 可靠性与稳定性（06-16 ~ 06-25）
 
-### 7.3 汇总 ↔ 明细 联动
-
-- **汇总组**：`1.2.3` 序号 + 「☑ 全选本组到明细」(`selectGroup`，纯勾选不跳转) + 「查看成员活动」每个 key 可点跳转(`jumpToGroupMember`)。
-- **特殊调整**：`1.2.` 序号 + 活动名做成可点链接(`jumpToSpecial`)，**跳转即自动勾选**。
-- **跳转高亮**(`jumpToDetail`)：切明细 tab + 滚动定位 + **`IntersectionObserver` 等卡片真正滚进视口(≥60%)才播放**浅黄闪烁(2 次、1.2s)——规避平滑滚动途中动效被掩盖；目标被筛选藏住则临时重置筛选保证跳得过去。
-
-### 7.4 组合气泡增强
-
-- 每气泡内加 **「调整前 $X | 调整后 $Y」**：调整后与"执行后预计总预算"**同逻辑**(勾选→proposed / 未勾→current)，随勾选动态重算；低价捡漏组不参与(占位"—")。
-- **约束 = AI 推荐 + 运营改/执行(占位)**：仅**选中(active)**气泡才显示 [改]/[执行]；[改] 为 inline 编辑([保存]用 `onmousedown+preventDefault` 抢在 blur 前、失焦不保存)；[执行] 占位 stub(后端 override 表待接)；覆盖值前端临时态 `_portfolioOverride`。
-- 4 气泡统一大小(flex 等分 + 圆角矩形)、**浅天蓝底黑字**。
-
-### 7.5 免跑加载(调前端提效)
-
-- 痛点：每次调前端都要等几十分钟真分析。
-- `loadDebugResult`：优先 localStorage(上次真跑缓存) → fetch 同目录 `campaign_sample.json` → `renderResult`，**跳过 analyze**；analyze 成功自动写 localStorage。
-- 样例 `demo/campaign_sample.json`：完整 result，含手动注入的 synthesis(真实 campaign_key)/overview(新字段)/facts(完整策略上下文)/budget_summary。
-
-### 7.6 独立展示版 `demo/前端样例展示/`
-
-- **自包含、双击 `file://` 即用**(不依赖端口/后端)。关键：浏览器在 `file://` 下禁止 `fetch` 本地 json(CORS)，故把数据包成 **`campaign_sample.js`**(`window.CAMPAIGN_SAMPLE = {…}`)，用 `<script src>` 引入(script 标签不受 file:// 限制)。
-- 「加载状态 / 运行分析 / LLM 温度」**禁用**；左上「加载状态」位换成 **「⚡ 加载样例展示」**。
-- **数据更新需同步** json→js：
-  ```bash
-  cd demo/前端样例展示
-  python -c "raw=open('campaign_sample.json',encoding='utf-8').read(); open('campaign_sample.js','w',encoding='utf-8').write('window.CAMPAIGN_SAMPLE = '+raw+';\n')"
-  ```
-
-> **注**：7.1 的 overview/synthesis 改造与 7.4 的约束 override 后端落库，均需真跑(走真实 LLM)/接后端 override 表后再端到端验证。
+- **data_unavailable 区分**：fetch 失败不再伪装 "no adjustments"。
+- **StarRocks BE 重试**：`starrocks_retry.py` 单一真源，带签名 1064 自动重试。
+- **MCP 日期窗口按站点**：`make_date_window(days, site_code)` 6 站点硬编码时区。
+- **override 持久化**：acos/预算 override 跨日/跨事件保留（删过期 DELETE 分支）。
+- **目标 ACOS 区间化**：`compute_target_acos_band()` 算法+prompt 双口对齐，阶段优先+层级兜底。
+- **新增词长尾优先**：排序改词数多者优先，去 category/brand 品类锚点误导。
+- **库存口径统一**：两路径均用 `can_sale_num`。
 
 ---
 
-## 8. 执行层落地 ERP — 架构共识与待办 (2026-06-09 团队定稿)
+## 8. 经营模式（Operating Mode）
 
-> 6.9 讨论 + 后续梳理的团队共识。**取代**「定时跑完全部工作流→全部落库→ERP 渲染」的原方案（已否决）。
+> v3.21 新增，详见 commit `e2cffa0` 和 `01fca90`。
 
-### 8.1 核心决策：前置缓存 + 执行层走库（定时跑、T+1 看）
+### 8.1 模型定义
 
-按工作流阶段**分层处理**（不是一刀切缓存或一刀切落库）：
+`app/models/layers.py`：
 
-| 阶段 | 内容 | 实时性 | 存储 |
-|------|------|--------|------|
-| **前置工作流 (1)~(4)** | (1)产品定位/阶段/淡旺季 →(2)广告目的/关键词 →(3)目标ACOS/父ASIN预算 →(4)广告方向 | **需实时交互**（(1)(2)长期配置，日常高频在 (3)(4)） | **走缓存，即得即用** |
-| **执行层 (5) campaign** | 广告活动分析（单父ASIN **40-70 次 LLM**、耗时长、终态无后顾之忧） | 不需实时 | **走数据库，每晚定时跑，运营第二天看** |
+| 枚举 | 值 | 说明 |
+|------|------|------|
+| `OperatingMode` | `IMMEDIATE_EXIT` / `CONTROLLED_CLEARANCE` / `LIMITED_REPAIR` / `STABLE_OPERATION` / `ACTIVE_PUSH` / `PROFIT_HARVEST` | 6 种经营模式，人工录入 |
+| `AdPermission` | `STOP` / `CLEARANCE_ONLY` / `NORMAL` | 3 级广告权限，由经营模式推导 |
 
-**运营使用节奏（T+1 批次制）**：每天看**前一天**的执行层分析 → 点击确认执行；配好**当天**的前置配置 → **当晚自动跑**；不配则用默认值。
+`operating_mode_to_permission(mode)` 纯函数：`IMMEDIATE_EXIT` → STOP / `CONTROLLED_CLEARANCE` → CLEARANCE_ONLY / 其余 → NORMAL。
 
-**并发说明**：执行层支持并行但有上限——i/o 密集型（绝大多数时间在等 MCP/LLM 响应），当前 6 workers，**加 worker 用处不大**。
+### 8.2 数据流
 
-### 8.2 后端待办
-
-> 业务数据库已有整体骨架（~90%），多数为**补充**。
-
-| 项 | 说明 |
-|---|---|
-| **配置表** | 驱动 campaign 定时分析（哪些 ASIN / 参数 / 调度） |
-| **渲染表** | 存"上一次定时分析"的快照，供前端渲染；快照含**前置配置结果值**（与调试前端"加载状态"同源） |
-| —（渲染/配置表）兼作 | **为后续记忆系统预留依据** + **为质检 agent 预留依据** |
-| **写入数据库脚本** | 已有，补充即可 |
-| **新增"广告活动 agent 分析"功能** | 数据管道 + 功能设计 |
-| **淘汰活动重启功能** | 不频繁跑（见 §4.2 / KB 21 §7） |
-| **缓存** | 前置工作流需要 |
-| **全链路日志设计** | — |
-| **测试 / 质检 agent** | 为另一个项目预留接口，方便被调用 |
-
-### 8.3 前端待办（预计 2-3 天）
-
-**主要功能（大头）**：
-1. **合并 campaign 看板到主看板**（统一入口，作第 5 tab）；
-2. **补全 campaign 看板占位功能**：当前很多处仅占位、只有展示效果、无实质功能，需补全。
-
-**细节优化（小头）**：
-1. **跳转自动传父 ASIN**：从接口点击跳转后自动带入父 ASIN，无需手动输入（复用 ERP 前端已有设计）；
-2. **支持「近一次分析」与「实时分析」两种视图**（做成类似 ERP 前端的效果）；
-3. **区分操作台 / 快照查看区**：同一块区域——「实时分析」时是**操作台**（可执行），「近一次执行层分析」仅作**快照查看**（只读）。
-
-> 第 3 点正好解决"campaign 是 T+1 快照、与当天前置不同时间基准"的困惑：实时=操作台、近一次=只读快照，语义清晰。
-
-### 8.4 现有资产处理
-
-| 资产 | 处理 |
-|---|---|
-| 已建业务数据库 | **复用**（配置表/渲染表在其上补充） |
-| ERP 前端 | **部分设计复用**（自动传父ASIN、近一次/实时视图、快照区等交互参考）；整套退役 |
-| ERP 写入脚本 / pending 执行链 | **保留**（执行落地：写 pending → ERP 后台执行） |
-| ERP 接口 | **IT 负责** |
-
-### 8.5 待展开
-- 记忆系统梳理（渲染/配置表已为其预留依据）
-- 质检 agent 接口（后端已预留）
-
----
-
-## 9. 2026-06-10/11 迭代：新增广告活动分析线（KB 16）+ 预过滤可见化
-
-### 9.1 新增活动分析线（KB 16 + 06）— 三股并行独立管道
-
-**目标**：在只分析"已有活动"之外，补上"该 ASIN 应**新建**哪些活动"的建议。
-
-**编排位置**：在 `strategic_overview` 之后，与精准流/广泛流**三股并行**（共享 `asyncio.gather(return_exceptions=True)` + 同一 `ctx_dict`，posture_brief 一致注入）。fail-open：任何阶段失败仅 warning，不连累主分析。
-
-**数据流**（`campaign_new.py:analyze_new_campaigns`）：
 ```
-候选词发现 (discover_new_keywords: flow_keywords + own_keyword_flow 并行)
-  → 硬过滤 (KB 16 §6 阻断: 库存<7/退货≥30%/评分<3.8/清货期; + 去重已投词/去噪/搜索量<50)
-  → trigger_scene 标注 (KB 16 §1, 仅展示标签非门禁)
-  → 排序(有自然位优先+搜索量降序) + Top-N 截断 (campaign_new_max_count=20) ← 真正的量控
-  → ★双轮 LLM 取交集 (R1+R2 不同随机种子, 两轮都判"建"才保留, 降幻觉)
-  → 代码补齐: match_type(由keyword_class推导) / bid / budget / campaign_name / placement / 归组
+前端 radio 组 (layer_options.toml)
+  → API (decision/long_term_config) 透传
+  → ERP 库 t_advert_agent_decision_config 落库 (text_utils map/unmap)
+  → state DB strategy_config 表 (mysql_state_manager)
+  → campaign.py build_campaign_strategy_context 接入 operating_mode
+  → LLM prompt 注入经营模式上下文
 ```
 
-**职责切分**（关键设计）：
-- **LLM 只判**：`action`(create/skip) + `keyword_class`(KB 06 五类) + reason/evidence/negative_strategy。
-- **代码确定性产出**：bid/budget/campaign_name/match_type/primary_placement/归组——不进 LLM。
+### 8.3 工作流注入
 
-**KB / 数值规则**：
-| 项 | 规则 | 实现 |
-|---|---|---|
-| preset | `new_campaign = ["16:1,6","06","02:1-6","08","28:0,2,3"]` (LLM 不算数值故无 15/19/23；28=相关性R1-R4/场景/配额) | `kb_loader.py` |
-| 默认预算 | $3.00 (KB 16 §2) | `DEFAULT_NEW_BUDGET` |
-| 初始 bid | `min(0.5, 建议竞价×0.5)`，下限 $0.20 (KB 16 §3) | `_calc_initial_bid` |
-| **建议竞价字段** | MCP **当前无源** | **占位 $0.30**；TODO(suggested-bid) 数据源到位改一处 |
-| match_type | keyword_class→映射 (KB 06+16§4): brand/custom→EXACT, generic→BROAD 等 | `_derive_match_type` |
-| primary_placement | 仅 EXACT，代码默认"头部" (KB 16 §4 首轮只声明主投位，不加价) | 不交 LLM |
-| 命名 | `匹配类型-关键词-YYYY-MM-DD`（运营拍板，无 ASIN），如 `精准-fishnet stockings-2026-06-11` | `_generate_campaign_name` |
-| 置信 | keyword_class 两轮一致=high/AUTO_BATCHABLE；不一致=low/MANUAL_REVIEW | 交集组装 |
+全部 5 个工作流 step（`strategy/tactics/diagnosis/execution/wizard`）均从 `ProductIdentityMixin` 继承，接收 operating_mode 字段。
 
-**触发场景**：本期标注 3 类（RANKING_OPPORTUNITY_NO_EXACT / SEASONAL_ADVANCE_BUILD / FILL_AFTER_ELIMINATION）+ 兜底 KEYWORD_POOL_EXPANSION；其余 5 类（KEYWORD_PROMOTED_FROM_BROAD 需搜索词聚合 / COMPETITOR_INTERCEPT_WINDOW 需 KB08 / CUSTOM_KEYWORD_POOL 需运营词池表等）待数据源接入，有 TODO 标记。
+---
 
-### 9.2 投放目标子 ASIN（`pick_target_child_asin`）
+## 9. 精准组合确定性升降级
 
-新建活动须挂到具体子 ASIN（非父 ASIN 占位）。判据（运营定）：**历史活动数最多优先，平手按 7 天花费最高**（复合排序 `(活动数, perf_7d.cost)` 双降序）。数据取自 `campaign_data.campaigns`（已 MCP 拉过 perf）。
+> v3.22 新增，详见 commit `cbeb14c`。核心模块：`acos_constraints.py` + `campaign_exact_transition.py`。
 
-### 9.3 预过滤可见化（第一期 A+B）
+### 9.1 ACOS 约束模块 (`app/core/acos_constraints.py`)
 
-**背景**：原 `skipped_eliminated`（淘汰池）与 `excluded`（多词等）未在前端展示。本期让被预过滤的活动**也在前端可见**（灰色不可操作，只标签+原因），与 LLM"已丢失"项区分。
+目标 ACOS/预算的硬约束计算引擎。独立于 LLM，纯代码判定：
+- 输入：目标 ACOS、实际 ACOS、经营模式、产品阶段
+- 输出：升降级判定 + 约束边界值
 
-| 类别 | 数据源 | 本期 | 说明 |
+### 9.2 精准组合升降级 (`app/workflow/steps/campaign_exact_transition.py`)
+
+EXACT 活动在四组间的确定性升降级逻辑：
+- **升级路径**：低价捡漏 → 精准测试 → 精准主力
+- **降级路径**：精准主力 → 精准测试 → 低价捡漏
+- **自动广泛组**：仅 BROAD/PHRASE/AUTO，不参与精准升降级
+
+判定依据：ACOS 约束 + 3 日验证数据（连续 3 完整站点日，每日花费>$5，3 日聚合 ACOS < 目标 ACOS）。
+
+---
+
+## 10. 护栏系统
+
+> v3.14 独立模块化，v3.15 增强优先级 + R3/R4 重试。
+
+### 10.1 护栏规则 (`campaign_guardrails.py`, 504 行)
+
+`apply_all()` 统一入口，12 条规则（P0-P11），每条含 `retry_instruction` + `campaign_key`：
+
+| 优先级 | 规则 | 说明 |
+|--------|------|------|
+| P0 | 日预算上限 | 父 ASIN 预算硬顶 |
+| P1 | 样本不足保护 | 新活动(≤3天)/测试期(<14天)/复评防抖(≤3天)禁止淘汰 |
+| P2 | 库存/退货/评分 | inventory_days/refund_rate/rating 硬护栏 |
+| P3 | 硬淘汰 | 无单且 bid≤$0.10 或 budget≤$1 → 强制淘汰（优先级 > P1） |
+| P4-P11 | 预算/Bid/广告位/否词 | 各维度边界修正 |
+
+### 10.2 R3/R4 LLM 重试编排
+
+护栏拦截后按 `campaign_key` 带 `retry_instruction` 回灌 LLM 重判，最多 R3→R4 两轮。R4 后不再 R5，最终护栏兜底。`_build_guardrail_alerts` 仅用 `retry_instruction`，不回落 `message`（避免规则编号泄露给 LLM）。
+
+### 10.3 淘汰多环节阈值（有意不同）
+
+`campaign_guardrails.py` 常量：`LOW_BID_MAX = 0.20`、`LOW_BID_MIN = 0.10`、`LOW_BUDGET_MAX = 1.00`。
+
+| 环节 | 位置 | 判据 | 用途 |
+|------|------|------|------|
+| 预过滤 | `is_strictly_in_low_bid_pool` | bid ≤ LOW_BID_MAX(0.20) **AND** budget ≤ LOW_BUDGET_MAX(1.00) | 判定"已执行淘汰"→灰卡剔除 |
+| 归组 | `_is_in_elimination_pool` | bid ≤ LOW_BID_MIN(0.10) **OR** budget ≤ LOW_BUDGET_MAX(1.00) | 预分类/终分类/强制修正 |
+| 强制修正 | `_resolve_budget_conflicts` | OR 命中即翻 eliminate + 硬填 $1/$0.20 | LLM 不听话兜底 |
+
+> **勿统一阈值**：预过滤(AND)用 LOW_BID_MAX=0.20，归组/强制修正(OR)用 LOW_BID_MIN=0.10，是有意设计，不是 bug。两种常量的不同组合实现了不同的环节语义。
+
+---
+
+## 11. 淘汰复评（KB21 §7）
+
+> v3.10 实现。ERP 库 `t_advert_agent_pool_entry` 表 + 双向 sync + 执行钩子。
+
+### 11.1 入池同步
+
+- **discovery 入池**：分析后取全量 live 活动 vs 池表 `exit_date IS NULL`，live 在池底 → INSERT `source='discovery'`
+- **离池**：池表有但 live 无或已恢复 → UPDATE `exit_date=NOW()`
+- **执行钩子**：ELIMINATE 卡 MCP 真跑后 `upsert_pool_entry(source='execution')`；REACTIVATE 卡真跑后 `mark_pool_exit`
+
+### 11.2 复评保护护栏
+
+三种条件 OR，命中任一禁强制淘汰：
+1. `days_online ≤ 3` — 新活动样本不足
+2. 测试期 + `days_online < 14` — 测试期样本保护
+3. `days_since_reactivation ≤ 3` — 复评后防抖
+
+### 11.3 复评卡归类
+
+`reactivate_budget_only` / `reactivate_with_calibrated_bid` → `suggest_category='REACTIVATE'`。`summary_stats` 独立 `to_reactivate` 桶。ERP summary 表含 `reactivate_count` 列。
+
+### 11.4 未尽事项
+
+- 回算口径修复（释放预算入池 + cap 锚定活动之和）
+- 余量出口（复评捞回 + 二次新增 + 缓冲）
+
+---
+
+## 12. 执行层
+
+### 12.1 广告调整执行 (`advert_execution.py`)
+
+confirm(CONFIRMED) → 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表。`advert_exec_mapper.py` 为唯一映射点。默认 `advert_mcp_enabled=false` + `advert_exec_dry_run=true` 安全闸。
+
+**v3.22 immediate_exit 确定性执行**：经营模式为 `IMMEDIATE_EXIT` 时，BROAD/PHRASE/AUTO 暂停 + EXACT 迁入低价捡漏组，不走 LLM 分析、直接生成确定性 ActionBundle。
+
+### 12.2 灰度卡
+
+ERP 执行过程中对部分失败的活动打灰度标记（gray card），分类展示：
+- `move_errors`：挪组失败（portfolioId 匹配失败）
+- 部分执行失败：不影响已成功的活动
+
+### 12.3 组合预算执行 (`portfolio_execution.py`)
+
+`/campaign/execute-portfolio-budget` → 实时查 portfolioId → MCP 更新组合预算。
+
+### 12.4 经营模式 × 执行闭环状态（待办，2026-07-30）
+
+当前三个链路的执行闭环完整度不一致。核心问题：正常/清货优先链路把"提交成功"误写为"已生效"。
+
+#### 各链路对比
+
+| 链路 | pending 构参来源 | 自动下发 | taskId 终态轮询 | "提交"与"生效"区分 |
+|---|---|---|---|---|
+| 立即退出 | 是（确定性 ActionBundle → pending） | 是 | 有，前端轮询约 60 秒 | 基本有，依赖 ERP 回写 taskId |
+| 清货优先 | 是（LLM 分析 → pending） | 否，前端人工确认 | 无 | 无，提交成功即写 SUCCESS |
+| 正常 Campaign | 是（LLM 分析 → pending） | 否，前端人工确认 | 无 | 无，提交成功即写 SUCCESS |
+
+#### pending → 执行 MCP 的统一性
+
+执行 mapper（`advert_exec_mapper.py`）以 pending 为唯一构参来源：
+
+- `campaign_pending`：活动预算、活动状态、组合迁移目标 `target_campaign_group_type`
+- `keyword_pending`：关键词状态、Bid
+- `placement_pending`：广告位比例
+
+mapper 不感知 `operating_mode`，不根据经营模式重算业务规则。组合迁移同样是 `campaign_pending.target_campaign_group_type → 解析真实 portfolioId → MCP payload`。
+
+两个执行入口存在状态处理差异：
+- 立即退出：`submit_execution()` — 提交后 `IN_PROGRESS` → 轮询终态 → `SUCCESS/FAIL`
+- 前端人工确认：`submit_execution_direct()` — 提交后直接写 `SUCCESS`
+
+#### 必要语义与当前差距
+
+建议的字段状态机（不区分经营模式，适用全部链路）：
+
+| 阶段 | `confirm_status` | `execute_status` | 含义 |
 |---|---|---|---|
-| **A 已入淘汰池** ($1/$0.20) | `skipped_eliminated` (campaign.py) | ✅ | 打 `__prefiltered`，reason="已入淘汰池…请到ERP手动修改" |
-| **B 多词活动** | `excluded` (prefilter) | ✅ | **折叠去重**(每活动1条,防 raw 多行 N 重复)+补维度字段+`keyword_text="多关键词活动"`+词条数最多子ASIN(prefilter 无 perf 故"花费最高"不可得) |
-| **C 非 ENABLED** | — | ❌ 未做 | `_fetch_campaign_context` SQL 已 `WHERE campaign_status='ENABLED'` 且输出列写死 ENABLED → raw 不含；要展示**须改 SQL**(去 WHERE+取真实 status)，prefilter 规则1 才转活 |
-| **D 近7天无数据** | — | ❌ 未做 | report 表对零活动**无行**，且**无 campaign 主表**可 LEFT JOIN；放宽窗口语义也变。需先确认数据口径，prefilter 规则2 当前为死代码 |
+| 待人工确认 | PENDING | PENDING | 未授权下发 |
+| 已确认待提交 | CONFIRMED | PENDING | 可执行但未提交 |
+| 已提交异步任务 | CONFIRMED | IN_PROGRESS | 已拿到 taskId，等待终态 |
+| 广告侧终态成功 | CONFIRMED | SUCCESS | MCP 查询确认成功 |
+| 广告侧终态失败 | CONFIRMED | FAIL | MCP 查询确认失败 |
+| 演练 | CONFIRMED/PENDING | DRY_RUN | 未真实下发 |
 
-> A/B 现有数据齐全、零额外查询；C/D 需数据层改造，运营已确认本期不做。
+当前差距：
+1. 清货优先/正常人工执行在 MCP 返回异步任务后，直接将 `execute_status` 写为 `SUCCESS`，`execute_msg` 写为 `"direct execution via MCP"`。实际仅完成提交(submitted)，不等于广告平台执行完成(effective)。
+2. 本地代码不写执行记录表 `t_advert_agent_modify_advert_record.task_id`，依赖 ERP/MCP 根据 `decisionId` 回写。若外部未正确回写，后续无法追溯 taskId。
+3. `execute_time` 在提交时和终态时都会写，不能单独解释为"生效时间"。若需严格审计，后续应拆为 `submitted_at` 与 `effective_at`，或以 task 子记录时间线为权威来源。
 
-### 9.4 前端（`demo/campaign_test.html`）
+#### 涉及字段汇总
 
-- `new_campaigns` 映射为 adjustment 形状复用卡片渲染器：绿色 `create` 卡 + `sumNew` 统计 + 筛选「新增」+ `actionLabel`/klass/badge 全配齐。
-- **主投位/否词策略专用渲染** `renderNewCampaignExtras`：不套调整型 placement/否词模板（避免假"0%→100%"违反 KB16§5、及字段名对不上的 `?` 占位垃圾）；渲染为「主投广告位: 头部（首轮不加价）」+「否词策略: …」。
-- skipped 分两类：`prefiltered`(灰卡、无悬停) vs `lost`(红色⚠悬停)；概览行显示「预过滤 N | 丢失 M」。
-- 样例 `demo/campaign_sample.json` 已注入展示数据（4 新增 + 23 预过滤 + 1 丢失）。**注意** `loadDebugResult` 优先读 localStorage `campaign_debug_result`，看样例需先 `localStorage.removeItem('campaign_debug_result')`。
+pending 三表共享字段：
+- `execute_status`：PENDING / IN_PROGRESS / SUCCESS / FAIL
+- `execute_msg`
+- `execute_time`
 
-### 9.5 涉及文件
+确认字段：
+- `confirm_status`
+- `confirm_user_id`
+- `confirm_time`
 
-| 文件 | 改动 |
-|---|---|
-| `app/workflow/steps/campaign_new.py` | 新建：全流程 + `pick_target_child_asin` |
-| `app/llm/reasoner.py` | `_NEW_CAMPAIGN_PROMPT` + `recommend_new_campaigns()` |
-| `app/data/campaign_fetcher.py` | `discover_new_keywords()` + `_last_shop_account` |
-| `app/llm/kb_loader.py` | preset `new_campaign=["16:1,6","06","02:1-6","08","28:0,2,3"]`（28=新增词相关性/场景/配额） |
-| `app/models/campaign.py` | `NewCampaignCandidate`(含 `week_rank`/`week_search_volume`)/`NewCampaignItem`(含 child_asin/`relevance_tier`) + `CampaignAnalysisResult.new_campaigns` |
-| `app/config/settings.py` | `campaign_new_enabled`/`_batch_size`/`_max_count` |
-| `app/workflow/steps/campaign.py` | 三股并行 gather + 淘汰池打 `__prefiltered` + 合并 `excluded` |
-| `app/data/campaign_prefilter.py` | 多词去重+补字段+`__prefiltered` |
-| `demo/campaign_test.html` | new_campaigns 映射/绿卡/sumNew/筛选 + 预过滤分流灰卡 + `renderNewCampaignExtras` + 修复 `skipped` 变量遗留 bug |
+决策卡汇总字段（`t_advert_agent_decision_cards`）：
+- `execute_status`（汇总值）
 
----
-
-## 10. 2026-06-11 (续)：广告位加价比例数据接入 + 代码回填 + 前端合并
-
-### 10.1 广告位加价比例字段接入
-
-**背景**：广告位调整建议一直产出一律 `0% → 0% (维持)`。排查发现两个原因叠加：
-1. `ad_campaign_basic_info` MCP 新增了 `头部位置加价比例` / `商品位置加价比例` / `其他位置加价比例` 字段，但代码未解析。
-2. LLM 被要求输出 `current_pct` 数字，但 prompt 无法可靠约束 LLM 从输入复制结构化数值。
-
-**修法**：数据接入 + 代码回填 `current_pct`，LLM 只负责方向判断。
-
-**改动链**（4 文件，~85 行）：
-| # | 文件 | 改动 |
-|---|---|---|
-| ① | `models/campaign.py` | `CampaignUnit` 加 `tos_bid_pct` / `pp_bid_pct` / `ros_bid_pct`（默认 0.0） |
-| ② | `campaign_fetcher.py` | 三条 basic_info 生产路径各补 3 个字段：MCP 路径 `_to_float(row.get("头部位置加价比例"))`，fallback 路径填 0.0；`_assemble` 透传 |
-| ③ | `reasoner.py` | `_campaign_to_prompt_dict` 注入 `_placement_pcts: {头部:N, 商品:N, 其他:N}`；prompt 加 `当前加价比例` 行；placement schema 改：LLM **只输出 `action`（维持/小涨/大涨/小降/大降）+ `evidence`**，禁止输出 `current_pct/proposed_pct` |
-| ④ | `campaign.py` | 新增 `_backfill_placement_pcts()` 回填函数——`current_pct` 从 `CampaignUnit` 取真实值，`proposed_pct` = `current + action步长` 受 KB 07 边界裁断（头部≤30/商品≤10/其他≤15，≥0）；`_ACTION_STEP` 步长: 小涨+5pp/大涨+10pp/小降-5pp/大降-10pp；`_PLACEMENT_NAME_MAP` 中英文 placement 名归一；两个 return 路径各调一次 |
-
-**步长（运营未定，本期临时值，替换点 `_ACTION_STEP`）**：
-| action | 步长 |
-|---|---|
-| 小涨 | +5pp |
-| 大涨 | +10pp |
-| 小降 | -5pp |
-| 大降 | -10pp |
-| 维持 | 0 |
-
-**效果**：精准活动 `cur>0` 从 0 升至 43（代码回填），LLM 产出 placement 比率约 41/69（prompt 待加强令覆盖率到 100%）。
-
-### 10.2 关于 `_to_float` vs `_to_pct`
-
-MCP 的加价比例字段返回**百分数口径**（`9.0` = 9%），不和其他 MCP 百分比字段一样走 `_to_pct`（`_to_pct(9.0)` → `900.0` ❌），**必须用 `_to_float`**。
-
-### 10.3 前端合并 (campaign-panel/)
-
-`campaign_test.html` 的渲染逻辑迁移为 **ES module** 独立模块 `demo/campaign-panel/`，通过主看板 `ad-asisitant-agent.html` L2672 的 `<script type="module">` lazy-mount 到第 5 tab。
-
-**文件**（均在 `demo/campaign-panel/`）：
-| 文件 | 说明 |
-|---|---|
-| `panel.js` | 唯一入口 `mountCampaignPanel(el, {asin, days, mode})`，创建骨架→状态→事件→请求→返回 API |
-| `viewmodel.js` | `normalizeViewModel(raw)` 兜底归一（仅 null 填充 + 旧格式兼容），`PORTFOLIO_NAMES` 常量 |
-| `state.js` | `createCampaignState()` 工厂：全部状态 + 突变方法 |
-| `render.js` | 全部渲染函数 + `_backfill_placement_pcts` 对应的前端 `_renderNewCampaignExtras` |
-| `events.js` | `mountEventDelegation(root, state)` — 1 个 click + 1 个 mousedown + change/input/keydown/blur 捕获，按 `[data-action]` 分发 |
-| `panel.css` | 全部 `.camp-` 前缀 CSS，`.camp-root` 包裹 |
-
-**关键设计**：
-- **双轨渲染**：`mode: "interactive"` (操作台，显示复选框/执行按钮) / `"readonly"` (快照只读，隐藏操作件)。前端不感知数据来源。
-- **后端适配层** `app/api/campaign_viewmodel.py`：字段映射 + 枚举翻译 + 来源差异消化（`primary_placement` → `placement_adjustments`+`is_declaration`），前端见统一 ViewModel。
-- **快照接口** `GET /campaign/snapshot?asin=&decision_id=`：stub 实现，后端 mapper 另排期。**当前 tab5 默认 `interactive` 模式**，snapshot 接入后改 `readonly`。
-- **原 `campaign_test.html` 保留**作独立调试页。
-- **CSS 全部 `.camp-` 前缀**，无污染主看板风险（`review-approve/reject` 已加 `.camp-root` 作用域）。
+执行记录表（`t_advert_agent_modify_advert_record`）：
+- `task_id`（当前依赖外部回写）
 
 ---
 
-## 11. 2026-06-12：决策批次驱动 + 快照回读 + confirm 写回
+## 13. 核心词管理系统
 
-### 11.1 决策批次状态机（P1-P2，详见 `docs/决策批次改造方案.md`）
+> v3.18 实现，v3.19 扩展。
 
-**模型**：`run_id` = 批次句柄（分析启动时即存在），`decision_id` = 写库时生成（ERP 表主键）。进行中状态落 state 库 `analysis_session`（asin → run_id），不污染 ERP decision 表。
+### 13.1 数据流
 
-**A/B/C 三态**：
-| 场景 | 左侧 1-4 | tab5 |
-|---|---|---|
-| A 首访/未配置 | 可编辑 | 锁定 |
-| B 已配置·无进行中 | 只读快照 | 可交互·可执行（选中 `is_latest` 批次） |
-| C 有进行中 | 可编辑 | 全锁（旧失效·新未完成） |
+```
+MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
+  → semantic_conflict(4种) + R1 精确相关判定
+  → 落库 ERP t_advert_agent_core_keyword
+  → campaign 主流程读回填 is_core
+```
 
-**执行权**：`executable = is_latest AND NOT state.get_in_progress()`
+### 13.2 关键文件
 
-**关键 API**：
-- `GET /decision/context` — 批次列表 + 三态判定
-- `POST /decision/new-event` — 新建分析（写 state session，清 3-4）
-- `POST /decision/cancel-event` — 取消分析（清 state session）
-- `GET /decision/{id}/preset` — 前置 1-4 配置快照（ERP 码→中文 label）
+| 文件 | 角色 |
+|------|------|
+| `app/data/core_keyword_fetcher.py` (414行) | 数据编排器 |
+| `app/workflow/steps/core_keyword.py` (309行) | 语义判定工作流 |
+| `app/api/core_keyword.py` (62行) | API: `/analyze` `/status` `/enable` `/disable` `/groups` |
+| `app/core/core_keyword_policy.py` (25行) | 策略引擎：按 campaign 分组聚合 |
 
-### 11.2 快照回读 mapper（`campaign_viewmodel.from_db_snapshot`）
+### 13.3 离线批跑
 
-21 表 → ViewModel 反向映射：
-- card + 3×pending 子表 → 统一 `items`
-- `suggest_category` + group_type 兜底 → `action` 推导
-- summary 8 列 → `portfolio_constraints` 重组
-- `_f()` 处理 Decimal→float JSON 安全
-- overview 读 `analysis_overview` 列
-- 快照是实时子集（`prefiltered`/`lost`/`perf_7d` 可能缺），前端按字段有无降级
-
-### 11.3 `/campaign/confirm` 写回
-
-校验批次可执行 + 每活动幂等（`confirm_status='PENDING'` 限），写 card + 3×pending `confirm_status`。
-
-### 11.4 `finalize_batch` 闭环
-
-`_maybe_push_erp` 成功后 → `finalize_batch(report.decision_id, asin, analysis_mode)` → 旧批次 `is_latest=0`、新批次 `is_latest=1` + 清 state session。
-
-### 11.5 ERP 库改造摘要
-
-已落地列：`is_latest`/`analysis_mode`、card `keyword_class`/`review_level`/`is_core`/`perf_json`/`is_prefiltered`、summary `create_count`/`analysis_overview`/portfolio 8 列、`decision_config` P4 字段、synthesis collation 统一。
-
-### 11.6 前端合并（`campaign-panel/`）
-
-tab5 用统一的 `data-action` 事件委托 + `executable` 门禁替代原来的 `mode` 门禁。in-panel 模式条已移除，改由页面级批次选择器驱动。
-
----
-
-## 12. 2026-06-12 (续)：建议竞价 MCP 接入 + 前端闭环 + 稳定性修复
-
-### 12.1 建议竞价 MCP 接入（KB 16 §3 数据源）
-
-`whp_amazon_advert_keyword_suggest_bid` 工具已上线。候选词截断后（≤20）一次批量查询，命中词填入 `cand.suggested_bid` → `_calc_initial_bid` 自动按 `min(0.5, bid×0.5)` 计算真实出价。未命中词降级 `$0.30` 占位（关键词不在亚马逊建议竞价数据库覆盖范围内）。实测命中率 ~70%（14/20）。
-
-### 12.2 前端闭环接线（`0119404` 提交）
-
-`new-event` 创建的 `run_id` → C 态 tab5 "运行执行层分析"按钮 → `mountCampaignPanel({write_erp:true, run_id})` → analysis 完成 → `finalize_batch` 翻 `is_latest` + 清 session → `onComplete` 刷新 context → 自动切 B 态快照。
-
-### 12.3 前置配置只读快照渲染（P3）
-
-`renderReadonlyDecisionPreset(decisionId)` 调 `/decision/{id}/preset`，渲染战略/策略/P3/广告方向为只读 badge 标签，隐藏保存/AI 推荐按钮。
-
-### 12.4 稳定性修复
-
-| 修复 | 说明 |
-|---|---|
-| session TTL 12h | `get_analysis_session` 超期自动清，防运营执行权永久冻结（MySQL + JSON 双后端） |
-| userId 接线 | `batchConfirm` 的 `operator` 从硬编码 `'tab5'` 改为 `window._erpParams.userId` |
-| state session 方法 | `set_workflow_state`（非 `save_`）、`clear_p3_recommendation` 双后端补全 |
-| SQL 迁移 | `is_latest` 回填用 `ROW_NUMBER() OVER (PARTITION BY parent_asin)` 窗口函数 |
-
-### 12.5 待完成
-
-- P3 前置只读渲染完成闭环（B 态初始加载时自动调 `renderReadonlyDecisionPreset`，当前仅切换批次时触发）
-- P4 定时调度器（`decision_config.enabled` 列已备，APScheduler 扫表）
-- `analysis_overview` 写入端补（列在但 `write_full` 不填）
-- `ensure_schema` 健壮化（`--` 注释 chunk 被整段跳过）
-
----
-
-## 13. 2026-06-12 (续)：自然排名（周排名）接入精准活动分析
-
-### 13.1 缺口
-两条互不相通的排名路径：ASIN 级（wizard tab2，有 natural_rank/near/change）vs campaign 级（tab5，**无**）。且 `campaign.py:_do_analyze` 的 `aggregator.fetch(..., meta_filter=["META_AD_PRODUCT"])` 把排名 META 砍了 → campaign 路径**连排名数据都没拉**。KB 07/19§5/22§2.2 的 Ranking 规则依赖排名，LLM 只能靠 perf 反推——真实信息缺口。
-
-### 13.2 修复（纯 MCP，纯精准）
-旁路拉取 → 挂活动 → 进 prompt：
-| 文件 | 改动 |
-|---|---|
-| `data/campaign_fetcher.py` | `_fetch_keyword_ranks`：主源 `keyword_child_asins`（含近次→周变化），`own_keyword_flow` 补缺（仅当前排名）；返回 `{kw_lower:{natural_rank,near_natural_rank,rank_change}}`。`fetch_campaigns` 旁路 task 与 basic/perf 两波 gather **重叠**；`_assemble` 仅 EXACT 按 keyword join |
-| `models/campaign.py` | `CampaignUnit` + `CampaignAdjustmentItem` 各 +`natural_rank`/`near_natural_rank`/`rank_change` |
-| `llm/reasoner.py` | `_campaign_to_prompt_dict` 注入 `_natural_rank`（仅 EXACT）；活动列表三态渲染行（有排名/已掉榜/无数据不渲染）；EXACT prompt 加 RANK 决策指令 |
-| `workflow/steps/campaign.py` | 回填 adjustment 3 字段 + 追加排名证据行（走 `card.evidence` 落库，**快照轨零改可见**） |
-| `api/campaign_viewmodel.py` | `_item_from_adjustment` 透传 3 字段（实时轨） |
-| `demo/campaign-panel/render.js` | 精准卡 meta 行显示排名 + `_rankArrow` 周变化箭头（↑绿/↓红/持平灰） |
-
-### 13.3 关键性质
-- **周语义** = `near_natural_rank`(上次爬取) vs 当前的 delta，与 tab2 同口径（非严格自然周环比）；
-- **纯精准**：`has_exact` 门控——纯广泛 ASIN 根本不拉排名，广泛流 prompt/前端零改；
-- **零串行延迟**：旁路 task 与 basic/perf 重叠；**超时 `campaign_rank_timeout=45s` 在 `_fetch_keyword_ranks` 内部**（从协程启动算，与 await 时机无关），超时/异常 fail-open 返回 `{}`，不连累主分析；
-- **子 ASIN 精度**：child_asins 返回该词最优子 ASIN 排名（ASIN 级口径），与活动绑定 child_asin 可能不同——v1 接受（tab2 同款折衷）。
-
-### 13.4 待真实环境确认
-`keyword_child_asins` 传空 `keyword` 是否返回**全部词**排名（沿用 ASIN 级同款 builder，理论一致；本机 Doris/MCP 不可达未 live 验证）。若返回空/单词 → 改逐词查或换 `keyword_competitors`。解析/合并逻辑已**造假 MCP 响应单测通过**（child 优先 + own 补缺 + 周变化 + 掉榜 + rank≤0 脏值过滤）。
-
----
-
-## 14. 2026-06-13：执行层 ERP 全链路落库 + 缓存分 key + pipeline 并行 + 前端/数据修复
-
-> 当日 6 commit + 4 未提交。**完整细节见 [docs/2026-06-13-交接文档.md](2026-06-13-交接文档.md)**。
-
-### 14.1 ERP 执行层全链路落库接线（`53fa5b3` + 未提交 mappers）
-表结构经核对 **0 加列**（`ERP数据库改造方案.md` DDL 已落地，含 synthesis 三表/card 新列/summary 新列/collation 已转 general_ci）。
-- `auto_push`：payload 带 overview/synthesis/new_campaigns/skipped。
-- `models`：`SuggestCardCanonical` +campaign_key/keyword_class/review_level/is_core/perf_json/is_prefiltered/prefilter_reason；`CanonicalRun` +overview_text/synthesis/create_count。
-- `mappers`：cards 扩展（adjustments + **CREATE 卡 + 预过滤 prefiltered 卡**，新增/预过滤卡 `campaign_id=NULL` 避免撞 `uk(decision_id,campaign_id)`）；提取 overview/synthesis。
-- `repository`：summary 写 `analysis_overview`/`create_count`；card 写 6 新列；新增 `_upsert_synthesis`（reason_group/member/special，member.suggest_card_id=card_id）；read_snapshot 读 synthesis 三表；pending 行主键种子改 `card_id`。
-- `from_db_snapshot`：读 synthesis 三表；`target_budget` 取 `decision.daily_budget_suggest`（不在 summary 冗余存）。
-- 真库验证：analysis_overview / review_level / is_prefiltered(39 灰卡) / create_count ✅。
-
-### 14.2 batch_no + confidence_level 修复（未提交 mappers）
-- **batch_no**：从 run_id 派生本地 `YYYYMMDD-HHMM-序号`（复刻旧格式、与历史 7 天一致、同 run_id 重试稳定），与 decision_id 解耦；不参与唯一键。
-- **confidence_level**：原 `to_int("high")=None → _confidence_level → "low"` 把所有卡写成 low；改为直接用字符串 high/medium/low。**历史脏数据无法 SQL 回填，需重跑覆盖**。
-
-### 14.3 pipeline 并行提速（`5d232dd`）
-basic/perf 每活动配对并行；overview 改 gate task 与三流 prefetch 重叠；新增活动批次 `for`→`gather`（并修 `sem or Semaphore(1)` 失效限流）；sanity/synthesis 合成并行。
-
-### 14.4 缓存按 filter 分 key（`ecc207e`）
-`_ensure_data` 的 meta_filter 分支原**不读写缓存** → 同 ASIN 当天每次「加载分析」重拉。改：redis key 加 `:f<hash>` filter 维度 + 三级查找（本 filter→全量超集→fetch），refresh 删本 filter+全量。运维：Redis 未起只剩 30s LRU。
-
-### 14.5 决策批次面板修复（`889a0db`）
-B1 汇总 tab ReferenceError(state→vm) / B2 ViewModel 字段透传 / B3 localStorage GC 误删 / B5 跳转门禁 / B6 onComplete 三态 / B7 预算合计全集 / 缺口1 C 态放弃分析 / 实时切 tab 重复触发（`_campaignRealtimeRunning`）。
-
-### 14.6 前端展示 + synthesis 截断（未提交 render/panel/reasoner）
-- reason 完整显示（pre-wrap，不截断、不进展开详情）。
-- 批量栏去 inline `display:none`（`_show()` 清不掉 inline → 整条栏含「全选可见」永不显示）。
-- synthesis 截断（Unterminated string）：精简输入字段 + `max_tokens` 8192→16384 + timeout 240。
-
-### 14.7 待办（详见 6.13 文档）
-P1：方向 A 收敛（实时轨落库→读快照+删 to_viewmodel，落库失败报错不兜底）；ERP 脚本迁移（scripts/erp_db→根 scripts/erp，去硬编码可插拔）；历史 confidence 脏数据重跑；is_core 数据源。P2：定时调度器（decision_config 已备）；special 跳转；synthesis 兜底。
-
----
-
-## 15. 2026-06-14/15：双轨读回 + tab5 多处口径修复 + Part 6 真实执行接入
-
-> 跨多 commit / 多窗口并行：`99ce0b6`(方向A收敛+KB23回算) → `c436415` → `63ba75d`(action粗类化+placement判据+campaign_new shop_account回退+flow_sv) → `1a79370`(post-merge rounding/card_id/TZ) → `8c6efd0`(Part 6 合并)。
-
-### 15.1 前置双轨读回（Tab3/Tab4 快照富化）
-- **Tab3**：`decision.py:_translate_p3_recommend` → `/decision/{id}/preset` 出 `p3_recommend`；前端 `renderReadonlyPreset` 复用 `renderP3` 还原 ACOS/预算推理全文（ai_suggest 真库有值，前端接线即出）。
-- **Tab4**：`repository.read_decision_preset_rich` 加读 `direction_recommend_detail`；`decision.py:_translate_p4_directions` → `directions_rich`；前端抽 `renderDirCard(d)`（实时 `loadExecution` 与快照共用），渲评分+理由全文卡。**前提**：写入侧须先把完整 directions 落 `wf["directions"]`（`run_get_execution_options` 持久化）——历史批次无则降级方向名 badge。
-
-### 15.2 tab5 执行层口径修复（均在 `from_db_snapshot` / 分析侧，单源生效）
-- **action 粗类化**：`_snapshot_action` 退化为纯查 `suggest_category`（ELIMINATE/CREATE/KEEP/低价 group → 对应；ADJUST/空 → 粗类 `adjust`=「调整」），**不再按 pending 行有无猜 adjust_bid**（曾把全维持活动误标「调出价」）。前端 `_actionLabel` 补 `adjust:'调整'`。
-- **placement 判据**：`_normalize_action` 的 `placement_changed` 从「列表非空」改为「任一广告位 proposed_pct≠current_pct」——全维持的 EXACT 活动正确 derive 成 `keep`。
-- **预算约束 backend 化**：`from_db_snapshot` 的 `target_budget`（顶部预算约束）= **3 活跃组约束加总 + 低价捡漏固定 $1**（KB21§6），不再取 `decision.daily_budget_suggest`（那是回算前父级预算，与组加总不同口径，会对不上）。低价 $1 前端硬编码（KB 常量）。
-
-### 15.3 低价捡漏组判定重做（阈值 0.21/1.01）
-统一常量 `LOW_BID_MAX=0.21` / `LOW_BUDGET_MAX=1.01`（`campaign_portfolio.py`，campaign.py 复用）：
-- **预过滤（AND）**：`bid≤0.21 且 budget≤1.01`（两者都到底=已入池）→ 灰卡剔除不分析。
-- **分类（OR）**：`_is_in_elimination_pool` = `bid≤0.21 或 budget≤1.01` → 低价捡漏组。
-- **LLM 硬规则**：EXACT/BROAD prompt 加「bid≤0.21 或 budget≤1.01 → 必须 eliminate」。
-- **强制兜底（不靠 LLM）**：`_resolve_budget_conflicts` 循环顶部命中 OR 即翻 `action=eliminate`，**紧接现有淘汰硬校验无条件把 proposed 修正到 $1/$0.20**（治 LLM 不听话把 proposed 调高）。
-
-### 15.4 Part 6：广告调整 MCP 真实执行接入（`8c6efd0`，详见 [docs/2026-06-15-交接文档.md]）
-confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表 + 回写 pending `execute_status` → 前端「调整记录」表。新增 `advert_mcp_client`/`advert_exec_mapper`(唯一映射点)/`advert_execution`；repo 6 执行方法 + `_audit_int` + `use_tls`；端点现仅存 `/campaign/execute`（原 `execute/status`、`execution-records` 已随 §16.3-④ 前端调用点一并下线）。**默认安全**：`advert_mcp_enabled=false` + `advert_exec_dry_run=true`。真库 dry-run 全链路通；真实写 Amazon「新建活动」链路通仅被 IP 白名单 403 拦；「改已有活动」卡在数仓 campaign_id 调整 MCP 不识别（外部契约待 MCP 团队）。
-
-### 15.5 待办状态核对（对照 §4.2/§9.1/§12.5，2026-07-12 重新核实）
-
-| 项 | 状态 | 代码锚点 / 说明 |
-|---|---|---|
-| 方向 A 收敛（实时轨落库→读快照+删 to_viewmodel） | ✅ 已完成 | `99ce0b6` |
-| `/campaign/confirm` 落地 | ✅ 已完成 | campaign.py:433 `campaign_confirm` 已实现 |
-| A1（`_ensure_data` meta_filter 按 filter 分 key 缓存） | ✅ 已完成 | `ecc207e` |
-| `analysis_overview` 写入端 / 执行层 DB 全链路落库 | ✅ 已完成 | `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` |
-| ~~建议竞价（suggestedBid）MCP 接入~~ → **未实现** | ❌ 原标注已完成但代码核实：`_calc_initial_bid` 仍用 `0.30` 占位，MCP `ad_campaign_basic_info_v2` 不返回建议竞价字段 | campaign_new.py `default_bid=0.30` |
-| **`is_core` 真实数据源** | ✅ **v3.18 已实现** | 核心词管理系统 → LLM 语义判定 → ERP 落库 → campaign 主流程 is_core 回填 |
-| **P4 定时调度器** | ✅ cron 已上线 | `crontab` → `batch_via_api.py`，定时目标达成 |
-| **新增活动预算接入组合回算**（KB23 §5.1） | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 参数已接入，`current=0` → `proposed` 整笔入组 delta |
-| 触发场景 KEYWORD_PROMOTED_FROM_BROAD 等 5 类 | 🟡 **设计决策**：仅展示标签，不作筛选门禁 | `campaign_new.py:6` 注释明确，与历史待办一致 |
-| **组合按 proposed 分类** | ✅ 已实现 | `campaign_portfolio.classify` 按 `effective_budget=proposed` 终分类 |
-| Part 6 真实写 Amazon（改已有/新建活动） | ⏳ 链路通，被 IP 白名单 + 数仓 campaign_id 外部契约阻塞 | — |
-| **Tab4 方向卡快照**（原标注"方向对象未落 state"） | ✅ **已解决（ERP 路径）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回富卡，快照可正常显示 |
-| **定时分析 acos/预算采信**（原 §19 标注"不采信 config 的 acos/预算"） | ✅ **已解决（state DB 路径）** | acos 走 `get_target_acos_override`（`acos_override` 表），预算走 `daily_budget_override`（`budget_override` 表）+ 06-18 灌回修复。config 表两列是死列但不影响功能 |
-| **卡 C 态**（原 §21.3 标注"分析结束不清 session"） | 🟡 **成功路径已修，失败路径仍未清** | campaign.py:98 `clear_analysis_session` 在 write_full OK 后调用；失败/超时时不触发。有 12h TTL 兜底（`mysql_state_manager.py:539`），但失败场景仍会短暂卡 C 态 |
-
-> **新增活动 LLM 触发条件（澄清）**：LLM **无触发门禁**。`trigger_scene` 仅展示标签；门是「硬过滤(KB16§6)→排序→Top-N(≤20)→双轮 LLM 取交集」，LLM 只对每候选词判 create/skip。
-
----
-
-## 16. 2026-06-16：双轨读回补全（Tab1关键词/Tab3接线/Tab4） + 前端重构 + 总览·方向·预算·库存 根因修复
-
-> 承 §15。`app/**.py` 改动需**重启 uvicorn**；`demo/**` 刷新浏览器。
-
-### 16.1 前置双轨读回补全（接 §15.1）
-- **Tab1 核心关键词监控（新增）**：`repository.read_decision_preset_rich` 加读 `core_keyword_tracking`；`decision.py:_translate_core_keywords`（keyword_type ERP码→前端 Broad/Long-tail 键、nature_rank varchar→int，near_rank/周变化未落库→缺省）→ endpoint `core_keywords`；`renderReadonlyPreset` 复用 `renderKeywordTable`。**排名列大概率仍空**（源头改造未做，06-14 §5.3；真库 nature_rank 99% 空）。
-- **Tab3 前端接线（补 §15.1 落地）**：`renderReadonlyPreset` 改为 `renderP3(data.p3_recommend)`（原只渲 badge）；`renderP3` 预算 delta 加 `if(bb.current!=null)` 守卫（快照零 delta 不渲丑串，实时零回归）。
-- **Tab3 人工覆盖提示（新增）**：快照有数值但三段推理全空（人工覆盖/未经 LLM）→ 复用 `p3Warnings` 显示「⚠ 人工覆盖值，未经 LLM 推理建议」（无 manual_override 列，以「有值无推理」作代理）。
-- **Tab4 写入轨缺陷（诊断锐化，承 §15.1 前提）**：根因锁死——完整方向对象**从未落 state**（`run_get_execution_options` 只返 response、`ExecutionSelectRequest` 只有 selected_directions、`save_execution` 只存 id、全工程无 `wf["directions"]=`）→ `_upsert_wizard_direction` 整段不写。真库有 detail 的老决策是早期 `/wizard/report` 遗留。**修法待办**：`run_get_execution_options` 落 `wf["directions"]` 或 `_do_analyze` resolved_directions 透传（零映射，与 ACOS resolved_* 对称）；修后新批次 Tab4 读回零改点亮。
-
-### 16.2 Tab5 显隐门禁改 vm.is_latest 自决
-执行控件（勾选框/批量栏/执行按钮）原由页面层 `/decision/context`（latest_completed_id + in_progress）决定，与 ERP 可达性强耦合（断则控件静默全消失）。改：`state.js:setData` 里 `state.executable = vm.is_latest===true`（展示批次自身），`panel.js` 不再用调用方传入值；`ad-asisitant-agent.html:switchBatch` 每次切批次先 `refreshDecisionContext` + 重渲批次栏。门禁真相源 = 展示批次 `decision.is_latest`（与下拉「· 最新」同源）。
-
-### 16.3 campaign-panel 前端重构（纯前端）
-1. 组合气泡标签「约束」→「广告组合预算」。
-2. **回算修改弹窗**：改/执行移出气泡到行末统一操作区 `[回算修改][执行]`（竖排等宽，+override 时[恢复]）；弹窗内 4 列两行表（上行 AI 回算推荐、下行 3 输入框+灰禁 `1`），3 组同改；输入框数字居中防误点；挂载点 `#camp-modal-mount`（camp-root 内保事件委托）。
-3. **三执行按钮加确认弹窗**（同意/不同意/回算执行）：点击先弹确认，执行流绑「确认」`runConfirm`、「取消」不执行；挂载点 `#camp-confirm-mount`。
-4. 去「执行已确认调整」按钮 + 前端调用点（`executeConfirmed`/`pollExecStatus`/`_operator` 删；后端 `/campaign/execute` 保留）。
-5. 批量栏重排：同意/不同意挨着调整记录。
-6. **处理状态分段筛选**「全部/待处理/已处理」（`camp-set-process`）；已处理=本地 `_reviewState` 或快照 `confirm_status∈{CONFIRMED,REJECTED}`；预过滤/丢失仅「全部」可见。
-7. **sticky 控制区**：明细/汇总+筛选+组合气泡+批量栏钉顶、卡片列表内部独立滚动。配套修高度链：`.camp-root` 加 flex 列 + min-height:0、`camp-app-layout/camp-main-area` 调整；**主看板**补 `#panel-tab5.tab-panel.active{flex:1;min-height:0}` + `#mainContent`/`#campPanelRoot` min-height:0（原 `.tab-panel.active` 缺 flex:1 致高度链断、整体一起滚）。⚠ iframe 嵌入的 live 生效未验。
-
-### 16.4 总览/广告方向/预算/库存 根因
-- **总览缺数据过度阻断（已修 prompt）**：库存 N/A → 总览硬断「禁一切增长」冻结健康活动。`reasoner.py:507` 改「数据缺失既不当正常也不当风险、不得据此阻断；只有数值确认越线（库存<7天）才阻断」（只改 507）。
-- **广告方向英文 id 未翻译（已修，一处堵三处）**：`saveDirectionsLeft` 存英文 id（`expand_keywords`），`build_campaign_strategy_context` 原样透传；而总览/逐活动 prompt/KB23（查 `"推进自然位" in ad_directions`）全按中文匹配 → 认不出选中方向（"选了新增扩词、总览却禁新增扩词"）。`campaign.py` 加 `_zh_ad_direction`（id→中文，幂等），翻译后进 `strat_ctx.ad_directions`，一处修好总览+逐活动+KB23。
-- **KB23 父目标未接进回算（诊断，未修）**：`campaign_parent_allowed_net_increase=0.0`（占位无源）→ `available=只有释放预算`，父目标只作 LLM 文字 context、不入 `aggregate()`；`validate()` 无「proposed 合计 vs 父目标」绝对护栏；GROUP-009 超目标压缩/「建议提父预算」未实现。澄清 §4.2：caps 允许超父目标（caps≠花费），proposed_group_budget 是自底向上回算值。**修法待办**：算 `expected_total_spend=Σ(perf_7d.cost/7)` 与 headroom，<0 触发 GROUP-009 或建议提预算（perf_7d.cost 现成）。
-- **库存 MCP 透传 bug（已修解包）**：`mcp_adapter` 库存解析原用裸 `isinstance(list)` 判**原始 payload**，MCP 返回是 envelope（`{"rows"}`/单行 dict）→ 恒 False → 库存丢 None（数据查到却没透传）。改经 `_as_rows` 解包 + `_int`，保持 `can_sale_num`（FBA可售=可售天数指标，**不混** `in_stock_num`/`stock`，口径不同）。**~~待办~~**（06-18 已闭环）：Doris 路径口径已统一成 `can_sale_num`（`db_adapter.py:426` `inventory_qty=_int(listing.get("can_sale_num"))`），两路径不再口径不一致。（真库 live 调 `listing_inventory` 确认 envelope/列名仍建议补一次端到端验证。）
-
-### 16.5 `summary total_count mismatch` 告警（仅解释）
-`_upsert_modern_summary`（repository.py:786）落库前校验：`declared=total_campaigns` vs `categorized=淘汰+调整+保持` 不等则告警，按 categorized 写 `total_count`。差值正常 = 新增+预过滤+丢失（三桶不含）；若差值 > 这三类合计 → 有活动真丢（多为 LLM 分批解析异常未记 lost），查 `warnings`。
-
-### 16.6 待办（本期新增/锐化）
-> ⚠ 部分条目已被 06-17/18 后续工作覆盖，最新核实状态见 §17。
-- [ ] **Tab4 写入轨修复**（16.1）—— 阻塞 Tab4 富卡见数。**（06-18 核实仍未实现）**
-- [x] ~~**KB23 父目标接进回算**~~（16.4）—— 06-18 核实：闸控已接线（`campaign_budget_reallocation.py:108` 读 `parent_allowed_net_increase`），但值仍 `=0.0` 占位无源（settings.py:160）；**GROUP-009 超目标压缩护栏仍缺**。
-- [x] ~~**库存口径统一**~~（16.4）—— 06-18 核实：已统一成 `can_sale_num`（`db_adapter.py:426`），本条已完成。
-- [ ] 重启 uvicorn + 真库回归（Tab1关键词/Tab3/Tab4 还原；总览不误禁增长+认得方向；库存 N/A 消失）。
-- [ ] Tab2 诊断/趋势双轨（ECharts 隐藏容器懒渲染 + 列名核 + nor 缺线）。
-- [ ] sticky 控制区 iframe live 验证（不生效则改 JS 实测高度兜底）。
-
----
-
----
-
-## 17. 2026-06-18：待办逐条对代码核实 → 2026-07-12 重新核实
-
-> 对照 §4.2 / §9.1 / §12.5 / §15.5 / §16.6 的历史待办，逐条对**当前代码**核实。
-
-| # | 待办 | 实际状态 | 证据 |
-|---|------|----------|------|
-| ① | `is_core` 硬编码 False | ✅ **v3.18 已实现** | 核心词管理系统上线，campaign 主流程 is_core 回填（2026-07-12） |
-| ② | Tab4 方向对象未落 state | ✅ **已解决（ERP 路径替代）** | `decision.py:417` `_translate_p4_directions` 从 ERP `direction_recommend_detail` 表读回 → snapshot 可显示，无需走 state DB |
-| ③ | KB23 父目标接回算 + GROUP-009 压缩 | 🟡 闸控已接但值=0.0 占位；GROUP-009 未做。★ v3.13 组合预算源已从虚构 60/20/20 升级为 MCP ad_portfolio_list 真实值，但 parent_allowed_net_increase 仍为 0.0（净增无源） | settings.py:148 `campaign_parent_allowed_net_increase=0.0`，2026-07-10 核实仍为 0.0 |
-| ④ | P4 定时调度（APScheduler） | ✅ cron 已上线替代 | `crontab` → `batch_via_api.py`，定时目标达成 |
-| ⑤ | 新增活动预算接入组合回算 | ✅ **已实现** | `campaign_budget_reallocation.py:160-178`：`new_campaigns` 整笔 proposed 入组 delta |
-| ⑥ | 5 类触发场景仅展示标签 | 🟡 **设计决策**，非待办 | `campaign_new.py:6` 明确仅标签、不做门禁 |
-| ⑦ | 库存口径 Doris 用 in_stock_num | ✅ 已统一 | 两路径均用 `can_sale_num` |
-| ⑧ | 核心关键词 nature_rank 源头改造 | 🟡 代码在，数据源空 | MCP 返回多数为空，属数据/ETL 侧 |
-
-**结论（2026-07-12 重新核实）**：
-- **仍未实现（1 条）**：③ 父目标占位 0.0（GROUP-009 未做；v3.13 portfolio MCP 缓解了预算源问题但 parent_allowed_net_increase 仍为 0.0）
-- **已解决（6 条）**：① is_core(v3.18) / ② Tab4 ERP 路径 / ④ cron 替代 / ⑤ 新增活动回算 / ⑦ 库存口径 / ⑧ 数据侧问题
-- **设计决策非待办（1 条）**：⑥ 触发场景仅标签
-
----
-
-## 18. 2026-06-18：前端三项优化（已实现，主看板 `ad-asisitant-agent.html`）
-
-> 三项前端渲染/批次状态优化，均已落地（后端零改动）。下列为改动记录 + 关键代码锚点。
-
-| # | 待办 | 现状（代码锚点） | 目标 |
-|---|------|------------------|------|
-| F1 | **分析完成后左栏切快照** | `onComplete`（:3249）原仅刷新批次栏 + 挂 tab5 快照，未切左侧前置配置栏 | ✅ **已实现（2026-06-18）**：`onComplete` 成功分支插入 `renderReadonlyDecisionPreset(write.decision_id||ctx.latest_completed_id, {switchDefault:false})`，复用 loadAll B 态同一函数完整切快照、停留 tab5。**未加失败兜底/loading 态**（评估为低 UX 价值，见会话决策） |
-| F2 | **进行中隐藏历史批次下拉** | `renderBatchBar` C 态原只隐藏「新建分析事件」按钮，`batchSelect` 仍可见 | ✅ **已实现（2026-06-18）**：标签加 `id="batchSelectLabel"`；`renderBatchBar` 中 C 态隐藏标签 + `batchSelect`（仅留徽标 + 放弃按钮），A/B 态显示。完成后转 B 态经 `applyBatchBarFromCtx` + `refreshDecisionContext` 自动重渲并刷新批次 |
-| F3 | **去掉战略层分析天数下拉** | `daysControl`/`daysSelect`（:580-588）+ `onDaysChange`（:1455）；`days` 传入 11 处 API（strategy/tactics/recommend/diagnosis/execution/wizard/campaign）。**⚠ 后端确实在用 `days`**——`campaign.py:_do_analyze` 实打实 `days=int(req.get("days",7))` 并下传 `aggregator.fetch(days=)`/`analyze_campaigns(days=)`；零改动能成立是因为**前端永远传 7 → 后端就跑 7 天**，不是因为后端忽略 days | ✅ **已实现（2026-06-18）**：删前端天数下拉 UI + `onDaysChange` + 快照天数行 + 两处 `show/hide('daysControl')`；**保留 `let days=7` 常量**（11 处调用全锁 7）；后端零改动 |
-
-> **F3 ⚠ 切勿据"后端忽略 days"去清理后端 `days` 参数**——会搞坏定时跑批（SCHEDULED 链可能传非 7 的 days）。后端 `days` 是活参数，本次只是前端锁 7。
->
-> F3 注：主交接文档「days 时间窗口参数化」节称"前端无下拉框"已**过时**——本次移除后该节描述方与代码一致。
-
----
-
-## 19. 2026-06-18：已知逻辑缺陷 → **2026-07-04 已解决（state DB 路径替代）**
-
-> ~~⚠ 定时分析不采信 config 的 acos/预算配置 —— 这是错的逻辑，已确认，暂无时间改。~~ **已解决**：经 06-18 灌回修复 + 06-22 override 持久化，定时分析现在**通过 state DB 路径**正确采信运营配置的 acos/预算。
-
-**现状（2026-07-04 核实）**：
-- acos：`campaign.py:342` → `state.get_target_acos_override(asin)` → `acos_override` 表。运营保存即生效，定时分析优先采信。
-- 预算：`campaign.py:324-327` → `daily_budget_override` 从 state DB 灌回 `long_term`。06-18 修复确保 `_cfg14` 替换不丢掉 override。
-- config 表 `target_acos_suggest`/`daily_budget_suggest` 仍是死列（无代码读写），但**不影响功能**——运营配置走 state DB 的 `acos_override`/`budget_override` 表。
-- `decision_config_reader.load_layer14` 不读 acos/预算是**有意设计**：1-4 类目走 config，acos/预算走 state DB override，两路不交叉。
-
-**结论**：本节原标注为"已知逻辑缺陷"，现已不再是缺陷。config 表两死列可保留（不破坏现有功能），将来如需统一入口再合并。
-
----
-
-## 20. 2026-06-18：修复4 — 目标ACOS 区间化（AI 在 KB 锚定区间内出单值）
-
-> 仅本地（`AD_assistant_agent-v3.2`），**未上服务器 chenv31**。背景见 §19 + 主交接文档「目标ACOS/预算 prompt↔KB 出入核查」。
-
-### 20.1 设计
-目标ACOS = **单值**（运营衡量偏离度的基准）；区间是**给 AI/算法看的工作边界**，在其中选一个值。
-- **上限 acos_ceiling = 阶段上限**（KB03 §2，优先生效）：测试50/推进40/收割40/维持40/清货60；阶段未定义/未归一化时回落层级**默认**上限（KB03 §1：长尾P3=30、其余40）。⚠ 2026-06-24 修正：原为 `min(阶段, 层级)`，因非长尾层级恒40 把清货期60/测试期50 永久封顶（详见 20.4）；运营确认阶段优先、层级仅作 fallback（长尾 P3 清货期亦随阶段到 60%）。
-- **下限 acos_floor = max(全局 min_acos=25, 各广告目的下限的最大值)**，且不超过上限（上限优先）。目的下限（needs_review 初值）：盈利25/转化25/排名35/引流40；多目的取最大。
-- 精度 **5% 取整**。
-- 同一区间函数同时进**算法**（定时跑批主力 + 实时降级）与 **prompt**（实时 LLM 主路）→ 四处口径一致。
-
-### 20.2 改动（4 文件）
-| 文件 | 改动 |
-|---|---|
-| `app/config/thresholds.toml` | `[target_acos]` 保留 `min_acos=25`、`increment=5`；**删** `stage_scopes`（min=5/10 与 25 矛盾）；**新增** `stage_ceilings`/`level_ceilings`(KB03同步)/`purpose_floors`(目的下限) |
-| `app/core/recommender.py` | 新增模块函数 `compute_target_acos_band(cfg, stage, level, ad_purposes)`；`TargetAcosRecommender` Step1 基准取区间中点、Step7 钳到 `[floor,ceiling]`+5%取整（先取整再钳）|
-| `app/llm/reasoner.py` | `_P3_TASK_PROMPT` 加「概念澄清」段（目标ACOS↔实测ACOS↔KB上限/容忍上限 三者区分，治幻觉）；删硬编码矛盾（5%下限/±40%/预算30/Bid25）；精度1%→5%；`recommend_p3` 用户消息注入「目标ACOS取值区间」；**删 P3 的关键词级 Bid 调整表述**（P3 仅产出目标ACOS+每日预算，schema 本无该字段）|
-| `app/llm/kb_loader.py` | `p3_recommend` 移除 `"19"`（活动级数值矩阵，对 ASIN 级误导/易引发 ACOS-目标 幻觉）|
-
-### 20.3 自检结论
-- ✅ 编译/TOML/运行时 `recommend()` 端到端跑通；区间边界用例全对（含 floor>ceiling 上限优先、多目的取大、兜底 25–40）。
-- ✅ 删 `stage_scopes` 全仓无残留读取者；`test_recommender_scoring.py` 用的是 `Recommender`（方向评分器）非 `TargetAcosRecommender`，无测试断言 target_acos 具体值 → **零回归**；签名未变；无循环依赖。
-- ⚠️ **行为注意**：① 当前 ACOS 离区间中点远时 Step3/6 易触发 violation → 置信度偏 medium/low（语义合理）；② prompt 示例值（25%）未跟区间联动，靠"示例不照搬"免责声明 + 区间硬约束兜底；③ 阶段值须已归一化（旧值→默认上限40）。
-
-### 20.4 遗留（未引入新问题）
-- **预算线未对齐**：prompt 已改"预算幅度遵循 KB"（KB03=50%），但 `BudgetBidRecommender`/`[budget_bid] max_budget_adjustment_pct=30` 仍 30 —— **改前即存在的不一致**，本轮只做 ACOS，预算另起一轮。
-- **`purpose_floors` 是 needs_review 初值**（运营给的 25/25/35/40），隔离在 toml 一张表便于改。
-- ~~**服务器未同步**~~ → **已于 2026-06-22 上线**（见 §21）。
-- ✅ **阶段上限 >40 永不生效 —— 已修复（2026-06-24，补测试时发现，运营确认）**：原 `compute_target_acos_band` 取 `ceiling = min(阶段上限, 层级上限)`，而层级上限对非长尾产品恒为 40 → `stage_ceilings` 里测试期=50、清货期=60 对任何非长尾产品被层级 40 永久封顶、永不生效（清货期 ACOS 给不到 40% 以上）。**根因**：KB03 §1 层级栏措辞为「**默认**ACOS上限」=仅作 fallback，应被 §2 阶段具体值覆盖；旧实现误当硬约束 min。**修法**：改为阶段上限优先，层级仅在阶段未定义/未归一化时兜底（含长尾 P3 清货期亦随阶段到 60%——运营拍板长尾清货也要能清掉库存）。改 `recommender.py:compute_target_acos_band` + `thresholds.toml` 注释；由 `tests/test_target_acos_band.py` 18 例钉死（含 `test_band_stage_ceiling_takes_effect`/`test_band_longtail_follows_stage_when_defined`）。⚠ **仅本地，未上服务器 chenv31**。
-
----
-
-## 21. 2026-06-22：override 持久化上线 + 前端广告方向统一 + 卡C态/MCP慢 诊断 + state库回填
-
-> 本会话改动**已全部同步到服务器 chenv31** 并重启生效（systemd `ad-direction-agent`）。每次同步走：本地改 → diff(无漂移) → 备份(`_bak_*`) → 转LF上传 → py_compile/import 预检 → 重启 → /health 200。
-
-### 21.1 override 持久化（acos/预算 override 跨日/跨事件持久）— 已上线
-运营设的目标 ACOS / 预算 override 此前**每日 5:00 过期** + new-event 清除，导致定时分析读不到。4 处最小改法：
-| # | 文件 | 改动 |
-|---|---|---|
-| ①a | `mysql_state_manager.py` `get_target_acos_override` | 删过期 DELETE 分支 → 持久 `return int(row["value"])` |
-| ①b | 同文件 `get_long_term_config`（budget） | 删过期门控 → 无条件 `data["daily_budget_override"]=bud["value"]` |
-| ② | `api/campaign.py:316` | cfg14 替换 long_term 前**先存 `daily_budget_override`、替换后灌回**（定时轨预算 override 才读得到）|
-| ③ | `api/decision.py` new-event | 去掉 `clear_target_acos_override` → acos override 跨新建事件保留（仅"取消覆盖"删，与预算对齐）|
-- **效果**：定时分析现在**采信 state库 override**（acos 走 `get_target_acos_override`；预算走 cfg14 灌回 + `build_campaign_strategy_context`）。**前提：运营设过**——没设则 acos 落 AI 推荐器、预算落数仓兜底（§21.4 实测 542 个配置 ASIN 里仅 34 有 acos override、508 空）。
-- ⚠ `①a` 注释残留"仅由 new-event 失效"与 `③` 矛盾（实际仅"取消覆盖"删），待清理。
-
-### 21.2 前端：广告方向开关统一 + renderP3 守卫 — 已上线
-- **广告方向配置栏与 ACOS/预算同框同切**（根治"偶现只读'—'无法调"漂移）：`leftDirectionsBlock` 去自身 `hidden`(绑父 cardP3Override 可见性) + 开关绑到 `loadAll` 同一处 + `_dirFallbackOptsHtml()` 4方向兜底 + `loadExecution` 降级为只灌选项。快照态 `renderReadonlyPreset` 仍原子只读。
-- **`renderP3` 加 `if(!data)return`**：修保存目标ACOS时 `cannot read properties of null (reading 'target_acos')` 崩溃（`_p3data` 未就绪时保存/取消传 null）。
-
-### 21.3 已知问题/待办（2026-07-04 重新核实）
-
-| 问题 | 状态 | 核实 |
-|---|---|---|
-| **实时分析结束后卡 C 态** | 🟡 成功路径已修，失败路径未修 | campaign.py:98 `clear_analysis_session` 在 write_full OK 后调用 → 正常结束会清。**失败/超时/中途放弃仍不清**。有 12h TTL 兜底（`mysql_state_manager.py:539`），但失败场景仍会短暂卡 C 态。修复方向：失败也清 session |
-| **每次新建分析"先快照后配置"闪烁** | ❌ 未修 | `onNewEventClick` 里阻塞 `alert` 把旧 B 态快照晾在背后。修复方向：确认后立即切加载态 + alert 移到 loadAll 后 |
-| **新建分析进来慢** | ⏳ 非 app 代码问题 | MCP 网关慢，治网关/数仓 |
-| **超长 SKU 名写不进 state 库** | ❌ 未修 | `asin` varchar(50) 不够。修复：加宽列或跳过 |
-| ~~`①a` 注释残留~~ | ✅ 已清理 | 06-22 override 持久化注释矛盾已修正 |
-
-### 21.4 一次性数据操作：state库 override 回填（315 个）
-- 从 `t_advert_agent_decision`（06-17/18，acos>5%）逐 ASIN 选值（优先手动REALTIME、取预算最高），剔除已有 override 的，回填 `acos_override`+`budget_override`。
-- **315/316 成功**（1 个超长 SKU 名失败，§21.3）。写前已备份 `acos_override_bak_20260622`(34)/`budget_override_bak_20260622`(132)，回滚就绪。
-
-### 21.5 容量结论（定时批量 500+ ASIN）
-- **state库扛得住、非瓶颈**：`max_connections=151`，25天历史峰值 `Max_used_connections=5`，容器闲（CPU<1%）。
-- 批次并发 = **5**（`batch_via_api.py:41 DEFAULT_CONCURRENCY`，cron 不传参→用默认；asyncio.Semaphore 节流）。可调 `--concurrency` 但**真瓶颈是 MCP**，调高并发可能不提速反增超时/卡C态。
-- ⚠ `mysql_state_manager._execute` 每次新建连接、无连接池——并发5无碍，并发调到几十才需加池。
-- ⚠ `batch_via_api.py:34` 硬编码 prod ERP 明文账密，建议挪 `.env`。
-
----
-
-## 22. 2026-06-24：新增活动选词改造（相关性把关 + 多源词池 + 竞品源接入 + 串行优化）
-
-> 仅本地（`AD_assistant_agent-v3.2`），**竞品源默认关、未上服务器 chenv31**。改动落在 `campaign_new.py` / `campaign_fetcher.py` / `reasoner.py` / `models/campaign.py` / `settings.py` / `kb_loader.py`。方案+隐患核实见 `~/.claude/plans/40-mcp-keyword-competitor-flow-...md`。
-
-### 22.1 背景
-新增活动候选词原仅 2 源（`flow_keywords` + `own_keyword_flow`），三个问题：① 无相关性把关 → 出现与产品**毫无相关**的词（代码只滤去重/噪声/搜索量<50，LLM 又拿不到产品标识）；② 候选硬截断 20、单源全局排序 → 一源占满轮不到其他源；③ KB16 §1 多路词源（尤其**竞品** `COMPETITOR_INTERCEPT_WINDOW`）未接。
-
-### 22.2 已实现改动（分模块）
-
-**A. LLM 相关性把关（影响每次运行）** — `campaign_new.py` + `reasoner._NEW_CAMPAIGN_PROMPT`
-- 注入锚点：`existing_keywords`（已投词，原仅去重用）+ 产品 `title/brand/category_name`（asin_data，campaign.py 透传）→ 进 prompt 作"本产品相关性参照"。
-- prompt 硬规则：相关性为 create **首要 skip 判据**；create 须写相关性依据，说不出 → skip；`natural_rank` 有值 = **事实相关**可信；**锚点稀薄保护**（新品/伪 ASIN 参照少时以标题为主，勿过度 skip 误杀）。
-
-**B. 放宽 + 输出截断（影响每次运行）** — `settings.py` + `campaign_new.py`
-- `campaign_new_max_count` 20→**40**；新增输出硬顶 `campaign_new_max_creates=20`（双轮交集后 EXACT 优先截 20）。⚠ 20 与 **KB03 §7「每日最大新词数 15」冲突**，代码注释标"暂用 20，待 KB/运营定夺"。
-
-**C. 竞品词源接入（默认关）** — `campaign_fetcher.py` + `kb_loader.py`
-- `discover_competitor_keywords`：`direct_competitors`→KB06 §3 弱势排序取 Top-K 竞品→并行 `seller_sprite_keyword_reverse` 反查流量词。mirror `discover_new_keywords`，fail-open。
-- `new_campaign` preset 加 `"08"`（竞品姿态）。KB08 姿态门禁本期**简化**（标注待全量字段）。
-- 配置：`campaign_new_competitor_enabled=false`(默认关) / `_competitor_max` / `_competitor_kw_per` / `_competitor_timeout`。
-
-**D. 多源词池 + 配额** — `campaign_new.py` + `models/campaign.py`
-- `NewCampaignCandidate` 加 `source` / `source_reason` 字段。
-- `_select_by_quota`：**竞品20 / 自然位15 / 流量5**（暂定，注释待 KB），欠额按优先级回补（竞品>自然位>流量）。competitor 关时退回单一全局排序（现状）。
-- H2 防护：配额在**打 source 标签后分桶选取**，不复用全局 sort+截断（否则竞品 natural_rank=None 被挤掉）。
-
-**E. Live 解析修复（关键，避免踩坑）** — `campaign_fetcher.py`
-- `seller_sprite_keyword_reverse` 真实结构 **`value.data.data.list`**（嵌套 dict→dict→list，`_as_rows` 只解一层够不着）；真实字段 **`keyword` / `searches`（不是 `搜索量`）/ `bid`,`bid_max`,`bid_min`**。新增 `_reverse_keyword_rows` 容错下钻。原代码层级错+字段名错 → 即便开源也必得 0 词。
-- **SellerSprite 收录依赖**：niche/跟卖伪 ASIN 无反查数据（`total_keywords:0`）；主流竞品有（实测 `B0DQLB8WWC`→2095 词）；`direct_competitors` 对部分 niche `found:false`。→ 竞品源对**本账号伪 ASIN（跟卖/中文名）系统性偏弱**。
-- **bonus**：reverse 自带 `bid` → 竞品词直接用作 `suggested_bid`。
-
-**F. 去重合并来源（Q1）** — `campaign_new.py`
-- `_merge_candidate` + `_SOURCE_PRIORITY`：同词多源 → 留一条、`source_reason` 合并、bucket 归**最高优先级源**、补 natural_rank/suggested_bid/取大 search_volume。替换原 `seen`-skip（原只留首个源、丢弃后源）。
-
-**G. 三处串行优化（核实 LLM 不依赖 bid 后）** — `campaign_new.py`
-- **①** 竞品发现 ∥ flow/own（competitor 开时 `create_task` 并行，竞品块 await 同一 task）；顺带修"flow/own 空→直接 return 跳过竞品"→改"competitor 关才 return"。
-- **②** 建议竞价 ∥ 双轮 LLM（LLM prompt 禁用 bid，reasoner.py:397/402）：bid 作 task 与 LLM `gather` 并行，组装前 await。**每次净省 ~3s**。
-- **③** `fetch_suggested_bids` 只查 `suggested_bid is None` 的词（竞品 reverse 自带 bid 不再重查）。
-
-### 22.3 验证
-- 离线单测 `tests/workflow/test_campaign_new_quota.py` **7 个全过**（配额分配/欠额回补、**H2 竞品 natural_rank=None 不被挤掉**、reverse 真实层级解析、空/envelope、来源合并）。workflow 全套 **39 passed**。
-- ⚠ 预存坏测试 `test_budget_reallocation.py::test_classify_elimination_pool_stays_by_current_no_revival_gate`（`NameError: bs`，与本改动无关）。
-
-### 22.4 上线前必做 / 待办（2026-07-04 重新核实）
-
-| 项目 | 状态 | 说明 |
-|---|---|---|
-| competitor 源 live 验证 | ❌ 代码完成，默认关 | `campaign_new_competitor_enabled=False`（settings.py:157），需 lead 挑品验 reverse/direct_competitors/双轮成功率 |
-| 输出配额（20 vs KB15、20/15/5） | ❌ 暂定待定 | 代码已注释，等 KB/运营拍板 |
-| 首版最小闭环：竞品词源 + LLM 相关性 | ✅ 已完成 | 代码已实现，core loop 已闭环 |
-| `keyword_competitor_flow` 逐词打分 | ❌ 延后 TODO | 未实现 |
-| KB06 弱势精排 | ❌ 延后 TODO | 未实现 |
-| KB08 完整姿态 | ❌ 延后 TODO | 未实现 |
-| 锚点对伪 ASIN 系统性偏弱 | ❌ 未验证 | 需挑伪 ASIN 验 `brand/category` |
-| KB16 其余未接源 | ❌ TODO | `CUSTOM_KEYWORD_POOL`（运营词池）、`KEYWORD_PROMOTED_FROM_BROAD`（搜索词报告）未接 |
-
----
-
-## 23. 2026-06-24：淘汰判定是【多环节】——各环节阈值/口径有意不同（防误判备忘）
-
-> 本节**不改逻辑**，只记录设计意图 + 一次真实误判，防后人（或 AI）把"看着不一致"当 bug 去推平。配套已就地补/改注释（仅注释）。
-
-**起因**：有人（含本轮一个 AI）看到 `_is_in_elimination_pool` 用 `bid ≤ 0.10`，而常量 `LOW_BID_MAX = 0.21`、旧注释/docstring 又写"0.21"，**误判为 bug**，去"对齐"成 0.21。**错**。运营确认：**bid∈(0.10, 0.21] 且预算正常的活动，不应单凭 bid 强制归低价捡漏组**。
-
-**真相：淘汰命中分多个环节，各环节问的问题不同，判据本就不同，勿统一。**
-
-| 环节 | 在哪 | 判据 | 干什么 |
-|---|---|---|---|
-| **预过滤** | `campaign.py` / `is_strictly_in_low_bid_pool` | **AND**：bid ≤ `LOW_BID_MAX`(0.21) **且** 预算 ≤ 1.01 | 判"确实已淘汰执行"(两维都触底) → 剔除不分析(灰卡) |
-| **预分类** | `campaign_portfolio.classify`(读 current) | **OR**：`_is_in_elimination_pool` = bid ≤ **0.10** 或 预算 ≤ 1.01 | 喂 LLM 前按现状归组 |
-| **终分类** | `classify`(effective_budget=proposed) | 淘汰判据仍读 current；`effective_budget` 只影响主力↔测试 | 合并后按本轮建议归组 |
-| **强制修正** | `campaign.py` `_resolve_budget_conflicts` | **OR**：bid ≤ **0.10** 或 预算 ≤ 1.01 | LLM 不听话时翻成 eliminate + 硬填 $1/$0.20 |
-
-**关键点（勿踩）**：
-- **bid 阈值两套，有意不同**：预过滤(AND) 用 **0.21**（`LOW_BID_MAX`）；归组/强制修正(OR) 用 **0.10**（裸字面量）。AND 路径判"已执行淘汰"，OR 路径判"该不该归组/翻正"，门槛本就不同。
-- 常量 `LOW_BID_MAX=0.21` **只服务预过滤(AND)**；OR 路径的 0.10 是**独立口径**，**勿改成 LOW_BID_MAX、勿抽成"统一常量"**（那等于抹掉环节差别）。
-- 预算阈值 1.01 各环节共用。
-- 已补/改的注释（**逻辑零改**）：`campaign_portfolio.py`（阈值常量块 + `_is_in_elimination_pool` docstring）、`campaign.py`（强制修正 :1905 注释）——原写"0.21"的误导处已改准。
-
-**教训**：看到"看着不一致"的阈值，先确认是不是**多环节的有意差别**，**报告、别擅自推平**（更别在被纠正后继续改）。
-
----
-
-## 24. 2026-06-24：新增词总扩大词/泛词 → 长尾优先选词 + 属性级相关性（已修，本地）
-
-> 已上线 chenv31 2026-06-24。**影响每次新增分析**（非默认关的竞品路径）。改 `campaign_new.py` + `reasoner.py` + `campaign.py`（调用点）。承 §22 的相关性锚点改造，进一步治"总扩大词"。
-
-**现象**：新增词 agent 总选大词/泛词（产品是短裙却扩中长裙/连衣裙），相关性只到品类级。
-
-**根因（已核实，两层）**：
-1. **代码层放大（主因）**：选词两处（`_select_by_quota` 桶内 + 无竞品全局路径）都按 **`-search_volume` 降序**排再截 Top-40 → 高流量大词霸榜，**长尾在进 LLM 前就被截掉**（garbage-in，LLM 只能在大词里挑）。不只是"MCP 源偏大词"那么简单。
-2. **品类锚点误导**：§22 注入的 `category_name` 把 LLM 引向**品类级**匹配（"同属裙类→相关"），恰是"短裙误扩中长裙"的来源——这些 MCP 源本就大致同品类，品类无区分力、还常空（伪 ASIN）。
-
-**修复**：
-| # | 改动 | 文件 |
-|---|---|---|
-| ① 长尾优先选词 | 新增 `_longtail_sort_key`：排序键 `(有自然位 → 词数多 → 搜索量 tiebreak)`，**词数无上限**（词越多越精准越靠前），搜索量不再主排。两处选词统一用 | `campaign_new.py` |
-| ② 属性级相关性 | prompt 相关性判据从"同品类"→**匹配标题具体属性**（短裙≠中长裙≠连衣裙→skip，reason 须点明属性吻合）| `reasoner._NEW_CAMPAIGN_PROMPT` |
-| ③ 词型偏好 | prompt 新增：优先精准长尾；审慎大词/泛词，除非测试期/引流型否则倾向 skip（按阶段/目的）| `reasoner._NEW_CAMPAIGN_PROMPT` |
-| ④ 去品类/品牌锚点 | 相关性锚点只留**标题 + 已投词**；`product_brand`/`product_category` 从 reasoner 签名+prompt、campaign_new 签名+pass-through、campaign.py 调用点**全部移除**（非死代码）。⚠ **推翻 §22.2-A 与 §22.4-H12 的 brand/category 注入** | 3 文件 |
-
-**KB 依据**：KB06 long_tail 精准优先于 generic 大词测词；阶段感知（KB02/03：收割/盈利/维持期不宜建大词活动）。
-
-**验证**：3 文件 compile OK；brand/category 残留=0；workflow 全套 passed（含 H2 竞品 natural_rank=None 不被挤掉——排序改长尾优先后配额分桶不受影响）。
-
-**待办/上线前**：真机拿"短裙类"产品验——确认不再扩中长裙/大词、长尾能进候选并被 LLM 选中。`MIN_SEARCH_VOLUME=50` 保留兜底。按纪律 diff→备份→上传→预检→重启。
-
----
-
-## 25. 2026-06-24（续）：前端三项优化（A态空壳引导 / 执行结果toast常驻 / 告警tab化+筛选瘦身）
-
-> 均为**纯前端**（主看板 `demo/ad-asisitant-agent.html` + `demo/campaign-panel/**`），刷新浏览器即生效，后端零改动，**已上线 chenv31 2026-06-24**。
-
-### 25.1 A 态空壳引导（新 ASIN 未配置·无批次）
-**背景**：全新 ASIN（state 库无配置）透传进来时，旧设计左侧配置栏可编辑 + 顶部「新建分析事件」按钮并列，用户不知点哪个；且 A 态 tab5 实际跑不了执行层（`_mountCampaignRealtime` 仅 C 态触发），左侧配了也没用 → 反常识。另注：叠加触发过「标记进行中事件失败」，根因是超长 SKU 名撑爆 state 库 `asin VARCHAR(20)`（§21.3，列宽已另行修复）。
-**改**（`ad-asisitant-agent.html`）：`bootstrapFromContext` 的 A 分支由 `renderBatchBar('A')+loadAll(true)` 改为新函数 **`renderEmptyStateA()`**——左侧仅基础信息卡（隐藏 `#cardStrategy`/`#cardTactics`），右侧仅批次栏 +「新建分析事件」+ 中心灰色引导 `#emptyGuide`（隐藏 `#tabBar` + 所有 `.tab-panel`）；`loadAll` 开头加还原（进 B/C 态恢复 `cardStrategy`/`cardTactics`/`tabBar`、隐藏 `emptyGuide`）。使「新建分析事件」成为「配置→执行层」完整流程的**唯一入口**。点新建 → `onNewEventClick` → `loadAll(true)` 还原配置栏 → 进 C 态展开。
-
-### 25.2 执行结果 toast 常驻可关闭 + 即时提示
-**背景**：点「同意所选」确认后，结果 toast 必须等 `/campaign/confirm` 同步等 MCP 真实下发完成（§21.3，MCP avg 11s/max 258s/工具）才弹，1800ms 一闪即逝看不清；且点确认到结果之间**零反馈**，用户以为"点了没反应"。
-**改**（`campaign-panel/state.js` + `panel.css`）：
-- `_toast(msg, opts)` 加 `opts.sticky` 模式：**常驻不消失 + 右上角「×」可关闭**；非 sticky 自动消失 **1800→2400ms**。沿用原深色样式，无新增配色。
-- 6 个执行结果调用点（同意下发成功/部分成功/reject 写回/审核失败/组合预算成功/失败）改 `{sticky:true}`。
-- `batchConfirm` 发请求**前**加轻量即时提示「正在下发 N 个调整到 MCP，请稍候…」/「正在提交 N 项审核…」（2400ms，随后结果常驻 toast 覆盖同一 `#camp-toast`）。
-
-### 25.3 告警 tab 化 + 筛选器瘦身（给卡片列表腾纵向空间）
-**背景**：右下「调整活动」区太小，扩大空间来源。
-**改**（`campaign-panel/render.js` + `panel.js`）：
-- 告警从顶部红气泡 `#camp-warnings`（点击 `alert` 弹全部）→ 改为与「明细/汇总」**同级的常驻 tab**「告警 (N)」：新增 `#camp-warnings-panel` 容器；`_renderWarnings`(气泡)→`_renderWarningsPanel`(列表，空态「暂无告警」)；`_fullRender` 加 `warnings` 切换分支（与 detail/summary 同机制，走统一 `applyFilters` 重渲）。**数据契约不变**——仍读 `vm.warnings`（viewmodel.js 三处兜底为字符串数组），`_esc` 容错更稳；grep 确认无悬空引用。
-- `#camp-filters` 上下 padding **8→6px**。
-- **（未做，高风险待评）batchBar 进 topbar**：涉及 `.app-layout { height: calc(100vh - 46px) }` 硬编码高度链 + topbar 横向拥挤 + iframe 内滚动，需 ERP 真嵌入下验三态+滚动，留待单独做。
-
----
-
-## 26. 2026-06-24/25：可靠性与口径修复（数据不可用区分 / 数仓 BE 重试 / MCP 日期窗口按站点）
-
-> 背景：一周的 StarRocks 数仓 BE 故障（只读 FS → 无存活 BE）暴露三类问题；本节修复**均已上线 chenv31（2026-06-24/25）**。
-
-### 26.1 数据拉取失败 vs 业务无调整（`data_unavailable`）
-**问题**：数仓宕机时 `fetch_campaigns` 拉空/报错被压成「no adjustments」良性跳过——一次 529 个 ASIN「真成功 0 / 业务跳过 522」却 0 失败，宕机被伪装成正常。
-**改**：
-- `CampaignAnalysisResult` 加 `data_unavailable: bool`；`campaign.py` 的 fetch 超时/异常两分支置 True。
-- `auto_push.should_push_to_erp` 优先判 `data_unavailable` → 返回独立原因（非「no adjustments」）；`api/campaign._maybe_push_erp` 在 `erp_write` 带 `data_unavailable=True`。
-- `batch_via_api.py`：单列「数据不可用」计数 + 退出码（真失败→1；数据不可用占比 >50%→2）+ 告警。
-- ⚠ 仍未覆盖：真正「无可用广告活动」(`total_campaigns==0` 但拉取成功) 与「数仓返回空行」无法区分，后者仍记业务跳过——留待**批量级空结果护栏**（待办：单批 `total_campaigns==0` 占比过高时告警/非零退出）。
-- 测试 `tests/persistence/test_erp_auto_push.py`(+2)。
-
-### 26.2 StarRocks 共享存储 BE 错重试（`starrocks_retry` 单一真源）
-**问题**：BE 存储错以 `errno 1064` 的 `ProgrammingError` 回来但带 `starlet err`/`BE:1006x` 签名（只读 FS `BE:10064`、cache 目录分配失败 `BE:10062`），瞬时抖动直接失败、无重试。
-**改**：新增 `app/data/starrocks_retry.py`（判定 `is_starrocks_be_storage_error` + `backoff_delay` + 同步 `run_sync_with_be_retry`，**单一真源**）：
-- `db_adapter._query`（异步 asyncio.sleep）复用判定/退避；与内层 `OperationalError/InterfaceError` once-retry 互斥不叠加；超时不重试。
-- `mcp_db_context._lookup_sync`（#1 MCP 入参解析 / #3 ERP listing 上下文）+ `lookup_top_child_attrs`（执行层取 top 子 ASIN）两处同步裸查接入。
-- 退避：第1次重试 0.55–0.70s、第2次 1.05–1.20s（含抖动），共 3 次尝试 ≈ 1.6s；**只兜瞬时抖动**，整体宕机仍需数仓侧修。
-- 只重试带签名的 1064；SQL 语法错（同 1064 无签名）不重试。错误签名是外部契约，**StarRocks 升级后需回归**这个判定。
-- 测试 `tests/test_starrocks_retry.py`(6) + `tests/test_db_adapter_be_retry.py`(3)。
-
-### 26.3 MCP 日期窗口按 ASIN 站点当地时间
-**问题**：`make_date_window` 用服务器本地 `date.today()`、`end=today`（含未完整当天、span 多一天）；且数仓按各站点当地时间存，硬编一个时区对非美站点错。
-**改**：`make_date_window(days, site_code)` **单一真源**——按站点当地时间：`end=当地今天-1`（排未完整当天）、`start=当地今天-days`（[today-days, today-1] 共 days 天）。
-- `_SITE_TZ` 覆盖**实跑 6 站点**（日志核实分布）：US=America/Los_Angeles、UK=Europe/London、DE=Europe/Berlin、IT=Europe/Rome、ES=Europe/Madrid、FR=Europe/Paris；未知站点回落默认站(US) + 告警。
-- **全链路 6 类构参点收口**：`mcp_adapter._resolve_context`、`mcp_query`、`campaign_fetcher`×3（perf/flow/rank）、`campaign.py`×4（restart/CPC/懒加载 placement+search_term），均按 `db_ctx.site_code` / `campaign_data.site_code` / `ctx.site_code`。
-- 修掉 `campaign.py` 里**第二处** `date.today()` 老实现（本地 `_make_date_window` 改委托 mcp_mapping）。
-- ⚠ 数仓 `dwd_whp_amazon_listing_general.site_code` 实存 15 个站点（含 CA/MX/JP/NL 等），但实跑只命中 6 个；新站点上量需在 `_SITE_TZ` 补行（不补则回落 US 并告警，可发现）。
-- 测试 `tests/test_mcp_date_window.py`(7)。
-
-### 26.4 运营 DB 变更
-- `ad_agent_state`（docker `mysql-state-v25`）13 张表 `asin` 列 `VARCHAR(20)→VARCHAR(50)`（含 2 张 `*_bak_20260622` 表）：原 20 对中文 SKU 串（如「US-运动文胸…」）报 `1406 Data too long`。无外键、`ALGORITHM=INPLACE` 在线变更、已全库备份（`/root/db_backup_ad_agent_state_*.sql.gz`）。
-
----
-
-## 27. 2026-07-05/06：淘汰复评数据源重建（KB21 §7 解锁）——「入池日期恒空」根因治标
-
-> 仅本地（`AD_assistant_agent-v3.2`），未上服务器 chenv31。Phase 1 范围：**只做复评数据源重建**，不动护栏、不动余量回流、不动执行钩子。
->
-> **2026-07-06 更新：ERP 库已可达，表+方法已从 state 库迁回 ERP 库**（`erp_writer/repository.py`）。
-
-### 27.1 背景（为什么做）
-
-复评（KB21 §7）完整 code path 已就绪，唯一断点是入池日期取数 [repository.py:131](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:131) `get_elimination_entry_dates` 恒空——旧查询依赖 `suggest_category='ELIMINATE' AND confirm_status='CONFIRMED'`，一步直跑 `submit_execution_direct` 不写 confirm_status → 0 行 → 复评门永不进。
-
-同时存在淘汰误杀（LLM 100% 拍板、无代码否决）、复评卡归类为 ADJUST、统计漏桶、复评后抖动（刚捞回又被淘汰）等问题。本迭代（v3.10）一并治理。
-
-### 27.2 总改动清单
-
-| # | 文件 | 改动 |
-|---|---|---|
-| ① | ERP 库 `t_advert_agent_pool_entry` | 新建入池专表；DDL 见 [migration_20260706_pool_entry_table.sql](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/migration_20260706_pool_entry_table.sql)；ERP 库已执行建表 |
-| ② | ERP 库 `t_advert_agent_modify_suggest_summary` | ALTER TABLE 加 `reactivate_count INT NOT NULL DEFAULT 0 AFTER keep_count`；migration 见 [migration_20260706b_summary_reactivate_count.sql](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/migration_20260706b_summary_reactivate_count.sql)；ERP 库已执行 |
-| ③ | [erp_writer/repository.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py) | 新增 `get_active_entries`(:1636) / `sync_pool_entries`(:1668) / `upsert_pool_entry`(:1783) / `mark_pool_exit`(:1843) / `get_recently_reactivated`(:1867)；`load_pending_by_card_ids` SELECT 增 `perf_json, trigger_rule`(:394)；删死代码 `get_elimination_entry_dates` |
-| ④ | [advert_execution.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/advert_execution.py) | 新增 `_sync_pool_entries_from_exec` 辅助函数；`submit_execution_direct`(:375) 和 `submit_execution`(:282) 真跑后各调一次：ELIMINATE → upsert / REACTIVATE_* → mark_pool_exit。async_batch MCP 整批成功后写，失败不写 |
-| ⑤ | [campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py) | §7c 复评块改三步(sync→读→复评)(:669)；淘汰护栏扩充(:2005-2017)：`days_online≤3` / 测试期+`<14` / `days_since_reactivation≤3`(防淘汰↔复评抖动)；`summary_stats` 加 `to_reactivate`(:818)；复评保护回填块(:641-650)批量取池表给 adj 赋 `days_since_reactivation` |
-| ⑥ | [models/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/models/campaign.py) | `CampaignAdjustmentItem` 新增 `days_since_reactivation: int = -1`(:161) |
-| ⑦ | [mappers.py](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/mappers.py) | `_ACTION_TO_CATEGORY` 加 `reactivate_budget_only` / `reactivate_with_calibrated_bid` → `'REACTIVATE'`(:60)；`_CATEGORY_PRIORITY` 调序(:66) |
-| ⑧ | [api/campaign.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign.py) | 不再提前取 `get_elimination_entry_dates` → campaign.py 内部 sync 后自取(:362) |
-| ⑨ | [campaign_viewmodel.py](AD_assistant_agent-v3.2/ad-direction-agent/app/api/campaign_viewmodel.py) | `_CAT_TO_ACTION` 加 REACTIVATE(:246) |
-| ⑩ | [db_health_check.py](AD_assistant_agent-v3.2/ad-direction-agent/scripts/erp_db/db_health_check.py) | `VALID_CAT` 加 REACTIVATE + CREATE(:125) |
-| ⑪ | 前端 [panel.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/panel.js) + [render.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/render.js) + [viewmodel.js](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign-panel/viewmodel.js) + [campaign_test.html](AD_assistant_agent-v3.2/ad-direction-agent/demo/campaign_test.html) | 汇总统计「新增/复评」合并展示位；viewmodel 加 `reactivate` 桶；render.js:164 数字 = create + reactivate |
-| ⑫ | [tests/persistence/test_pool_entry_sync.py](AD_assistant_agent-v3.2/ad-direction-agent/tests/persistence/test_pool_entry_sync.py) | 离线单测 |
-
-### 27.3 入池表同步口径
-
-- **discovery 入池**（[repository.py:1668](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:1668)）：分析后取全量 live 活动 vs 池表 `exit_date IS NULL` 记录。live `is_strictly_in_low_bid_pool=True` 且池表无 → INSERT `source='discovery', entry_date=NOW()`。复淘汰走 `ON DUPLICATE KEY UPDATE`（重置 exit_date=NULL）。
-- **离池（手动复评/恢复检测）**：池表有记录但 live 无该 `campaign_id`，或 live 已恢复超池底 → UPDATE `exit_date=NOW()`（软标记）。
-- **空串保护**：`campaign_id` 空串全部跳过。
-- **执行钩子**（[repository.py:1783](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:1783)）：`upsert_pool_entry(source='execution', entry_date=NOW())` → ELIMINATE 卡 MCP 真跑后写；`mark_pool_exit(exit_date=NOW())` → REACTIVATE_ 卡 MCP 真跑后软标记。
-- **性能**：一次 `SELECT WHERE parent_asin AND exit_date IS NULL` + campaign_data 全量 dict（O(池行数)，不逐活动查）。
-
-### 27.4 复评保护护栏
-
-`_resolve_budget_conflicts`（[campaign.py:2005-2017](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:2005)）三种条件 OR，命中任一即禁强制淘汰、LLM 误判淘汰翻正为 keep：
-
-1. `days_online ≥ 0 and ≤ 3` — 新活动样本不足（KB21 §2）
-2. `product_stage == "测试期" and days_online ≥ 0 and < 14` — 测试期样本保护（KB21 §2）
-3. `days_since_reactivation ≥ 0 and ≤ 3` — 复评后防抖（KB21 §2 精神，复用池表 `exit_date` 反算）
-
-`days_since_reactivation` 的回填链路（[campaign.py:641-650](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:641)）：`get_recently_reactivated(parent_asin, max_days=3)` 查池表近 3 天离池记录 → 算 `(now - exit_date).days` → 赋到 `adj.days_since_reactivation`。`_resolve_budget_conflicts` 通过 `product_stage` 参数接收产品阶段（从 `strategy_context` 透传，[campaign.py:656](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:656)）。
-
-### 27.5 复评卡归类 + 汇总统计
-
-- **映射**：[mappers.py:60-63](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/mappers.py:60) `reactivate_budget_only` / `reactivate_with_calibrated_bid` → `suggest_category='REACTIVATE'`（前端 badge 深蓝，render.js:42-43 `_actionLabel` 返回「复评」）
-- **后端 `to_reactivate` 桶**：[campaign.py:818](AD_assistant_agent-v3.2/ad-direction-agent/app/workflow/steps/campaign.py:818) `summary_stats` 独立统计；ERP 库 summary 表已加 `reactivate_count` 列
-- **前端展示**：汇总统计「新增/复评」合并位，值 = `create + reactivate`
-- **`categorized_total`**：[repository.py:689](AD_assistant_agent-v3.2/ad-direction-agent/app/persistence/erp_writer/repository.py:689) 纳入所有四桶(eliminate/adjust/keep/reactivate)，告警不再误触
-
-### 27.6 验证
-
-离线单测 `tests/persistence/test_pool_entry_sync.py` 9 例全过 + `test_campaign_resolve_conflicts.py` 26 例（含新增测试期/复评防抖 12 例）+ `test_campaign_restart.py` 8 例 = **44 passed 零回归**。
-
-**生产库确证**（2026-07-06 SSH 直连 ERP 库）：旧逻辑曾生效——`confirm_status='CONFIRMED'` 的 ELIMINATE 卡 15,738 条（全 ASIN），其中 B0B7S3PWWB 有 77 条（confirm_time=2026-06-17）。一步直跑合并后 confirm 路径断，后续全是 PENDING。执行钩子补了 `update_pending_execute_status('SUCCESS')` 后，未来真执行会写回 `execute_time`，discovery 路径可读到真实入池时间。
-
-### 27.7 未尽事项
-
-- 回算口径修复（释放预算入池 + cap 锚定活动之和）— Phase 2b
-- 余量出口（复评捞回 + 二次新增 + 缓冲）— Phase 2c
-- `pool_entry_record_on_dryrun` 开关 — settings.py 可选
+`batch_core_keyword.py` + `batch_core_keyword.sh`：离线 7 天一批，crontab 定时跑。
 
 ---
 
@@ -1289,11 +713,15 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
 
+*v3.22: 精准组合升降级 + ACOS约束 + KB v2.0 重构收尾（2026-07-28~30，本地未部署服务器）—— ①`acos_constraints.py` ACOS约束核心模块(新) ②`campaign_exact_transition.py` 精准组合四组升降级逻辑(新) ③KB v2.0 重构：新增 00-总纲+30-动作词表+runtime_contract.yaml+evidence.yaml；精简过时 KB30/31/32 旧版(否词/样本窗口/自动广告)；全部 KB 切片+7 个 ontology YAML 大范围更新 ④ERP 执行状态管理：immediate_exit 确定性执行+灰度卡+组合匹配执行 ⑤`access-guard.js` 前端入口守卫(新) ⑥测试大面积扩展：test_portfolio_match_and_exec(+1328)+test_product_identity_required(+908)+test_erp_gray_cards(+359)+test_mcp_campaign_discover(+380) ⑦kb_loader 预设精简。27+17+31+5 files +8781/-1349。*
+
+最后更新：2026-07-30
+
 *v3.21: 战略层经营模式 + 新增活动选词重构 + MCP registry（2026-07-25，本地未部署服务器）—— ①`OperatingMode` 6值+`AdPermission` 3级+`operating_mode_to_permission()` ②ERP/state DB 全链路持久化 ③`new_keyword_fetcher.py` 统一多源候选词发现+`campaign_new.py` -130 行 ④`mcp_registry.py` MCP 工具集中注册 ⑤`.gitignore` 加 logs/。28+18+7 files。*
 
 最后更新：2026-07-25
 
-*v3.20: KB30/31/32 否词治理 + 组合 spend 窗口 + 预过滤收口 + KB 切片细化（2026-07-17~22，本地未部署服务器）—— ①KB30/31/32 新规则(否词治理/样本窗口/自动广告调整)+广泛否词 MCP 真实下发链路 ②组合预算 spend 多周期窗口(1d/3d/7d/14d/30d)+前端展示 ③预过滤收口 campaign_prefilter+删死代码 ④KB 细粒度切片+core_keyword_policy 迁移 app/core/ ⑤Codex hook 预埋+decisionId 追踪 ⑥批跑脚本迁移 scripts/+清理过期文档。24+10+8+3+28+7+9 files。*
+*v3.20: KB30/31/32 新规则 + 组合 spend 窗口 + 预过滤收口 + KB 切片细化（2026-07-17~22，本地未部署服务器）—— ①KB30(否词治理)/KB31(样本窗口)/KB32(自动广告)新规则+广泛否词 MCP 真实下发链路（注：KB30/31/32 后在 v3.22 重构中清理替换为新版）②组合预算 spend 多周期窗口(1d/3d/7d/14d/30d)+前端展示 ③预过滤收口 campaign_prefilter+删死代码 ④KB 细粒度切片+core_keyword_policy 迁移 app/core/ ⑤Codex hook 预埋+decisionId 追踪 ⑥批跑脚本迁移 scripts/+清理过期文档。24+10+8+3+28+7+9 files。*
 
 最后更新：2026-07-22
 
@@ -1307,7 +735,7 @@ confirm(CONFIRMED) → 「执行已确认调整」→ 调 `whp-advert-agent` MCP
 
 *v3.16: 秒开优化 + meta_filter 分级缓存（2026-07-11，本地未部署服务器）—— ①策略层轻量化：`run_get_tactics_options` 零 MCP/LLM 纯缓存读取，删除 diagnosis 自动回访逻辑 ②缓存 key 加入 meta_filter 维度 ③BOOTSTRAP_TOOLS 分级 + bootstrap_tools_for_meta() 按需跳过 campaign keyword 拉取 ④`_build_guardrail_alerts` 仅用 retry_instruction 不回落 message。18+2 files +491/-68。*
 
-*v3.15: 护栏优先级重构 + R3/R4 LLM 重试编排（2026-07-10，本地未部署服务器）—— ①P3 硬淘汰（无单且触底）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3 ②R3/R4 重试编排：护栏拦截后带 retry_instruction 回灌 LLM 重判，最多两轮，最终护栏兜底 ③全部 11 条护栏规则新增 retry_instruction/campaign_key 字段 ④KB 阈值全线对齐 + AUTO_BATCHABLE→AUTO_APPROVED ⑤campaign_viewmodel 审核等级转中文标签。6+17+1 files +1298/-184。*
+*v3.15: 护栏优先级重构 + R3/R4 LLM 重试编排（2026-07-10，本地未部署服务器）—— ①P3 硬淘汰（无单且触底）优先级升至 P1 样本不足之上，P0/P2 仍高于 P3 ②R3/R4 重试编排：护栏拦截后带 retry_instruction 回灌 LLM 重判，最多两轮，最终护栏兜底 ③全部 12 条护栏规则新增 retry_instruction/campaign_key 字段 ④KB 阈值全线对齐 + AUTO_BATCHABLE→AUTO_APPROVED ⑤campaign_viewmodel 审核等级转中文标签。6+17+1 files +1298/-184。*
 
 *v3.14: 护栏独立模块 + 组合映射归一化 + prompt 瘦身（2026-07-10，本地未部署服务器）—— ①`campaign_guardrails.py` 新模块：`apply_all()` 统一护栏入口，从 `_resolve_budget_conflicts` 提取淘汰保护/强制淘汰/淘汰硬填充/日预算上限/库存退货评分护栏，阈值常量+谓词为 `campaign_portfolio` 侧唯一来源 ②`campaign_portfolio.py` 新增 `GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE` 双向映射作为归一化来源；`campaign_viewmodel.py`/`text_utils.py` 删除本地硬编码映射改 import，消除三处漂移 ③`campaign.py`：`_resolve_budget_conflicts` 委托 guardrails，新增 inventory_days/refund_rate/rating 参数 ④`reasoner.py`：精准/广泛 prompt 示例输出删冗余字段（cid 句柄已回填）；`recommend_new_campaigns` JSONDecodeError 重试 2 次+max_tokens 8192 ⑤阈值修正：Bid≤$0.21→$0.20、Budget≤$1.01→$1.00、退货率阻断 25%→30%。7 files +546/-227。*
 

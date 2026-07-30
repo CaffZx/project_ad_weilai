@@ -256,6 +256,18 @@ class ProductIdentityMixin(BaseModel):
         default=None,
         validation_alias=AliasChoices("parent_seller_sku", "_parentSellerSku", "parentSellerSku"),
     )
+    shop_account: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("shop_account", "_shopAccount", "shopAccount"),
+    )
+    site_code: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("site_code", "_siteCode", "siteCode"),
+    )
+    user_id: str | int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("user_id", "_userId", "userId"),
+    )
 
 
 # ── Layer 1.1 战略层 请求/响应 ─────────────────────────────

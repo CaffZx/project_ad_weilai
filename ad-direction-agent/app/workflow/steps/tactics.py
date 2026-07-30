@@ -183,13 +183,13 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
     回访（keyword_analysis 已缓存）：跳过 LLM，从缓存读，仅刷新 DB 排名字段
     """
     long_term = ctx.state.get_long_term_config(asin)
-    strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
+    strategy_saved = all(k in long_term for k in ("product_level", "season_stage"))
     tactics_saved = all(k in long_term for k in ("ad_purposes", "target_keyword_strategy"))
 
     strategy_context = StrategyConfirmRequest(
         asin=asin,
         product_level=long_term.get("product_level", "常规产品 (P2)"),
-        product_stage=long_term.get("product_stage", "推进期"),
+        product_stage=long_term.get("product_stage"),
         season_stage=long_term.get("season_stage", "淡季"),
         operating_mode=long_term.get("operating_mode"),
     ) if strategy_saved else None
@@ -366,11 +366,11 @@ async def _run_get_tactics_options_legacy(ctx: WorkflowContext, asin: str, days:
 async def run_get_tactics_options(ctx: WorkflowContext, asin: str, days: int = 7) -> TacticsOptionsResponse:
     """Return tactics options from long-term config and existing cache only."""
     long_term = ctx.state.get_long_term_config(asin)
-    strategy_saved = all(k in long_term for k in ("product_level", "product_stage", "season_stage"))
+    strategy_saved = all(k in long_term for k in ("product_level", "season_stage"))
     strategy_context = StrategyConfirmRequest(
         asin=asin,
         product_level=long_term.get("product_level", ""),
-        product_stage=long_term.get("product_stage", ""),
+        product_stage=long_term.get("product_stage"),
         season_stage=long_term.get("season_stage", ""),
         operating_mode=long_term.get("operating_mode"),
     ) if strategy_saved else None
@@ -469,7 +469,7 @@ async def run_get_tactics_recommendations(ctx: WorkflowContext, asin: str, days:
             recommend_tactics_from_purpose(
                 data=data,
                 position=long_term.get("product_level", "常规产品 (P2)"),
-                stage=long_term.get("product_stage", "推进期"),
+                stage=long_term.get("product_stage"),
                 season=long_term.get("season_stage", "淡季"),
                 days=days,
             ),

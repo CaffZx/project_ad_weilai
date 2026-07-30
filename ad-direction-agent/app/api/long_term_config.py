@@ -47,8 +47,9 @@ async def update_config(
     }
     if req.product_level is not None:
         updates["product_level"] = req.product_level
-    if req.product_stage is not None:
-        updates["product_stage"] = req.product_stage
+    # [产品阶段] 前端已用经营模式替代，不再接受 API 更新。
+    # if req.product_stage is not None:
+    #     updates["product_stage"] = req.product_stage
     if req.season_stage is not None:
         updates["season_stage"] = req.season_stage
     if req.operating_mode is not None:

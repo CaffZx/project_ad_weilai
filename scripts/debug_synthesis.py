@@ -44,7 +44,8 @@ async def main(asin: str, days: int = 7):
         })
 
     ctx_lines = [
-        f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+        # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+        # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
         f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
         f"  - 目标 ACOS: {strategy_context.get('target_acos', '?')}%",
     ]

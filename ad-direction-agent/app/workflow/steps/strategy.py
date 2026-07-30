@@ -131,10 +131,10 @@ async def run_confirm_strategy(ctx: WorkflowContext, req: StrategyConfirmRequest
     }
     if req.operating_mode is not None:
         config["operating_mode"] = req.operating_mode.value
-    # 前端不再编辑产品阶段时，不传该键以保留 MySQL 中已有的历史阶段；
-    # 仅兼容旧客户端显式提交的阶段值。
-    if req.product_stage is not None:
-        config["product_stage"] = req.product_stage
+    # [产品阶段] 前端已用经营模式替代，切除前端→后端透传通道。
+    # 历史兼容：旧客户端显式提交时不再写入 MySQL，保留 DB 中已有值不动。
+    # if req.product_stage is not None:
+    #     config["product_stage"] = req.product_stage
     ctx.state.set_long_term_config(req.asin, config)
     ctx.state.advance_layer(
         req.asin,

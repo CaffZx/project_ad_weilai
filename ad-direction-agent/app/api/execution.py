@@ -1,7 +1,10 @@
 """Layer 1.4 执行层 API — 广告方向选择 + P3 上游推荐"""
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends
 
+from app.api.config_mirror import mirror_agent_config
 from app.api.deps import get_workflow_orchestrator
 from app.api.product_identity import require_product_identity
 from app.core.workflow_orchestrator import WorkflowOrchestrator
@@ -42,7 +45,14 @@ async def execution_select(
 ):
     """确认执行层方向选择（持久化至 workflow_state，Campaign 分析复用）"""
     require_product_identity(req)
-    return await orchestrator.confirm_execution(req)
+    result = await orchestrator.confirm_execution(req)
+    if result.accepted:
+        await mirror_agent_config(
+            req=req,
+            patch={"advert_direction_types": req.selected_directions},
+            operation="execution_select",
+        )
+    return result
 
 
 # ── P3 上游推荐端点 ──────────────────────────────────────
@@ -90,6 +100,12 @@ async def save_target_acos_override(
         shop_id=req.shop_id,
         parent_seller_sku=req.parent_seller_sku,
     )
+    if ok:
+        await mirror_agent_config(
+            req=req,
+            patch={"target_acos_suggest": req.value},
+            operation="target_acos_override_save",
+        )
     return {"asin": req.asin, "saved": ok, "value": req.value}
 
 
@@ -100,6 +116,12 @@ async def clear_target_acos_override(
 ):
     """清除手动设定的目标 ACOS，恢复算法推荐"""
     ok = orchestrator.clear_target_acos_override(req.asin)
+    if ok:
+        await mirror_agent_config(
+            req=req,
+            patch={"target_acos_suggest": None},
+            operation="target_acos_override_clear",
+        )
     return {"asin": req.asin, "cleared": ok}
 
 
@@ -116,6 +138,12 @@ async def save_budget_override(
         shop_id=req.shop_id,
         parent_seller_sku=req.parent_seller_sku,
     )
+    if ok:
+        await mirror_agent_config(
+            req=req,
+            patch={"daily_budget_suggest": Decimal(str(req.value))},
+            operation="budget_override_save",
+        )
     return {"asin": req.asin, "saved": ok, "value": req.value}
 
 
@@ -126,6 +154,12 @@ async def clear_budget_override(
 ):
     """清除手动设定的日预算，恢复算法推荐"""
     ok = orchestrator.clear_budget_override(req.asin)
+    if ok:
+        await mirror_agent_config(
+            req=req,
+            patch={"daily_budget_suggest": None},
+            operation="budget_override_clear",
+        )
     return {"asin": req.asin, "cleared": ok}
 
 

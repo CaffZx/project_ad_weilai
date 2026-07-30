@@ -13,7 +13,7 @@ from app.persistence.mysql_state_manager import MySQLStateManager
 
 PRESET = {
     "product_level": "重点产品 (P1)",
-    "product_stage": "推进期",
+    "product_stage": None,
     "season_stage": "旺季准备",
 }
 

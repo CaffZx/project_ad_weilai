@@ -62,7 +62,8 @@ def _install() -> None:
 
         ctx_parts = [
             "## 策略上下文 (ASIN 级，全批共享)",
-            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代
+            # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {strategy_context.get('product_level', '?') or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",

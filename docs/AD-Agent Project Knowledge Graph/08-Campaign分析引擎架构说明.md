@@ -16,12 +16,15 @@
 - 数据模型：`ad-direction-agent/app/models/campaign.py`
 - LLM Prompt/解析：`ad-direction-agent/app/llm/reasoner.py`
 - KB 切片：`ad-direction-agent/app/llm/kb_loader.py`
+- Ontology 契约：`ad-direction-agent/docs/knowledge_base/ontology/runtime_contract.yaml`
 - 组合分类：`ad-direction-agent/app/workflow/steps/campaign_portfolio.py`
 - 预算汇总：`ad-direction-agent/app/workflow/steps/campaign_budget_summary.py`
 - 预算回算：`ad-direction-agent/app/workflow/steps/campaign_budget_reallocation.py`
 - 新建活动：`ad-direction-agent/app/workflow/steps/campaign_new.py`
 - 淘汰复评：`ad-direction-agent/app/workflow/steps/campaign_restart.py`
 - 确定性护栏：`ad-direction-agent/app/workflow/steps/campaign_guardrails.py`
+- ACOS 约束：`ad-direction-agent/app/core/acos_constraints.py`
+- 精准升降级：`ad-direction-agent/app/workflow/steps/campaign_exact_transition.py`
 - ERP 写入：`ad-direction-agent/app/persistence/erp_writer/repository.py`
 - 执行链路：`ad-direction-agent/app/workflow/steps/advert_execution.py`
 - 配置：`ad-direction-agent/app/config/settings.py`
@@ -65,28 +68,38 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | Prompt 构造 | `app/llm/reasoner.py:366`、`:437`、`:488`、`:523`、`:578` | exact/broad/new/synthesis/overview/budget prompt |
 | ERP 映射/落库 | `persistence/erp_writer/mappers.py:357`；`repository.py:801` | CampaignAnalysisResult 转 card/pending/reason group |
 | Advert 执行 | `workflow/steps/advert_execution.py:255`；`persistence/erp_writer/advert_exec_mapper.py:82` | CONFIRMED pending 转 MCP 执行计划 |
+| 经营模式权限闸 | `campaign.py:414` `ad_permission`；`:417` `growth_analysis_enabled` | 经营模式 → AdPermission，控制增长流（复评/新建）开关 |
+| ACOS 容忍上限 | `campaign.py:1246` `fill_acos_constraints()` → `acos_constraints.py:55` `compute_acos_tolerance()` | 预计算 effective_acos_tolerance / target_cpa，注入策略上下文 |
+| 精准升降级 | `campaign.py:1153` `_apply_exact_transition_rules()` → `campaign_exact_transition.py:172` `evaluate_exact_transition()` | 32号规则引擎：EXACT 单关键词活动的迁组/诊断，LLM 合并后护栏前执行 |
+| 组合目标收拢 | `campaign.py:2101` `_reconcile_portfolio_targets()` | 落库前唯一可信挪组 target：广泛→auto_broad，精准仅 EXACT_TRANSITION 结果可写 |
+| Ontology Card | `kb_loader.py:232` `build_ontology_card()` | 从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt |
 
 ## 总数据流
 
 ```mermaid
 flowchart TD
   A["POST /campaign/viewmodel 或 /campaign/analyze"] --> B["准备 ASINData + CampaignStrategyContext"]
-  B --> C["CampaignFetcher.fetch_campaigns"]
+  B --> B2["fill_acos_constraints: 预计算 ACOS 容忍上限"]
+  B2 --> C["CampaignFetcher.fetch_campaigns"]
   C --> D["MCP context + campaign discovery"]
   D --> E["basic_info_v2 + product_report"]
   E --> F["CampaignData / CampaignUnit[]"]
   F --> G["预过滤: 否定词/多词活动/淘汰池"]
   G --> H["组合预分类"]
   H --> I["策略总览 overview gate"]
-  I --> J["三股并行: exact / broad / new_campaigns"]
-  J --> K["R1/R2 投票 + R3 tiebreaker"]
-  K --> L["action 归一化 + 护栏 + R3/R4 重判"]
-  L --> M["预算冲突裁决 + portfolio budget summary/reallocation"]
-  M --> N["淘汰复评 restart review"]
-  N --> O["CampaignAnalysisResult"]
-  O --> P["ERP write_dual/write_full"]
-  P --> Q["campaign_viewmodel"]
-  Q --> R["前端确认/拒绝/执行"]
+  I --> J["经营模式闸控: ad_permission → growth_analysis_enabled"]
+  J --> K["三股并行: exact / broad / new_campaigns"]
+  K --> L["R1/R2 投票 + R3 tiebreaker"]
+  L --> M["action 归一化"]
+  M --> N["精准确定性升降级 (32号): EXACT 单关键词迁组/诊断"]
+  N --> O["护栏 + R3/R4 重判"]
+  O --> P["预算冲突裁决 + portfolio budget summary/reallocation"]
+  P --> Q["组合目标收拢: broad→auto_broad 无条件 / exact 仅规则结果"]
+  Q --> R["淘汰复评 restart review"]
+  R --> S["CampaignAnalysisResult"]
+  S --> T["ERP write_dual/write_full"]
+  T --> U["campaign_viewmodel"]
+  U --> V["前端确认/拒绝/执行"]
 ```
 
 ## 输入对象
@@ -269,6 +282,43 @@ Campaign 引擎按 match type 分流：
 | exact | product report、placement、关键词自然排名、策略上下文 | bid、budget、placement、淘汰、保持 |
 | broad/phrase/auto | product report、search term、否定词机会、策略上下文 | bid、budget、negative keywords、淘汰、保持 |
 | new_campaigns | flow keywords、own keyword flow、排名、搜索量、标题相关性、竞品可选源 | 新建 exact/broad 活动 |
+
+## 经营模式注入点
+
+Campaign 引擎在运行时消费经营模式（`OperatingMode`），但不将其持久化到 Campaign 侧的调整结果中。经营模式通过三层机制约束分析行为，权威定义在 `runtime_contract.yaml` §mode_policies。
+
+### 第一层：广告权限闸控
+
+`campaign.py:414` 将经营模式转为 `AdPermission`（`operating_mode_to_permission()` 纯函数）：
+
+| 经营模式 | AdPermission | 效果 |
+|----------|-------------|------|
+| `IMMEDIATE_EXIT`（立即退出） | `STOP` | 不进入 Campaign LLM 分析，由 `advert_execution.py` 走确定性执行：BROAD/PHRASE/AUTO → stop_campaign，EXACT → move_to_low_bid_retention_group |
+| `CONTROLLED_CLEARANCE`（控制清货） | `CLEARANCE_ONLY` | `growth_analysis_enabled=False`：禁用新增活动分析和淘汰复评；仅允许下调类动作（降 bid/降预算/加否词/stop/PP 广告位） |
+| 其余 4 种模式 | `NORMAL` | 全部分析流正常启用 |
+
+`IMMEDIATE_EXIT` 的确定性执行在 `advert_execution.py:660-663` 触发，跳过常规 Campaign LLM 全流程。其余模式走正常 Campaign 分析管道，但 `CLEARANCE_ONLY` 在 `campaign.py:418-421` 通过 `growth_analysis_enabled` 关闭新增活动和复评。
+
+### 第二层：ACOS 容忍系数
+
+`acos_constraints.py:35-42` 定义了 `_MODE_COEFFICIENT`，经营模式作为乘数作用于 15号§4.2 的阶段 ACOS 加值：
+
+| 经营模式 | 系数 | 含义 |
+|----------|------|------|
+| 立即退出 / 控制清货 / 获取利润 / 限时修复 | 0.0 | 阶段正加值归零，ACOS 容忍不因产品阶段放大 |
+| 稳定经营 / 积极推进 | 1.0 | 阶段加值全额生效 |
+
+`控制清货` 有特殊逻辑（`acos_constraints.py:97-98`）：当 `product_stage == "清货期"` 时系数取 1.0（与清货方向一致），其余阶段取 0.0。
+
+### 第三层：知识库注入
+
+`runtime_contract.yaml` 的 `mode_policies` 在 `kb_loader.build_ontology_card()` 中随 Ontology Card 注入 LLM prompt，让 LLM 感知当前模式的允许/禁止动作边界。但代码层的闸控（第一、二层）是硬约束，不依赖 LLM 遵守。
+
+### 关键边界
+
+- 经营模式不参与 `_reconcile_portfolio_targets()` 的迁组授权（`campaign.py:2110` 注释：「经营模式只能影响前序分析与护栏，不参与此处迁组授权」）。
+- `fill_acos_constraints()` 在 LLM 分析前预计算 `effective_acos_tolerance`，存入 `CampaignStrategyContext`，后续精准升降级和护栏均消费此值。
+- 未知经营模式按 `mode_fallback.unknown_value` 处理：强制人工复核（`force_manual_review`），禁止静默降级为 NORMAL。
 
 ## 策略总览 overview gate
 
@@ -570,6 +620,50 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 通过护栏（corrections=0）：进入终态组合分类(§7b)、sanity check、synthesis、预算回算、ERP 落库
 - 被护栏修正（corrections>0）：修正项进入 `warnings_list`（运营可见），同时 `retry_instruction` 注入 R3/R4。R4 后仍违规则以护栏强制修正版为准落库，不再重试
 
+## 精准组合确定性升降级
+
+`campaign_exact_transition.py` 是基于 32号（精准组合升降级规则）的纯函数引擎，无 I/O、无副作用。在 pipeline 中位于 step 6d：LLM 结果合并后、护栏执行前（`campaign.py:756`），由 `exact_transition_enabled` 闸控（`settings.py:177`，默认 True）。
+
+### 适用范围
+
+仅处理同时满足以下条件的活动：
+- `match_type == "EXACT"`
+- `keyword_id` 非空（单关键词活动）
+- 当前归组为 `exact_core_group` 或 `exact_testing_group`
+
+不满足条件的活动（非 EXACT、多关键词、已淘汰、广泛组）直接跳过，由 LLM 和护栏处理。
+
+### 判定逻辑
+
+`evaluate_exact_transition()` 纯函数（`campaign_exact_transition.py:172`），按当前归组分流：
+
+**精准测试组 → 优先查升级，再查淘汰：**
+- `promote_to_core`：T-3/T-4/T-5 各日花费 > $5，3 日合计 ACOS < target_acos，且自然排名改善（最新 7 日 < 前 7 日）→ AUTO 升级到 exact_core_group
+- `eliminate_to_low_bid`：观察窗口满足（demoted ≥ 7 天或 native ≥ 14 天），7 日零订单，且点击 ≥ 10 或花费 ≥ $15 → AUTO 淘汰到 low_bid_retention_group（核心词除外）
+
+**精准核心组 → 查衰退：**
+- `stay_with_adjustment`（mild）：3 日 ACOS 在 (target_acos, effective_acos_tolerance] 区间且 7 日有出单 → AUTO，保持核心组
+- `demote_to_testing`（moderate）：连续两个 3 日周期 ACOS 均 > effective_acos_tolerance，且（7 日零单+点击≥10 或 订单下降 > 20%）→ MANUAL_REVIEW，降级到 exact_testing_group
+
+### 前置数据依赖
+
+`_apply_exact_transition_rules()` 在执行前需要：
+1. `fill_acos_constraints()` 已计算 `effective_acos_tolerance`（存入 `strat_ctx`）
+2. `repo.list_campaign_metric_daily()` 拉取近 21 天日维度指标（spend/sales/orders/clicks/natural_rank）
+3. `repo.get_exact_lifecycle()` 读取生命周期（testing_origin / demoted_at / campaign_created_at）
+4. `core_keyword_set` 用于核心词保护判定
+
+### 输出覆写
+
+触发 transition 时直接覆写 `CampaignAdjustmentItem` 的以下字段：
+- `action` ← transition_type 映射（promote_to_core → `promote_to_exact_core` 等）
+- `target_campaign_group_type` ← 目标组 ERP code
+- `proposed_budget` / `proposed_bid` / `placement_adjustments` ← 确定性值
+- `triggered_rule` ← `"EXACT_TRANSITION:{transition_type}"`（供 `_reconcile_portfolio_targets` 识别）
+- `review_level` ← AUTO / MANUAL_REVIEW
+
+升降级结果在后续护栏阶段仍受 P0-P11 保护（如核心词禁淘汰在 32号内部和护栏 P0 双重防护）。
+
 ## 组合分类和预算
 
 Campaign 引擎维护四类组合语义：
@@ -588,6 +682,25 @@ Campaign 引擎维护四类组合语义：
 - `campaign_parent_allowed_net_increase`：父级允许净增，当前默认 0，意味着预算增长要非常谨慎。
 
 低价捡漏组不参与主推/测试/广泛三组预算约束，通常按每活动 1 美元思路处理。
+
+### 组合目标收拢（`_reconcile_portfolio_targets`）
+
+`campaign.py:2101` 的 `_reconcile_portfolio_targets()` 是落库前唯一可信的挪组 target 生成点，在护栏后、ERP 落库前执行（step 7b）。其原则是「挪组授权不依赖 LLM」：
+
+**广泛/词组/自动 → 无条件收拢到自动广泛组：**
+- 不依赖 LLM 输出：只要当前真实组合确认不属于 `auto_broad_group`，就写入 `target_campaign_group_type`
+- 未被 LLM 返回的广泛活动（含多关键词预过滤活动）补一条纯挪组项：只改 portfolio，不改 bid/budget
+- 权威路由：`runtime_contract.yaml` ROUTE-001：`match_type in [BROAD, PHRASE, AUTO] → auto_broad_group`
+
+**精准 EXACT → 仅确定性规则结果可授权挪组：**
+- 只有 `triggered_rule` 以 `"EXACT_TRANSITION:"` 开头的项才写 `target_campaign_group_type`
+- 旧的 $5 预算分界（`campaign_portfolio.py:classify()`）仅作展示标签（`ai_portfolio_class`），不授权实际的 portfolio 迁移
+- 权威路由：ROUTE-003/004 由 exact_main_validation 决定 core/testing 归属
+
+**关键边界：**
+- 经营模式不参与此处迁组授权（代码注释：「经营模式只能影响前序分析与护栏」）
+- `target_campaign_group_type` 为空字符串时执行侧不发起挪组 MCP 调用
+- `match_unique_portfolio()` 要求子串匹配唯一命中；多命中或零命中均不写 target
 
 ## 新建活动线
 
@@ -770,6 +883,9 @@ Campaign 分析本身不直接动真实广告。
 - 不要把新建活动线当成 exact/broad 流的副产物；它是第三条并行管道。
 - 不要把 `adjustments` 为空当成无结果，还要检查 `new_campaigns`、`budget_summary`、`skipped_campaigns` 和 `data_unavailable`。
 - 不要让前端直接拼 pending 逻辑；应优先通过 viewmodel。
+- 不要以为选了经营模式就自动生效。`IMMEDIATE_EXIT` 走确定性执行跳过 LLM，`CONTROLLED_CLEARANCE` 通过 `growth_analysis_enabled` 关闭增长流，其余模式通过 ACOS 容忍系数和 Ontology Card 间接约束——各模式的生效路径不同。
+- 不要把 `campaign_portfolio.classify()` 的旧 $5 分界当成挪组授权。精准活动的实际挪组仅由 32号确定性规则结果驱动；旧分界只产生 `ai_portfolio_class` 展示标签。
+- 不要把精准升降级当成护栏的子集。升降级在护栏前执行（step 6d），产出被护栏的 P0-P11 二次校验；两者是串行关系，不是替代关系。
 
 ## 更新检查清单
 
@@ -780,3 +896,6 @@ Campaign 分析本身不直接动真实广告。
 - 修改 `campaign_restart.py` 或 pool entry 逻辑后，同步更新淘汰复评。
 - 修改 ERP repository/mappers 后，同步更新落库段和数据库文档。
 - 修改 `campaign_viewmodel.py` 或前端 panel 后，同步更新 ViewModel 和前端文档。
+- 修改 `acos_constraints.py` 或 `campaign_exact_transition.py` 后，同步更新精准升降级段和 ACOS 约束段。
+- 修改 `runtime_contract.yaml` 的 mode_policies / portfolio_routing / hard_rules 后，同步更新经营模式注入点和 Ontology Card 段。
+- 新增经营模式或修改 `OperatingMode` 枚举后，同步更新本文经营模式注入点、`09-知识库切片加载说明` 的 Ontology Card 节和 `00-项目知识图谱总览` 的命名约定。

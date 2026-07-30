@@ -30,6 +30,7 @@ from .text_utils import (
     map_purpose_target,
     map_season_type,
     map_target_keyword_type,
+    normalize_site_code,
     split_reason_sections,
     to_enum_list,
 )
@@ -125,6 +126,113 @@ class ErpDualWriterRepository:
 
     def _connect(self):
         return pymysql.connect(**self._conn_kwargs)
+
+    def upsert_agent_config(
+        self,
+        *,
+        identity: dict[str, Any],
+        patch: dict[str, Any],
+    ) -> None:
+        """按唯一商品身份增量写入未来批跑配置表。
+
+        此表不是分析事件快照；一次保存仅更新本次触及的业务列，防止
+        后续任一保存清空先前保存的战略、策略或人工覆盖值。
+        """
+        allowed = {
+            "product_position",
+            "operating_mode",
+            "season_type",
+            "advert_purposes",
+            "target_keyword_types",
+            "target_acos_suggest",
+            "daily_budget_suggest",
+            "advert_direction_types",
+        }
+        invalid = set(patch) - allowed
+        if invalid:
+            raise ValueError(f"unsupported agent config fields: {sorted(invalid)}")
+        if not patch:
+            raise ValueError("agent config patch is empty")
+
+        parent_asin = str(identity.get("parent_asin") or "").strip()
+        parent_seller_sku = str(identity.get("parent_seller_sku") or "").strip()
+        try:
+            shop_id = int(identity.get("shop_id"))
+        except (TypeError, ValueError):
+            shop_id = 0
+        if not parent_asin or not parent_seller_sku or shop_id <= 0:
+            raise ValueError("agent config identity is incomplete")
+
+        mappers = {
+            "product_position": map_product_position,
+            "operating_mode": map_operating_mode,
+            "season_type": map_season_type,
+            "advert_purposes": lambda value: to_enum_list(value, map_purpose_target),
+            "target_keyword_types": lambda value: to_enum_list(
+                value, map_target_keyword_type
+            ),
+            "target_acos_suggest": lambda value: value,
+            "daily_budget_suggest": lambda value: value,
+            "advert_direction_types": map_direction_types_json,
+        }
+        mapped_patch = {key: mappers[key](value) for key, value in patch.items()}
+
+        audit_user_id = _audit_int(identity.get("user_id"))
+        now = datetime.now()
+        base_columns = [
+            "shop_id",
+            "shop_account",
+            "parent_asin",
+            "parent_seller_sku",
+            "site_code",
+            "day_range",
+        ]
+        audit_columns = [
+            "create_by",
+            "editor_by",
+            "creator_id",
+            "editor_id",
+            "create_time",
+            "update_time",
+        ]
+        columns = [*base_columns, *mapped_patch, *audit_columns]
+        updates = [
+            *(f"{column}=VALUES({column})" for column in mapped_patch),
+            "editor_by=VALUES(editor_by)",
+            "editor_id=VALUES(editor_id)",
+            "update_time=VALUES(update_time)",
+        ]
+        values = (
+            shop_id,
+            identity.get("shop_account"),
+            parent_asin,
+            parent_seller_sku,
+            normalize_site_code(identity.get("site_code")),
+            identity.get("day_range") or "DAY_7",
+            *mapped_patch.values(),
+            audit_user_id,
+            audit_user_id,
+            audit_user_id,
+            audit_user_id,
+            now,
+            now,
+        )
+        sql = f"""
+        INSERT INTO t_advet_agent_config ({", ".join(columns)})
+        VALUES ({", ".join(["%s"] * len(columns))})
+        ON DUPLICATE KEY UPDATE {", ".join(updates)}
+        """
+
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, values)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     @contextmanager
     def immediate_exit_lock(

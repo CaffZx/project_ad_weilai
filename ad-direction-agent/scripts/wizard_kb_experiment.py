@@ -18,7 +18,7 @@ for _p in (_PROJ, _PURPOSE):
 
 STRATEGY_PRESET = {
     "product_level": "重点产品 (P1)",
-    "product_stage": "推进期",
+    "product_stage": None,
     "season_stage": "旺季准备",
 }
 
@@ -92,7 +92,7 @@ async def run_one(orch: WorkflowOrchestrator, asin: str, days: int) -> dict:
         StrategyConfirmRequest(
             asin=asin,
             product_level=ProductLevel(STRATEGY_PRESET["product_level"]),
-            product_stage=ProductStage(STRATEGY_PRESET["product_stage"]),
+            product_stage=None,  # [产品阶段] 已由经营模式替代
             season_stage=SeasonStage(STRATEGY_PRESET["season_stage"]),
         ),
         days=days,

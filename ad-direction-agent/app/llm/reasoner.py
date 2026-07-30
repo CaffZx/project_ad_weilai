@@ -1059,7 +1059,8 @@ class LLMReasoner:
         if strategy:
             parts.append("## 战略层（人工选择）")
             parts.append(f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}")
-            parts.append(f"  - 产品阶段: {strategy.get('product_stage', '?')}")
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # parts.append(f"  - 产品阶段: {strategy.get('product_stage', '?')}")
             parts.append(f"  - 淡旺季: {strategy.get('season_stage', '?')}")
             parts.append(f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}")
             parts.append("")
@@ -1259,7 +1260,8 @@ class LLMReasoner:
         context_parts = [
             "## 战略层",
             f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
-            f"  - 产品阶段: {strategy.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
             f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}",
             "",
@@ -1384,7 +1386,8 @@ class LLMReasoner:
         parts = [
             "## 战略层",
             f"  - 产品定位: {product_level_with_code(strategy.get('product_level', '')) or '?'}",
-            f"  - 产品阶段: {strategy.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy.get('product_stage', '?')}",
             f"  - 淡旺季: {strategy.get('season_stage', '?')}",
             f"  - 经营模式: {strategy.get('operating_mode') or '未设置'}",
             "",
@@ -1671,7 +1674,8 @@ class LLMReasoner:
         # 构建策略上下文字符串
         ctx_parts = [
             "## 策略上下文 (ASIN 级，全批次共享)",
-            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 经营模式: {strategy_context.get('operating_mode') or '未设置'}",
@@ -1915,7 +1919,8 @@ class LLMReasoner:
         # 策略上下文段（精简，仅 LLM 判选词/类别所需）
         ctx_parts = [
             "## 策略上下文 (ASIN 级，全批共享)",
-            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 经营模式: {strategy_context.get('operating_mode') or '未设置'}",
@@ -2043,7 +2048,8 @@ class LLMReasoner:
 
         ctx_lines = [
             "## 策略上下文",
-            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 产品定位: {product_level_with_code(strategy_context.get('product_level', '')) or '?'}",
             f"  - 淡旺季: {strategy_context.get('season_stage', '?')}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
@@ -2187,7 +2193,8 @@ class LLMReasoner:
             })
 
         ctx_lines = [
-            f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
+            # [产品阶段] 已由经营模式替代，不再注入 LLM prompt
+            # f"  - 产品阶段: {strategy_context.get('product_stage', '?')}",
             f"  - 广告目的: {strategy_context.get('ad_purposes', [])}",
             f"  - 目标 ACOS: {strategy_context.get('target_acos', '?')}%",
         ]
