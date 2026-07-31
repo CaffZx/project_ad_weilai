@@ -52,14 +52,20 @@ def load_batch_layer14(asin: str, parent_seller_sku: str | None, shop_id: int | 
             conn = _get_repository()._connect()
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT product_position, operating_mode, season_type FROM t_advet_agent_config "
+                    "SELECT product_position, operating_mode, season_type, advert_direction_types "
+                    "FROM t_advet_agent_config "
                     "WHERE parent_asin=%s AND parent_seller_sku=%s AND shop_id=%s LIMIT 1",
                     (asin, sku, sid),
                 )
                 row = cur.fetchone()
             if row:
                 legacy["long_term"].update(agent_config_row_to_layer14(row))
-                legacy["config_source"] = "agent_config_strategy"
+                ad_from_agent = normalize_advert_direction_types_list(row.get("advert_direction_types"))
+                if ad_from_agent:
+                    legacy["ad_directions"] = ad_from_agent
+                    legacy["config_source"] = "agent_config"
+                else:
+                    legacy["config_source"] = "agent_config_strategy"
                 return legacy
         except Exception as e:  # noqa: BLE001
             logger.warning("agent_config 批跑读取失败 [%s]: %s", asin, e)
