@@ -100,7 +100,7 @@ def _window_acos(rows: list[dict]) -> float | None:
     """计算窗口 ACOS = sum(spend) / sum(sales), 任一为空或 sales<=0 返回 None。"""
     total_spend = 0.0
     total_sales = 0.0
-    for r in metric_daily:
+    for r in rows:
         spend = r.get("spend")
         sales = r.get("sales")
         if spend is None or sales is None:
@@ -112,8 +112,11 @@ def _window_acos(rows: list[dict]) -> float | None:
     return total_spend / total_sales * 100  # 百分比
 
 
-def _count_complete_days(rows: list[dict], today: datetime) -> int:
-    """统计 stat_date < today 且 spend/sales/orders/clicks 均非 NULL 的天数 (按日去重)。"""
+def _count_complete_days(metric_daily: list[dict], today: datetime) -> int:
+    """统计 stat_date < today 且 spend/sales/orders/clicks 均非 NULL 的天数 (按日去重)。
+
+    恒接收全量日序列 metric_daily（唯一调用点 evaluate_exact_transition 传全量）。
+    """
     seen_dates: set[datetime] = set()
     count = 0
     for r in metric_daily:
@@ -158,7 +161,7 @@ def _get_rows_in_window(
 def _avg_natural_rank(rows: list[dict]) -> float | None:
     """计算窗口内 natural_rank 的平均值。全部为 None 则返回 None。"""
     vals = []
-    for r in metric_daily:
+    for r in rows:
         rank = r.get("natural_rank")
         if rank is not None:
             vals.append(float(rank))

@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     # client 层 llm_global_concurrency（见 LLM 配置段）。保留仅兼容旧 .env，无实际作用。
     campaign_global_llm_concurrency: int = 24
     campaign_llm_temperature: float = 0.3
-    campaign_batch_size: int = 6
+    campaign_batch_size: int = 10
     # 纵深防御: 任务级总超时 (默认 900s=15min,防 Semaphore 饥饿永久挂死)
     campaign_total_timeout: int = 900
     # 信号量获取超时 (等 Semaphore 槽位的最长时间,防饿死在 sem 门前)

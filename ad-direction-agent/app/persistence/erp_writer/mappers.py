@@ -595,7 +595,7 @@ def canonicalize_payload(
 
     # ── 预过滤活动 + LLM 丢失活动 → 灰卡（复用预过滤卡面，不可执行，无 pending）──
     #   预过滤(__prefiltered): inactive/no_data/multi_keyword 硬过滤；
-    #   丢失(无 __prefiltered): 两轮+R3 均未返回 / 整批失败的活动（_collect_skipped）。
+    #   丢失(无 __prefiltered): R1+补答循环(R2/R3/R4)均未返回 / 整批失败的活动（_collect_skipped）。
     #   二者都落库留痕、复用同一灰卡面，靠 reason「未分析：」前缀 + card_id `lost:` 命名空间区分，
     #   杜绝丢失项静默蒸发（先落库再渲染，定时/手动同一渲染路）。
     for sk in payload.get("skipped_campaigns") or []:

@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-30（版本日志见文末，最新 v3.22：精准组合确定性升降级 + ACOS约束模块 + KB v2.0 重构收尾）
-> **版本**: v3.22
+> **最后更新**: 2026-07-31（版本日志见文末，最新 v3.23：分析运行闸门 + 配置镜像 + Codex 批跑接入）
+> **版本**: v3.23
 > **分支**: chenv3.2
 
 ---
@@ -125,9 +125,11 @@ parent_asin
 | `app/config/settings.py` | 283 | Campaign 相关配置项 (含 portfolio shares/fallback_multiplier/portfolio_fetch 开关 + `meta_filter_dashboard_light`) |
 | `demo/ad-asisitant-agent.html` | 3853 | ★主前端（合并到主看板第5 tab，含侧栏折叠/Toast/降级兜底/手动输入保护/经营模式 radio 组） |
 | `demo/access-guard.js` | — | ★前端入口守卫（v3.22 新增）：页面加载前校验 product identity 三元组 |
+| `app/workflow/analysis_run_guard.py` | — | ★分析运行闸门（v3.23 新增）：防重复分析、session 取消态管理、运行前幂等校验 |
 | `app/data/mcp_adapter.py` | 536 | MCP 适配器：`campaign_call_tool` 透传 `qryFixedPortfolio`；`_resolve_context` 缓存 `product_name` 供扩词锚点；meta_filter 透传 |
 | `app/data/mcp_mapping.py` | 258 | MCP 工具注册 + 入参构造：`ad_portfolio_list` 接入 (2026-07-09)；`bootstrap_tools_for_meta()` 按 meta_filter 按需跳过 campaign keyword bootstrap |
 | `app/data/mcp_registry.py` | — | ★MCP 工具注册集中化（v3.21 新增）：单一真源管理 MCP 工具定义，`mcp_adapter` 适配 |
+| `app/api/config_mirror.py` | — | ★配置保存镜像（v3.23 新增）：Agent 配置双向同步 API，保证运营配置与 state DB/ERP 一致性 |
 | `app/workflow/steps/campaign_portfolio.py` | — | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
 | `app/workflow/steps/campaign_budget_summary.py` | — | ★预算汇总：3 组约束分配 (主力/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
 | `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN。**v3.21 减负**：多源发现委托 `new_keyword_fetcher.py` |
@@ -335,6 +337,10 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-28 | **★ ERP 执行状态管理+测试大面积扩展** | `advert_execution.py`（+439）：immediate_exit 确定性执行链路。`repository.py`（+368）：灰度卡读写+池表同步+组合执行记录。`advert_exec_mapper.py`（+99）：ERP 硬护栏增强。`decision.py`（+929）：决策流程重构。`campaign_fetcher.py`（+38）：补三日验证数据。测试大面积扩展：`test_portfolio_match_and_exec.py`（+1128）、`test_product_identity_required.py`（+908）、`test_erp_gray_cards.py`（+359）、`test_mcp_campaign_discover.py`（+338）、`test_advert_exec_child_asin.py`（+177）。前端 `ad-asisitant-agent.html`（+75）。新增实施方案文档 `2026-07-28-immediate-exit-deterministic-execution.md`。17 files +6161/-114。 |
 | 07-28 | **kb_loader 预设精简 + access-guard.js** | `kb_loader.py`：切片预设精简（-28 行冗余）。新增 `demo/access-guard.js`：前端入口守卫，页面加载前校验 product identity 三元组。`settings.py`（+2）、`campaign.py` 微调。5 files +44/-28。 |
 | 07-29 | **★ 精准组合确定性升降级** | `acos_constraints.py`（新）：ACOS 约束核心模块。`campaign_exact_transition.py`（新）：精准组合升降级逻辑（EXACT 活动四组升降级判定）。`campaign_fetcher.py`（+201）：增强数据编排。`campaign.py`（+330）：策略上下文扩展 + 升降级调度。`repository.py`（+246）：ERP 读写增强。`text_utils.py`（+58/-20）：映射表扩展。`campaign_portfolio.py`（+102）：组合路由增强。`advert_execution.py`（+52）、`portfolio_execution.py`（+24）：执行链路同步。`layers.py`（+62）、`campaign.py` models（+11）：模型扩展。测试：5 个文件 +420。新增 `docs/精准组合确定性升降级实施方案.md`。27 files +2616/-235。 |
+| 07-30 | **★ 分析事件取消 + 运行闸门** | `analysis_run_guard.py`（新）：分析运行闸门模块，防重复分析+session 取消态管理+运行前幂等校验。`mysql_state_manager.py`（+128）：session 取消/运行状态持久化。`state_manager.py`（+105）：运行闸门接口。`schema.sql`（+11）：analysis_session 加 cancelled 列。`decision.py`（+59）：取消事件 API + new-event 闸门校验。`campaign.py` API（+87）：运行前闸门接入。`campaign_new.py`（+22）：新增活动线闸门适配。`ad-asisitant-agent.html`（+74）：前端放弃确认闭环。新增测试 `test_campaign_cancellation_fencing.py`（144行）+ `docs/sql/2026-07-30-analysis-session-cancellation.sql` + `docs/superpowers/plans/2026-07-30-analysis-event-cancellation-run-fencing.md`。17+3 files +1280/-99。 |
+| 07-30 | **配置镜像 API + Codex 批跑** | `config_mirror.py`（新）：Agent 配置保存镜像 API，双向同步运营配置到 state DB + ERP。`decision_config_reader.py`（+44）：批量读取增强。`batch_via_api_codex.py`（新，308行）：Codex 复核批量调度入口，替代旧 batch_via_api.py 集成 deepseek-v4-pro review hook。新增测试 `test_config_mirror.py` + `test_agent_config_mirror.py` + `test_agent_config_batch_reader.py`。6 files +370/-14。 |
+| 07-30 | **交接文档 v3.22 全面重构** | 历史迭代日志 §7-§27（~800行）压缩为 §7 摘要（40行）+ 新增 §8-§13 当前架构说明（经营模式/精准升降级/护栏/复评/执行层/核心词）。修正过时阈值（LOW_BID_MAX 0.21→0.20）、护栏规则数（11→12）、KB 预设表（6→13项完整预设）、_SYNTHESIS_ENABLED→settings。详见 commit `d0958c4`。 |
+| 07-30 | **分析闸门加固 + session 修复** | `mysql_state_manager.py`/`state_manager.py`/`schema.sql`：取消态补全。`campaign.py`/`decision.py` API：取消逻辑修复。`campaign_new.py`：闸门适配。`ad-asisitant-agent.html`：前端适配。新增 `test_campaign_cancellation_fencing.py` + `batch_via_api_codex.py`。13 files +681/-73。 |
 
 ---
 
@@ -599,25 +605,73 @@ EXACT 活动在四组间的确定性升降级逻辑：
 
 ---
 
-## 12. 执行层
+## 12. 分析运行闸门 + 配置镜像
 
-### 12.1 广告调整执行 (`advert_execution.py`)
+### 12.1 分析运行闸门 (`app/workflow/analysis_run_guard.py`)
+
+> v3.23 新增。解决重复分析触发、session 取消态不一致、前端放弃分析后后端仍运行等问题。
+
+**核心职责**：
+- **防重复运行**：同 ASIN 已有进行中分析时拒绝新的分析请求（幂等校验）
+- **取消态管理**：session 新增 `cancelled` 列，前端放弃分析时写 `cancelled=1`，后端各阶段检查取消标记
+- **运行前校验**：`campaign.py` 入口加闸门调用，analysis_start 前检查是否已有 running session 或已取消
+
+**关键文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `app/workflow/analysis_run_guard.py`（新） | 运行闸门核心逻辑 |
+| `app/persistence/mysql_state_manager.py` | +128：取消/运行状态持久化 |
+| `app/persistence/state_manager.py` | +105：闸门接口抽象层 |
+| `app/persistence/schema.sql` | +11：`analysis_session` 加 `cancelled` 列 |
+| `app/api/decision.py` | +59：`POST /decision/cancel-event` 增强 + new-event 闸门校验 |
+| `app/api/campaign.py` | +87：运行前闸门校验 |
+| `app/workflow/steps/campaign.py` | +46：编排层闸门接入点 |
+| `app/workflow/steps/campaign_new.py` | +22：新增活动线闸门适配 |
+| `demo/ad-asisitant-agent.html` | +74：前端放弃确认弹窗闭环 |
+| `tests/api/test_campaign_cancellation_fencing.py`（新） | 144 行：取消闸门全链路测试 |
+
+### 12.2 配置保存镜像 (`app/api/config_mirror.py`)
+
+> v3.23 新增。保证前端运营配置（战略/策略/P3/方向）保存后同步写入 state DB 和 ERP 库，消除"保存成功但下次加载丢失"的一致性问题。
+
+**设计**：每次配置保存操作同时写两份——state DB（实时读取路径）+ ERP `t_advert_agent_decision_config`（批次快照路径）。双写任一失败回滚 + 告警。
+
+**关键文件**：
+
+| 文件 | 变更 |
+|------|------|
+| `app/api/config_mirror.py`（新） | 配置镜像 API |
+| `app/data/decision_config_reader.py` | +44：批量读取增强 |
+| `tests/api/test_config_mirror.py`（新） | 镜像 API 测试 |
+| `tests/persistence/test_agent_config_mirror.py`（新） | 镜像持久化测试 |
+| `tests/data/test_agent_config_batch_reader.py`（新） | 批量读测试 |
+
+### 12.3 Codex 批跑 (`batch_via_api_codex.py`)
+
+> v3.23 新增。Codex 复核批量调度入口（308 行），集成 deepseek-v4-pro review hook，替代旧 `batch_via_api.py` 基础调度。
+
+---
+
+## 13. 执行层
+
+### 13.1 广告调整执行 (`advert_execution.py`)
 
 confirm(CONFIRMED) → 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_record` 表。`advert_exec_mapper.py` 为唯一映射点。默认 `advert_mcp_enabled=false` + `advert_exec_dry_run=true` 安全闸。
 
 **v3.22 immediate_exit 确定性执行**：经营模式为 `IMMEDIATE_EXIT` 时，BROAD/PHRASE/AUTO 暂停 + EXACT 迁入低价捡漏组，不走 LLM 分析、直接生成确定性 ActionBundle。
 
-### 12.2 灰度卡
+### 13.2 灰度卡
 
 ERP 执行过程中对部分失败的活动打灰度标记（gray card），分类展示：
 - `move_errors`：挪组失败（portfolioId 匹配失败）
 - 部分执行失败：不影响已成功的活动
 
-### 12.3 组合预算执行 (`portfolio_execution.py`)
+### 13.3 组合预算执行 (`portfolio_execution.py`)
 
 `/campaign/execute-portfolio-budget` → 实时查 portfolioId → MCP 更新组合预算。
 
-### 12.4 经营模式 × 执行闭环状态（待办，2026-07-30）
+### 13.4 经营模式 × 执行闭环状态（待办，2026-07-30）
 
 当前三个链路的执行闭环完整度不一致。核心问题：正常/清货优先链路把"提交成功"误写为"已生效"。
 
@@ -681,11 +735,11 @@ pending 三表共享字段：
 
 ---
 
-## 13. 核心词管理系统
+## 14. 核心词管理系统
 
 > v3.18 实现，v3.19 扩展。
 
-### 13.1 数据流
+### 14.1 数据流
 
 ```
 MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
@@ -694,7 +748,7 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
   → campaign 主流程读回填 is_core
 ```
 
-### 13.2 关键文件
+### 14.2 关键文件
 
 | 文件 | 角色 |
 |------|------|
@@ -703,7 +757,7 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 | `app/api/core_keyword.py` (62行) | API: `/analyze` `/status` `/enable` `/disable` `/groups` |
 | `app/core/core_keyword_policy.py` (25行) | 策略引擎：按 campaign 分组聚合 |
 
-### 13.3 离线批跑
+### 14.3 离线批跑
 
 `batch_core_keyword.py` + `batch_core_keyword.sh`：离线 7 天一批，crontab 定时跑。
 
@@ -712,6 +766,10 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.23: 分析运行闸门 + 配置镜像 + Codex 批跑（2026-07-30~31，本地未部署服务器）—— ①`analysis_run_guard.py` 分析运行闸门(新)：防重复分析+session 取消态+前端放弃确认闭环 ②`config_mirror.py` 配置保存镜像(新)：运营配置双写 state DB+ERP ③`batch_via_api_codex.py` Codex 批跑入口(新,308行) ④`decision_config_reader.py` 批量读增强(+44) ⑤`mysql_state_manager`/`state_manager`/`schema.sql` session 取消态全链路 ⑥前端放弃确认弹窗闭环 ⑦测试 4 个新文件。17+6+13+4 files +1701/-173。*
+
+最后更新：2026-07-31
 
 *v3.22: 精准组合升降级 + ACOS约束 + KB v2.0 重构收尾（2026-07-28~30，本地未部署服务器）—— ①`acos_constraints.py` ACOS约束核心模块(新) ②`campaign_exact_transition.py` 精准组合四组升降级逻辑(新) ③KB v2.0 重构：新增 00-总纲+30-动作词表+runtime_contract.yaml+evidence.yaml；精简过时 KB30/31/32 旧版(否词/样本窗口/自动广告)；全部 KB 切片+7 个 ontology YAML 大范围更新 ④ERP 执行状态管理：immediate_exit 确定性执行+灰度卡+组合匹配执行 ⑤`access-guard.js` 前端入口守卫(新) ⑥测试大面积扩展：test_portfolio_match_and_exec(+1328)+test_product_identity_required(+908)+test_erp_gray_cards(+359)+test_mcp_campaign_discover(+380) ⑦kb_loader 预设精简。27+17+31+5 files +8781/-1349。*
 

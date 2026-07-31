@@ -1,4 +1,4 @@
-"""Campaign LLM 分析引擎 — 分批 + 两轮投票 + 可选 Round3 + sanity_check。
+"""Campaign LLM 分析引擎 — 分批 + R1 单轮 + 护栏 R2/R3/R4 重试 + sanity_check。
 
 复用资产:
 - CampaignFetcher.fetch_campaigns() → CampaignData
@@ -273,7 +273,7 @@ async def analyze_campaigns(
     elimination_entry_dates: dict | None = None,  # deprecated: 现由内部 sync 后从 state 库读取，外部传 None 即可
     cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> CampaignAnalysisResult:
-    """完整 LLM 分析：拉数据 → 分批 → R1+R2 → 投票 → (R3) → sanity_check。
+    """完整 LLM 分析：拉数据 → 分批 → R1 单轮 → 护栏 R2/R3/R4 重试 → sanity_check。
 
     实验脚本直接调用此函数，无需 WorkflowContext。
     campaign_data 可预取后复用；keyword_analysis 用于逐词 keyword_class 富化。
@@ -606,6 +606,7 @@ async def _analyze_campaigns_impl(
     broad_sem = asyncio.Semaphore(cc)
     new_sem = asyncio.Semaphore(cc)     # 新增活动线独立限流（与 exact/broad 对等）
     rounds_detail: dict[str, dict] = {}
+    llm_rounds_completed = 1  # R1 必定执行；护栏重试轮次在循环内 max() 更新
 
     # 4.5 策略总览(执行总纲)：改为 gate task，与三流的 prefetch【重叠】跑（prefetch 不读 ctx_dict）。
     #     各流在 LLM 轮(_run_round)前 await gate → posture_brief 已注入，保证今日总纲一致。
@@ -779,9 +780,17 @@ async def _analyze_campaigns_impl(
             campaign_data, core_keyword_set,
         )
 
-    # 7. 护栏 + R3/R4 重试编排
-    #    任意护栏修正都会按 campaign_key 带真实告警回灌给 LLM；R4 后不再 R5，由最终护栏兜底。
-    retry_rounds = ((3, "R3"), (4, "R4"))
+    # 7. 护栏 + R2/R3/R4 重试编排
+    #    护栏失败项与 R1 缺失补答项统一进重试循环；告警跨轮累积（retry_instruction 逐条去重）。
+    #    送进去没吐出来的 key 一律带入下一轮，R4 后由最终护栏兜底。
+    retry_rounds = ((2, "R2"), (3, "R3"), (4, "R4"))
+    guardrail_alert_history: dict[str, list[str]] = {}
+    guardrail_rounds: dict[str, dict] = {}
+    unresolved_keys: set[str] = {
+        s.get("campaign_key", "")
+        for s in (exact_skipped + broad_skipped)
+        if s.get("campaign_key")
+    }
     for round_number, round_label in retry_rounds:
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
             adjustments,
@@ -792,9 +801,35 @@ async def _analyze_campaigns_impl(
         )
         warnings_list.extend(budget_warnings)
 
+        # 告警累积（逐条 retry_instruction 去重，跨轮保留）
+        for r in guardrail_pass.results:
+            if not r.corrected:
+                continue
+            key = getattr(r, "campaign_key", "") or ""
+            instruction = (getattr(r, "retry_instruction", "") or "").strip()
+            if not key or not instruction:
+                continue
+            entries = guardrail_alert_history.setdefault(key, [])
+            if instruction not in entries:
+                entries.append(instruction)
+        cumulative_alerts = {k: "\n".join(v) for k, v in guardrail_alert_history.items()}
+
+        # 护栏失败项（仅 retry_instruction 非空，与既有行为一致）
         alerts = _build_guardrail_alerts(guardrail_pass)
-        failed_keys = set(alerts)
-        if not failed_keys:
+        guardrail_failed = set(alerts)
+
+        # 合并入口：护栏失败 ∪ 待补答
+        retry_keys = guardrail_failed | unresolved_keys
+        guardrail_rounds[round_label] = {
+            "ran": True,
+            "corrections": guardrail_pass.corrections,
+            "failed": len(guardrail_failed),
+            "unresolved": len(unresolved_keys),
+            "retried": len(retry_keys),
+            "items_returned": 0,
+            "recovered": 0,
+        }
+        if not retry_keys:
             logger.info(
                 "Guardrail %s pass [%s]: corrections=%d rules=%s",
                 round_label, parent_asin, guardrail_pass.corrections,
@@ -802,20 +837,24 @@ async def _analyze_campaigns_impl(
             )
             break
         logger.info(
-            "Guardrail %s blocked [%s]: corrections=%d failed=%d/%d rules=%s snapshot=%s",
-            round_label, parent_asin, guardrail_pass.corrections, len(failed_keys), len(adjustments),
-            _guardrail_rule_counts(guardrail_pass), _guardrail_snapshot(adjustments, failed_keys),
+            "Guardrail %s blocked [%s]: corrections=%d failed=%d unresolved=%d retry=%d rules=%s",
+            round_label, parent_asin, guardrail_pass.corrections,
+            len(guardrail_failed), len(unresolved_keys), len(retry_keys),
+            _guardrail_rule_counts(guardrail_pass),
         )
 
+        # 构建重试源（护栏失败项 + 缺失项）
         retry_source = []
         for s in (exact_summaries + broad_summaries):
-            if s.get("campaign_key") in failed_keys:
+            if s.get("campaign_key") in retry_keys:
                 retry_source.append(dict(s))
         if not retry_source:
             logger.warning(
-                "Guardrail %s retry skipped [%s]: no source summaries for failed_keys=%s",
-                round_label, parent_asin, sorted(failed_keys),
+                "Guardrail %s retry skipped [%s]: no source summaries for retry_keys=%s",
+                round_label, parent_asin, sorted(retry_keys),
             )
+            if unresolved_keys:
+                continue  # 缺失项仍需补答，带到下一轮
             break
 
         exact_retry = [s for s in retry_source if (s.get("match_type") or "").upper() == "EXACT"]
@@ -823,7 +862,7 @@ async def _analyze_campaigns_impl(
         logger.info(
             "Guardrail %s retry source [%s]: exact=%d broad=%d missing_source=%s",
             round_label, parent_asin, len(exact_retry), len(broad_retry),
-            sorted(failed_keys - {s.get("campaign_key") for s in retry_source}),
+            sorted(retry_keys - {s.get("campaign_key") for s in retry_source}),
         )
         alert_text = _GUARDRAIL_RETRY_INSTRUCTION
         retry_items: list[CampaignAdjustmentItem] = []
@@ -834,26 +873,24 @@ async def _analyze_campaigns_impl(
         ):
             if not retry_summaries:
                 continue
-            _inject_alerts_to_summaries(retry_summaries, alerts)
+            # 循环内注入累计告警（护栏失败项有告警，纯缺失项无告警）
+            _inject_alerts_to_summaries(retry_summaries, cumulative_alerts)
             ctx_dict["_guardrail_instruction"] = alert_text
             try:
                 results = await _run_round(
                     reasoner, parent_asin,
-                    _build_batches(retry_summaries, settings.campaign_batch_size, seed=round_number),
+                    _build_batches(retry_summaries, bs, seed=round_number),
                     ctx_dict, temperature, retry_sem, round_number,
                     task_type=task_type_name,
                     cancel_check=cancel_check,
                 )
-                returned_keys: set[str] = set()
                 for br in results:
                     retry_items.extend(br.items)
-                    returned_keys.update(item.campaign_key for item in br.items)
-                expected_keys = {s.get("campaign_key") for s in retry_summaries}
+                llm_rounds_completed = max(llm_rounds_completed, round_number)
                 logger.info(
-                    "Guardrail %s retry result [%s|%s]: batches=%s items=%d returned=%s missing=%s extra=%s",
-                    round_label, parent_asin, task_type_name, _round_stats(results), len(retry_items),
-                    sorted(returned_keys), sorted(expected_keys - returned_keys),
-                    sorted(returned_keys - expected_keys),
+                    "Guardrail %s retry result [%s|%s]: batches=%s items=%d",
+                    round_label, parent_asin, task_type_name,
+                    _round_stats(results), len(retry_items),
                 )
             except AnalysisRunCancelled:
                 raise
@@ -862,44 +899,78 @@ async def _analyze_campaigns_impl(
             finally:
                 ctx_dict.pop("_guardrail_instruction", None)
 
+        returned_keys = {item.campaign_key for item in retry_items}
+        guardrail_rounds[round_label]["items_returned"] = len(retry_items)
+
         if not retry_items:
             logger.warning(
-                "Guardrail %s retry stopped [%s]: no retry items returned for failed_keys=%s",
-                round_label, parent_asin, sorted(failed_keys),
+                "Guardrail %s empty result [%s]: %d retry_keys carried to next round",
+                round_label, parent_asin, len(retry_keys),
             )
-            break
+            continue
 
-        replacement_by_key = {
-            item.campaign_key: item
-            for item in retry_items
-            if item.campaign_key in failed_keys
-        }
-        if not replacement_by_key:
-            logger.warning(
-                "Guardrail %s retry stopped [%s]: no replacement matched failed_keys=%s returned_keys=%s",
-                round_label, parent_asin, sorted(failed_keys),
-                sorted(item.campaign_key for item in retry_items),
+        # 统一 upsert：已在 adjustments → 替换；不在 → 追加。不区分护栏失败/缺失补答。
+        # 替换前快照旧值，供 before→after 诊断日志（旧值瞬态，覆盖即丢）
+        old_by_key = {item.campaign_key: item for item in adjustments}
+        replacement_by_key: dict[str, CampaignAdjustmentItem] = {}
+        newly_appended: list[CampaignAdjustmentItem] = []
+        for ri in retry_items:
+            key = ri.campaign_key
+            ri.confidence = "medium"
+            replaced = False
+            for idx, item in enumerate(adjustments):
+                if item.campaign_key == key:
+                    replacement_by_key[key] = ri
+                    adjustments[idx] = ri
+                    replaced = True
+                    break
+            if not replaced:
+                adjustments.append(ri)
+                newly_appended.append(ri)
+
+        if replacement_by_key:
+            old_snapshot = [old_by_key[k] for k in replacement_by_key]
+            logger.info(
+                "Guardrail %s replacement [%s]: %d changed %s",
+                round_label, parent_asin, len(replacement_by_key),
+                _guardrail_replacement_summary(old_snapshot, replacement_by_key),
             )
-            break
-        logger.info(
-            "Guardrail %s retry replacement [%s]: replaced=%d summary=%s",
-            round_label, parent_asin, len(replacement_by_key),
-            _guardrail_replacement_summary(adjustments, replacement_by_key),
-        )
-        for idx, item in enumerate(adjustments):
-            replacement = replacement_by_key.get(item.campaign_key)
-            if replacement is not None:
-                adjustments[idx] = replacement
-        _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
-                                              core_keyword_set=core_keyword_set)
-        _backfill_placement_pcts(adjustments, unit_by_key)
-        for item in adjustments:
-            cid = (item.campaign_id or "").strip()
-            item.days_since_reactivation = recent_reactivated.get(cid, -1)
-        logger.info(
-            "Guardrail %s retry [%s]: exact=%d broad=%d retried, %d corrections",
-            round_label, parent_asin, len(exact_retry), len(broad_retry), guardrail_pass.corrections,
-        )
+
+        # 回填 + 从 skipped 移除
+        recovered_keys = {item.campaign_key for item in newly_appended}
+        guardrail_rounds[round_label]["recovered"] = len(recovered_keys)
+        if recovered_keys:
+            skipped_campaigns[:] = [
+                s for s in skipped_campaigns
+                if s.get("campaign_key") not in recovered_keys
+            ]
+            _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
+                                                  core_keyword_set=core_keyword_set)
+            _backfill_placement_pcts(adjustments, unit_by_key)
+            for item in adjustments:
+                cid = (item.campaign_id or "").strip()
+                item.days_since_reactivation = recent_reactivated.get(cid, -1)
+            logger.info(
+                "Guardrail %s recovered [%s]: %d campaigns, skipped now=%d",
+                round_label, parent_asin, len(recovered_keys), len(skipped_campaigns),
+            )
+
+        # 对本轮补回的 EXACT 活动执行精准确定性规则
+        if newly_appended and getattr(settings, "exact_transition_enabled", False):
+            newly_exact = [a for a in newly_appended if (a.match_type or "").upper() == "EXACT"]
+            if newly_exact:
+                _apply_exact_transition_rules(
+                    newly_exact, unit_by_key, strategy_context,
+                    campaign_data, core_keyword_set,
+                )
+
+        # 下轮待补答：本轮送进去但没吐出来的，一律带入下一轮
+        unresolved_keys = retry_keys - returned_keys
+        if unresolved_keys:
+            logger.warning(
+                "Guardrail %s still unresolved [%s]: %s",
+                round_label, parent_asin, sorted(unresolved_keys),
+            )
     else:
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
             adjustments,
@@ -914,6 +985,15 @@ async def _analyze_campaigns_impl(
             parent_asin, guardrail_pass.corrections, _guardrail_rule_counts(guardrail_pass),
             _guardrail_snapshot(adjustments, set(_build_guardrail_alerts(guardrail_pass))),
         )
+        rounds_detail["guardrail_final"] = {
+            "corrections": guardrail_pass.corrections,
+            "rules": _guardrail_rule_counts(guardrail_pass),
+        }
+
+    rounds_detail["guardrail"] = guardrail_rounds
+
+    # 7a. 补答/替换可能打乱 action 顺序，重排
+    adjustments.sort(key=lambda x: action_order.get(x.action, 9))
 
     # 7b. 组合目标收拢：广泛/词组/自动固定进入自动广泛组；精准活动暂不走旧 $5 迁移。
     # 必须在护栏后、落库前：已有调整项保留其预算/Bid，仅补活动级 target；
@@ -1091,7 +1171,7 @@ async def _analyze_campaigns_impl(
         summary=summary_stats,
         warnings=warnings_list,
         sanity_check_passed=sanity_ok,
-        llm_rounds_completed=2,
+        llm_rounds_completed=llm_rounds_completed,
         rounds_detail=rounds_detail,
     )
 
@@ -1530,10 +1610,10 @@ async def _analyze_one_stream(
     cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
     _core_set: set[str] = core_keyword_set or set()
-    """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1+R2 → 投票 → (R3) → 合并。
+    """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1 单轮 → 合并。
 
     返回 (adjustments, rounds_detail, enriched_summaries, skipped_campaigns)。
-    skipped = 整批 LLM 失败或未返回 item 的活动（运营需人工补救）。
+    skipped = 整批 LLM 失败或未返回 item 的活动（运营需人工补救；外层护栏循环会补答）。
     """
     if not campaigns:
         return [], {}, [], []
@@ -1572,64 +1652,27 @@ async def _analyze_one_stream(
     if overview_gate is not None:
         await overview_gate
 
-    # 3. 分批 + R1+R2（少于 2 批时跳过投票，单轮直出）
-    if len(campaigns) < batch_size * 2:
-        batches = _build_batches(summaries, batch_size, seed=1)
-        r1 = await _run_round(
-            reasoner, parent_asin, batches, ctx_dict, temperature, sem, 1,
-            task_type=task_type, cancel_check=cancel_check,
-        )
-        adjustments: list[CampaignAdjustmentItem] = []
-        for br in r1:
-            for item in br.items:
-                item.confidence = "medium"
-                adjustments.append(item)
-        skipped = _collect_skipped(campaigns, adjustments)
-        if task_type == "exact":
-            _backfill_placement_pcts(adjustments, unit_lookup)
-        return adjustments, {
-            "round1": _round_stats(r1), "round2": None, "round3": None,
-        }, summaries, skipped
-
-    r1_batches = _build_batches(summaries, batch_size, seed=1)
-    r2_batches = _build_batches(summaries, batch_size, seed=2)
-    r1_results, r2_results = await asyncio.gather(
-        _run_round(reasoner, parent_asin, r1_batches, ctx_dict, temperature, sem, 1, task_type=task_type, cancel_check=cancel_check),
-        _run_round(reasoner, parent_asin, r2_batches, ctx_dict, temperature, sem, 2, task_type=task_type, cancel_check=cancel_check),
+    # 3. 分批 + R1 单轮分析（不再双轮投票）
+    batches = _build_batches(summaries, batch_size, seed=1)
+    r1_results = await _run_round(
+        reasoner, parent_asin, batches, ctx_dict, temperature, sem, 1,
+        task_type=task_type, cancel_check=cancel_check,
     )
-    _st(f"DONE R1+R2 ({len(r1_batches)}+{len(r2_batches)} batches)")
+    _st(f"DONE R1 ({len(batches)} batches)")
     await _cancel()
-    rd: dict = {
-        "round1": _round_stats(r1_results),
-        "round2": _round_stats(r2_results),
-        "round3": {"ran": False},
-    }
 
-    # 4. 投票 + tiebreaker
-    expected_keys = {s.get("campaign_key") for s in summaries if s.get("campaign_key")}
-    votes, needs_tiebreaker = _vote(r1_results, r2_results, expected_keys)
-    if needs_tiebreaker:
-        tiebreaker_summaries = [s for s in summaries if s.get("campaign_key") in needs_tiebreaker]
-        if tiebreaker_summaries:
-            r3_results = await _run_round(
-                reasoner, parent_asin,
-                _build_batches(tiebreaker_summaries, batch_size, seed=3),
-                ctx_dict, temperature, sem, 3, task_type=task_type,
-                cancel_check=cancel_check,
-            )
-            _resolve_tiebreaker(votes, r3_results, needs_tiebreaker)
-            rd["round3"] = {
-                "ran": True,
-                "disputed_count": len(needs_tiebreaker),
-                **_round_stats(r3_results),
-            }
-
-    adjustments = _merge_to_adjustments(votes, r1_results, r2_results)
+    adjustments: list[CampaignAdjustmentItem] = []
+    for br in r1_results:
+        for item in br.items:
+            item.confidence = "medium"
+            adjustments.append(item)
     skipped = _collect_skipped(campaigns, adjustments)
     if task_type == "exact":
         _backfill_placement_pcts(adjustments, unit_lookup)
     _st(f"DONE merge ({len(adjustments)} items, {len(skipped)} skipped)")
-    return adjustments, rd, summaries, skipped
+    return adjustments, {
+        "round1": _round_stats(r1_results), "round2": None, "round3": None,
+    }, summaries, skipped
 
 
 def _collect_skipped(
@@ -1793,7 +1836,7 @@ async def _run_round(
     return final
 
 
-# ── 投票与合并 ──────────────────────────────────────────────────────────────
+# ── 统计与回填辅助 ───────────────────────────────────────────────────────────
 
 
 def _round_stats(results: list[CampaignBatchResult]) -> dict:
@@ -1805,20 +1848,6 @@ def _round_stats(results: list[CampaignBatchResult]) -> dict:
         "failed_batches": len(results) - successful,
         "total_items": total_items,
     }
-
-
-def _vote_key(item: CampaignAdjustmentItem) -> str:
-    """投票/合并阶段对 item 的统一 key 生成规则。"""
-    return item.campaign_key or item.campaign_name or f"unknown_{id(item)}"
-
-
-def _placement_sig(adjustments: list[dict]) -> frozenset:
-    """广告位调整签名：{(广告位, 动作)} 集合，用于跨轮一致性比对（精准流）。"""
-    sig: set[tuple[str, str]] = set()
-    for p in adjustments or []:
-        if isinstance(p, dict):
-            sig.add((str(p.get("placement", "")), str(p.get("action", ""))))
-    return frozenset(sig)
 
 
 # KB 07 加价比例边界
@@ -1873,232 +1902,6 @@ def _backfill_placement_pcts(
             step = _placement_step(action, cap)
             proposed = max(0.0, current + step)
             p["proposed_pct"] = proposed
-
-
-def _merge_negative_keywords(
-    a: CampaignAdjustmentItem,
-    b: CampaignAdjustmentItem,
-) -> list[dict]:
-    """合并两轮否词：两轮都命中=推荐(vote=recommended)，仅单轮命中=可选(vote=optional)。
-
-    否词是叠加型建议，不作为投票分歧判据；两轮并集全部保留，只用 vote 标注可信度。
-    """
-    def _index(items: list[dict]) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        for n in items or []:
-            if isinstance(n, dict):
-                kw = str(n.get("keyword", "")).strip().lower()
-                if kw:
-                    out[kw] = n
-        return out
-
-    ma, mb = _index(a.negative_keywords), _index(b.negative_keywords)
-    merged: list[dict] = []
-    for kw in ma.keys() | mb.keys():
-        base = dict(ma.get(kw) or mb.get(kw) or {})
-        base["vote"] = "recommended" if (kw in ma and kw in mb) else "optional"
-        merged.append(base)
-    merged.sort(key=lambda n: 0 if n.get("vote") == "recommended" else 1)  # 推荐排前
-    return merged
-
-
-def _vote(
-    r1_results: list[CampaignBatchResult],
-    r2_results: list[CampaignBatchResult],
-    expected_keys: set[str] | None = None,
-) -> tuple[dict[str, dict], set[str]]:
-    """比较 R1 与 R2 的 action + direction：全一致 → high (保守幅度)；否则 → tiebreaker。
-
-    expected_keys: 本流应分析的全部 campaign_key（来自 summaries，代码权威）。
-      - 仅在一轮出现（另一轮 LLM 漏输出）→ 视为分歧，送 R3 复核（Level A）。
-      - 两轮都未出现（both-missing）→ 种占位并送 R3；R3 仍缺则由 _resolve_tiebreaker 删除占位，
-        还原为"未分析"交 _collect_skipped 兜底（Level B），绝不伪造成 keep。
-    """
-
-    def _same_direction(a: CampaignAdjustmentItem, b: CampaignAdjustmentItem) -> bool:
-        if a.action != b.action:
-            return False
-        da = a.direction or {}
-        db = b.direction or {}
-        if da.get("bid") != db.get("bid") or da.get("budget") != db.get("budget"):
-            return False
-        # 精准流：广告位调整方向也须一致，否则视为分歧（防 placement 分歧被误判 high）
-        if a.match_type == "EXACT" or b.match_type == "EXACT":
-            return _placement_sig(a.placement_adjustments) == _placement_sig(b.placement_adjustments)
-        # 广泛流：否词是叠加型建议，不作为分歧判据；两轮否词在 _conservative 里合并为 推荐/可选
-        return True
-
-    r1_map: dict[str, CampaignAdjustmentItem] = {}
-    for br in r1_results:
-        if br.llm_success:
-            for item in br.items:
-                r1_map[_vote_key(item)] = item
-
-    r2_map: dict[str, CampaignAdjustmentItem] = {}
-    for br in r2_results:
-        if br.llm_success:
-            for item in br.items:
-                r2_map[_vote_key(item)] = item
-
-    all_keys = set(r1_map.keys()) | set(r2_map.keys())
-    votes: dict[str, dict] = {}
-    needs_tiebreaker: set[str] = set()
-
-    for key in all_keys:
-        r1 = r1_map.get(key)
-        r2 = r2_map.get(key)
-
-        if r1 and r2:
-            if _same_direction(r1, r2):
-                # action + direction 一致 → 取保守幅度
-                conservative = _conservative(r1, r2)
-                conservative["round_votes"] = {
-                    "round1": f"{r1.action}|{r1.direction}",
-                    "round2": f"{r2.action}|{r2.direction}",
-                }
-                conservative["confidence"] = "high"
-                votes[key] = conservative
-            else:
-                # action / bid·budget 方向分歧 → tiebreaker
-                # 保留 R1 全部富字段（否词/广告位/理由/建议值），不再用骨架 dict 丢字段
-                needs_tiebreaker.add(key)
-                v = r1.model_dump()
-                v["campaign_key"] = key
-                v["confidence"] = "low"
-                v["round_votes"] = {
-                    "round1": f"{r1.action}|{r1.direction}",
-                    "round2": f"{r2.action}|{r2.direction}",
-                }
-                merged_neg = _merge_negative_keywords(r1, r2)
-                if merged_neg:
-                    v["negative_keywords"] = merged_neg
-                v["_r1"] = r1
-                v["_r2"] = r2
-                votes[key] = v
-        elif r1:
-            # 仅 R1 出现（R2 漏）→ 暂存 R1 值并送 R3 复核（Level A）
-            votes[key] = _item_to_vote(r1, "low")
-            votes[key]["round_votes"] = {"round1": r1.action, "round2": "missing"}
-            needs_tiebreaker.add(key)
-        else:
-            # 仅 R2 出现（R1 漏）→ 暂存 R2 值并送 R3 复核（Level A）
-            votes[key] = _item_to_vote(r2, "low")
-            votes[key]["round_votes"] = {"round1": "missing", "round2": r2.action}
-            needs_tiebreaker.add(key)
-
-    # Level B：两轮都漏的活动（不在任一 round map 里）→ 种占位 + 送 R3。
-    # 占位仅用于让 _resolve_tiebreaker 放行并被 R3 结果覆盖；R3 也缺则删除（见该函数）。
-    if expected_keys:
-        for key in expected_keys - all_keys:
-            votes[key] = {
-                "campaign_key": key,
-                "confidence": "low",
-                "_placeholder": True,
-                "round_votes": {"round1": "missing", "round2": "missing"},
-            }
-            needs_tiebreaker.add(key)
-
-    return votes, needs_tiebreaker
-
-
-def _conservative(
-    a: CampaignAdjustmentItem,
-    b: CampaignAdjustmentItem,
-) -> dict:
-    """两个同 action 的建议中取保守幅度。"""
-    chosen = a.model_dump()
-    # Bid: 取绝对值较小者 (更安全)
-    if (a.proposed_bid is not None and b.proposed_bid is not None
-            and a.current_bid is not None and b.current_bid is not None):
-        delta_a = abs(a.proposed_bid - a.current_bid)
-        delta_b = abs(b.proposed_bid - b.current_bid)
-        if delta_b < delta_a:
-            chosen["proposed_bid"] = b.proposed_bid
-            chosen["reason"] = b.reason
-    # Budget: 取绝对值较小者
-    if (a.proposed_budget is not None and b.proposed_budget is not None
-            and a.current_budget is not None and b.current_budget is not None):
-        delta_a = abs(a.proposed_budget - a.current_budget)
-        delta_b = abs(b.proposed_budget - b.current_budget)
-        if delta_b < delta_a:
-            chosen["proposed_budget"] = b.proposed_budget
-            chosen["reason"] = b.reason
-    # 广泛流：合并两轮否词为 推荐(两轮一致)/可选(单轮)，不丢任一轮建议
-    merged_neg = _merge_negative_keywords(a, b)
-    if merged_neg:
-        chosen["negative_keywords"] = merged_neg
-    return chosen
-
-
-def _item_to_vote(item: CampaignAdjustmentItem, confidence: str) -> dict:
-    d = item.model_dump()
-    d["confidence"] = confidence
-    return d
-
-
-def _resolve_tiebreaker(
-    votes: dict[str, dict],
-    r3_results: list[CampaignBatchResult],
-    disputed_keys: set[str],
-) -> None:
-    """R3 直接采信，覆盖 votes 中暂存的 R1 值。
-
-    仅处理 disputed_keys（R1/R2 分歧项）；高置信项已定，不得在此被误降级为 low。
-    """
-    r3_map: dict[str, CampaignAdjustmentItem] = {}
-    for br in r3_results:
-        if br.llm_success:
-            for item in br.items:
-                r3_map[_vote_key(item)] = item
-
-    for key in disputed_keys:
-        if key not in votes:
-            continue
-        r3 = r3_map.get(key)
-        if r3:
-            votes[key].update(r3.model_dump())
-            votes[key]["confidence"] = "medium"
-            current_round = dict(votes[key].get("round_votes", {}))
-            current_round["round3"] = r3.action
-            votes[key]["round_votes"] = current_round
-            # 占位被真实结果填实 → 清除占位标记 + 内部引用
-            votes[key].pop("_placeholder", None)
-            votes[key].pop("_r1", None)
-            votes[key].pop("_r2", None)
-        elif votes[key].get("_placeholder"):
-            # 两轮都漏且 R3 也漏 → 删除占位，还原为"未分析"（_collect_skipped 兜底），不伪造 keep
-            del votes[key]
-        else:
-            # 单轮缺失且 R3 也缺失 → 降级保持已暂存的那一轮值
-            votes[key]["confidence"] = "low"
-            votes[key].pop("_r1", None)
-            votes[key].pop("_r2", None)
-
-
-def _merge_to_adjustments(
-    votes: dict[str, dict],
-    *rounds: list[CampaignBatchResult],
-) -> list[CampaignAdjustmentItem]:
-    """将最终 votes 转为 CampaignAdjustmentItem 列表，排序：淘汰 > 调整 > 保持。"""
-    items: list[CampaignAdjustmentItem] = []
-    for v in votes.values():
-        if v.get("_placeholder"):
-            # 防御：占位未被 R3 填实也未被删（理论不应到此）→ 不构造假决策
-            continue
-        v.pop("_r1", None)
-        v.pop("_r2", None)
-        try:
-            items.append(CampaignAdjustmentItem(**v))
-        except Exception as e:
-            logger.warning("_merge_to_adjustments 解析失败: %s", e)
-
-    action_order = {
-        "eliminate_to_low_bid_pool": 0,
-        "adjust_bid": 1, "adjust_budget": 1, "adjust_placement": 1,
-        "keep": 2,
-    }
-    items.sort(key=lambda x: action_order.get(x.action, 9))
-    return items
 
 
 def _backfill_campaign_adjustment_context(
@@ -2438,8 +2241,9 @@ async def _sanity_check_batched(
     任一批次 LLM 失败 / 超时 / gather 异常 → all_ok=False，前端据此显示 ✗。
 
     设计：
-    - 过滤：只取 confidence=='low' 的 adjustments（投票分歧最需要复核）。
-      高置信项假定 LLM 双轮一致，不再 sanity check（节省调用且这类最稳）。
+    - 过滤：只取 confidence=='low' 的 adjustments（原投票分歧最需复核）。
+      ⚠ 2026-07-31 切除双轮投票后所有项统一 medium，low_conf 恒空 → 当前为 no-op，
+      待后续单独重构筛选对象（如改为被护栏拦截过的项）。
     - 分批：每批 ≤batch_size 条；不做优先级排序，按原顺序切分。
     - 并行：asyncio.gather 同时跑所有批次，外层 wait_for(120s) 防整体挂死。
     - 失败隔离：单批 LLM 失败仅该批 warning + all_ok=False，其他批不受影响。
@@ -2701,7 +2505,7 @@ def _apply_campaign_guardrails(
                 ),
             ))
 
-    # 终态 action 归一: _conservative 可能把 proposed 改回 current,
+    # 终态 action 归一: proposed 可能被改回 current,
     # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变。
     re_normalized = 0
     for adj in adjustments:

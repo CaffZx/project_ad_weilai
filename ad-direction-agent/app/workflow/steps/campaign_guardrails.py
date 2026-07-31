@@ -4,9 +4,9 @@
   P0: 核心词禁淘汰 (is_core=True → action 不得为 eliminate)
   P1: 新活动保护 (days_online ≤ 3 → 禁止淘汰)
   P2: 复评抖动保护 (days_since_reactivation ≤ 3 → 禁止淘汰)
-  P3: 硬淘汰触发 (无出单 且 (bid ≤ $0.10 或 budget ≤ $1.00) → 强制淘汰, OR 口径)
+  P3: 硬淘汰触发 (无出单 且 (bid ≤ $0.10 或 budget ≤ $1.00) → 强制淘汰, OR 口径; 仅限精准 EXACT, KB10 §1.6/ONT-016)
   P4: 淘汰值硬填充 ($1.00/$0.20, 清 placement/neg_kw)
-  P5: 淘汰保护反修正 (受保护活动被误判 → 强制改 keep)
+  P5: 淘汰反修正 (受保护活动/非精准活动被误判 → 强制改 keep)
   P6: 日预算上限 ($200, KB15 §1.4)
   P7: 预算花不完禁加 (7d 花费 / 日预算×7 < 50% → cap)
   P8: Bid 振幅上限 (>50% 且 clicks<10 → 收敛到 30%)
@@ -193,6 +193,10 @@ def _p3_force_eliminate(item, gp: GuardrailPass, *, product_stage: str = "") -> 
     days_since_reactivation = getattr(item, "days_since_reactivation", -1)
     if days_since_reactivation >= 0 and days_since_reactivation <= 3:
         return
+    # KB10 §1.6 / ONT-016: 低价捡漏组仅允许精准活动；BROAD/PHRASE/AUTO 退出走
+    # stop_campaign（当前引擎未实现，不做强制淘汰，留给 LLM 判断）
+    if (item.match_type or "").upper() != "EXACT":
+        return
     if not _p3_should_force_eliminate(item):
         return
     item.action = "eliminate_to_low_bid_pool"
@@ -253,27 +257,48 @@ def _p4_elimination_fill(item, gp: GuardrailPass) -> None:
 
 
 def _p5_protection_reversal(item, gp: GuardrailPass) -> None:
-    """淘汰保护反修正：绝对保护项（核心词/复评≤3天）若被误判淘汰 → 强制改回 keep。
+    """淘汰反修正：绝对保护项（核心词/复评≤3天）或非精准活动被误判淘汰 → 强制改回 keep。
 
     P0(核心词) 和 P2(复评保护) 高于 P3，P1(样本不足) 低于 P3。
+    非精准活动（BROAD/PHRASE/AUTO/PRODUCT_TARGETING）不得迁入低价捡漏组
+    （KB10 §1.6 / ONT-016），退出应走 stop_campaign；当前引擎无该动作，
+    先拉回 keep 留待后续判断。
     此处兜底处理：若 P3 之后的规则链把受保护项又变成淘汰，则在 P5 阶段拉回。
     """
     if item.action != "eliminate_to_low_bid_pool":
         return
     core = getattr(item, "is_core", False)
     react = getattr(item, "days_since_reactivation", -1)
-    if core or (react >= 0 and react <= 3):
-        _force_keep(item)
-        gp.add(GuardrailResult(
-            rule_id="P5_PROTECTION_REVERSAL", corrected=True,
-            campaign_key=getattr(item, "campaign_key", ""),
-            original_action="eliminate_to_low_bid_pool", new_action="keep",
-            message=f"[{item.campaign_name}] 受{'核心词' if core else '复评'}保护，已强制修正回 keep",
-            retry_instruction=(
-                f"[{item.campaign_name}] 受{'核心词' if core else '复评'}保护，不得淘汰。"
-                "可结合事实重新评估轻量调整或维持。"
-            ),
-        ))
+    react_protected = react >= 0 and react <= 3
+    non_exact = (item.match_type or "").upper() != "EXACT"
+    if not (core or react_protected or non_exact):
+        return
+    if core:
+        reason = "核心词"
+        instruction = (
+            f"[{item.campaign_name}] 核心词不得淘汰。若当前表现偏弱，可结合活动事实评估小幅降 bid、"
+            "降预算、调整广告位或维持观察。"
+        )
+    elif react_protected:
+        reason = "复评"
+        instruction = (
+            f"[{item.campaign_name}] 复评后短期内不得再次淘汰。若表现仍弱，"
+            "可评估轻量收敛 bid、预算或维持观察，避免进出池抖动。"
+        )
+    else:
+        reason = "非精准活动(低价捡漏组仅限精准)"
+        instruction = (
+            f"[{item.campaign_name}] 非精准活动不得迁入低价捡漏组。"
+            "可结合事实评估否词、降Bid、降预算或维持。"
+        )
+    _force_keep(item)
+    gp.add(GuardrailResult(
+        rule_id="P5_PROTECTION_REVERSAL", corrected=True,
+        campaign_key=getattr(item, "campaign_key", ""),
+        original_action="eliminate_to_low_bid_pool", new_action="keep",
+        message=f"[{item.campaign_name}] 受{reason}保护，已强制修正回 keep",
+        retry_instruction=instruction,
+    ))
 
 
 def _p6_budget_cap(item, gp: GuardrailPass) -> None:

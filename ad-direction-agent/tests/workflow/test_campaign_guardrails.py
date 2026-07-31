@@ -20,6 +20,7 @@ def _make_item(**overrides) -> CampaignAdjustmentItem:
         "campaign_name": "test_campaign",
         "campaign_key": "test_key",
         "action": "eliminate_to_low_bid_pool",
+        "match_type": "EXACT",  # 低价捡漏组仅限精准（KB10 §1.6 / ONT-016）
         "current_budget": 10.0,
         "current_bid": 0.50,
         "proposed_budget": 1.0,
@@ -191,6 +192,26 @@ def test_p3_bid_between_thresholds():
                        action="adjust_bid")
     gp = apply_all([item])
     assert not any(r.rule_id == "P3_FORCE_ELIMINATE" for r in gp.results)
+
+
+def test_p3_does_not_force_eliminate_non_exact():
+    """KB10 §1.6 / ONT-016: 低价捡漏组仅限精准，BROAD 触底也不强制淘汰"""
+    item = _make_item(perf_7d={"cost": 20, "clicks": 20, "orders": 0},
+                       current_bid=0.08, current_budget=5.0,
+                       action="adjust_bid", match_type="BROAD")
+    gp = apply_all([item])
+    assert not any(r.rule_id == "P3_FORCE_ELIMINATE" for r in gp.results)
+    assert item.action == "adjust_bid"
+
+
+def test_p3_force_eliminate_only_exact():
+    """仅 EXACT 活动可被 P3 强制淘汰入低价捡漏组"""
+    item = _make_item(perf_7d={"cost": 20, "clicks": 20, "orders": 0},
+                       current_bid=0.08, current_budget=5.0,
+                       action="adjust_bid", match_type="EXACT")
+    gp = apply_all([item])
+    assert any(r.rule_id == "P3_FORCE_ELIMINATE" for r in gp.results)
+    assert item.action == "eliminate_to_low_bid_pool"
 
 
 # ── P4: 淘汰值填充 ───────────────────────────────────
@@ -503,6 +524,32 @@ def test_p5_does_not_reverse_sample_insufficient_eliminate():
                        perf_7d={"cost": 2.0, "clicks": 3, "orders": 0},
                        days_online=30,
                        current_bid=0.05, current_budget=5.0)
+    gp = GuardrailPass()
+    _p5_protection_reversal(item, gp)
+    assert not any(r.rule_id == "P5_PROTECTION_REVERSAL" for r in gp.results)
+    assert item.action == "eliminate_to_low_bid_pool"
+
+
+def test_p5_reverses_non_exact_eliminate():
+    """KB10 §1.6 / ONT-016: 非精准活动不得迁入低价捡漏组，LLM 误判淘汰则拉回 keep"""
+    item = _make_item(action="eliminate_to_low_bid_pool",
+                       perf_7d={"cost": 50.0, "clicks": 50, "orders": 0},
+                       days_online=30,
+                       current_bid=0.50, current_budget=10.0,
+                       match_type="PHRASE")
+    gp = GuardrailPass()
+    _p5_protection_reversal(item, gp)
+    assert any(r.rule_id == "P5_PROTECTION_REVERSAL" for r in gp.results)
+    assert item.action == "keep"
+
+
+def test_p5_keeps_exact_eliminate_when_not_protected():
+    """精准活动、无核心词/复评保护 → 不触发 P5 反修正"""
+    item = _make_item(action="eliminate_to_low_bid_pool",
+                       perf_7d={"cost": 50.0, "clicks": 50, "orders": 0},
+                       days_online=30,
+                       current_bid=0.50, current_budget=10.0,
+                       match_type="EXACT")
     gp = GuardrailPass()
     _p5_protection_reversal(item, gp)
     assert not any(r.rule_id == "P5_PROTECTION_REVERSAL" for r in gp.results)

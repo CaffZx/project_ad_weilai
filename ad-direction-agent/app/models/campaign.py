@@ -311,7 +311,7 @@ class CampaignAnalysisResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     sanity_check_passed: bool = True
     data_unavailable: bool = False                                    # True=上游数据(数仓/MCP)拉取失败/超时，本次未真正分析；区别于"无调整/无活动"业务态，供 ERP 门禁、批量统计与告警区分
-    llm_rounds_completed: int = 2
+    llm_rounds_completed: int = 0
     rounds_detail: dict = Field(default_factory=dict)
 
 

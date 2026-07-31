@@ -61,7 +61,7 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | Campaign 主流程 | `workflow/steps/campaign.py:253` `analyze_campaigns()`；`:310` `_analyze_campaigns_impl()` | 主分析编排 |
 | 策略上下文 | `campaign.py:1085` `build_campaign_strategy_context()` | 把前置工作流 long_term/P3 转成 Campaign 背景 |
 | 策略总览 | `campaign.py:1188` `_build_overview_facts()`；`:1239` `_run_overview()` | 生成 shared overview gate |
-| 分流分析 | `campaign.py:1269` `_analyze_one_stream()`；`:1416` `_run_round()` | exact/broad 分批、双轮、R3/R4 |
+| 分流分析 | `campaign.py:1269` `_analyze_one_stream()`；`:1416` `_run_round()` | exact/broad 分批、R1 单轮、护栏 R2/R3/R4 重判 |
 | 护栏注入 | `campaign.py:2175` `_build_guardrail_alerts()`；`:2193` `_inject_alerts_to_summaries()`；`:2265` `_apply_campaign_guardrails()` | LLM 后的确定性修正和重判提示 |
 | CampaignData 拉取 | `app/data/campaign_fetcher.py:45` `fetch_campaigns()`；`:964` `_assemble()` | MCP 结果归一成 CampaignUnit |
 | 新建活动线 | `workflow/steps/campaign_new.py:263` `analyze_new_campaigns()`；`:484` `_run_round()` | 候选词、双轮 LLM、确定性补齐执行字段 |
@@ -89,10 +89,10 @@ flowchart TD
   H --> I["策略总览 overview gate"]
   I --> J["经营模式闸控: ad_permission → growth_analysis_enabled"]
   J --> K["三股并行: exact / broad / new_campaigns"]
-  K --> L["R1/R2 投票 + R3 tiebreaker"]
+  K --> L["R1 单轮 (exact/broad 各自, 种子1)"]
   L --> M["action 归一化"]
   M --> N["精准确定性升降级 (32号): EXACT 单关键词迁组/诊断"]
-  N --> O["护栏 + R3/R4 重判"]
+  N --> O["护栏 + R2/R3/R4 重判 (含缺失补答)"]
   O --> P["预算冲突裁决 + portfolio budget summary/reallocation"]
   P --> Q["组合目标收拢: broad→auto_broad 无条件 / exact 仅规则结果"]
   Q --> R["淘汰复评 restart review"]
@@ -356,21 +356,20 @@ Prompt 组装细节：
 | synthesis | `reasoner.py:488` `_build_campaign_synthesis_prompt()`；`:2011` `recommend_campaign_synthesis()` | Campaign synthesis 相关切片 | 已有活动调整、新建活动、预算摘要、策略总览 | reason groups / specials |
 | budget reallocation | `reasoner.py:578` `_build_budget_realloc_prompt()`；`:2101` `recommend_budget_reallocation()` | `kb_loader.py:85` `budget_reallocation` | portfolio 预算、组别预算、调整建议、父级净增约束 | 组合预算重分配建议 |
 
-## LLM 分批与投票
+## LLM 分批与单轮分析
 
-现有 Campaign 调整采用分批 + 双轮投票：
+现有 Campaign 调整采用分批 + R1 单轮 + 护栏 R2/R3/R4 重判：
 
-- batch size 默认来自 `campaign_batch_size`，当前默认 6。
+- batch size 默认来自 `campaign_batch_size`，当前默认 10。
 - per-stream 并发来自 `campaign_llm_concurrency`。
 - 单批 LLM timeout 在 `campaign.py` 中定义为 60 秒。
-- R1/R2 使用不同随机种子排序。
-- R1/R2 输出按 `campaign_key` 合并。
-- action 和关键方向一致则 high。
-- 单轮缺失或两轮分歧进入 R3。
-- R3 直接采信并标 medium。
-- 两轮都漏且 R3 仍漏的活动删除占位，交 skipped 兜底，不伪造成 keep。
+- 每条流（exact/broad）统一执行一次 R1（种子 1），不做双轮投票。
+- R1 输出按 `campaign_key` 合并，`confidence` 统一 `medium`。
+- 护栏失败项 + R1 缺失补答项合并进 `retry_keys`，进入 R2/R3/R4 重判。
+- 每轮护栏告警跨轮累积（`retry_instruction` 逐条去重），注入下一轮 prompt。
+- 送进去没吐出来的 key 一律带入下一轮；R4 后仍缺失的留在 `skipped_campaigns`。
 
-投票只比较核心决策方向。否定词是叠加型建议，不作为投票分歧判据；两轮并集保留，并用 vote 标注可信度。
+护栏重判不再依赖双轮投票的置信度；`high`/`low` 置信度不再产生。
 
 ## action 归一化
 
@@ -393,28 +392,29 @@ LLM 输出的 action 不是最终真源。`_normalize_action()` 会根据 propos
 ### 在分析链路中的位置
 
 ```
-MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并行)
+MCP拉数 → 预过滤 → R1_exact+R1_broad(并行)
     ↓
-投票合并(R3 tiebreaker: 仅冲突项) → backfill(context) → backfill(复评保护)
+R1 合并 → backfill(context) → backfill(复评保护)
     ↓
-┌─ 护栏编排 (campaign.py 第 667 行起) ───────────────────────┐
+┌─ 护栏编排 (campaign.py) ──────────────────────────────────┐
 │                                                             │
 │  护栏执行(_apply_campaign_guardrails)                        │
 │    ↓                                                        │
-│  ├─ corrections==0 → 通过 → 进入终态组合分类、sanity         │
+│  ├─ corrections==0 且无缺失 → 通过 → 进入终态组合分类、sanity │
 │  │                                                          │
-│  └─ corrections>0 → 构造告警 → 注入 prompt → R3 重判(精准/广泛分开)│
+│  └─ 否则: retry_keys = 护栏失败 ∪ 待补答(R1缺失/上轮未返回)   │
+│       │ 告警跨轮累积注入 → R2 重判(精准/广泛分开)             │
 │       ↓                                                     │
 │     护栏再次执行                                              │
-│       ├─ corrections==0 → 通过                               │
-│       └─ corrections>0 → R4 重判 → 护栏兜底(不再 R5，强制修正) │
+│       ├─ corrections==0 且无缺失 → 通过                       │
+│       └─ 否则 → R3 重判 → 护栏 → R4 重判 → 护栏兜底(强制修正) │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
     ↓
 终态组合分类(§7b) → sanity_check → synthesis → budget_reallocation → ERP落库
 ```
 
-护栏使用 `for retry_rounds((3,”R3”),(4,”R4”)): ... else: _apply_campaign_guardrails()` 结构。R4 后不再有 R5，护栏强制修正作为最终输出。
+护栏使用 `for retry_rounds((2,"R2"),(3,"R3"),(4,"R4")): ... else: _apply_campaign_guardrails()` 结构。R4 后不再有 R5，护栏强制修正作为最终输出。R1 缺失的活动在重判轮补答成功后 append 回 `adjustments`、回填上下文并从 `skipped_campaigns` 移除；R4 后仍未返回的留在 `skipped_campaigns`。
 
 ### 数据消费
 
@@ -463,7 +463,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 动作：`_force_keep(item)` —— action 改 keep，proposed_bid/budget 回退到 current，清空 direction/placement_adjustments；保留 negative_keywords（否词是叠加建议，keep 时不丢失）
 - 优先级：最高。P3 显式检查 `is_core` → return，确保不被硬淘汰覆盖
 - KB 依据：KB21 §2 Custom 核心词保护
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 核心词不得淘汰。若当前表现偏弱，可结合活动事实评估小幅降 bid、`
   > `降预算、调整广告位或维持观察。`
 
@@ -474,7 +474,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - P3 硬淘汰优先级高于 P1：在执行 `_force_keep` 之前先查 `_p3_should_force_eliminate(item)`——若 P3 会强制淘汰，P1 跳过（不写矛盾告警），交给 P3 处理
 - 动作：`_force_keep(item)`。仅禁淘汰，不拦调整——LLM 判 `adjust_bid` 等非淘汰 action 时不触发
 - KB 依据：KB21 §2 / KB17 §1.2 SAMPLE_INSUFFICIENT
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 样本不足({reasons})时不得直接淘汰；若同时命中无订单且 bid/预算触底，`
   > `按硬淘汰判断。其他情况下，可结合事实评估小幅 bid、预算、广告位调整或维持。`
 
@@ -484,7 +484,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 动作：`_force_keep(item)`
 - 优先级：与 P0 同级，高于 P3。P3 显式检查 `days_since_reactivation` → return
 - 说明：防止淘汰 → 复评捞回 → 又被淘汰的死循环
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 复评后仅 {days} 天，短期内不得再次淘汰。若表现仍弱，`
   > `可结合事实评估轻量收敛 bid、预算或维持观察，避免进出池抖动。`
 
@@ -499,7 +499,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 动作：action 改 `eliminate_to_low_bid_pool`，budget=$1.00，bid 收敛到 [LOW_BID_MIN, LOW_BID_MAX] 区间，清 placement_adjustments/negative_keywords
 - 说明：P1 样本不足不阻断 P3——即使样本不足，无出单且已触底的活动仍应强制淘汰
 - 口径：OR（归组/强制修正用），严于预过滤 AND
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 无订单且 bid=${current_bid}/budget=${current_budget} 已触及淘汰阈值，`
   > `应进入低价捡漏/淘汰判断，不要仅因样本不足改回 keep。`
 
@@ -508,7 +508,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：`action == eliminate_to_low_bid_pool`
 - 动作：budget 补齐到 $1.00；bid 取 `max($0.10, min(current_bid, proposed_bid, $0.20))`；清空 placement_adjustments/negative_keywords
 - 说明：保证 ERP pending 和执行层拿到完整淘汰值。LLM 原始输出或 P3 强制淘汰后都会经过此规则
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 若判断为淘汰，预算应为 $1.00，bid 应落在低价捡漏区间，`
   > `且不应附带广告位加价或否词调整。`
 
@@ -517,7 +517,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：`action == eliminate_to_low_bid_pool` 且（`is_core == True` 或 `days_since_reactivation ∈ [0,3]`）
 - 动作：`_force_keep(item)`
 - 说明：防御性兜底。正常情况下 P3 的 early return 已阻止保护项被强制淘汰。若将来规则链变更导致漏网，P5 在 P3 后、P4 前兜底拉回
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 受{'核心词' if core else '复评'}保护，不得淘汰。`
   > `可结合事实重新评估轻量调整或维持。`
 
@@ -526,7 +526,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：`proposed_budget > BUDGET_CAP($200)`
 - 动作：截断到 $200
 - KB 依据：KB15 §1.4 / KB19 §10
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 日预算不得超过 $200。如仍需加预算，`
   > `请在上限内给出合规值；也可按事实选择维持或下调。`
 
@@ -535,7 +535,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：非淘汰、`proposed_budget > current_budget`、且 `budget_utilization_pct = spend / (current_budget × 7) × 100 < 50%`（近 7 天日均花费不到日预算一半）
 - 动作：`proposed_budget` 封顶回 `current_budget`
 - 说明：当前预算都花不完，加预算无意义。应先提 Bid 或扩词
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 近 7 天总花费 ${spend}，当前日预算 ${current_budget}，`
   > `预算利用率 {pct}% 低于 50%，不应上调预算。可结合事实评估维持预算、下调预算、调整 bid 或广告位。`
 
@@ -544,7 +544,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：非淘汰、`abs(proposed_bid - current_bid)/current_bid > 0.5` 且 `perf_7d.clicks < 10`
 - 动作：收敛到 30% 变动，不低于 $0.20
 - 说明：小样本下 LLM 不宜做剧烈 bid 调整
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] clicks={clicks} 的样本下 bid 变动 {change_pct}% 偏大。`
   > `可保留原调整方向，但幅度应更收敛；若事实支持，也可维持。`
 
@@ -553,7 +553,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 触发：`proposed_bid > BID_HARD_CAP($3.00)`
 - 动作：截断到 $3.00
 - KB 依据：KB15 §1.4
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] bid 不得超过 $3.00。如仍需加 bid，`
   > `请在上限内重新给值；否则按事实选择维持或其他调整。`
 
@@ -563,7 +563,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 动作：action 改为”维持”，`proposed_pct` 同步回到 `current_pct`
 - 说明：只阻断 TOS 加价，不阻断其他广告位、不影响整体 action。数据来自 `CampaignStrategyContext`，非 activity 级
 - KB 依据：KB15 §3.2
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 因 {'; '.join(blocks)}，不得上调头部 TOS 加价。`
   > `这不代表商品位、其他位、bid 或预算必须维持；请按各自数据继续判断。`
 
@@ -573,7 +573,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 - 动作：降幅收窄到 `current_bid - max_drop`
 - 说明：新活动允许小降（≤ $0.05 或 ≤ 10%），阻止大幅降价。淘汰活动由 P4 处理，此规则跳过
 - KB 依据：KB15 §1.3 / KB19 §3
-- R3/R4 回灌文案：
+- R2/R3/R4 回灌文案：
   > `[campaign_name] 上线仅 {days} 天，bid 不应大幅下调。若确需降 bid，`
   > `可收敛到不超过 ${max_drop} 的降幅；也可按事实选择维持或其他轻量调整。`
 
@@ -584,7 +584,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 | 字段 | 消费方 | 内容 |
 |------|--------|------|
 | `message` | 运营前端 `warnings_list` | 人可读的拦截说明，如”核心词受保护，已强制修正为 keep” |
-| `retry_instruction` | LLM R3/R4 prompt | 内部复判指令，不包含规则编号/护栏口气，是正向指引而非纯否定 |
+| `retry_instruction` | LLM R2/R3/R4 prompt | 内部复判指令，不包含规则编号/护栏口气，是正向指引而非纯否定 |
 | `campaign_key` | 告警精确注入 | 标识被修正的活动，防止告警混入其他活动 |
 | `rule_id` | 日志/审计 | 如 `P0_CORE_PROTECT` |
 
@@ -595,9 +595,12 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 ### 告警注入机制
 
 1. `_build_guardrail_alerts(guardrail_pass)` 按 `campaign_key` 分组，取每条 Result 的 `retry_instruction` 拼接
-2. `_inject_alerts_to_summaries(retry_summaries, alerts)` 将告警文本写入每个 summary 的 `_guardrail_alert` 字段
-3. `reasoner.py` prompt 构建时检查 `_guardrail_alert`，如有则在活动标题后插入 `⚠️ 护栏告警:` 行
-4. 精准和广泛分流：被拦 item 按 `match_type` 分桶，`EXACT` 走 `task_type=”exact”`，其余走 `task_type=”broad”`
+2. **告警跨轮累积**：`guardrail_alert_history` 按 `campaign_key + retry_instruction` 逐条去重累积（同一指令不重复追加），每轮生成 `cumulative` 快照注入
+3. `_inject_alerts_to_summaries(retry_summaries, cumulative)` 将累计告警文本写入每个 summary 的 `_guardrail_alert` 字段
+4. `reasoner.py` prompt 构建时检查 `_guardrail_alert`，如有则在活动标题后插入 `⚠️ 护栏告警:` 行
+5. 精准和广泛分流：被拦 item 按 `match_type` 分桶，`EXACT` 走 `task_type=”exact”`，其余走 `task_type=”broad”`
+
+跨轮累积效果：R2 触发 P7 → R3 prompt 带 P7；R3 新触发 P8 → R4 prompt 同时带 P7 + P8。纯缺失补答项（从未触发护栏）不注入告警。
 
 ### 低价池阈值（归一化唯一来源）
 
@@ -618,7 +621,7 @@ MCP拉数 → 预过滤 → R1_exact+R1_broad(并行) → R2_exact+R2_broad(并�
 ### 通过/不通过后的后续
 
 - 通过护栏（corrections=0）：进入终态组合分类(§7b)、sanity check、synthesis、预算回算、ERP 落库
-- 被护栏修正（corrections>0）：修正项进入 `warnings_list`（运营可见），同时 `retry_instruction` 注入 R3/R4。R4 后仍违规则以护栏强制修正版为准落库，不再重试
+- 被护栏修正（corrections>0）：修正项进入 `warnings_list`（运营可见），同时 `retry_instruction` 注入 R2/R3/R4。R4 后仍违规则以护栏强制修正版为准落库，不再重试
 
 ## 精准组合确定性升降级
 
@@ -756,7 +759,7 @@ Campaign 引擎维护四类组合语义：
 - `budget_summary` / budget reallocation 相关字段。
 - `skipped_campaigns`：预过滤、未分析、数据不足等。
 - `warnings`：非致命问题。
-- `rounds_detail`：R1/R2/R3 等细节。
+- `rounds_detail`：R1 + 护栏重判轮次等细节。
 - `data_unavailable`：上游数据不可用标记。
 
 `data_unavailable=true` 必须和“业务判断无需调整”区分。前端、定时任务和 ERP 写入门禁都不应把它当作正常 no-op。
@@ -889,7 +892,7 @@ Campaign 分析本身不直接动真实广告。
 
 ## 更新检查清单
 
-- 修改 `campaign.py` 主流程后，同步更新总数据流、投票、护栏和预算段。
+- 修改 `campaign.py` 主流程后，同步更新总数据流、分流、护栏和预算段。
 - 修改 `campaign_fetcher.py` 或 `mcp_mapping.py` 后，同步更新 CampaignData 构造和 MCP 文档。
 - 修改 `campaign_guardrails.py` 后，同步更新护栏段和测试地图。
 - 修改 `campaign_new.py` 后，同步更新新建活动线。

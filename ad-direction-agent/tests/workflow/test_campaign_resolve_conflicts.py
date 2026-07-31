@@ -21,11 +21,12 @@ from app.workflow.steps.campaign import _normalize_action, _resolve_budget_confl
 def _item(name="c1", action="keep", current_budget=1.0, current_bid=0.20,
           proposed_budget=None, proposed_bid=None, days_online=-1,
           days_since_reactivation=-1):
-    """工厂：构造 CampaignAdjustmentItem，默认模拟已淘汰池活动。"""
+    """工厂：构造 CampaignAdjustmentItem，默认模拟已淘汰池活动（低价捡漏组仅限精准 EXACT）。"""
     return CampaignAdjustmentItem(
         campaign_name=name,
         campaign_key=f"{name} x A1",
         action=action,
+        match_type="EXACT",
         current_budget=current_budget,
         current_bid=current_bid,
         proposed_budget=proposed_budget,

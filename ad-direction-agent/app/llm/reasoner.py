@@ -1828,7 +1828,7 @@ class LLMReasoner:
             raw_adjustments = parsed.get("campaign_adjustments", [])
             # cid 回填：用代码持有的 cid_map 把 LLM 回吐的句柄解析回权威结构/现状字段，
             # 无条件覆盖 LLM 任何值（根治 LLM 抄错 campaign_key / 误报 current_*）。
-            # 命中失败（越界/幻觉/重复 cid）→ 丢弃该条 → 该活动按"缺失"处理，由投票层送 R3 复核。
+            # 命中失败（越界/幻觉/重复 cid）→ 丢弃该条 → 该活动按"缺失"处理，由外层护栏补答循环补答。
             adjustments = []
             seen_cids: set[str] = set()
             for adj in raw_adjustments:
