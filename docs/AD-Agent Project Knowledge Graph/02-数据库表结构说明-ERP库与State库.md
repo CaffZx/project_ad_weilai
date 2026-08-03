@@ -909,8 +909,9 @@ CREATE TABLE `t_advert_agent_modify_campaign_pending` (
   `confirm_time` datetime DEFAULT NULL COMMENT '确认时间',
   `reject_reason` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '拒绝原因',
   `execute_status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'PENDING' COMMENT '执行状态',
+  `task_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '异步广告调整MCP返回的taskId；仅终态回写/人工核对用',
   `execute_msg` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '执行结果',
-  `execute_time` datetime DEFAULT NULL COMMENT '执行时间',
+  `execute_time` datetime DEFAULT NULL COMMENT '执行时间（仅 SUCCESS/FAIL 终态写入）',
   `remark` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '备注',
   `create_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '创建人',
   `editor_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改人',
@@ -921,7 +922,8 @@ CREATE TABLE `t_advert_agent_modify_campaign_pending` (
   `version` int DEFAULT NULL COMMENT '版本号',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `idx_camp_pending_card` (`suggest_card_id`) USING BTREE,
-  KEY `idx_camp_pending_decision` (`decision_id`) USING BTREE
+  KEY `idx_camp_pending_decision` (`decision_id`) USING BTREE,
+  KEY `idx_campaign_pending_task_id` (`task_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='分析建议-活动Budget/状态修改'
 ```
 
@@ -1001,8 +1003,9 @@ CREATE TABLE `t_advert_agent_modify_keyword_pending` (
   `confirm_time` datetime DEFAULT NULL COMMENT '确认时间',
   `reject_reason` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '拒绝原因',
   `execute_status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'PENDING' COMMENT '执行状态',
+  `task_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '异步广告调整MCP返回的taskId；否词同步接口保持空',
   `execute_msg` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '执行结果',
-  `execute_time` datetime DEFAULT NULL COMMENT '执行时间',
+  `execute_time` datetime DEFAULT NULL COMMENT '执行时间（仅 SUCCESS/FAIL 终态写入）',
   `remark` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '备注',
   `create_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '创建人',
   `editor_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改人',
@@ -1013,7 +1016,8 @@ CREATE TABLE `t_advert_agent_modify_keyword_pending` (
   `version` int DEFAULT NULL COMMENT '版本号',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `idx_kw_pending_card` (`suggest_card_id`) USING BTREE,
-  KEY `idx_kw_pending_decision` (`decision_id`) USING BTREE
+  KEY `idx_kw_pending_decision` (`decision_id`) USING BTREE,
+  KEY `idx_keyword_pending_task_id` (`task_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='分析建议-关键词修改'
 ```
 
@@ -1088,8 +1092,9 @@ CREATE TABLE `t_advert_agent_modify_placement_pending` (
   `confirm_time` datetime DEFAULT NULL COMMENT '确认时间',
   `reject_reason` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '拒绝原因',
   `execute_status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'PENDING' COMMENT '执行状态',
+  `task_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '异步广告调整MCP返回的taskId',
   `execute_msg` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '执行结果',
-  `execute_time` datetime DEFAULT NULL COMMENT '执行时间',
+  `execute_time` datetime DEFAULT NULL COMMENT '执行时间（仅 SUCCESS/FAIL 终态写入）',
   `remark` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '说明，如「无花费，无数据」',
   `create_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '创建人',
   `editor_by` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '修改人',
@@ -1100,7 +1105,8 @@ CREATE TABLE `t_advert_agent_modify_placement_pending` (
   `version` int DEFAULT NULL COMMENT '版本号',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `idx_plc_pending_card` (`suggest_card_id`) USING BTREE,
-  KEY `idx_plc_pending_decision` (`decision_id`) USING BTREE
+  KEY `idx_plc_pending_decision` (`decision_id`) USING BTREE,
+  KEY `idx_placement_pending_task_id` (`task_id`) USING BTREE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='分析建议-广告位加价修改'
 ```
 
@@ -1573,7 +1579,7 @@ State 写入通常是按 ASIN upsert 或按 ASIN+days upsert。
 | daily budget override | `budget_override` | P3 budget override | P3/Campaign context | 长期配置读取时合并 |
 | Campaign 最新批次 | `t_advert_agent_decision.is_latest` | `repository.py:557` `finalize_batch()` | `/campaign/snapshot`、viewmodel、confirm 门禁 | 同 ASIN 只应一个最新批次 |
 | 用户确认 | card + 三类 pending `confirm_status` | `/campaign/confirm` | `load_confirmed_pending()` | UPDATE 限 `PENDING`，重复确认会 skipped |
-| 执行状态 | 三类 pending `execute_status` | `advert_execution.py` / repository 更新 | viewmodel、执行幂等 | `DRY_RUN` 不等于真实执行 |
+| 执行状态 | 三类 pending `execute_status` + `task_id` | `advert_execution.py` 统一提交/轮询服务 + `task_poll_scheduler.py` | viewmodel、`/decision/execution-status`、执行幂等 | `task_id` 拿到即落库（保持 IN_PROGRESS）；终态由后台 3/6/12/24 分钟轮询按 `(record_kind, pending_id)` 精确回写；`DRY_RUN` 不等于真实执行 |
 | 核心词标签 | `t_advert_agent_core_keyword_label.is_core` + `t_advert_agent_core_keyword_task.status='DONE'` | 离线 `POST /core-keyword/analyze` | Campaign `_analyze_campaigns_impl()` → `item.is_core` → 护栏 P0/P3/P5 + ERP card `is_core` 列 | 任务状态过滤 RUNNING，防读到半截数据；fail-soft |
 
 ## ERP card/pending 关系

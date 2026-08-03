@@ -1432,11 +1432,11 @@ class ErpDualWriterRepository:
         ON DUPLICATE KEY UPDATE
             shop_id=VALUES(shop_id),
             campaign_id=VALUES(campaign_id),
-            old_state=VALUES(old_state),
-            new_state=VALUES(new_state),
-            old_budget=VALUES(old_budget),
-            new_budget=VALUES(new_budget),
-            target_campaign_group_type=VALUES(target_campaign_group_type),
+            old_state=COALESCE(VALUES(old_state), old_state),
+            new_state=COALESCE(VALUES(new_state), new_state),
+            old_budget=COALESCE(VALUES(old_budget), old_budget),
+            new_budget=COALESCE(VALUES(new_budget), new_budget),
+            target_campaign_group_type=COALESCE(VALUES(target_campaign_group_type), target_campaign_group_type),
             submit_user_id=VALUES(submit_user_id),
             submit_user_name=VALUES(submit_user_name),
             update_time=VALUES(update_time)

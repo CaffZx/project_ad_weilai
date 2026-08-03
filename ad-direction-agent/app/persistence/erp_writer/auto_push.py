@@ -66,6 +66,7 @@ def analysis_to_kb_payload(
         "temperature": temperature if temperature is not None else settings.campaign_llm_temperature,
         "total_campaigns": data.get("total_campaigns") or 0,
         "adjustments": adjustments,
+        "campaign_group_targets": data.get("campaign_group_targets") or {},
         "summary": data.get("summary") or {},
         "warnings": data.get("warnings") or [],
         "sanity_check_passed": data.get("sanity_check_passed", True),

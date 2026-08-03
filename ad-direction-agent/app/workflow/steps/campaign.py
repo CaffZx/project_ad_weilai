@@ -771,18 +771,11 @@ async def _analyze_campaigns_impl(
         cid = (item.campaign_id or "").strip()
         item.days_since_reactivation = recent_reactivated.get(cid, -1)
 
-    # 6d. 精准确定性规则（32号）：覆盖 EXACT 单关键词活动的迁组/诊断结果
-    #     在 LLM 结果合并后、护栏前执行；护栏不重算分组。
-    #     §0.1 冻结门禁：未验收前不生成 target_group_type；日快照仍正常积累。
-    if getattr(settings, "exact_transition_enabled", False):
-        _apply_exact_transition_rules(
-            adjustments, unit_by_key, strategy_context,
-            campaign_data, core_keyword_set,
-        )
-
     # 7. 护栏 + R2/R3/R4 重试编排
     #    护栏失败项与 R1 缺失补答项统一进重试循环；告警跨轮累积（retry_instruction 逐条去重）。
     #    送进去没吐出来的 key 一律带入下一轮，R4 后由最终护栏兜底。
+    #    精准确定性规则（32号）不在此处执行——必须等 LLM 全部轮次结束后再补建/覆写，
+    #    否则补建结果会被后续 LLM 重试 replacement 覆盖（spec §0.5）。
     retry_rounds = ((2, "R2"), (3, "R3"), (4, "R4"))
     guardrail_alert_history: dict[str, list[str]] = {}
     guardrail_rounds: dict[str, dict] = {}
@@ -955,15 +948,6 @@ async def _analyze_campaigns_impl(
                 round_label, parent_asin, len(recovered_keys), len(skipped_campaigns),
             )
 
-        # 对本轮补回的 EXACT 活动执行精准确定性规则
-        if newly_appended and getattr(settings, "exact_transition_enabled", False):
-            newly_exact = [a for a in newly_appended if (a.match_type or "").upper() == "EXACT"]
-            if newly_exact:
-                _apply_exact_transition_rules(
-                    newly_exact, unit_by_key, strategy_context,
-                    campaign_data, core_keyword_set,
-                )
-
         # 下轮待补答：本轮送进去但没吐出来的，一律带入下一轮
         unresolved_keys = retry_keys - returned_keys
         if unresolved_keys:
@@ -991,6 +975,35 @@ async def _analyze_campaigns_impl(
         }
 
     rounds_detail["guardrail"] = guardrail_rounds
+
+    # 6d. 精准确定性规则（32号）—— LLM 全部轮次（R1-R4）结束后执行。
+    #     只生成独立迁组补丁，不覆写 LLM 调整字段；补丁不会被 LLM 重试丢失。
+    #     §0.1 冻结门禁：未验收前不生成 target_group_type；日快照仍正常积累。
+    exact_created_keys: set[str] = set()
+    exact_group_targets: dict[str, str] = {}
+    if getattr(settings, "exact_transition_enabled", False):
+        exact_created_keys, exact_group_targets = _apply_exact_transition_rules(
+            adjustments, unit_by_key, strategy_context,
+            campaign_data, core_keyword_set,
+        )
+        # 补建的活动已有确定性 item，从 skipped 中移除，避免前端同时展示"已丢失"与调整项
+        if exact_created_keys:
+            skipped_campaigns = [
+                s for s in skipped_campaigns
+                if (
+                    s.get("campaign_key", "") if isinstance(s, dict)
+                    else getattr(s, "campaign_key", "")
+                ) not in exact_created_keys
+            ]
+            # 补建 item 补齐上下文字段（keyword_class/is_core/自然位 evidence 等），与重试 recovered 后一致
+            _backfill_campaign_adjustment_context(
+                adjustments, unit_by_key, keyword_class_map,
+                _rank_evidence_line, core_keyword_set=core_keyword_set,
+            )
+            _backfill_placement_pcts(adjustments, unit_by_key)
+            for item in adjustments:
+                cid = (item.campaign_id or "").strip()
+                item.days_since_reactivation = recent_reactivated.get(cid, -1)
 
     # 7a. 补答/替换可能打乱 action 顺序，重排
     adjustments.sort(key=lambda x: action_order.get(x.action, 9))
@@ -1162,6 +1175,7 @@ async def _analyze_campaigns_impl(
         site_code=campaign_data.site_code,
         total_campaigns=len(llm_campaigns),
         adjustments=adjustments,
+        campaign_group_targets=exact_group_targets,
         new_campaigns=new_campaigns,
         new_campaigns_warnings=new_campaigns_warnings,
         skipped_campaigns=skipped_campaigns,
@@ -1261,37 +1275,44 @@ def _apply_exact_transition_rules(
     strat_ctx: CampaignStrategyContext,
     campaign_data: CampaignData,
     core_keyword_set: set[str],
-) -> None:
-    """精准确定性规则（32号）：对 EXACT 单关键词活动覆盖迁组/诊断结果。
+) -> tuple[set[str], dict[str, str]]:
+    """精准确定性规则（32号）：生成独立的活动迁组补丁。
 
-    在 LLM 结果合并后、护栏前执行。LLM 的分组结论不消费。
+    基于全部 CampaignUnit（非仅 LLM adjustments）——LLM 未返回的活动同样进入规则，
+    命中迁组时补建纯挪组 item（spec §0.5）。在 LLM 全部轮次和护栏结束后执行。
+
+    返回 (补建 campaign_key 集合, {campaign_id: target_group_type})。
+    迁组补丁不覆盖已有 LLM adjustment；持久化侧按活动合并到 campaign_pending。
     """
     from app.workflow.steps.campaign_exact_transition import evaluate_exact_transition
 
+    created_keys: set[str] = set()
+    group_targets: dict[str, str] = {}
+
     if not strat_ctx.effective_acos_tolerance:
-        return
+        return created_keys, group_targets
 
     shop_id = campaign_data.shop_id or 0
     site_code = campaign_data.site_code or ""
     parent_asin = campaign_data.parent_asin or ""
     if not shop_id or not site_code or not parent_asin:
-        return
+        return created_keys, group_targets
 
     repo = None
     try:
         from app.persistence.erp_writer.repository import _get_repository
         repo = _get_repository()
     except Exception:
-        return
+        return created_keys, group_targets
 
-    for item in adjustments:
-        cu = unit_by_key.get(item.campaign_key)
-        if not cu:
-            continue
+    # 已存在的 adjustment 按 campaign_key 索引；仅判断是否需要补建，不覆写已有项。
+    item_by_key = {item.campaign_key: item for item in adjustments}
+
+    for cu in unit_by_key.values():
         # 只处理单关键词 EXACT
         if cu.match_type != "EXACT" or not cu.keyword_id:
             continue
-        campaign_id = cu.campaign_id or item.campaign_id or ""
+        campaign_id = cu.campaign_id or ""
         if not campaign_id:
             continue
 
@@ -1321,31 +1342,47 @@ def _apply_exact_transition_rules(
             )
             if not decision.triggered:
                 continue
+            # stay_with_adjustment 仅表示继续观察：没有可执行 action，
+            # 既不能补建活动调整卡，也不能覆盖已有的 LLM 调整。
+            if not decision.action:
+                continue
 
-            # 覆写 adjustment
-            item.target_campaign_group_type = decision.target_group_type
-            item.action = decision.action
-            if decision.proposed_budget is not None:
-                item.proposed_budget = decision.proposed_budget
-            if decision.proposed_bid is not None:
-                item.proposed_bid = decision.proposed_bid
-            if decision.proposed_placement:
-                item.placement_adjustments = [decision.proposed_placement]
-            item.review_level = decision.review_level
-            item.triggered_rule = f"EXACT_TRANSITION:{decision.transition_type}"
-            item.reason = "; ".join(decision.evidence)
-            item.evidence = decision.evidence
+            group_targets[campaign_id] = decision.target_group_type
+            created = cu.campaign_key not in item_by_key
+            if created:
+                # LLM 未返回该活动：补建纯迁组卡；不携带规则引擎的预算/Bid/Placement 值。
+                item = CampaignAdjustmentItem(
+                    campaign_name=cu.campaign_name,
+                    campaign_key=cu.campaign_key,
+                    campaign_id=campaign_id,
+                    child_asin=cu.child_asin,
+                    keyword_text=cu.keyword_text,
+                    match_type=cu.match_type,
+                    action="keep",
+                    current_budget=cu.current_budget,
+                    current_bid=cu.current_bid,
+                    perf_7d=cu.perf_7d.model_dump() if cu.perf_7d else {},
+                    triggered_rule=f"EXACT_TRANSITION:{decision.transition_type}",
+                    reason="; ".join(decision.evidence),
+                    evidence=decision.evidence,
+                )
+                adjustments.append(item)
+                item_by_key[cu.campaign_key] = item
+                created_keys.add(cu.campaign_key)
 
             logger.info(
-                "精准规则 [%s] %s: %s → %s (%s)",
+                "精准规则 [%s] %s: %s → %s (%s)%s",
                 parent_asin, cu.keyword_text, cu.current_group_type,
                 decision.target_group_type, decision.transition_type,
+                " [补建]" if created else "",
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "精准规则异常 [%s/%s]: %s", campaign_id, cu.keyword_text, e,
                 exc_info=True,
             )
+
+    return created_keys, group_targets
 
 
 def fill_acos_constraints(

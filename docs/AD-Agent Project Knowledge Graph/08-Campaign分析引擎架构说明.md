@@ -56,7 +56,7 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | API 分析入口 | `app/api/campaign.py:113` `/campaign/analyze`；`:139` `/campaign/viewmodel`；`:265` `_do_analyze()` | 接收前端/API 请求，运行分析，按需写 ERP 并读回 viewmodel |
 | ERP 写入门禁 | `app/api/campaign.py:40` `_maybe_push_erp()` | 判断是否写 ERP，写入后 finalize 最新批次 |
 | 快照读取 | `app/api/campaign.py:235` `/campaign/snapshot` | 读取最新或指定 decision 快照 |
-| 确认/执行 | `campaign.py:426` `/campaign/confirm`；`:511` `/campaign/execute`；`:534` `/campaign/execute-portfolio-budget` | 前端确认、拒绝和真实执行入口 |
+| 确认/执行 | `campaign.py` `/campaign/confirm`（approve 内调统一提交/轮询服务）；`:534` `/campaign/execute-portfolio-budget`；`decision.py` `/decision/immediate-exit`、`/decision/execution-status` | 前端确认、拒绝和真实执行入口（2026-08-03 起 `/campaign/execute` 已删除） |
 | ViewModel 组装 | `app/api/campaign_viewmodel.py:113` `from_db_snapshot()` | ERP 21 表快照转前端结构 |
 | Campaign 主流程 | `workflow/steps/campaign.py:253` `analyze_campaigns()`；`:310` `_analyze_campaigns_impl()` | 主分析编排 |
 | 策略上下文 | `campaign.py:1085` `build_campaign_strategy_context()` | 把前置工作流 long_term/P3 转成 Campaign 背景 |
@@ -833,9 +833,11 @@ Campaign viewmodel 主入口通常走“分析 → 落库 → 读回快照 → v
 | POST | `/campaign/analyze` | 返回老格式 `CampaignAnalysisResult`，用于调试和兼容 |
 | POST | `/campaign/viewmodel` | 主入口：分析/落库/读回 viewmodel |
 | GET | `/campaign/snapshot` | 读取已有 ERP 快照 |
-| POST | `/campaign/confirm` | 确认/拒绝建议，更新 card 和 pending confirm_status |
-| POST | `/campaign/execute` | 执行已确认广告调整，进入 Advert MCP 链路 |
+| POST | `/campaign/confirm` | 确认/拒绝建议；approve 分支先确认再调统一提交/轮询服务 |
+| GET | `/decision/execution-status` | 只读查询 pending 执行状态（task_id/execute_status） |
 | POST | `/campaign/execute-portfolio-budget` | 执行组合预算调整 |
+
+> `POST /campaign/execute` 已于 2026-08-03 删除（生产 0 次访问，spec §6.2）；执行统一入口为 `/campaign/confirm`(approve) 与 `/decision/immediate-exit`。
 
 ## 关键配置
 
@@ -868,8 +870,8 @@ Campaign 分析本身不直接动真实广告。
 执行需要：
 
 1. 分析结果落 ERP。
-2. 前端或 API 确认建议。
-3. `/campaign/execute` 读取 confirmed pending。
+2. 前端或 API 确认建议（`/campaign/confirm` approve 先确认、重载 CONFIRMED pending，再提交；`/decision/immediate-exit` 系统自动确认）。
+3. `advert_execution.py` 统一服务读取 confirmed pending → 原子抢占 → 调异步 MCP 拿 taskId → taskId 落库 → 后台轮询器按 3/6/12/24 分钟轮询终态。
 4. `advert_exec_mapper.py` 构造执行计划。
 5. `advert_execution.py` 检查 `advert_mcp_enabled` 和 `advert_exec_dry_run`。
 6. 调用 Advert MCP。

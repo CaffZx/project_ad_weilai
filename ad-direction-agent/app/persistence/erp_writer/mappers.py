@@ -391,6 +391,11 @@ def canonicalize_payload(
             effective_shop_id = None
 
     adjustments = payload.get("adjustments") or []
+    raw_group_targets = payload.get("campaign_group_targets") or {}
+    campaign_group_targets = (
+        {str(k): str(v) for k, v in raw_group_targets.items() if k and v}
+        if isinstance(raw_group_targets, dict) else {}
+    )
     kw_lookup = _build_keyword_id_lookup(payload)
 
     by_campaign: dict[str, list[tuple[int, dict[str, Any]]]] = {}
@@ -424,7 +429,8 @@ def canonicalize_payload(
         description = primary_adj.get("reason")
         portfolio_label = (primary_adj.get("ai_portfolio_class") or primary_adj.get("portfolio") or "").strip()
         target_campaign_group_type = map_campaign_group_type(
-            (primary_adj.get("target_campaign_group_type") or "").strip()
+            campaign_group_targets.get(campaign_id)
+            or (primary_adj.get("target_campaign_group_type") or "").strip()
         )
         # 卡片展示代码判定出的目标组；没有挪组时仍展示本轮归组，但不据此创建 pending。
         campaign_group_type = target_campaign_group_type or map_campaign_group_type(portfolio_label)

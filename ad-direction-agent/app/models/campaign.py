@@ -301,6 +301,7 @@ class CampaignAnalysisResult(BaseModel):
     run_id: str = ""                                                  # 本次分析唯一 ID (e.g. "20260601T123456Z")，前端 localStorage 隔离用
     total_campaigns: int = 0
     adjustments: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    campaign_group_targets: dict[str, str] = Field(default_factory=dict)
     new_campaigns: list[NewCampaignItem] = Field(default_factory=list)  # KB 16 新增活动建议（独立分析线）
     new_campaigns_warnings: list[str] = Field(default_factory=list)     # 新增线专属 warning（聚合也进 warnings）
     skipped_campaigns: list[dict] = Field(default_factory=list)       # 整批 LLM 失败或未返回，需人工补救

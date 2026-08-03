@@ -9,7 +9,6 @@ import pytest
 from app.config.settings import settings
 from app.models.campaign import (
     CampaignAdjustmentItem,
-    CampaignPerf,
     CampaignStrategyContext,
     CampaignUnit,
 )
@@ -86,17 +85,87 @@ def test_aggregate_pool_grows_with_parent_allowed(parent_allowed_10):
     assert agg["parent"]["budget_pool"] == 150.0          # 140 + 10 允许净增
 
 
-def test_search_volume_and_acos_join():
-    units = [CampaignUnit(
-        campaign_name="camp_main", campaign_key="camp_main", child_asin="B0C1",
-        keyword_text="Main KW", match_type="EXACT", perf_7d=CampaignPerf(acos=22.0),
-    )]
-    agg = aggregate(_adjustments(), units, _ctx(), search_volume_map={"main kw": 1000})
-    camp = next(g for g in agg["groups"] if g["group"] == PORTFOLIO_MAIN)["campaigns"][0]
-    assert camp["search_volume"] == 1000     # join by keyword_text.lower()
-    assert camp["acos"] == 22.0              # 透传 perf_7d.acos
-    agg2 = aggregate(_adjustments(), [], _ctx(), search_volume_map={})
-    assert next(g for g in agg2["groups"] if g["group"] == PORTFOLIO_MAIN)["campaigns"][0]["search_volume"] is None
+def test_aggregate_portfolio_level_fields():
+    # 组合级字段来自 portfolio_data：acos_7d / spend_utilization / daily_spend
+    pf = {
+        PORTFOLIO_MAIN: {"budget": 40.0, "daily_spend": 36.5, "acos_7d": 0.24},
+        PORTFOLIO_TEST: {"budget": 12.0, "daily_spend": 7.8, "acos_7d": 0.30},
+        PORTFOLIO_BROAD: {"budget": 18.0, "daily_spend": None, "acos_7d": None},
+    }
+    agg = aggregate(_adjustments(), [], _ctx(), portfolio_data=pf)
+    assert agg["parent"]["constraint_basis"] == "portfolio"
+    by = {g["group"]: g for g in agg["groups"]}
+    main = by[PORTFOLIO_MAIN]
+    assert main["current_group_budget"] == 40.0
+    assert main["daily_spend"] == 36.5
+    assert main["spend_utilization"] == round(36.5 / 40.0, 2)   # 0.91
+    assert main["acos_7d"] == 0.24
+    assert "campaigns" not in main                              # 活动明细已移除
+    broad = by[PORTFOLIO_BROAD]
+    assert broad["spend_utilization"] is None                   # daily_spend=None 不计算
+    assert broad["acos_7d"] is None
+
+
+def test_aggregate_keeps_net_demand_signals():
+    # group_requested_delta / new_requested_delta 保留（组合级净需求，非活动明细）
+    agg = aggregate(_adjustments(), [], _ctx(140.0))
+    by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_MAIN]["group_requested_delta"] == 20.0
+    assert by[PORTFOLIO_TEST]["group_requested_delta"] == 3.0
+    assert by[PORTFOLIO_BROAD]["group_requested_delta"] == 7.0
+    assert "campaigns" not in by[PORTFOLIO_MAIN]
+
+
+def test_aggregate_priority_context_acos_and_budget_sum_after():
+    # priority_context 透传 target_acos / effective_acos_tolerance；
+    # campaign_budget_sum_after = 挪组后+新增后组内活动预算之和（统计值，恢复旧 campaigns[].proposed 求和）
+    ctx = CampaignStrategyContext(
+        parent_asin="B0TEST", product_level="重点产品 (P1)", season_stage="旺季准备",
+        ad_purposes=["排名型"], ad_directions=["推进自然位"],
+        daily_budget=140.0, daily_budget_source="override",
+        target_acos=25, effective_acos_tolerance=40.0,
+    )
+    agg = aggregate(_adjustments(), [], ctx)
+    pc = agg["parent"]["priority_context"]
+    assert pc["target_acos"] == 25
+    assert pc["effective_acos_tolerance"] == 40.0
+    by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_MAIN]["campaign_budget_sum_after"] == 70.0    # camp_main proposed
+    assert by[PORTFOLIO_TEST]["campaign_budget_sum_after"] == 13.0    # camp_test proposed
+    assert by[PORTFOLIO_BROAD]["campaign_budget_sum_after"] == 27.0   # camp_broad proposed
+    # 淘汰活动不计入任何活跃组
+    assert by[PORTFOLIO_MAIN]["campaign_budget_sum_after"] == 70.0
+
+
+def test_aggregate_group_by_target_priority():
+    # EXACT_TRANSITION 挪组活动按 target_campaign_group_type 归位（主力→测试降级）
+    items = [
+        _adj("camp_main", "Main KW", 50, 55, PORTFOLIO_MAIN),
+        _adj("camp_demote", "Demote KW", 30, 20, PORTFOLIO_MAIN, match="EXACT"),
+        _adj("camp_broad", "Broad KW", 20, 27, PORTFOLIO_BROAD, match="BROAD"),
+    ]
+    items[1].target_campaign_group_type = "exact_testing_group"   # 挪组目标：主力→测试
+    agg = aggregate(items, [], _ctx(140.0))
+    by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_TEST]["campaign_budget_sum_after"] == 20.0   # camp_demote 按挪组目标归测试组
+    assert by[PORTFOLIO_TEST]["group_requested_delta"] == 20.0      # 跨组进入 +20（proposed）
+    assert by[PORTFOLIO_MAIN]["campaign_budget_sum_after"] == 55.0   # 主力组只剩 camp_main
+    assert by[PORTFOLIO_MAIN]["group_requested_delta"] == -25.0      # camp_main +5，camp_demote 离开释放 -30
+
+
+def test_aggregate_cross_group_move_accounting():
+    # 跨组移动（主力 $30→$20 降入测试组）：来源组释放 -current，目标组新增 +proposed
+    items = [_adj("camp_demote", "Demote KW", 30, 20, PORTFOLIO_MAIN, match="EXACT")]
+    items[0].target_campaign_group_type = "exact_testing_group"
+    agg = aggregate(items, [], _ctx())
+    by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_MAIN]["group_requested_delta"] == -30.0   # 活动离开释放 -30
+    assert by[PORTFOLIO_TEST]["group_requested_delta"] == 20.0    # 活动进入新增 +20
+    assert by[PORTFOLIO_MAIN]["campaign_budget_sum_after"] == 0.0
+    assert by[PORTFOLIO_TEST]["campaign_budget_sum_after"] == 20.0
+
+
+
 
 
 def _agent_out(main=90.0, test=25.0, broad=25.0, *, cur_main=84.0, cur_test=28.0, cur_broad=28.0):
@@ -121,6 +190,23 @@ def test_validate_rejects_over_pool():
     agg = aggregate(_adjustments(), [], _ctx(140.0))       # pool=140
     ok, _ = validate(_agent_out(220, 11, 19), agg)         # sum=250 ≫ 140
     assert ok is False                                     # 守恒/父目标硬顶
+
+
+def test_validate_allows_filling_pool_below_parent():
+    # 三组当前之和(70) < pool(100)，填满 pool 正增长 30 超 available_for_increase(0)
+    # 但 ≤ budget_pool → 应放行（只受父目标硬顶约束）
+    pf = {
+        PORTFOLIO_MAIN: {"budget": 30.0},
+        PORTFOLIO_TEST: {"budget": 20.0},
+        PORTFOLIO_BROAD: {"budget": 20.0},
+    }
+    items = [_adj("camp_main", "Main KW", 30, 32, PORTFOLIO_MAIN)]
+    agg = aggregate(items, [], _ctx(100.0), portfolio_data=pf)
+    assert agg["parent"]["budget_pool"] == 100.0
+    assert agg["parent"]["available_for_increase"] == 0.0
+    out = _agent_out(45, 25, 30, cur_main=30.0, cur_test=20.0, cur_broad=20.0)  # sum=100=pool
+    ok, why = validate(out, agg)
+    assert ok, why
 
 
 def test_validate_rejects_low_bid_in_groups():

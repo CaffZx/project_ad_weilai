@@ -13,10 +13,11 @@
 
 ═══ 职责切分 ═══
   - 算术归代码：aggregate() 算占比基线/需求 delta/释放/池（确定性）。
-  - 判断归 LLM：recommend_budget_reallocation 在池内按 §7 调占比 + §3.1A 组内优先级。
+  - 判断归 LLM：recommend_budget_reallocation 在池内按 §7 调占比 + 倾斜方向。
   - 校验+兜底：validate() 守恒(Σproposed ≤ 池) + GROUP-004；不过由调用方回落 build_summary。
 
-字段全部透传，零新增 MCP 查询（acos←perf_7d；search_volume←flow_keywords 透传）。
+组合级输入（current_group_budget / daily_spend / acos_7d / spend_utilization）
+全部来自 portfolio_data（ad_portfolio_list MCP），零新增 MCP 查询。
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from app.models.campaign import (
     NewCampaignItem,
 )
 from app.workflow.steps.campaign_portfolio import (
+    GROUP_CODE_TO_LABEL,
     PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
@@ -58,8 +60,8 @@ def _f(v, default: float = 0.0) -> float:
         return default
 
 
-def _group_of(item: CampaignAdjustmentItem) -> str:
-    """活动归组：已分类用 ai_portfolio_class；空则按 KB23 §3.1 用 item 字段兜底。"""
+def _current_group_of(item: CampaignAdjustmentItem) -> str:
+    """活动当前归属（来源组）：ai_portfolio_class 优先，action/match 兜底。"""
     g = (item.ai_portfolio_class or "").strip()
     if g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE):
         return g
@@ -74,6 +76,19 @@ def _group_of(item: CampaignAdjustmentItem) -> str:
         eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
         return PORTFOLIO_TEST if _f(eff) < 5.0 else PORTFOLIO_MAIN
     return PORTFOLIO_BROAD
+
+
+def _target_group_of(item: CampaignAdjustmentItem) -> str:
+    """挪组目标组（target_campaign_group_type → 中文 label），无目标返回空串。
+
+    挪组目标由 _apply_exact_transition_rules / _reconcile_portfolio_targets 写好（7b 先于 realloc 执行）。
+    """
+    return GROUP_CODE_TO_LABEL.get((item.target_campaign_group_type or "").strip(), "")
+
+
+def _group_of(item: CampaignAdjustmentItem) -> str:
+    """活动最终归组：挪组目标优先，否则当前归属。供淘汰判断/最终归位。"""
+    return _target_group_of(item) or _current_group_of(item)
 
 
 def _group_of_new(nc: NewCampaignItem) -> str:
@@ -97,15 +112,16 @@ def aggregate(
     new_campaigns: list[NewCampaignItem] | None = None,
     portfolio_data: dict[str, dict] | None = None,
 ) -> dict:
-    """预聚合 LLM 输入包。
+    """预聚合 LLM 输入包（组合级视图，不含活动明细）。
 
-    组合预算/花费来源优先级：ad_portfolio_list MCP 真实值 > 父目标×60/20/20 兜底。
-    daily_spend 为日均花费（MCP 已换算），与 current_group_budget（日预算）同口径，
-    供 LLM 直接对比预算消耗率做回算决策。
+    组合预算/花费/ACOS 来源优先级：ad_portfolio_list MCP 真实值 > 父目标×60/20/20 兜底。
+    daily_spend 为日均花费（MCP 已换算），spend_utilization 由代码算好，
+    acos_7d 为组合近 7 天 ACOS（均来自 portfolio_data）。
+    group_requested_delta / new_requested_delta 为组合级净需求信号。
+    all_units / search_volume_map 保留以兼容调用方，不再参与输入。
     新增活动（KB23 §5.1）：current=0 的纯净增需求。
     """
-    sv_map = search_volume_map or {}
-    unit_by_key = {cu.campaign_key: cu for cu in all_units}
+    del all_units, search_volume_map  # 活动明细已不进回算 LLM 输入，签名保留兼容调用方
     parent_target = _f(ctx.daily_budget) if ctx.daily_budget is not None else None
     parent_allowed = _f(settings.campaign_parent_allowed_net_increase)
 
@@ -128,20 +144,28 @@ def aggregate(
             daily_spend = (pf.get(g) or {}).get("daily_spend")
             if daily_spend is not None:
                 daily_spend = _f(daily_spend)
+            acos_7d = (pf.get(g) or {}).get("acos_7d")
             constraint_basis = "portfolio"
         else:
             # MCP 整体失败：父目标 × 占比兜底
             current_group_budget = (round(parent_target * shares[g] / share_sum, 2)
                                     if parent_target else 0.0)
             daily_spend = None
+            acos_7d = None
+        spend_utilization = (
+            round(daily_spend / current_group_budget, 2)
+            if daily_spend is not None and current_group_budget > 0 else None
+        )
         groups[g] = {
             "group": g,
             "current_group_budget": round(current_group_budget, 2),
             "daily_spend": round(daily_spend, 2) if daily_spend is not None else None,
+            "spend_utilization": spend_utilization,
+            "acos_7d": round(acos_7d, 4) if acos_7d is not None else None,
             "constraint_source": constraint_basis if current_group_budget > 0 else "none",
             "group_requested_delta": 0.0,
             "new_requested_delta": 0.0,
-            "campaigns": [],
+            "campaign_budget_sum_after": 0.0,   # 挪组后+新增后组内活动预算之和（统计值）
         }
 
     low_bid_release = 0.0
@@ -150,26 +174,25 @@ def aggregate(
     for item in adjustments:
         cur = _f(item.current_budget)
         action = item.action or ""
-        grp = _group_of(item)
-        if action == _ELIMINATE_ACTION or grp == PORTFOLIO_ELIMINATE:
+        if action == _ELIMINATE_ACTION or _group_of(item) == PORTFOLIO_ELIMINATE:
             if action == _ELIMINATE_ACTION:
                 low_bid_release += max(0.0, cur - _LOW_BID_FIXED)
                 low_bid_moved += 1
             continue
         proposed = _f(item.proposed_budget, cur)
-        gd = groups[grp]
-        gd["group_requested_delta"] += proposed - cur
-        unit = unit_by_key.get(item.campaign_key)
-        gd["campaigns"].append({
-            "campaign_key": item.campaign_key,
-            "keyword_text": item.keyword_text,
-            "current_budget": round(cur, 2),
-            "proposed_budget": round(proposed, 2),
-            "natural_rank": item.natural_rank,
-            "rank_change": item.rank_change,
-            "acos": unit.perf_7d.acos if unit else None,
-            "search_volume": sv_map.get((item.keyword_text or "").strip().lower()),
-        })
+        src = _current_group_of(item)              # 来源组（活动当前归属）
+        dst = _target_group_of(item) or src        # 目标组（挪组目标，默认当前）
+        if src == dst:
+            # 组内调整：净需求 = proposed - current
+            gd = groups[src]
+            gd["group_requested_delta"] += proposed - cur
+            gd["campaign_budget_sum_after"] += proposed
+        else:
+            # 跨组移动：来源组释放 -current，目标组新增 +proposed（两侧都记，避免误当组内降预算）
+            groups[src]["group_requested_delta"] += -cur
+            gd_dst = groups[dst]
+            gd_dst["group_requested_delta"] += proposed
+            gd_dst["campaign_budget_sum_after"] += proposed
 
     for nc in (new_campaigns or []):
         grp = _group_of_new(nc)
@@ -179,21 +202,12 @@ def aggregate(
         gd = groups[grp]
         gd["group_requested_delta"] += proposed
         gd["new_requested_delta"] += proposed
-        gd["campaigns"].append({
-            "campaign_key": nc.campaign_name or nc.keyword_text,
-            "keyword_text": nc.keyword_text,
-            "current_budget": 0.0,
-            "proposed_budget": round(proposed, 2),
-            "natural_rank": None,
-            "rank_change": None,
-            "acos": None,
-            "search_volume": sv_map.get((nc.keyword_text or "").strip().lower()),
-            "is_new": True,
-        })
+        gd["campaign_budget_sum_after"] += proposed
 
     for g in _ACTIVE_GROUPS:
         groups[g]["group_requested_delta"] = round(groups[g]["group_requested_delta"], 2)
         groups[g]["new_requested_delta"] = round(groups[g]["new_requested_delta"], 2)
+        groups[g]["campaign_budget_sum_after"] = round(groups[g]["campaign_budget_sum_after"], 2)
 
     # ★ 3 活跃组全为零（不区分是否含低价捡漏）→ 跳过回算 LLM
     all_active_zero = all(groups[g]["current_group_budget"] <= 0 for g in _ACTIVE_GROUPS)
@@ -217,6 +231,8 @@ def aggregate(
             "priority_context": {
                 "product_level": ctx.product_level,
                 "season_stage": ctx.season_stage,
+                "target_acos": ctx.target_acos,
+                "effective_acos_tolerance": ctx.effective_acos_tolerance,
                 "ad_purposes": purposes,
                 "ad_directions": directions,
                 "is_p0_p1": any(lv in (ctx.product_level or "") for lv in _PRIORITY_LEVELS),
@@ -234,7 +250,11 @@ def aggregate(
 
 
 def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
-    """守恒(Σproposed ≤ budget_pool) + GROUP-004 + 增量约束。"""
+    """守恒(Σproposed ≤ budget_pool) + GROUP-004 + 非负。
+
+    只以 budget_pool 为唯一硬顶：不感知 allowed_net_increase / available_for_increase——
+    三组当前预算之和低于父目标时，补足差额到 pool 是合法的（由父目标未用满部分覆盖）。
+    """
     if not isinstance(agent_out, dict):
         return False, "agent 输出非 dict"
     bg = agent_out.get("budget_groups")
@@ -243,7 +263,6 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
 
     parent = agg.get("parent", {})
     pool = _f(parent.get("budget_pool"))
-    available = _f(parent.get("available_for_increase"))
 
     by_name: dict = {}
     for g in bg:
@@ -254,7 +273,6 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
         by_name[g.get("group")] = g
 
     total = 0.0
-    increase_used = 0.0
     for name in _ACTIVE_GROUPS:
         g = by_name.get(name)
         if g is None:
@@ -266,14 +284,9 @@ def validate(agent_out: dict, agg: dict) -> tuple[bool, str]:
         if v < -_TOL:
             return False, f"{name} proposed_group_budget 为负"
         total += max(0.0, v)
-        # 增量约束：正增长合计不得超过可用额度
-        cur = _f(g.get("current_group_budget"))
-        increase_used += max(0.0, v - cur)
 
     if pool > 0 and total > pool + _TOL:
         return False, f"3 组约束合计 {round(total, 2)} 超 budget_pool {pool}（父目标硬顶）"
-    if available >= 0 and increase_used > available + _TOL:
-        return False, f"正增长合计 {round(increase_used, 2)} 超 available_for_increase {available}"
     return True, ""
 
 

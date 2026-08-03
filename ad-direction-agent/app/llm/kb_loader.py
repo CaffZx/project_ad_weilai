@@ -105,9 +105,11 @@ class KnowledgeBase:
         # Campaign 新增活动: LLM 只判"选哪些词 + keyword_class"。
         #   清仓期禁扩词由上游开关控制(campaign_new_enabled)，不进 prompt。
         "new_campaign":         ["16:1,6", "06", "02:1,2,3,4,5,6", "28:2"],
-        # Campaign 预算回算 agent: KB23 自包含三层回算算法(§5 增量/§6 二次分配/§7 分配方式
-        #   /§3.1A 组内优先级/§9 输出/§10 护栏)。算术由代码预聚合,LLM 只判分配方式+组内排序+解释。
-        "budget_reallocation":  ["23"],
+        # Campaign 预算回算 agent: 只注入分配决策需要的切片。
+        #   §5(字段语义: group_requested_delta / low_bid_retention_release)
+        #   §7(组合预算分配优先级) §3.6(主力组保护) §4.1(核心原则)。
+        #   算术由代码预聚合, LLM 只判分配方式+倾斜方向+解释。
+        "budget_reallocation":  ["23:5,7,3.6,4.1"],
         # 核心词语义判定: KB29 §1-3(判定公式+冲突+语义) + KB28 §2(R1-R4定义)。
         # 不含 KB29 §4-6(数据规则/词池/来源=代码处理)、§7(输出=prompt定义)、§8(数量=代码处理)。
         "semantic_core":        ["29:1,2,3", "28:2"],

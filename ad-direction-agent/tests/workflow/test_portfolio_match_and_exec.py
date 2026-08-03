@@ -14,10 +14,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from app.api import decision as decision_api
-from app.models.campaign import CampaignAdjustmentItem, CampaignPerf, CampaignUnit
+from app.models.campaign import (
+    CampaignAdjustmentItem,
+    CampaignData,
+    CampaignPerf,
+    CampaignStrategyContext,
+    CampaignUnit,
+)
 from app.persistence.erp_writer.advert_exec_mapper import (
     parse_batch_update_terminal,
 )
+from app.persistence.erp_writer.mappers import canonicalize_payload
 from app.workflow.steps import advert_execution as AE
 from app.workflow.steps import campaign as campaign_step
 from app.workflow.steps.campaign_portfolio import (
@@ -1421,3 +1428,244 @@ def test_dry_run_portfolio_query_fails_move_errors_still_returned(
     assert result["ok"] is True
     assert result["dry_run"] is True
     mock_client_cls.assert_not_called()
+
+
+# ── 精准规则补建：LLM 未返回的单关键词 EXACT 仍进入 32 号规则 ──────────────
+
+
+def _exact_unit(campaign_key: str = "exact-missing") -> CampaignUnit:
+    return CampaignUnit(
+        campaign_name="exact-missing",
+        campaign_key=campaign_key,
+        campaign_id="cid-exact-missing",
+        child_asin="B0CHILD",
+        keyword_text="exact missing kw",
+        keyword_id="kid-1",
+        match_type="EXACT",
+        current_budget=8.0,
+        current_bid=0.6,
+        current_portfolio_name="US-精准主力组",
+        current_group_type="exact_core_group",
+        perf_7d=CampaignPerf(orders=0, cost=20.0, clicks=15),
+    )
+
+
+@patch("app.workflow.steps.campaign_exact_transition.evaluate_exact_transition")
+@patch("app.persistence.erp_writer.repository._get_repository")
+def test_exact_transition_builds_pure_move_item_when_llm_missing(
+    mock_repo, mock_evaluate,
+):
+    """LLM 未返回的单关键词 EXACT：命中 32 号规则时补建纯挪组 item（spec §0.5）。"""
+    from app.workflow.steps.campaign_exact_transition import ExactTransitionDecision
+
+    repo = MagicMock()
+    repo.list_campaign_metric_daily.return_value = []
+    repo.get_exact_lifecycle.return_value = None
+    mock_repo.return_value = repo
+
+    mock_evaluate.return_value = ExactTransitionDecision(
+        transition_type="demote_to_testing",
+        target_group_type="exact_testing_group",
+        severity_tier="moderate",
+        proposed_budget=4.0,
+        proposed_bid=0.4,
+        proposed_placement=None,
+        review_level="MANUAL_REVIEW",
+        evidence=["连续 2 个三日周期 ACOS 超容忍上限", "近 7 天无转化"],
+    )
+
+    unit = _exact_unit()
+    adjustments: list[CampaignAdjustmentItem] = []  # LLM 未返回该活动
+    strat_ctx = CampaignStrategyContext(
+        target_acos=25,
+        effective_acos_tolerance=35.0,
+        product_stage="推进期",
+        operating_mode="稳定经营",
+        season_stage="淡季",
+    )
+    campaign_data = CampaignData(parent_asin="B0PARENT", shop_id=1, site_code="Amazon_US")
+
+    created_keys, exact_targets = campaign_step._apply_exact_transition_rules(
+        adjustments, {unit.campaign_key: unit}, strat_ctx, campaign_data, set(),
+    )
+
+    # 补建 key 返回给调用方，用于从 unresolved_keys / skipped_campaigns 排除
+    assert created_keys == {"exact-missing"}
+    assert exact_targets == {"cid-exact-missing": "exact_testing_group"}
+    assert len(adjustments) == 1
+    item = adjustments[0]
+    assert item.campaign_key == "exact-missing"
+    assert item.target_campaign_group_type == ""
+    assert item.action == "keep"
+    assert item.proposed_budget is None
+    assert item.proposed_bid is None
+    assert item.triggered_rule == "EXACT_TRANSITION:demote_to_testing"
+    assert item.review_level == "MANUAL_REVIEW"
+
+
+@patch("app.workflow.steps.campaign_exact_transition.evaluate_exact_transition")
+@patch("app.persistence.erp_writer.repository._get_repository")
+def test_exact_transition_stay_does_not_build_missing_item(
+    mock_repo, mock_evaluate,
+):
+    """stay_with_adjustment 只是标记，不能因 LLM 缺项补建可执行卡。"""
+    from app.workflow.steps.campaign_exact_transition import ExactTransitionDecision
+
+    mock_repo.return_value = MagicMock()
+    mock_evaluate.return_value = ExactTransitionDecision(
+        transition_type="stay_with_adjustment",
+        target_group_type="exact_core_group",
+        severity_tier="mild",
+        review_level="AUTO",
+        evidence=["轻度回落，继续观察"],
+    )
+    unit = _exact_unit()
+    adjustments: list[CampaignAdjustmentItem] = []
+    strat_ctx = CampaignStrategyContext(
+        target_acos=25,
+        effective_acos_tolerance=35.0,
+        product_stage="推进期",
+        operating_mode="稳定经营",
+        season_stage="淡季",
+    )
+    campaign_data = CampaignData(parent_asin="B0PARENT", shop_id=1, site_code="Amazon_US")
+
+    created_keys, exact_targets = campaign_step._apply_exact_transition_rules(
+        adjustments, {unit.campaign_key: unit}, strat_ctx, campaign_data, set(),
+    )
+
+    assert created_keys == set()
+    assert exact_targets == {}
+    assert adjustments == []
+
+
+@patch("app.workflow.steps.campaign_exact_transition.evaluate_exact_transition")
+@patch("app.persistence.erp_writer.repository._get_repository")
+def test_exact_transition_stay_preserves_existing_action(
+    mock_repo, mock_evaluate,
+):
+    """stay_with_adjustment 不得清空已有的真实调整动作。"""
+    from app.workflow.steps.campaign_exact_transition import ExactTransitionDecision
+
+    mock_repo.return_value = MagicMock()
+    mock_evaluate.return_value = ExactTransitionDecision(
+        transition_type="stay_with_adjustment",
+        target_group_type="exact_core_group",
+        severity_tier="mild",
+        review_level="AUTO",
+        evidence=["轻度回落，继续观察"],
+    )
+    unit = _exact_unit()
+    item = CampaignAdjustmentItem(
+        campaign_name=unit.campaign_name,
+        campaign_key=unit.campaign_key,
+        campaign_id=unit.campaign_id,
+        action="adjust_bid",
+        current_bid=unit.current_bid,
+        proposed_bid=0.5,
+        reason="LLM 认为应小幅降 bid",
+        evidence=["LLM evidence"],
+    )
+    strat_ctx = CampaignStrategyContext(
+        target_acos=25,
+        effective_acos_tolerance=35.0,
+        product_stage="推进期",
+        operating_mode="稳定经营",
+        season_stage="淡季",
+    )
+    campaign_data = CampaignData(parent_asin="B0PARENT", shop_id=1, site_code="Amazon_US")
+
+    campaign_step._apply_exact_transition_rules(
+        [item], {unit.campaign_key: unit}, strat_ctx, campaign_data, set(),
+    )
+
+    assert item.action == "adjust_bid"
+    assert item.proposed_bid == 0.5
+    assert item.reason == "LLM 认为应小幅降 bid"
+
+
+@patch("app.workflow.steps.campaign_exact_transition.evaluate_exact_transition")
+@patch("app.persistence.erp_writer.repository._get_repository")
+def test_exact_transition_only_returns_target_for_existing_llm_item(
+    mock_repo, mock_evaluate,
+):
+    """Exact 迁组不得改写已有 LLM 调整字段。"""
+    from app.workflow.steps.campaign_exact_transition import ExactTransitionDecision
+
+    mock_repo.return_value = MagicMock()
+    mock_evaluate.return_value = ExactTransitionDecision(
+        transition_type="demote_to_testing",
+        target_group_type="exact_testing_group",
+        proposed_budget=4.0,
+        proposed_bid=0.4,
+        review_level="MANUAL_REVIEW",
+        evidence=["Exact evidence"],
+    )
+    unit = _exact_unit()
+    item = CampaignAdjustmentItem(
+        campaign_name=unit.campaign_name,
+        campaign_key=unit.campaign_key,
+        campaign_id=unit.campaign_id,
+        action="adjust_bid",
+        current_bid=unit.current_bid,
+        proposed_bid=0.5,
+        triggered_rule="LLM_BID_RULE",
+        reason="LLM reason",
+        evidence=["LLM evidence"],
+        review_level="AUTO",
+    )
+    strat_ctx = CampaignStrategyContext(
+        target_acos=25, effective_acos_tolerance=35.0,
+        product_stage="推进期", operating_mode="稳定经营", season_stage="淡季",
+    )
+    campaign_data = CampaignData(parent_asin="B0PARENT", shop_id=1, site_code="Amazon_US")
+
+    created_keys, exact_targets = campaign_step._apply_exact_transition_rules(
+        [item], {unit.campaign_key: unit}, strat_ctx, campaign_data, set(),
+    )
+
+    assert created_keys == set()
+    assert exact_targets == {unit.campaign_id: "exact_testing_group"}
+    assert item.target_campaign_group_type == ""
+    assert item.action == "adjust_bid"
+    assert item.proposed_bid == 0.5
+    assert item.triggered_rule == "LLM_BID_RULE"
+    assert item.reason == "LLM reason"
+    assert item.evidence == ["LLM evidence"]
+    assert item.review_level == "AUTO"
+
+
+def test_canonicalize_merges_exact_target_into_llm_campaign_pending():
+    """Exact 迁组目标写同一 Pending，不覆盖 LLM 卡及预算调整。"""
+    run = canonicalize_payload({
+        "experiment_id": "20260803T120000Z",
+        "parent_asin": "B0PARENT",
+        "shop_id": 1,
+        "site_code": "Amazon_US",
+        "adjustments": [{
+            "campaign_id": "cid-1",
+            "campaign_name": "llm-campaign",
+            "campaign_key": "llm-key",
+            "child_asin": "B0CHILD",
+            "keyword_text": "exact kw",
+            "match_type": "EXACT",
+            "action": "adjust_budget",
+            "triggered_rule": "LLM_BUDGET_RULE",
+            "reason": "LLM budget reason",
+            "evidence": ["LLM budget evidence"],
+            "current_budget": 10.0,
+            "proposed_budget": 12.0,
+        }],
+        "campaign_group_targets": {"cid-1": "exact_testing_group"},
+    })
+
+    assert len(run.cards) == 1
+    card = run.cards[0]
+    assert card.trigger_rule == "LLM_BUDGET_RULE"
+    assert card.description == "LLM budget reason"
+    assert card.campaign_group_type == "exact_testing_group"
+    assert len(card.campaign_pending) == 1
+    pending = card.campaign_pending[0]
+    assert str(pending.old_budget) == "10.0"
+    assert str(pending.new_budget) == "12.0"
+    assert pending.target_campaign_group_type == "exact_testing_group"

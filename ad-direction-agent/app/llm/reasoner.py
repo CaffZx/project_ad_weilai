@@ -581,7 +581,7 @@ def _build_semantic_core_prompt() -> str:
 
 # ── Campaign 预算回算 Agent Prompt（KB23）────────────────────────────────────
 
-_BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下方知识库（KB23 广告组合与预算分配规则），对 3 个活跃组合（精准主力组 / 精准测试组 / 自动广泛组）的预算约束值做二次分配。
+_BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下方知识库（KB23 广告组合与预算分配规则），把父目标预算合理分配到 3 个活跃组合（精准主力组 / 精准测试组 / 自动广泛组）。
 
 重要：输出中文，JSON key 用英文。这里分配的是**组合层预算约束值**（控制层 cap），不是组内活动预算之和。
 
@@ -590,28 +590,30 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
 
 ## 输入说明（数值已由代码算好，禁止重算）
 - `parent`：
+  - `parent_target_daily_budget` = 父目标日预算
   - `budget_pool` = 父目标 + 允许净增（**绝对硬顶**，3 组 proposed 之和不得超此值）
-  - `available_for_increase` = 淘汰释放 + 允许净增（**增量额度**，本轮正增长合计不得超此值）
-  - `low_bid_retention_release`、`priority_context`（产品定位/淡旺季/是否含 ranking 推词）
-- `groups[]`：
+  - `available_for_increase` = 淘汰释放 + 允许净增（**参考增量额度，非硬约束**）
+  - `low_bid_retention_release` = 本轮淘汰活动在活动层释放的预算
+  - `priority_context` = 目标ACOS/有效容忍上限/产品定位/淡旺季/广告目的/广告方向（判断倾斜的依据）
+- `groups[]`（每个活跃组合一条）：
   - `current_group_budget` = 该组合在 Amazon 的**真实当前预算**（来自 portfolio MCP；若为 0 则该组之前不存在，可从 0 起建）
-  - `daily_spend` = 该组合**日均花费**（与 current_group_budget 同口径，可直接计算消耗率/利用率）。**None 表示 MCP 未返回花费数据**，此时不适用 KB23 §3.6 的花费判定、不计算组合利用率。
+  - `daily_spend` = 该组合**日均花费**（已按 7 天平均换算，无需再除）。**None 表示 MCP 未返回花费数据**，此时不计算组合利用率
+  - `spend_utilization` = 组合利用率 = daily_spend / current_group_budget（**判断"花完没"的核心信号**；current_group_budget=0 时为 null）
+  - `acos_7d` = 该组合近 7 天 ACOS（表现好坏；None 表示无数据）
   - `group_requested_delta` = 组内活动**想加/减多少**（净需求信号，不是绝对预算）
-  - `new_requested_delta` = 其中来自本轮**新建活动**的需求（current=0 全是净增）
-  - `campaigns[]`：组内活动明细（natural_rank/rank_change/acos/search_volume，供 §3.1A 组内优先级判断）
-  - **新建活动权衡（KB §3.1B）**：`new_requested_delta` 大不代表必须把该组预算加到满——不得为新活动稀释推词预算。
-- `low_bid_group`：低价捡漏组，固定 $1、不参与分配。
+  - `new_requested_delta` = 其中来自本轮**新建活动**的需求（current=0 全是净增）；不得为新活动稀释推词预算
+  - `campaign_budget_sum_after` = 本轮挪组+新增后，该组合内活动预算之和（统计值，可对比 `current_group_budget` 判断瓶颈：活动之和接近或超过组合预算 → 组合预算可能是瓶颈，加组合预算才有效）
+- `low_bid_group`：低价捡漏组，固定 $1、不参与分配（代码已处理，不要出现在输出中）。
 
 ## 你的任务
 1. 起点 = 各组 `current_group_budget`（真实 portfolio 预算）。
 2. 各组 `proposed_group_budget` = current + 你的调整量。
-3. 正调整量合计 ≤ `available_for_increase`（淘汰释放 + 允许净增）。
-4. 按 KB §7 决定倾斜方向（数据健康→稳定；P0/P1/ranking/旺季→向主力组倾斜），结合 §3.1A 自然流量优先级。
+3. **优先给"花完且表现好"的组合加预算**：利用率高（`spend_utilization` 接近或超过 1）且 ACOS 达标（`acos_7d` 在目标内）的组合该加就加。
+4. 按 KB §7 决定倾斜方向（数据健康→稳定；P0/P1/ranking/旺季→向主力组倾斜）。
 5. 每组在 `reason` 里用运营可读中文说明为什么这么分。
 
 ## 硬性约束（违反将被拒绝回落规则引擎）
 - 3 组 `proposed_group_budget` 之和 ≤ `budget_pool`（父目标硬顶）
-- 本轮正增长合计（Σ max(0, proposed - current)）≤ `available_for_increase`
 - 各组 `proposed_group_budget` ≥ 0
 - **低价捡漏组不得出现在 budget_groups 里**（KB GROUP-004）
 
