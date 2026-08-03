@@ -377,369 +377,6 @@ def _terminal_snapshot() -> dict:
     }
 
 
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_without_erp_task_id_stays_in_progress(
-    mock_client_cls,
-    mock_repo,
-):
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = []
-    mock_repo.return_value = repo
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result == {
-        "ok": True,
-        "decision_id": "dec-1",
-        "execute_status": "IN_PROGRESS",
-        "task_ids": [],
-        "campaign_statuses": {},
-    }
-    repo.read_snapshot.assert_not_called()
-    repo.update_campaign_terminal_status.assert_not_called()
-    mock_client_cls.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_updates_each_campaign_and_only_pools_success(
-    mock_client_cls,
-    mock_repo,
-):
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = _terminal_snapshot()
-    mock_repo.return_value = repo
-    client = MagicMock()
-    client.batch_update_result = AsyncMock(return_value=[{
-        "result": {
-            "detailVoList": [{
-                "campaignResList": [
-                    {
-                        "campaignId": "camp-success",
-                        "updateCampaignState": "success",
-                    },
-                    {
-                        "campaignId": "camp-fail",
-                        "updateCampaignState": "fail",
-                        "errorMsg": "修改失败",
-                    },
-                ],
-            }],
-        },
-    }])
-    client.aclose = AsyncMock()
-    mock_client_cls.return_value = client
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result == {
-        "ok": True,
-        "decision_id": "dec-1",
-        "execute_status": "FAIL",
-        "task_ids": ["task-1"],
-        "campaign_statuses": {
-            "camp-success": "SUCCESS",
-            "camp-fail": "FAIL",
-            "camp-wait": "IN_PROGRESS",
-        },
-    }
-    repo.update_campaign_terminal_status.assert_called_once_with(
-        "dec-1",
-        {
-            "camp-success": "SUCCESS",
-            "camp-fail": "FAIL",
-            "camp-wait": "IN_PROGRESS",
-        },
-        operator="42",
-        message_by_campaign={"camp-fail": "修改失败"},
-    )
-    repo.upsert_pool_entry.assert_called_once()
-    assert repo.upsert_pool_entry.call_args.kwargs["campaign_id"] == "camp-success"
-    client.batch_update_result.assert_awaited_once_with(["task-1"])
-    client.aclose.assert_awaited_once()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_not_found_retries_persisted_success_pool(
-    mock_client_cls,
-    mock_repo,
-):
-    snapshot = _terminal_snapshot()
-    snapshot["campaign_pending"][0]["execute_status"] = "SUCCESS"
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = snapshot
-    mock_repo.return_value = repo
-    client = MagicMock()
-    client.batch_update_result = AsyncMock(
-        return_value={"errorMsg": "未找到相关记录"}
-    )
-    client.aclose = AsyncMock()
-    mock_client_cls.return_value = client
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result["execute_status"] == "IN_PROGRESS"
-    assert result["campaign_statuses"] == {
-        "camp-success": "SUCCESS",
-        "camp-fail": "IN_PROGRESS",
-        "camp-wait": "IN_PROGRESS",
-    }
-    repo.upsert_pool_entry.assert_called_once()
-    assert repo.upsert_pool_entry.call_args.kwargs["campaign_id"] == "camp-success"
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_rejects_non_immediate_exit_decision(
-    mock_client_cls,
-    mock_repo,
-):
-    snapshot = _terminal_snapshot()
-    snapshot["decision"]["operating_mode"] = "STABLE_OPERATION"
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "STABLE_OPERATION",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = snapshot
-    mock_repo.return_value = repo
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result == {
-        "ok": False,
-        "decision_id": "dec-1",
-        "execute_status": "IN_PROGRESS",
-        "task_ids": [],
-        "campaign_statuses": {},
-        "error": "该批次不是立即退出决策，拒绝查询并回写",
-    }
-    mock_client_cls.assert_not_called()
-    repo.list_execution_task_ids.assert_not_called()
-    repo.read_snapshot.assert_not_called()
-    repo.update_campaign_terminal_status.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_rejects_non_immediate_before_task_id_lookup(
-    mock_client_cls,
-    mock_repo,
-):
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "STABLE_OPERATION",
-    }
-    mock_repo.return_value = repo
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result["ok"] is False
-    assert "不是立即退出决策" in result["error"]
-    repo.list_execution_task_ids.assert_not_called()
-    repo.read_snapshot.assert_not_called()
-    mock_client_cls.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_rejects_non_latest_immediate_exit(
-    mock_client_cls,
-    mock_repo,
-):
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-old",
-        "is_latest": 0,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    mock_repo.return_value = repo
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-old",
-        operator="42",
-    ))
-
-    assert result == {
-        "ok": False,
-        "decision_id": "dec-old",
-        "execute_status": "IN_PROGRESS",
-        "task_ids": [],
-        "campaign_statuses": {},
-        "error": "该立即退出批次已不是最新批次，拒绝查询并回写",
-    }
-    repo.list_execution_task_ids.assert_not_called()
-    repo.read_snapshot.assert_not_called()
-    mock_client_cls.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_existing_fail_blocks_later_success_pool(
-    mock_client_cls,
-    mock_repo,
-):
-    snapshot = _terminal_snapshot()
-    snapshot["campaign_pending"][0]["execute_status"] = "FAIL"
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = snapshot
-    mock_repo.return_value = repo
-    client = MagicMock()
-    client.batch_update_result = AsyncMock(return_value=[{
-        "result": {
-            "detailVoList": [{
-                "campaignResList": [{
-                    "campaignId": "camp-success",
-                    "updateCampaignState": "success",
-                }],
-            }],
-        },
-    }])
-    client.aclose = AsyncMock()
-    mock_client_cls.return_value = client
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result["execute_status"] == "FAIL"
-    assert result["campaign_statuses"]["camp-success"] == "FAIL"
-    repo.upsert_pool_entry.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_all_adjust_success_without_pool_write(
-    mock_client_cls,
-    mock_repo,
-):
-    snapshot = _terminal_snapshot()
-    snapshot["cards"] = [snapshot["cards"][2]]
-    snapshot["campaign_pending"] = [snapshot["campaign_pending"][2]]
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = snapshot
-    mock_repo.return_value = repo
-    client = MagicMock()
-    client.batch_update_result = AsyncMock(return_value=[{
-        "result": {
-            "detailVoList": [{
-                "campaignResList": [{
-                    "campaignId": "camp-wait",
-                    "updateCampaignState": "success",
-                }],
-            }],
-        },
-    }])
-    client.aclose = AsyncMock()
-    mock_client_cls.return_value = client
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result["execute_status"] == "SUCCESS"
-    assert result["campaign_statuses"] == {"camp-wait": "SUCCESS"}
-    repo.upsert_pool_entry.assert_not_called()
-
-
-@patch.object(AE, "_get_repository")
-@patch.object(AE, "AdvertMcpClient")
-def test_poll_execution_result_stops_when_latest_changes_during_mcp(
-    mock_client_cls,
-    mock_repo,
-):
-    snapshot = _terminal_snapshot()
-    repo = MagicMock()
-    repo.get_decision_basic.return_value = {
-        "id": "dec-1",
-        "is_latest": 1,
-        "operating_mode": "IMMEDIATE_EXIT",
-    }
-    repo.list_execution_task_ids.return_value = ["task-1"]
-    repo.read_snapshot.return_value = snapshot
-    repo.update_campaign_terminal_status.return_value = False
-    mock_repo.return_value = repo
-    client = MagicMock()
-    client.batch_update_result = AsyncMock(return_value=[{
-        "result": {
-            "detailVoList": [{
-                "campaignResList": [{
-                    "campaignId": "camp-success",
-                    "updateCampaignState": "success",
-                }],
-            }],
-        },
-    }])
-    client.aclose = AsyncMock()
-    mock_client_cls.return_value = client
-
-    result = asyncio.run(AE.poll_execution_result(
-        "dec-1",
-        operator="42",
-    ))
-
-    assert result["ok"] is False
-    assert result["execute_status"] == "IN_PROGRESS"
-    assert "不再是最新批次" in result["error"]
-    repo.upsert_pool_entry.assert_not_called()
-
-
-# ═══════════════════════════════════════════════════════════════
-# _match_portfolio
-# ═══════════════════════════════════════════════════════════════
-
 def _pf(name: str) -> dict:
     return {"name": name, "portfolioId": f"id-{name}"}
 
@@ -1362,6 +999,7 @@ def _immediate_exit_pending() -> dict:
     }
 
 
+@patch("app.workflow.steps.advert_execution.get_scheduler")
 @patch.object(AE, "_sync_pool_entries_from_exec")
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
@@ -1371,14 +1009,18 @@ def test_immediate_exit_submit_marks_in_progress_only_with_task_id(
     mock_client_cls,
     mock_repo,
     mock_sync_pool,
+    mock_scheduler,
 ):
+    """提交成功+taskId → task_id 落库（保持 IN_PROGRESS）+ 入队轮询，不写终态。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = False
     mock_settings.campaign_negative_keyword_exec_enabled = False
+    mock_scheduler.return_value.capacity_available = True
     repo = MagicMock()
     repo.load_confirmed_pending.return_value = _immediate_exit_pending()
     repo.insert_advert_record.return_value = "record-1"
     repo.claim_pending_for_execution.return_value = 2
+    repo.write_pending_task_id.return_value = 2
     mock_repo.return_value = repo
     client = MagicMock()
     client.async_batch_update = AsyncMock(return_value={
@@ -1393,7 +1035,6 @@ def test_immediate_exit_submit_marks_in_progress_only_with_task_id(
         "dec-immediate",
         operator="operator-1",
         resolved_portfolio_ids={"low_bid_retention_group": "pf-1"},
-        wait_for_terminal=True,
     ))
 
     repo.load_confirmed_pending.assert_called_once_with("dec-immediate")
@@ -1404,13 +1045,15 @@ def test_immediate_exit_submit_marks_in_progress_only_with_task_id(
     assert result["ok"] is True
     assert result["task_ids"] == ["task-1"]
     assert result["execute_status"] == "IN_PROGRESS"
-    assert {
-        op["execute_status"] for op in repo.update_pending_execute_status.call_args.args[0]
-    } == {"IN_PROGRESS"}
-    mock_sync_pool.assert_not_called()
+    # taskId 落库，但不写终态
+    repo.write_pending_task_id.assert_called_once()
+    repo.write_pending_terminal.assert_not_called()
+    mock_scheduler.return_value.enqueue.assert_called_once()
+    mock_sync_pool.assert_called_once()
     repo.upsert_pool_entry.assert_not_called()
 
 
+@patch("app.workflow.steps.advert_execution.get_scheduler")
 @patch.object(AE, "_sync_pool_entries_from_exec")
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
@@ -1420,15 +1063,18 @@ def test_immediate_exit_submit_accepts_task_id_only_envelope(
     mock_client_cls,
     mock_repo,
     mock_sync_pool,
+    mock_scheduler,
 ):
     """真实异步工具可仅返回 taskId；taskId 本身就是成功提交凭证。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = False
     mock_settings.campaign_negative_keyword_exec_enabled = False
+    mock_scheduler.return_value.capacity_available = True
     repo = MagicMock()
     repo.load_confirmed_pending.return_value = _immediate_exit_pending()
     repo.insert_advert_record.return_value = "record-1"
     repo.claim_pending_for_execution.return_value = 2
+    repo.write_pending_task_id.return_value = 2
     mock_repo.return_value = repo
     client = MagicMock()
     client.async_batch_update = AsyncMock(return_value={"taskId": "task-1"})
@@ -1440,13 +1086,14 @@ def test_immediate_exit_submit_accepts_task_id_only_envelope(
         "dec-immediate",
         operator="operator-1",
         resolved_portfolio_ids={},
-        wait_for_terminal=True,
     ))
 
     assert result["ok"] is True
     assert result["task_ids"] == ["task-1"]
     assert result["execute_status"] == "IN_PROGRESS"
-    mock_sync_pool.assert_not_called()
+    repo.write_pending_task_id.assert_called_once()
+    mock_scheduler.return_value.enqueue.assert_called_once()
+    mock_sync_pool.assert_called_once()
 
 
 @patch.object(AE, "_get_repository")
@@ -1469,21 +1116,16 @@ def test_immediate_exit_submit_claim_lost_does_not_call_mcp(
         "dec-immediate",
         operator="operator-1",
         resolved_portfolio_ids={},
-        wait_for_terminal=True,
     ))
 
     mock_client_cls.assert_not_called()
-    assert result == {
-        "ok": True,
-        "already_claimed": True,
-        "task_ids": [],
-        "execute_status": "IN_PROGRESS",
-        "ops": 2,
-        "warnings": [],
-        "move_errors": [],
-    }
+    assert result["ok"] is True
+    assert result["already_claimed"] is True
+    assert result["execute_status"] == "IN_PROGRESS"
+    assert result["ops"] == 2
 
 
+@patch("app.workflow.steps.advert_execution.get_scheduler")
 @patch.object(AE, "_sync_pool_entries_from_exec")
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
@@ -1493,14 +1135,17 @@ def test_immediate_exit_submit_close_error_does_not_hide_task_id(
     mock_client_cls,
     mock_repo,
     mock_sync_pool,
+    mock_scheduler,
 ):
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = False
     mock_settings.campaign_negative_keyword_exec_enabled = False
+    mock_scheduler.return_value.capacity_available = True
     repo = MagicMock()
     repo.load_confirmed_pending.return_value = _immediate_exit_pending()
     repo.insert_advert_record.return_value = "record-1"
     repo.claim_pending_for_execution.return_value = 2
+    repo.write_pending_task_id.return_value = 2
     mock_repo.return_value = repo
     client = MagicMock()
     client.async_batch_update = AsyncMock(return_value={"taskId": "task-1"})
@@ -1512,13 +1157,137 @@ def test_immediate_exit_submit_close_error_does_not_hide_task_id(
         "dec-immediate",
         operator="operator-1",
         resolved_portfolio_ids={},
-        wait_for_terminal=True,
     ))
 
     assert result["ok"] is True
     assert result["task_ids"] == ["task-1"]
+    repo.write_pending_task_id.assert_called_once()
+    mock_sync_pool.assert_called_once()
+
+
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_sync_negative_keyword_plan_returns_terminal_without_task_id(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+):
+    """否词工具是同步 MCP：成功即终态，不要求 taskId 或创建轮询任务。"""
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = True
+    repo = MagicMock()
+    repo.insert_advert_record.return_value = "record-1"
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.create_negative_keywords = AsyncMock(return_value={"state": "success"})
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+    plan = _FakePlan(
+        negative_calls=[{"campaignVoList": [{"campaignId": "cid-1"}]}],
+        ops=[{
+            "record_kind": "keyword", "pending_id": "kp-1",
+            "campaign_id": "cid-1", "is_negative": True,
+        }],
+    )
+    pending = {"decision": {"shop_id": 1, "parent_asin": "B0X", "parent_seller_sku": "SKU"}}
+
+    result = asyncio.run(AE.submit_and_poll("dec-1", pending, plan, operator="op"))
+
+    assert result["ok"] is True
+    assert result["execute_status"] == "SUCCESS"
+    assert result["task_ids"] == []
+    client.async_batch_update.assert_not_called()
+    repo.claim_pending_for_execution.assert_not_called()
+    repo.write_pending_task_id.assert_not_called()
     repo.update_pending_execute_status.assert_called_once()
-    mock_sync_pool.assert_not_called()
+
+
+@patch.object(AE, "submit_and_poll", new_callable=AsyncMock)
+@patch.object(AE, "asyncio_to_thread_confirm", new_callable=AsyncMock)
+@patch.object(AE, "build_exec_plan")
+@patch.object(AE, "_get_repository")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_direct_submit_confirms_before_loading_selected_confirmed_pending(
+    mock_settings,
+    mock_repo,
+    mock_build_plan,
+    mock_confirm,
+    mock_submit,
+):
+    """同意所选必须先确认，再只加载该范围内已确认且待执行的 pending。"""
+    mock_settings.advert_mcp_enabled = True
+    mock_settings.advert_exec_dry_run = False
+    events: list[tuple[str, dict]] = []
+    repo = MagicMock()
+    repo.load_pending_by_card_ids.side_effect = lambda *args, **kwargs: (
+        events.append(("load", kwargs)) or {"decision": {}}
+    )
+    mock_repo.return_value = repo
+    plan = MagicMock()
+    plan.is_empty.return_value = False
+    mock_build_plan.side_effect = lambda *_args, **_kwargs: (
+        events.append(("build", {})) or plan
+    )
+
+    async def _confirm(*_args, **_kwargs):
+        events.append(("confirm", {}))
+        return {"ok": True, "applied": 1, "skipped": 0}
+
+    async def _submit(*_args, **_kwargs):
+        events.append(("submit", {}))
+        return {"ok": True, "execute_status": "IN_PROGRESS", "task_ids": ["task-1"]}
+
+    mock_confirm.side_effect = _confirm
+    mock_submit.side_effect = _submit
+
+    result = asyncio.run(AE.submit_execution_direct("dec-1", ["card-1"], operator="op"))
+
+    assert result["ok"] is True
+    assert [event[0] for event in events] == ["confirm", "load", "build", "submit"]
+    assert events[1][1] == {"confirmed_only": True}
+
+
+@patch("app.workflow.steps.advert_execution.get_scheduler")
+@patch.object(AE, "_sync_pool_entries_from_exec")
+@patch.object(AE, "_get_repository")
+@patch.object(AE, "AdvertMcpClient")
+@patch("app.workflow.steps.advert_execution.settings")
+def test_duplicate_async_pending_target_is_claimed_and_submitted_once(
+    mock_settings,
+    mock_client_cls,
+    mock_repo,
+    mock_sync_pool,
+    mock_scheduler,
+):
+    """重复 ExecPlan 操作应按唯一 pending 目标判断抢占，而不是误报已抢占。"""
+    mock_settings.advert_exec_dry_run = False
+    mock_settings.campaign_negative_keyword_exec_enabled = False
+    mock_scheduler.return_value.reserve.return_value = True
+    mock_scheduler.return_value.enqueue.return_value = True
+    repo = MagicMock()
+    repo.insert_advert_record.return_value = "record-1"
+    repo.claim_pending_for_execution.return_value = 1
+    repo.write_pending_task_id.return_value = 1
+    mock_repo.return_value = repo
+    client = MagicMock()
+    client.async_batch_update = AsyncMock(return_value={"taskId": "task-1"})
+    client.aclose = AsyncMock()
+    mock_client_cls.return_value = client
+    op = {"record_kind": "keyword", "pending_id": "kp-1", "campaign_id": "cid-1"}
+    plan = _FakePlan(
+        params_vo_list=[{"campaignVoList": [{"campaignId": "cid-1"}]}],
+        ops=[op, dict(op)],
+    )
+    pending = {"decision": {"shop_id": 1, "parent_asin": "B0X", "parent_seller_sku": "SKU"}}
+
+    result = asyncio.run(AE.submit_and_poll("dec-1", pending, plan, operator="op"))
+
+    assert result["ok"] is True
+    assert result["task_ids"] == ["task-1"]
+    repo.claim_pending_for_execution.assert_called_once_with(plan.ops, operator="op")
+    repo.write_pending_task_id.assert_called_once_with(plan.ops, "task-1")
+    client.async_batch_update.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
@@ -1529,7 +1298,6 @@ def test_immediate_exit_submit_close_error_does_not_hide_task_id(
         (None, RuntimeError("MCP boom"), "MCP boom"),
     ],
 )
-@patch.object(AE, "_sync_pool_entries_from_exec")
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
 @patch("app.workflow.steps.advert_execution.settings")
@@ -1537,11 +1305,11 @@ def test_immediate_exit_submit_failure_marks_fail(
     mock_settings,
     mock_client_cls,
     mock_repo,
-    mock_sync_pool,
     response,
     side_effect,
     expected_error,
 ):
+    """任何未拿到有效 taskId 的提交都是提交阶段终态失败（spec §5.1 第6点）。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = False
     mock_settings.campaign_negative_keyword_exec_enabled = False
@@ -1563,60 +1331,45 @@ def test_immediate_exit_submit_failure_marks_fail(
         "dec-immediate",
         operator="operator-1",
         resolved_portfolio_ids={},
-        wait_for_terminal=True,
     ))
 
     assert result["ok"] is False
     assert result["execute_status"] == "FAIL"
-    assert expected_error in result["error"]
-    ops = repo.update_pending_execute_status.call_args.args[0]
-    assert {op["execute_status"] for op in ops} == {"FAIL"}
-    assert all(expected_error in op["error_msg"] for op in ops)
-    mock_sync_pool.assert_not_called()
+    # 提交结果未知 → 显式写 FAIL（write_pending_submit_failed，区别于轮询耗尽）
+    repo.write_pending_submit_failed.assert_called_once()
+    call_kwargs = repo.write_pending_submit_failed.call_args
+    assert call_kwargs[0][0]  # ops 非空
+    assert "未获得 taskId" in call_kwargs[0][1]
 
 
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
 @patch("app.workflow.steps.advert_execution.settings")
 def test_dry_run_returns_move_errors(mock_settings, mock_client_cls, mock_repo):
-    """dry_run 时 portfolio 不存在 → 返回 move_errors。"""
+    """dry_run 只构造计划：不抢占、不调 MCP、不入队（spec §5.1 第1条）。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = True
 
-    # repo
     repo = MagicMock()
     repo.load_confirmed_pending.return_value = _pending_with_group("exact_testing_group")
     repo.insert_advert_record.return_value = "rec-1"
     mock_repo.return_value = repo
 
-    # MCP client → portfolio 列表里没有精准测试组
-    mock_client = MagicMock()
-    mock_client.query_portfolio_list = AsyncMock(return_value=[
-        {"name": "US-产品-精准主力组", "portfolioId": "111"},
-    ])
-    mock_client.aclose = AsyncMock()
-    mock_client_cls.return_value = mock_client
-
     result = asyncio.run(AE.submit_execution("dec-1", operator="op"))
 
     assert result["ok"] is True
     assert result["dry_run"] is True
-    assert len(result["move_errors"]) == 1
-    assert result["move_errors"][0]["group"] == "精准测试组"
-    assert result["move_errors"][0]["reason"] == "不存在"
-    # 确认调了 query_portfolio_list（读）但没调写工具
-    mock_client.query_portfolio_list.assert_awaited_once()
-    mock_client.async_batch_update.assert_not_called()
-    mock_client.create_portfolio_campaign.assert_not_called()
-    mock_client.create_negative_keywords.assert_not_called()
-    mock_client.aclose.assert_awaited_once()
+    # 不抢占、不调 MCP、不写 task_id
+    repo.claim_pending_for_execution.assert_not_called()
+    mock_client_cls.assert_not_called()
+    repo.write_pending_task_id.assert_not_called()
 
 
 @patch.object(AE, "_get_repository")
 @patch.object(AE, "AdvertMcpClient")
 @patch("app.workflow.steps.advert_execution.settings")
 def test_dry_run_matching_success_no_move_errors(mock_settings, mock_client_cls, mock_repo):
-    """dry_run 时 portfolio 唯一命中 → 无 move_errors。"""
+    """dry_run 不调 MCP，自然无 move_errors。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = True
 
@@ -1625,18 +1378,12 @@ def test_dry_run_matching_success_no_move_errors(mock_settings, mock_client_cls,
     repo.insert_advert_record.return_value = "rec-2"
     mock_repo.return_value = repo
 
-    mock_client = MagicMock()
-    mock_client.query_portfolio_list = AsyncMock(return_value=[
-        {"name": "US-产品-精准主力组", "portfolioId": "111"},
-    ])
-    mock_client.aclose = AsyncMock()
-    mock_client_cls.return_value = mock_client
-
     result = asyncio.run(AE.submit_execution("dec-1", operator="op"))
 
     assert result["ok"] is True
     assert result["dry_run"] is True
     assert len(result["move_errors"]) == 0
+    mock_client_cls.assert_not_called()
 
 
 @patch.object(AE, "_get_repository")
@@ -1660,7 +1407,7 @@ def test_dry_run_disabled_no_portfolio_query(mock_settings, mock_client_cls, moc
 def test_dry_run_portfolio_query_fails_move_errors_still_returned(
     mock_settings, mock_client_cls, mock_repo,
 ):
-    """portfolio 查询抛异常 → fail-open，dry_run 仍正常返回（warnings 记错）。"""
+    """dry_run 不调 MCP：portfolio 查询异常不触发（spec §5.1 第1条）。"""
     mock_settings.advert_mcp_enabled = True
     mock_settings.advert_exec_dry_run = True
 
@@ -1669,14 +1416,8 @@ def test_dry_run_portfolio_query_fails_move_errors_still_returned(
     repo.insert_advert_record.return_value = "rec-3"
     mock_repo.return_value = repo
 
-    mock_client = MagicMock()
-    mock_client.query_portfolio_list = AsyncMock(side_effect=RuntimeError("MCP boom"))
-    mock_client.aclose = AsyncMock()
-    mock_client_cls.return_value = mock_client
-
     result = asyncio.run(AE.submit_execution("dec-1", operator="op"))
 
     assert result["ok"] is True
     assert result["dry_run"] is True
-    assert any("MCP boom" in w or "组合解析失败" in w for w in result["warnings"])
-    mock_client.aclose.assert_awaited_once()
+    mock_client_cls.assert_not_called()

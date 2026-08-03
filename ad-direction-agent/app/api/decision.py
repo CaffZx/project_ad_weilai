@@ -35,7 +35,6 @@ from app.persistence.erp_writer.models import (
 )
 from app.persistence.state_factory import get_state_manager
 from app.workflow.steps.advert_execution import (
-    poll_execution_result,
     submit_execution,
 )
 from app.workflow.steps.portfolio_execution import (
@@ -916,14 +915,13 @@ async def _run_immediate_exit(
         resolved_portfolio_ids=_immediate_exit_portfolio_ids(
             low_bid_portfolio
         ),
-        wait_for_terminal=True,
     )
     return _immediate_exit_execution_response(decision_id, execution)
 
 
 @router.post("/decision/immediate-exit")
 async def immediate_exit(req: dict):
-    """保存后的“立即退出”确定性入口：不调用 LLM，提交后等待终态查询。"""
+    """保存后的“立即退出”确定性入口：不调用 LLM，提交后由后台轮询器处理终态。"""
     state = get_state_manager()
     asin, identity, long_term = _validate_immediate_exit_request(
         req,
@@ -937,19 +935,27 @@ async def immediate_exit(req: dict):
     )
 
 
-@router.post("/decision/immediate-exit/status")
-async def immediate_exit_status(req: dict):
-    """查询立即退出广告执行终态，不发起任何分析或新执行。"""
-    decision_id = str(req.get("decision_id") or "").strip()
-    operator = str(
-        req.get("_userId") or req.get("userId") or ""
-    ).strip()
+@router.get("/decision/execution-status")
+async def execution_status(decision_id: str = ""):
+    """只读查询 pending 执行状态（spec §6.2 替换旧 /decision/immediate-exit/status）。
+
+    只聚合三张 pending 表的 task_id/execute_status/execute_msg/execute_time，
+    不调用 MCP、不写数据库，不驱动执行；前端刷新展示用。
+    """
+    decision_id = str(decision_id or "").strip()
     if not decision_id:
-        return {"ok": False, "error": "decision_id 必填"}
-    return await poll_execution_result(
-        decision_id,
-        operator=operator or "system",
-    )
+        return {"ok": False, "error": "decision_id 必填", "rows": []}
+    try:
+        from app.persistence.erp_writer.repository import _get_repository
+        rows = _get_repository().list_pending_execution_status(decision_id)
+        statuses = {str(r.get("execute_status") or "PENDING").upper() for r in rows}
+        aggregate = "FAIL" if "FAIL" in statuses else (
+            "IN_PROGRESS" if statuses and statuses != {"SUCCESS"} else "SUCCESS"
+        )
+        return {"ok": True, "decision_id": decision_id, "aggregate": aggregate, "rows": rows}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("execution-status 查询失败 [%s]: %s", decision_id, e)
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "rows": []}
 
 
 # ── GET /decision/context ────────────────────────────────────────────────

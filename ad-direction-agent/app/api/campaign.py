@@ -641,29 +641,8 @@ async def campaign_confirm(req: CampaignConfirmRequest):
 
 
 # ── 广告调整真实执行（Part 6）─────────────────────────────────────────────
-
-
-@router.post("/campaign/execute")
-async def campaign_execute(req: dict):
-    """执行已确认(CONFIRMED)的广告调整 → 调广告调整 MCP（dry-run 默认空跑）。
-
-    门禁与 confirm 一致：批次必须无进行中分析事件（state 库）。幂等由
-    load_confirmed_pending 只取 execute_status=PENDING 保证。
-    """
-    decision_id = str(req.get("decision_id") or req.get("run_id") or "").strip()
-    asin = str(req.get("asin") or "").strip()
-    operator = str(req.get("operator") or req.get("_userId") or "").strip() or "tab5"
-    if not decision_id:
-        return {"ok": False, "error": "decision_id 必填"}
-    try:
-        sess = get_state_manager().get_analysis_session(asin) if asin else None
-        if sess and sess.get("run_id"):
-            return {"ok": False, "error": "存在进行中分析事件，执行权已冻结"}
-        from app.workflow.steps.advert_execution import submit_execution
-        return await submit_execution(decision_id, operator=operator)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("Campaign execute 失败 [%s] decision_id=%s: %s", asin, decision_id, e)
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+# /campaign/execute 已于 2026-08-03 删除：历史端点 0 次访问（spec §6.2），
+# 统一执行入口为 /campaign/confirm(approve) 与 /decision/immediate-exit。
 
 
 @router.post("/campaign/execute-portfolio-budget")

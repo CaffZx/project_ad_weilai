@@ -2430,9 +2430,8 @@ async function confirmStrategy() {
       );
       await refreshDecisionContext();
       await loadAll(true);
-      if (exitResult.execute_status === 'IN_PROGRESS') {
-        startImmediateExitStatusPolling(exitResult.decision_id);
-      }
+      // 终态由后台调度器轮询 MCP 并回写 pending；前端不再驱动结果 MCP（spec §6.1 第4条）。
+      // 如需持续展示，可低频只读 /decision/execution-status。
       return;
     }
     const tact = await loadTactics();
@@ -3507,32 +3506,6 @@ function showReasonPopup(el) {
     </div></div>`;
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   document.body.appendChild(overlay);
-}
-
-async function startImmediateExitStatusPolling(decisionId) {
-  for (let attempt = 0; attempt < 12; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    let result;
-    try {
-      result = await callAPI('/decision/immediate-exit/status', { decision_id: decisionId });
-    } catch (e) {
-      console.warn('立即退出终态查询失败', e);
-      return;
-    }
-    if (!result.ok) {
-      showToast(result.error || '立即退出执行状态查询失败', 'error', 5000);
-      return;
-    }
-    await window._mountCampaignBatch({ decision_id: decisionId, executable: false });
-    if (result.execute_status === 'SUCCESS') {
-      showToast('立即退出广告调整已执行完成', 'success', 5000);
-      return;
-    }
-    if (result.execute_status === 'FAIL') {
-      showToast(result.error || '立即退出广告调整执行失败', 'error', 5000);
-      return;
-    }
-  }
 }
 
 function showImmediateExitConfirm() {

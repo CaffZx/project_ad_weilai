@@ -204,20 +204,26 @@ def test_immediate_exit_save_starts_deterministic_flow_before_loading_tactics():
     assert "callAPI('/decision/immediate-exit'" in exit_branch
     assert "await refreshDecisionContext();" in exit_branch
     assert "await loadAll(true);" in exit_branch
-    assert "startImmediateExitStatusPolling" in exit_branch
+    # 前端不得驱动结果 MCP：旧 5s×12 轮询已删除（spec §6.1 第4条 / §6.2）
+    assert "startImmediateExitStatusPolling" not in exit_branch
+    assert "immediate-exit/status" not in exit_branch
     assert "await onCancelEventClick({ skipConfirm: true });" not in exit_branch
     assert "await loadTactics()" not in exit_branch
 
 
-def test_immediate_exit_status_polling_is_bounded_and_snapshot_only():
+def test_immediate_exit_status_polling_removed_and_replaced_by_readonly_endpoint():
+    """前端旧 5s×12 轮询必须删除；终态展示走只读 /decision/execution-status。"""
     demo = Path(__file__).parents[2] / "demo" / "ad-asisitant-agent.html"
     source = demo.read_text(encoding="utf-8")
-    start = source.index("async function startImmediateExitStatusPolling(decisionId)")
-    polling = source[start:source.index("\n\nfunction showImmediateExitConfirm", start)]
-
-    assert "attempt < 12" in polling
-    assert "/decision/immediate-exit/status" in polling
-    assert "executable: false" in polling
+    assert "startImmediateExitStatusPolling" not in source
+    assert "/decision/immediate-exit/status" not in source
+    # 只读状态接口存在（后端决策 API）
+    from app.api import decision as decision_api
+    assert any(
+        getattr(route, "path", "") == "/decision/execution-status"
+        and "GET" in (getattr(route, "methods", set()) or set())
+        for route in decision_api.router.routes
+    )
 
 
 def test_campaign_guard_blocks_unsaved_strategy_fields():
@@ -824,36 +830,6 @@ def test_immediate_exit_route_is_registered():
     )
 
 
-def test_immediate_exit_status_route_validates_and_delegates():
-    with patch.object(
-        decision_api,
-        "poll_execution_result",
-        new=AsyncMock(return_value={
-            "ok": True,
-            "decision_id": "dec-1",
-            "execute_status": "SUCCESS",
-        }),
-        create=True,
-    ) as poll:
-        result = asyncio.run(decision_api.immediate_exit_status({
-            "decision_id": " dec-1 ",
-            "_userId": " operator ",
-        }))
-
-    assert result["execute_status"] == "SUCCESS"
-    poll.assert_awaited_once_with("dec-1", operator="operator")
-
-    missing = asyncio.run(decision_api.immediate_exit_status({}))
-    assert missing == {"ok": False, "error": "decision_id 必填"}
-
-
-def test_immediate_exit_status_route_is_registered():
-    assert any(
-        getattr(route, "path", "")
-        == "/decision/immediate-exit/status"
-        and "POST" in (getattr(route, "methods", set()) or set())
-        for route in decision_api.router.routes
-    )
 
 
 @pytest.mark.parametrize(
@@ -1066,7 +1042,6 @@ def test_run_immediate_exit_resume_requeries_portfolio_without_refetch():
         decision_id,
         operator="operator",
         resolved_portfolio_ids={"low_bid_retention_group": "pf-1"},
-        wait_for_terminal=True,
     )
     assert result["execute_status"] == "IN_PROGRESS"
 

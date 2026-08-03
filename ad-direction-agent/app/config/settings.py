@@ -231,6 +231,11 @@ class Settings(BaseSettings):
     advert_mcp_timeout: float = 120.0          # 单次工具调用超时（秒）
     advert_mcp_enabled: bool = False           # 总开关：关则 /campaign/execute 直接拒绝
     advert_exec_dry_run: bool = True           # 空跑：构造 payload + 落 advert_record(DRY_RUN)，不真调 MCP
+    # 轮询调度器（每 Web 进程独立）：
+    #   协程消费者数 × 队列容量 = 单进程已受理上限；多进程部署时全局上限 = 进程数 × 单进程值。
+    #   4 进程 × (2 协程 + 20 队列) = 全局最多 8 并发结果查询、80 个已受理轮询任务。
+    advert_task_poll_workers: int = 2          # 每进程轮询协程消费者数（非 Uvicorn 进程数）
+    advert_task_poll_queue_capacity: int = 20  # 每进程轮询队列容量（超过则拒绝提交）
     campaign_sanity_enabled: bool = True                 # Sanity check（分析后校验）
     campaign_synthesis_enabled: bool = False             # 汇总合成 LLM
     campaign_negative_keyword_exec_enabled: bool = True   # 否词执行开关

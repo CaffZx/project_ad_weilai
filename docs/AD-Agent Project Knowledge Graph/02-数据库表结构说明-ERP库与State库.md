@@ -374,7 +374,7 @@ CREATE TABLE `t_advert_agent_ai_suggest` (
 CREATE TABLE `t_advert_agent_core_keyword_label` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `task_id` varchar(32) NOT NULL,
-  `parent_asin` varchar(20) NOT NULL,
+  `parent_asin` varchar(50) NOT NULL,
   `parent_seller_sku` varchar(128) NOT NULL,
   `shop_id` bigint NOT NULL,
   `keyword_text` varchar(512) NOT NULL,
@@ -403,7 +403,7 @@ CREATE TABLE `t_advert_agent_core_keyword_label` (
 ```sql
 CREATE TABLE `t_advert_agent_core_keyword_task` (
   `id` varchar(32) NOT NULL,
-  `parent_asin` varchar(20) NOT NULL,
+  `parent_asin` varchar(50) NOT NULL,
   `parent_seller_sku` varchar(128) NOT NULL,
   `shop_id` bigint NOT NULL,
   `site_code` varchar(10) DEFAULT NULL,
@@ -457,7 +457,7 @@ CREATE TABLE `t_advert_agent_core_keyword_tracking` (
 ```sql
 CREATE TABLE `t_advert_agent_core_keyword_state` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `parent_asin` varchar(20) NOT NULL,
+  `parent_asin` varchar(50) NOT NULL,
   `parent_seller_sku` varchar(128) NOT NULL,
   `shop_id` bigint NOT NULL,
   `keyword_text` varchar(512) NOT NULL,

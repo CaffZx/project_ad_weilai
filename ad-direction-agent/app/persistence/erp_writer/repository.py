@@ -10,6 +10,8 @@ from typing import Any, TYPE_CHECKING
 import pymysql
 from pymysql.cursors import DictCursor
 
+from app.workflow.steps.task_poll_scheduler import POLL_EXHAUSTED_MSG
+
 from app.config.settings import settings
 from app.core.core_keyword_policy import (
     normalize_core_keyword,
@@ -501,10 +503,17 @@ class ErpDualWriterRepository:
         finally:
             conn.close()
 
-    def load_pending_by_card_ids(self, decision_id: str, card_ids: list[str]) -> dict | None:
-        """按 card_id 拉 cards + pending（不要求 confirm_status='CONFIRMED'）。
+    def load_pending_by_card_ids(
+        self,
+        decision_id: str,
+        card_ids: list[str],
+        *,
+        confirmed_only: bool = False,
+    ) -> dict | None:
+        """按 card_id 读取卡片和仍待执行的 pending。
 
-        供"合并审核+执行"流程：前端选中即跑，不写任何 confirm_status / record。
+        ``confirmed_only`` 用于“同意所选”在确认成功后的第二次读取，
+        防止未确认/已拒绝卡片混入本次执行计划。
         """
         if not card_ids:
             return None
@@ -520,12 +529,14 @@ class ErpDualWriterRepository:
                 if not decision:
                     return None
                 ph = ",".join(["%s"]*len(card_ids))
+                card_confirm_filter = " AND confirm_status='CONFIRMED'" if confirmed_only else ""
+                pending_confirm_filter = " AND confirm_status='CONFIRMED'" if confirmed_only else ""
                 cur.execute(
                     "SELECT id, campaign_id, campaign_name, suggest_category, "
                     "campaign_group_type, keyword_match_type, asin, keyword, "
                     "perf_json, trigger_rule "
                     f"FROM t_advert_agent_modify_suggest_card "
-                    f"WHERE decision_id=%s AND id IN ({ph})",
+                    f"WHERE decision_id=%s AND id IN ({ph}){card_confirm_filter}",
                     (decision_id, *card_ids),
                 )
                 cards = cur.fetchall() or []
@@ -537,7 +548,8 @@ class ErpDualWriterRepository:
                 ):
                     cur.execute(
                         f"SELECT * FROM {table} WHERE decision_id=%s "
-                        f"AND suggest_card_id IN ({ph}) AND execute_status='PENDING'",
+                        f"AND suggest_card_id IN ({ph}) AND execute_status='PENDING'"
+                        f"{pending_confirm_filter}",
                         (decision_id, *card_ids),
                     )
                     rows[key] = cur.fetchall() or []
@@ -581,31 +593,6 @@ class ErpDualWriterRepository:
         return 0
 
 
-    def list_execution_task_ids(self, decision_id: str) -> list[str]:
-        """只读 ERP 执行记录中的 taskId，按创建顺序去重。"""
-        conn = self._connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT task_id FROM t_advert_agent_modify_advert_record "
-                    "WHERE decision_id=%s AND task_id IS NOT NULL "
-                    "AND task_id<>'' ORDER BY create_time",
-                    (decision_id,),
-                )
-                rows = cur.fetchall() or []
-        finally:
-            conn.close()
-
-        task_ids: list[str] = []
-        seen: set[str] = set()
-        for row in rows:
-            task_id = str((row or {}).get("task_id") or "").strip()
-            if task_id and task_id not in seen:
-                seen.add(task_id)
-                task_ids.append(task_id)
-        return task_ids
-
-
     def insert_portfolio_records(
         self, record_id: str, ops: list[dict], operator: str, *,
         shop_id: int = 0, parent_asin: str = "", parent_seller_sku: str = "",
@@ -617,7 +604,11 @@ class ErpDualWriterRepository:
     def update_pending_execute_status(
         self, ops: list[dict], status: str, *, operator: str = "", msg: str = "",
     ) -> None:
-        """按 ops 的 pending_id 回写各 pending 表 execute_status / execute_msg / execute_time。"""
+        """按 ops 的 pending_id 回写各 pending 表 execute_status / execute_msg / execute_time。
+
+        终态语义（spec 2026-08-03 §3）：IN_PROGRESS/DRY_RUN/PENDING 不写 execute_time；
+        只有 SUCCESS/FAIL 等终态才写。
+        """
         by_table = {
             "campaign": "t_advert_agent_modify_campaign_pending",
             "keyword": "t_advert_agent_modify_keyword_pending",
@@ -634,114 +625,198 @@ class ErpDualWriterRepository:
                         continue
                     st = op.get("execute_status") or status
                     em = op.get("error_msg") or msg or None
-                    cur.execute(
-                        f"UPDATE {table} SET execute_status=%s, execute_msg=%s, "
-                        "execute_time=%s, update_time=%s WHERE id=%s",
-                        (st, em, now, now, pid),
-                    )
+                    is_terminal = str(st).upper() not in {"IN_PROGRESS", "PENDING", "DRY_RUN"}
+                    if is_terminal:
+                        cur.execute(
+                            f"UPDATE {table} SET execute_status=%s, execute_msg=%s, "
+                            "execute_time=%s, update_time=%s WHERE id=%s",
+                            (st, em, now, now, pid),
+                        )
+                    else:
+                        cur.execute(
+                            f"UPDATE {table} SET execute_status=%s, execute_msg=%s, "
+                            "update_time=%s WHERE id=%s",
+                            (st, em, now, pid),
+                        )
             conn.commit()
         finally:
             conn.close()
 
-    def update_campaign_terminal_status(
-        self,
-        decision_id: str,
-        campaign_statuses: dict[str, str],
-        *,
-        operator: str,
-        message_by_campaign: dict[str, str] | None = None,
-    ) -> bool:
-        """在 latest 行锁内回写 pending/card；批次已过期则不写并返回 False。"""
-        valid_statuses = {"SUCCESS", "FAIL", "IN_PROGRESS"}
-        normalized = {
-            str(campaign_id).strip(): str(status).strip().upper()
-            for campaign_id, status in campaign_statuses.items()
-            if str(campaign_id).strip()
-            and str(status).strip().upper() in valid_statuses
+    @staticmethod
+    def _exact_pending_targets(ops: list[dict]) -> list[tuple[str, str]]:
+        """Return unique pending rows or fail before any partial write."""
+        by_table = {
+            "campaign": "t_advert_agent_modify_campaign_pending",
+            "keyword": "t_advert_agent_modify_keyword_pending",
+            "placement": "t_advert_agent_modify_placement_pending",
         }
-        if not normalized:
-            return True
+        targets: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for op in ops:
+            table = by_table.get(op.get("record_kind"))
+            pending_id = str(op.get("pending_id") or "").strip()
+            if not table or not pending_id:
+                raise ValueError("async pending operation missing record_kind or pending_id")
+            key = (table, pending_id)
+            if key not in seen:
+                seen.add(key)
+                targets.append(key)
+        if not targets:
+            raise ValueError("no exact async pending targets")
+        return targets
 
-        messages = message_by_campaign or {}
-        tables = (
-            "t_advert_agent_modify_campaign_pending",
-            "t_advert_agent_modify_keyword_pending",
-            "t_advert_agent_modify_placement_pending",
-        )
+    def write_pending_task_id(
+        self, ops: list[dict], task_id: str,
+    ) -> int:
+        """taskId 落库：只写 task_id，不修改 execute_status（保持 IN_PROGRESS）与 execute_time。
+
+        spec §2：异步 MCP 返回有效 taskId 后立即写入精确 pending 行，作为轮询依据和重启后人工审计信息。
+        """
+        targets = self._exact_pending_targets(ops)
         conn = self._connect()
         now = datetime.now()
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT is_latest, operating_mode "
-                    "FROM t_advert_agent_decision "
-                    "WHERE id=%s FOR UPDATE",
-                    (decision_id,),
-                )
-                decision = cur.fetchone() or {}
-                if (
-                    decision.get("is_latest") not in {1, True, "1"}
-                    or str(
-                        decision.get("operating_mode") or ""
-                    ).strip() not in {"IMMEDIATE_EXIT", "立即退出"}
-                ):
-                    conn.rollback()
-                    return False
-
-                for campaign_id, status in normalized.items():
-                    message = str(
-                        messages.get(campaign_id) or ""
-                    ).strip() or None
-                    for table in tables:
-                        cur.execute(
-                            f"UPDATE {table} SET execute_status=%s, "
-                            "execute_msg=%s, "
-                            "execute_time=CASE WHEN %s IN ('SUCCESS','FAIL') "
-                            "THEN %s ELSE execute_time END, update_time=%s "
-                            "WHERE decision_id=%s AND campaign_id=%s "
-                            "AND execute_status IN ('PENDING','IN_PROGRESS')",
-                            (
-                                status, message, status, now, now,
-                                decision_id, campaign_id,
-                            ),
-                        )
-
-                by_card: dict[str, list[str]] = {}
-                for table in tables:
+                for table, pending_id in targets:
                     cur.execute(
-                        f"SELECT suggest_card_id, execute_status FROM {table} "
-                        "WHERE decision_id=%s",
+                        f"UPDATE {table} SET task_id=%s, update_time=%s "
+                        "WHERE id=%s AND execute_status='IN_PROGRESS'",
+                        (task_id, now, pending_id),
+                    )
+                    if int(cur.rowcount or 0) != 1:
+                        raise RuntimeError(
+                            f"task_id bind target missing or not IN_PROGRESS: {table}/{pending_id}"
+                        )
+            conn.commit()
+            return len(targets)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def write_pending_submit_failed(
+        self, ops: list[dict], msg: str, task_id: str = "",
+    ) -> None:
+        """提交阶段终态失败：所有关联 pending 行直接写 FAIL + 未知提交结果文案。
+
+        spec §5.1 第6点：任何未拿到有效 taskId 的提交（MCP 错误/超时/无法解析/空 taskId）
+        都是提交阶段终态失败。与轮询耗尽（exhausted）和平台明确失败语义分离。
+        """
+        targets = self._exact_pending_targets(ops)
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                for table, pending_id in targets:
+                    cur.execute(
+                        f"UPDATE {table} SET execute_status='FAIL', execute_msg=%s, "
+                        "task_id=%s, execute_time=%s, update_time=%s "
+                        "WHERE id=%s AND execute_status='IN_PROGRESS'",
+                        (msg, task_id or None, now, now, pending_id),
+                    )
+                    if int(cur.rowcount or 0) != 1:
+                        raise RuntimeError(
+                            f"submit-failed target missing or not IN_PROGRESS: {table}/{pending_id}"
+                        )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_pending_execution_status(self, decision_id: str) -> list[dict]:
+        """只读聚合三张 pending 表的执行状态（前端展示用，不驱动任何执行）。
+
+        返回行带 table/record_kind/pending_id/campaign_id/suggest_card_id/
+        task_id/execute_status/execute_msg/execute_time。
+        """
+        tables = (
+            ("campaign", "t_advert_agent_modify_campaign_pending"),
+            ("keyword", "t_advert_agent_modify_keyword_pending"),
+            ("placement", "t_advert_agent_modify_placement_pending"),
+        )
+        out: list[dict] = []
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                for record_kind, table in tables:
+                    cur.execute(
+                        f"SELECT id, campaign_id, suggest_card_id, task_id, "
+                        "execute_status, execute_msg, execute_time "
+                        f"FROM {table} WHERE decision_id=%s",
                         (decision_id,),
                     )
                     for row in cur.fetchall() or []:
-                        card_id = str(
-                            (row or {}).get("suggest_card_id") or ""
-                        ).strip()
-                        if not card_id:
-                            continue
-                        by_card.setdefault(card_id, []).append(
-                            str(
-                                (row or {}).get("execute_status") or "PENDING"
-                            ).strip().upper()
-                        )
+                        out.append({
+                            "record_kind": record_kind,
+                            "pending_id": str(row.get("id") or ""),
+                            "campaign_id": str(row.get("campaign_id") or ""),
+                            "suggest_card_id": str(row.get("suggest_card_id") or ""),
+                            "task_id": str(row.get("task_id") or ""),
+                            "execute_status": str(row.get("execute_status") or ""),
+                            "execute_msg": row.get("execute_msg"),
+                            "execute_time": row.get("execute_time"),
+                        })
+        finally:
+            conn.close()
+        return out
 
-                for card_id, statuses in by_card.items():
-                    if "FAIL" in statuses:
-                        card_status = "FAIL"
-                    elif "IN_PROGRESS" in statuses:
-                        card_status = "IN_PROGRESS"
-                    elif statuses and set(statuses) == {"SUCCESS"}:
-                        card_status = "SUCCESS"
+    def write_pending_terminal(
+        self,
+        ops: list[dict],
+        task_id: str,
+        campaign_statuses: dict[str, str],
+        message_by_campaign: dict[str, str] | None = None,
+        *,
+        exhausted: bool = False,
+        operator: str = "",
+    ) -> None:
+        """按 (record_kind, pending_id) 精确回写异步任务的终态。
+
+        spec §5.3：先以任务结果的 campaign_id 找到本次内存操作列表，再以每个操作的
+        (record_kind, pending_id) 更新对应表中的一行；不使用 decision_id+campaign_id 批量更新。
+        """
+        by_table = {
+            "campaign": "t_advert_agent_modify_campaign_pending",
+            "keyword": "t_advert_agent_modify_keyword_pending",
+            "placement": "t_advert_agent_modify_placement_pending",
+        }
+        targets = self._exact_pending_targets(ops)
+        campaign_by_target: dict[tuple[str, str], str] = {}
+        for op in ops:
+            table = by_table.get(op.get("record_kind"))
+            pending_id = str(op.get("pending_id") or "").strip()
+            if table and pending_id:
+                campaign_by_target.setdefault(
+                    (table, pending_id), str(op.get("campaign_id") or "").strip(),
+                )
+        messages = message_by_campaign or {}
+        conn = self._connect()
+        now = datetime.now()
+        try:
+            with conn.cursor() as cur:
+                for table, pid in targets:
+                    campaign_id = campaign_by_target.get((table, pid), "")
+                    st = str(campaign_statuses.get(campaign_id) or "").upper()
+                    if st in {"SUCCESS", "FAIL"}:
+                        em = messages.get(campaign_id) or (
+                            POLL_EXHAUSTED_MSG.format(task_id=task_id) if exhausted else None
+                        )
                     else:
-                        card_status = "PENDING"
+                        # 任务结果未覆盖该行：轮询耗尽视为 FAIL，其余保持 IN_PROGRESS 等下一次
+                        if exhausted:
+                            st, em = "FAIL", POLL_EXHAUSTED_MSG.format(task_id=task_id)
+                        else:
+                            continue
                     cur.execute(
-                        "UPDATE t_advert_agent_modify_suggest_card "
-                        "SET execute_status=%s, update_time=%s "
-                        "WHERE id=%s AND decision_id=%s",
-                        (card_status, now, card_id, decision_id),
+                        f"UPDATE {table} SET execute_status=%s, execute_msg=%s, "
+                        "task_id=%s, execute_time=%s, update_time=%s "
+                        "WHERE id=%s AND execute_status='IN_PROGRESS'",
+                        (st, em, task_id, now, now, pid),
                     )
             conn.commit()
-            return True
         except Exception:
             conn.rollback()
             raise

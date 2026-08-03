@@ -1,10 +1,14 @@
-"""广告调整真实执行编排（Part 6）。
+"""广告调整真实执行编排（Part 6）— 统一提交/轮询服务。
 
-submit_execution: load CONFIRMED pending → mapper → 插主记录 → 调 MCP(或 dry-run)
-                  → 插子记录 + 回写 pending execute_status。
+spec 2026-08-03-pending-taskid-polling-design：
+- 所有权限模式统一 pending 执行语义：PENDING → IN_PROGRESS → SUCCESS/FAIL。
+- 异步 MCP 返回 taskId 后立即写入精确 pending 行（保持 IN_PROGRESS），后台调度器按
+  3/6/12/24 分钟最多四次轮询结果 MCP；终态按 (record_kind, pending_id) 精确回写。
+- dry-run 只构造计划，不抢占、不调 MCP、不入轮询队列。
+- 任何未拿到有效 taskId 的提交结果都是提交阶段终态失败，不得伪称平台明确失败。
 
 安全：advert_mcp_enabled 总开关；advert_exec_dry_run 默认空跑（不动真实广告）。
-幂等：load_confirmed_pending 只取 execute_status=PENDING，已执行行不再取。
+幂等：原子抢占 PENDING→IN_PROGRESS 成功才允许提交；已执行行不再取。
 """
 
 from __future__ import annotations
@@ -16,7 +20,6 @@ from app.data.advert_mcp_client import AdvertMcpClient
 from app.persistence.erp_writer.advert_exec_mapper import (
     build_exec_plan,
     extract_task_ids,
-    parse_batch_update_terminal,
     parse_result_envelope,
 )
 from app.persistence.erp_writer.repository import _get_repository
@@ -26,8 +29,14 @@ from app.workflow.steps.portfolio_execution import (
     _normalize_portfolio_list,
     _pf_field,
 )
+from app.workflow.steps.task_poll_scheduler import PollTask, get_scheduler
 
 logger = logging.getLogger(__name__)
+
+# 提交阶段"结果未知"文案（与轮询耗尽、MCP 明确失败区分）
+_SUBMIT_UNKNOWN_MSG = (
+    "提交结果未知，未获得 taskId，禁止自动重提，需人工核对（{reason}）"
+)
 
 
 def _upsert_eliminate_pool_entry(
@@ -60,16 +69,13 @@ def _upsert_eliminate_pool_entry(
 def _sync_pool_entries_from_exec(
     pending: dict, plan, *, mcp_async_ok: bool, repo,
 ) -> None:
-    """执行钩子：根据本次 MCP 真跑结果写/删 t_advert_agent_pool_entry。
+    """执行钩子：根据本次 MCP 提交结果写/删 t_advert_agent_pool_entry。
 
     触发条件：
       - 淘汰卡（suggest_category='ELIMINATE'）：async_batch_update 成功 → upsert_pool_entry
       - 复评卡（trigger_rule 以 'REACTIVATE_' 开头）：async_batch_update 成功 → mark_pool_exit
 
-    只看 async_batch_update 的整批结果（改已有活动统一走过它）：
-      新建/否词路径不涉及淘汰/复评，无需单独判。MCP 部分失败时 ops 已逐条带 execute_status，
-      但池表语义是「活动已真被改成 $1/$0.20」或「真被改成 $3」——只要 async 这一批成功就写。
-
+    只负责池表，不写 pending 的 execute_status（终态由轮询精确回写，spec §6.1 第2条）。
     fail-open：DB 异常仅记日志，不阻断 MCP 已生效的事实。
     """
     dec = pending.get("decision") or {}
@@ -114,13 +120,6 @@ def _sync_pool_entries_from_exec(
             except Exception as e:  # noqa: BLE001
                 logger.warning("mark_pool_exit 失败 [%s/%s]: %s", parent_asin, campaign_id, e)
 
-    # 回写 pending 表 execute_status='SUCCESS' + execute_time=NOW()
-    # （填补 submit_execution_direct "不写库"的历史缺口：MCP 真跑了但 DB 无记录）
-    try:
-        repo.update_pending_execute_status(plan.ops, "SUCCESS", operator="system", msg="direct execution via MCP")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("update_pending_execute_status 失败 [%s]: %s", parent_asin, e)
-
 
 def _perf_json_cost(perf_json) -> float | None:
     """复用同名私有函数的轻量副本，避免跨模块循环导入。"""
@@ -160,22 +159,13 @@ def _campaign_statuses_from_snapshot(snapshot: dict) -> dict[str, str]:
     return result
 
 
-def _aggregate_campaign_statuses(statuses: dict[str, str]) -> str:
-    values = set(statuses.values())
-    if "FAIL" in values:
-        return "FAIL"
-    if values and values == {"SUCCESS"}:
-        return "SUCCESS"
-    return "IN_PROGRESS"
-
-
 def _sync_terminal_eliminate_pool(
     snapshot: dict,
     campaign_statuses: dict[str, str],
     *,
     repo,
 ) -> None:
-    """仅对最终有效状态为 SUCCESS 的 ELIMINATE 活动写入低价池。"""
+    """仅对最终有效状态为 SUCCESS 的 ELIMINATE 活动写入低价池（轮询终态回写后调用）。"""
     successful = {
         campaign_id
         for campaign_id, status in campaign_statuses.items()
@@ -261,13 +251,7 @@ async def _resolve_modify_portfolios(
     client, plan, *, shop_id: int, parent_asin: str, parent_sku: str, operator: str,
     resolved_portfolio_ids: dict[str, str] | None = None,
 ) -> None:
-    """为 MODIFY 路径注入 portfolioId（挪组）。
-
-    - 查 query_portfolio_list → 按组名匹配 → 按 portfolioId 拆分 paramsVoList。
-    - portfolioId 放在 paramsVo 顶层（schema 规定位置）。
-    - 匹配失败的活动移除 campaignGroupType，其他调整字段原样保留继续下发，写入 move_errors。
-    - 查询失败时整体跳过挪组，其他调整继续。
-    """
+    """为 MODIFY 路径注入 portfolioId（挪组）。"""
     if not plan.params_vo_list:
         return
 
@@ -357,72 +341,48 @@ async def _resolve_modify_portfolios(
     plan.params_vo_list = new_list
 
 
-def _record_exact_lifecycle_on_submit(
-    pending: dict, plan, repo,
-) -> None:
-    """MCP 提交成功后，为有 target_campaign_group_type 的 campaign_pending 写 Agent 锚点。
+def _async_ops(plan) -> list[dict]:
+    """ExecPlan.ops 中走异步批量调整的行（campaign/keyword/placement，非 create/negative）。"""
+    return [
+        op for op in plan.ops
+        if not op.get("is_create") and not op.get("is_negative")
+        and op.get("record_kind") in {"campaign", "keyword", "placement"}
+    ]
 
-    只在 async_batch_update 提交成功（非终态确认）时调用。
-    终态 SUCCESS/FAIL 的精确回写由 ERP 轮询路径处理，本函数是乐观写入。
+
+def _unique_pending_target_count(ops: list[dict]) -> int:
+    """Use the same one-row identity at every async execution stage.
+
+    Invalid identities deliberately remain part of the count: the repository
+    cannot claim them, so submission is stopped before an MCP call.
     """
-    dec = pending.get("decision") or {}
-    shop_id = int(dec.get("shop_id") or 0)
-    site_code = str(dec.get("site_code") or "")
-    if not shop_id or not site_code:
-        return
-    campaign_pendings = pending.get("campaign_pending") or []
-    for cp in campaign_pendings:
-        target_group = str(cp.get("target_campaign_group_type") or "").strip()
-        if not target_group:
-            continue
-        campaign_id = str(cp.get("campaign_id") or "")
-        if not campaign_id:
-            continue
-        try:
-            # 写 group_type 归因锚点
-            repo.record_exact_agent_action_success(
-                shop_id=shop_id, site_code=site_code,
-                campaign_id=campaign_id,
-                field="group",
-                target_value=target_group,
-            )
-            # 写 budget 归因锚点（如果有预算变更）
-            new_budget = cp.get("new_budget")
-            if new_budget is not None:
-                repo.record_exact_agent_action_success(
-                    shop_id=shop_id, site_code=site_code,
-                    campaign_id=campaign_id,
-                    field="budget",
-                    target_value=float(new_budget),
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "record_exact_lifecycle_on_submit 失败 [%s/%s]: %s",
-                campaign_id, target_group, e,
-            )
+    return len({
+        (
+            str(op.get("record_kind") or ""),
+            str(op.get("pending_id") or ""),
+        )
+        for op in ops
+    })
 
 
-async def submit_execution(
+async def submit_and_poll(
     decision_id: str,
+    pending: dict,
+    plan,
     *,
     operator: str,
     resolved_portfolio_ids: dict[str, str] | None = None,
-    wait_for_terminal: bool = False,
 ) -> dict:
-    """执行一个批次已确认(CONFIRMED)的调整。返回汇总 dict。"""
-    if not settings.advert_mcp_enabled:
-        return {"ok": False, "error": "广告调整执行通道未启用（advert_mcp_enabled=false）"}
+    """统一提交+轮询服务（spec §5）：抢占 → 异步提交 → taskId 落库 → 入队轮询。
 
+    调用方必须已确认（confirm_status='CONFIRMED'）或先完成确认。
+    返回 dict：dry_run / submitted(IN_PROGRESS) / failed(FAIL) / capacity_full。
+    """
+    dec = pending.get("decision") or {}
     repo = _get_repository()
-    pending = repo.load_confirmed_pending(decision_id)
-    if not pending:
-        return {"ok": False, "error": f"批次 {decision_id} 不存在"}
+    async_ops = _async_ops(plan)
+    async_target_count = _unique_pending_target_count(async_ops)
 
-    plan = build_exec_plan(pending, operator=operator)
-    if plan.is_empty():
-        return {"ok": True, "applied": 0, "skipped": 0, "msg": "无待执行项（可能已执行或无确认）"}
-
-    dec = pending["decision"]
     request_json = json_dumps({
         "params_vo_list": plan.params_vo_list,
         "create_calls": [{k: v for k, v in c.items() if k not in ("_card_id", "_group_type")} for c in plan.create_calls],
@@ -437,45 +397,7 @@ async def submit_execution(
         request_params_json=request_json,
     )
 
-    if wait_for_terminal:
-        claimable_ids = {
-            str(op.get("pending_id"))
-            for op in plan.ops
-            if op.get("pending_id")
-            and op.get("record_kind") in {
-                "campaign", "keyword", "placement",
-            }
-        }
-        claimed = repo.claim_pending_for_execution(
-            plan.ops,
-            operator=operator,
-        )
-        if claimed != len(claimable_ids):
-            return {
-                "ok": True,
-                "already_claimed": True,
-                "task_ids": [],
-                "execute_status": "IN_PROGRESS",
-                "ops": len(plan.ops),
-                "warnings": plan.warnings,
-                "move_errors": plan.move_errors,
-            }
-
-    client = AdvertMcpClient()
-    try:
-        await _resolve_modify_portfolios(
-            client, plan,
-            shop_id=int(dec.get("shop_id") or 0),
-            parent_asin=str(dec.get("parent_asin") or ""),
-            parent_sku=str(dec.get("parent_seller_sku") or ""),
-            operator=operator,
-            resolved_portfolio_ids=resolved_portfolio_ids,
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.exception("portfolio 解析失败 [%s]: %s", decision_id, e)
-        plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
-
-    # ── DRY-RUN：只落记录，不调 MCP ──
+    # ── dry-run 分流：只落记录，不抢占、不调 MCP、不入轮询队列（spec §5.1 第1条）──
     if settings.advert_exec_dry_run:
         try:
             for op in plan.ops:
@@ -494,56 +416,88 @@ async def submit_execution(
                 decision_id, record_id, len(plan.ops),
             )
         finally:
-            try:
-                await client.aclose()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "Advert MCP client 关闭失败 [%s]: %s",
-                    decision_id, e,
-                )
+            pass  # MCP client 由调用方统一关闭
         return {"ok": True, "dry_run": True, "record_id": record_id,
                 "ops": len(plan.ops), "warnings": plan.warnings,
                 "move_errors": plan.move_errors}
 
-    # ── 真实执行 ──
+    # ── 容量预检：有 async 操作时必须先预留轮询名额（spec §5.1 第2条）──
+    scheduler = None
+    reserved = False
+    if async_ops:
+        scheduler = get_scheduler()
+        if not scheduler.reserve():
+            logger.warning(
+                "轮询容量不足 [%s] async_ops=%d，拒绝提交，pending 保持 PENDING",
+                decision_id, len(async_ops),
+            )
+            return {"ok": False, "error": "轮询容量不足，请稍后重试", "ops": len(plan.ops),
+                    "record_id": record_id, "warnings": plan.warnings,
+                    "move_errors": plan.move_errors}
+        reserved = True
+
+    # ── 原子抢占（spec §5.1 第4条）：全部目标行成功才允许继续 ──
+    if async_ops:
+        claimed = repo.claim_pending_for_execution(async_ops, operator=operator)
+        if claimed != async_target_count:
+            if reserved and scheduler is not None:
+                scheduler.release()
+            return {
+                "ok": True,
+                "already_claimed": True,
+                "execute_status": "IN_PROGRESS",
+                "ops": len(plan.ops),
+                "record_id": record_id,
+                "warnings": plan.warnings,
+                "move_errors": plan.move_errors,
+            }
+
+    client = AdvertMcpClient()
+    try:
+        await _resolve_modify_portfolios(
+            client, plan,
+            shop_id=int(dec.get("shop_id") or 0),
+            parent_asin=str(dec.get("parent_asin") or ""),
+            parent_sku=str(dec.get("parent_seller_sku") or ""),
+            operator=operator,
+            resolved_portfolio_ids=resolved_portfolio_ids,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("portfolio 解析失败 [%s]: %s", decision_id, e)
+        plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
+
     results: dict = {"async": None, "create": [], "negative": []}
     task_ids: list[str] = []
     errors: list[str] = []
-    async_status: str | None = None
-    async_error = ""
+    async_submit_ok = False
     try:
+        # ── 异步批量调整 ──
         if plan.params_vo_list:
             try:
                 res = await client.async_batch_update(plan.params_vo_list)
                 results["async"] = res
                 task_ids = extract_task_ids(res)
                 ok, msg = parse_result_envelope(res)
-                # 异步：提交成功 → IN_PROGRESS（待 poll 终态）；提交失败 → FAIL
-                st = "IN_PROGRESS" if (ok and task_ids) else "FAIL"
-                async_status = st
-                async_error = (
-                    ""
-                    if st == "IN_PROGRESS"
-                    else (msg or "异步提交未返回 taskId")
-                )
-                if st == "FAIL":
-                    errors.append(f"async:{async_error}")
-                for op in plan.ops:
-                    if not op.get("is_create") and not op.get("is_negative"):
-                        op["modify_result"] = "PENDING" if st == "IN_PROGRESS" else "FAIL"
-                        op["execute_status"] = st
-                        if st == "FAIL":
-                            op["error_msg"] = async_error
+                if ok and task_ids:
+                    async_submit_ok = True
+                else:
+                    # 提交阶段未拿到有效 taskId = 终态失败（spec §5.1 第6点）
+                    reason = msg or "异步提交未返回 taskId"
+                    errors.append(f"async:{reason}")
+                    for op in async_ops:
+                        op["modify_result"] = "FAIL"
+                        op["execute_status"] = "FAIL"
+                        op["error_msg"] = _SUBMIT_UNKNOWN_MSG.format(reason=reason)
             except Exception as e:  # noqa: BLE001
                 logger.exception("async_batch_update 失败 [%s]: %s", decision_id, e)
-                async_status = "FAIL"
-                async_error = f"{type(e).__name__}: {e}"
-                errors.append(f"async:{async_error}")
-                for op in plan.ops:
-                    if not op.get("is_create") and not op.get("is_negative"):
-                        op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
-                        op["error_msg"] = async_error
+                reason = f"{type(e).__name__}: {e}"
+                errors.append(f"async:{reason}")
+                for op in async_ops:
+                    op["modify_result"] = "FAIL"
+                    op["execute_status"] = "FAIL"
+                    op["error_msg"] = _SUBMIT_UNKNOWN_MSG.format(reason=reason)
 
+        # ── 同步新建活动 ──
         skip_create = await _resolve_create_portfolios(
             client, plan,
             shop_id=int(dec.get("shop_id") or 0),
@@ -551,7 +505,6 @@ async def submit_execution(
             parent_sku=str(dec.get("parent_seller_sku") or ""),
             operator=operator,
         )
-
         for call in plan.create_calls:
             card_id = call.pop("_card_id", "")
             call.pop("_group_type", None)
@@ -579,6 +532,7 @@ async def submit_execution(
                         op["modify_result"] = "FAIL"; op["execute_status"] = "FAIL"
                         op["error_msg"] = f"{type(e).__name__}: {e}"
 
+        # ── 同步否词 ──
         if settings.campaign_negative_keyword_exec_enabled:
             for call in plan.negative_calls:
                 try:
@@ -606,172 +560,225 @@ async def submit_execution(
                 decision_id, e,
             )
 
+    # ── 同步路径（create/negative）精确回写 ──
+    sync_ops = [op for op in plan.ops if op.get("is_create") or op.get("is_negative")]
+    if sync_ops:
+        try:
+            repo.update_pending_execute_status(sync_ops, "", operator=operator)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("同步路径 pending 回写失败 [%s]: %s", decision_id, e)
+    # 插子记录（历史审计）
     repo.insert_exec_sub_records(record_id, plan.ops, operator)
-    repo.update_pending_execute_status(plan.ops, "IN_PROGRESS", operator=operator)
     repo.update_advert_record_result(
         record_id, task_id=(task_ids[0] if task_ids else ""),
         response_params_json=json_dumps(results),
     )
-    logger.info("Advert exec submitted [%s] record=%s tasks=%s ops=%d",
-                decision_id, record_id, task_ids, len(plan.ops))
 
-    # ★ 执行钩子：async_batch_update 成功 → 写/删 池表
+    # CREATE / negative-keyword tools are synchronous.  When this plan has
+    # no async batch operation, their per-row result is the terminal result;
+    # there is intentionally no taskId, scheduler, or result-MCP polling.
+    if not async_ops:
+        sync_failed = any(
+            str(op.get("execute_status") or "").upper() == "FAIL"
+            for op in sync_ops
+        )
+        return {
+            "ok": not sync_failed,
+            "record_id": record_id,
+            "task_ids": [],
+            "execute_status": "FAIL" if sync_failed else "SUCCESS",
+            "errors": errors,
+            "ops": len(plan.ops),
+            "warnings": plan.warnings,
+            "move_errors": plan.move_errors,
+        }
+
+    # ── 提交阶段失败（未拿到 taskId）：显式写 FAIL（spec §5.1 第6点，P0 修复）──
+    if not async_submit_ok:
+        if reserved and scheduler is not None:
+            scheduler.release()
+        if async_ops:
+            reason = "; ".join(errors) or "异步提交未返回 taskId"
+            msg = _SUBMIT_UNKNOWN_MSG.format(reason=reason)
+            try:
+                repo.write_pending_submit_failed(
+                    async_ops, msg, task_id=(task_ids[0] if task_ids else ""),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("提交阶段 FAIL 回写失败 [%s]: %s", decision_id, e)
+        return {
+            "ok": False, "record_id": record_id, "task_ids": task_ids,
+            "execute_status": "FAIL", "errors": errors,
+            "ops": len(plan.ops), "warnings": plan.warnings,
+            "move_errors": plan.move_errors,
+        }
+
+    # ── 提交成功：taskId 落库 → 入队轮询 ──
+    task_id = task_ids[0]
+    expected_task_id_rows = async_target_count
+    task_id_persisted = False
+    try:
+        written = repo.write_pending_task_id(async_ops, task_id)
+        if written != expected_task_id_rows:
+            logger.error(
+                "task_id 落库不完整 [%s] taskId=%s written=%d/%d",
+                decision_id, task_id, written, expected_task_id_rows,
+            )
+            raise RuntimeError("task_id bind count mismatch")
+        else:
+            task_id_persisted = True
+    except Exception as e:  # noqa: BLE001
+        logger.exception("task_id 落库失败 [%s] taskId=%s: %s", decision_id, task_id, e)
+        # spec §5.1 第8点：落库失败不得静默当作成功；同步有限重试一次
+        try:
+            written = repo.write_pending_task_id(async_ops, task_id)
+            task_id_persisted = written == expected_task_id_rows
+        except Exception:  # noqa: BLE001
+            task_id_persisted = False
+        if not task_id_persisted:
+            if reserved and scheduler is not None:
+                scheduler.release()
+            logger.error("task_id 落库重试仍失败 [%s] taskId=%s，需人工介入", decision_id, task_id)
+            return {
+                "ok": False, "record_id": record_id, "task_ids": [task_id],
+                "execute_status": "IN_PROGRESS",
+                "error": f"taskId 已从 MCP 返回但落库失败，需人工核对 taskId={task_id}",
+                "ops": len(plan.ops), "warnings": plan.warnings,
+                "move_errors": plan.move_errors,
+            }
+
+    # 池表：提交成功即写（保持既有语义；终态 SUCCESS 由轮询回写再核对）
+    # A non-exception short write is still a failed task-id bind.  It must
+    # never reach the scheduler because the database would no longer be the
+    # authoritative audit/recovery record for this task.
+    if not task_id_persisted:
+        if reserved and scheduler is not None:
+            scheduler.release()
+        logger.error("task_id bind incomplete [%s] taskId=%s", decision_id, task_id)
+        return {
+            "ok": False, "record_id": record_id, "task_ids": [task_id],
+            "execute_status": "IN_PROGRESS",
+            "error": f"taskId returned but persistence failed; manual reconciliation required: {task_id}",
+            "ops": len(plan.ops), "warnings": plan.warnings,
+            "move_errors": plan.move_errors,
+        }
+
     async_ok = bool(results.get("async")) and not any(
         str(e).startswith("async:") for e in errors
     )
-    if async_ok and not wait_for_terminal:
-        _sync_pool_entries_from_exec(
-            pending, plan, mcp_async_ok=True, repo=repo,
-        )
+    if async_ok:
+        try:
+            _sync_pool_entries_from_exec(
+                pending, plan, mcp_async_ok=True, repo=repo,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("池表同步失败 [%s]: %s", decision_id, e)
 
-    response_ok = not (
-        wait_for_terminal
-        and async_status == "FAIL"
+    # 终态回写闭包：精确回写 + SUCCESS 活动写池表
+    async def _terminal_write_fn(
+        ops, tid, status_by_campaign, message_by_campaign, *, exhausted,
+    ) -> None:
+        try:
+            repo.write_pending_terminal(
+                ops, tid, status_by_campaign, message_by_campaign,
+                exhausted=exhausted, operator=operator,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("轮询终态回写失败 [%s/%s]: %s", decision_id, tid, e)
+        if status_by_campaign:
+            try:
+                _sync_terminal_eliminate_pool(pending, status_by_campaign, repo=repo)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("终态池表同步失败 [%s/%s]: %s", decision_id, tid, e)
+
+    enqueued = scheduler.enqueue(PollTask(
+        task_id=task_id,
+        ops=async_ops,
+        poll_fn=lambda tid: client_batch_result_once(tid),
+        write_fn=_terminal_write_fn,
+    ))
+    if not enqueued:
+        # taskId 已落库但入队失败：任务不会被轮询，必须告警并转人工（不得静默）
+        logger.error(
+            "轮询入队失败 [%s] taskId=%s 已落库但无轮询器，需人工核对",
+            decision_id, task_id,
+        )
+        return {
+            "ok": False, "record_id": record_id, "task_ids": [task_id],
+            "execute_status": "IN_PROGRESS",
+            "error": f"taskId 已落库但轮询入队失败，需人工核对 taskId={task_id}",
+            "ops": len(plan.ops), "warnings": plan.warnings,
+            "move_errors": plan.move_errors,
+        }
+    logger.info(
+        "Advert exec submitted [%s] record=%s taskId=%s ops=%d（轮询已入队）",
+        decision_id, record_id, task_id, len(plan.ops),
     )
+
     return {
-        "ok": response_ok,
-        "record_id": record_id,
-        "task_ids": task_ids,
-        "execute_status": async_status,
-        "error": async_error if not response_ok else "",
-        "ops": len(plan.ops),
-        "warnings": plan.warnings,
+        "ok": True, "record_id": record_id, "task_ids": [task_id],
+        "execute_status": "IN_PROGRESS",
+        "ops": len(plan.ops), "warnings": plan.warnings,
         "move_errors": plan.move_errors,
     }
 
 
-async def poll_execution_result(
-    decision_id: str,
-    *,
-    operator: str,
-) -> dict:
-    """从 ERP 回读 taskId，查询活动终态并回写既有 pending/card。"""
-    repo = _get_repository()
-    decision = repo.get_decision_basic(decision_id)
-    if not decision:
-        return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": [],
-            "campaign_statuses": {},
-            "error": "立即退出决策不存在",
-        }
-    operating_mode = str(
-        decision.get("operating_mode") or ""
-    ).strip()
-    if operating_mode not in {"IMMEDIATE_EXIT", "立即退出"}:
-        return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": [],
-            "campaign_statuses": {},
-            "error": "该批次不是立即退出决策，拒绝查询并回写",
-        }
-    if decision.get("is_latest") not in {1, True, "1"}:
-        return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": [],
-            "campaign_statuses": {},
-            "error": "该立即退出批次已不是最新批次，拒绝查询并回写",
-        }
-
-    task_ids = repo.list_execution_task_ids(decision_id)
-    if not task_ids:
-        return {
-            "ok": True,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": [],
-            "campaign_statuses": {},
-        }
-
-    snapshot = repo.read_snapshot(decision_id)
-    if not snapshot:
-        return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": task_ids,
-            "campaign_statuses": {},
-            "error": "立即退出决策快照不存在",
-        }
+async def client_batch_result_once(task_id: str) -> dict:
+    """单次结果查询：调 agent_batch_update_advert_result，返回逐活动状态。"""
+    from app.persistence.erp_writer.advert_exec_mapper import parse_batch_update_terminal
     client = AdvertMcpClient()
     try:
-        raw = await client.batch_update_result(task_ids)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("广告执行终态查询失败 [%s]: %s", decision_id, e)
+        raw = await client.batch_update_result([task_id])
+        message_by_campaign: dict[str, str] = {}
+        status_by_campaign = parse_batch_update_terminal(
+            raw, message_by_campaign=message_by_campaign,
+        )
         return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": task_ids,
-            "campaign_statuses": _campaign_statuses_from_snapshot(
-                snapshot
-            ),
-            "error": f"{type(e).__name__}: {e}",
+            "status_by_campaign": status_by_campaign,
+            "message_by_campaign": message_by_campaign,
         }
     finally:
         try:
             await client.aclose()
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "Advert MCP client 关闭失败 [%s]: %s",
-                decision_id, e,
-            )
+            logger.warning("结果 MCP client 关闭失败: %s", e)
 
-    message_by_campaign: dict[str, str] = {}
-    queried_statuses = parse_batch_update_terminal(
-        raw,
-        message_by_campaign=message_by_campaign,
-    )
-    persisted_statuses = _campaign_statuses_from_snapshot(snapshot)
-    campaign_statuses = dict(persisted_statuses)
-    for campaign_id, status in queried_statuses.items():
-        if persisted_statuses.get(campaign_id) in {"SUCCESS", "FAIL"}:
-            continue
-        campaign_statuses[campaign_id] = status
 
-    updated = repo.update_campaign_terminal_status(
-        decision_id,
-        campaign_statuses,
-        operator=operator,
-        message_by_campaign=message_by_campaign,
+async def submit_execution(
+    decision_id: str,
+    *,
+    operator: str,
+    resolved_portfolio_ids: dict[str, str] | None = None,
+    wait_for_terminal: bool = False,
+) -> dict:
+    """执行一个批次已确认(CONFIRMED)的调整（统一服务薄包装）。
+
+    wait_for_terminal 参数保留兼容签名，内部不再区分——统一提交后由后台轮询器处理终态。
+    """
+    if not settings.advert_mcp_enabled:
+        return {"ok": False, "error": "广告调整执行通道未启用（advert_mcp_enabled=false）"}
+
+    repo = _get_repository()
+    pending = repo.load_confirmed_pending(decision_id)
+    if not pending:
+        return {"ok": False, "error": f"批次 {decision_id} 不存在"}
+
+    plan = build_exec_plan(pending, operator=operator)
+    if plan.is_empty():
+        return {"ok": True, "applied": 0, "skipped": 0, "msg": "无待执行项（可能已执行或无确认）"}
+
+    return await submit_and_poll(
+        decision_id, pending, plan, operator=operator,
+        resolved_portfolio_ids=resolved_portfolio_ids,
     )
-    if updated is False:
-        return {
-            "ok": False,
-            "decision_id": decision_id,
-            "execute_status": "IN_PROGRESS",
-            "task_ids": task_ids,
-            "campaign_statuses": persisted_statuses,
-            "error": "该立即退出批次已不再是最新批次，拒绝终态回写",
-        }
-    _sync_terminal_eliminate_pool(
-        snapshot,
-        campaign_statuses,
-        repo=repo,
-    )
-    return {
-        "ok": True,
-        "decision_id": decision_id,
-        "execute_status": _aggregate_campaign_statuses(
-            campaign_statuses
-        ),
-        "task_ids": task_ids,
-        "campaign_statuses": campaign_statuses,
-    }
 
 
 async def submit_execution_direct(
-    decision_id: str, card_ids: list[str], *, operator: str
+    decision_id: str, card_ids: list[str], *, operator: str,
 ) -> dict:
-    """合并"同意+执行"：按 card_ids 直接拉 pending → 调 MCP 真跑 → 不写任何 confirm_status / record / pending.execute_status。
+    """合并"同意+执行"：按 card_ids 先确认再调统一提交/轮询服务（spec §6.2 保留的薄包装）。
 
-    用于前端"同意所选"弹窗确认后的一步式真实下发。
+    前端"同意所选"弹窗仍为一次交互；确认失败不得下发（spec §6 最后一行）。
     """
     if not settings.advert_mcp_enabled:
         return {"ok": False, "error": "广告调整执行通道未启用（advert_mcp_enabled=false）"}
@@ -779,115 +786,50 @@ async def submit_execution_direct(
         return {"ok": False, "error": "card_ids 必填"}
 
     repo = _get_repository()
-    pending = repo.load_pending_by_card_ids(decision_id, card_ids)
-    if not pending:
-        return {"ok": False, "error": f"批次 {decision_id} 不存在或 card_ids 无匹配"}
 
-    plan = build_exec_plan(pending, operator=operator)
-    if plan.is_empty():
-        return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}
-
-    # DRY-RUN
+    # dry-run：不写 confirm，直接按当前选中范围构造计划（spec §5.1 第1条）
     if settings.advert_exec_dry_run:
+        pending = repo.load_pending_by_card_ids(decision_id, card_ids)
+        if not pending:
+            return {"ok": False, "error": f"批次 {decision_id} 不存在或 card_ids 无匹配"}
+        plan = build_exec_plan(pending, operator=operator)
+        if plan.is_empty():
+            return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无可执行操作"}
         logger.info("Advert exec DRY-RUN(direct) [%s] ops=%d cards=%d",
                     decision_id, len(plan.ops), len(card_ids))
         return {"ok": True, "dry_run": True, "ops": len(plan.ops),
                 "warnings": plan.warnings}
 
-    # 标 CONFIRMED：记录"同意执行"操作人
+    # 标 CONFIRMED：确认失败不得下发
     confirm_items = [{"card_id": cid, "decision": "approve"} for cid in card_ids]
-    try:
-        _get_repository().confirm_decisions(decision_id, confirm_items, operator=operator)
-    except Exception:
-        pass
-
-    # 真跑：调 MCP
-    client = AdvertMcpClient()
-    try:
-        # 挪组：MODIFY 路径注入 portfolioId
-        await _resolve_modify_portfolios(
-            client, plan,
-            shop_id=int((pending.get("decision") or {}).get("shop_id") or 0),
-            parent_asin=str((pending.get("decision") or {}).get("parent_asin") or ""),
-            parent_sku=str((pending.get("decision") or {}).get("parent_seller_sku") or ""),
-            operator=operator,
+    confirm_result = await asyncio_to_thread_confirm(repo, decision_id, confirm_items, operator)
+    if not confirm_result.get("ok"):
+        logger.warning(
+            "Campaign confirm 失败，拒绝下发 [%s] cards=%d: %s",
+            decision_id, len(card_ids), confirm_result.get("error"),
         )
-    except Exception as e:
-        logger.exception("portfolio 解析失败(direct) [%s]: %s", decision_id, e)
-        plan.warnings.append(f"组合解析失败：{type(e).__name__}: {e}")
+        return {"ok": False, "ops": 0, "error": f"确认失败，未下发：{confirm_result.get('error')}"}
 
-    results: dict = {"async": None, "create": [], "negative": []}
-    task_ids: list[str] = []
-    errors: list[str] = []
-    try:
-        if plan.params_vo_list:
-            try:
-                res = await client.async_batch_update(plan.params_vo_list)
-                results["async"] = res
-                task_ids = extract_task_ids(res)
-                ok, msg = parse_result_envelope(res)
-                if not ok:
-                    errors.append(f"async: {msg}")
-            except Exception as e:  # noqa: BLE001
-                logger.exception("async_batch_update 失败(direct) [%s]: %s", decision_id, e)
-                errors.append(f"async: {type(e).__name__}: {e}")
-
-        _dec_d = pending.get("decision") or {}
-        skip_create = await _resolve_create_portfolios(
-            client, plan,
-            shop_id=int(_dec_d.get("shop_id") or 0),
-            parent_asin=str(_dec_d.get("parent_asin") or ""),
-            parent_sku=str(_dec_d.get("parent_seller_sku") or ""),
-            operator=operator,
-        )
-
-        for call in plan.create_calls:
-            cid = call.pop("_card_id", "")
-            call.pop("_group_type", None)
-            if cid in skip_create:
-                continue
-            try:
-                res = await client.create_portfolio_campaign(call)
-                results["create"].append(res)
-                ok, msg = parse_result_envelope(res)
-                if not ok:
-                    errors.append(f"create: {msg}")
-            except Exception as e:  # noqa: BLE001
-                logger.exception("create_portfolio_campaign 失败(direct) [%s]: %s", decision_id, e)
-                errors.append(f"create: {type(e).__name__}: {e}")
-
-        if settings.campaign_negative_keyword_exec_enabled:
-            for call in plan.negative_calls:
-                try:
-                    res = await client.create_negative_keywords(call)
-                    results["negative"].append(res)
-                    ok, msg = parse_result_envelope(res)
-                    if not ok:
-                        errors.append(f"negative: {msg}")
-                except Exception as e:  # noqa: BLE001
-                    logger.exception("create_negative_keywords 失败(direct) [%s]: %s", decision_id, e)
-                    errors.append(f"negative: {type(e).__name__}: {e}")
-    finally:
-        await client.aclose()
-
-    logger.info("Advert exec direct [%s] ops=%d task_ids=%s errs=%d",
-                decision_id, len(plan.ops), task_ids, len(errors))
-    if errors:
-        for i, e in enumerate(errors, 1):
-            logger.warning("Advert exec direct [%s] error %d/%d: %s",
-                           decision_id, i, len(errors), str(e)[:500])
-
-    # ★ 执行钩子：async_batch_update 成功 → 写/删 池表。新建/否词路径不影响池表。
-    # 精准 lifecycle 锚点不在提交时写——必须等异步终态 SUCCESS 才写（§0.6）。
-    async_ok = bool(results.get("async")) and not any(
-        str(e).startswith("async:") for e in errors
+    # Confirmation can legitimately skip already processed cards.  Reloading
+    # only CONFIRMED/PENDING rows gives the shared submit service the exact
+    # eligible subset rather than the pre-confirmation selection.
+    pending = repo.load_pending_by_card_ids(
+        decision_id, card_ids, confirmed_only=True,
     )
-    if async_ok:
-        _sync_pool_entries_from_exec(
-            pending, plan, mcp_async_ok=True, repo=_get_repository(),
+    if not pending:
+        return {"ok": False, "ops": 0, "error": f"批次 {decision_id} 确认后无匹配项"}
+    plan = build_exec_plan(pending, operator=operator)
+    if plan.is_empty():
+        return {"ok": True, "applied": 0, "ops": 0, "msg": "选中项无已确认待执行操作"}
+
+    return await submit_and_poll(decision_id, pending, plan, operator=operator)
+
+
+async def asyncio_to_thread_confirm(repo, decision_id, confirm_items, operator):
+    import asyncio
+    try:
+        return await asyncio.to_thread(
+            repo.confirm_decisions, decision_id, confirm_items, operator or None,
         )
-
-    return {"ok": not errors, "ops": len(plan.ops), "task_ids": task_ids,
-            "errors": errors, "warnings": plan.warnings,
-            "move_errors": plan.move_errors}
-
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
