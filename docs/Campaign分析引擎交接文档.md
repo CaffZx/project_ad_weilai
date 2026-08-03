@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-07-31（版本日志见文末，最新 v3.23：分析运行闸门 + 配置镜像 + Codex 批跑接入）
-> **版本**: v3.23
+> **最后更新**: 2026-08-03（版本日志见文末，最新 v3.24：pending taskId 轮询调度器）
+> **版本**: v3.24
 > **分支**: chenv3.2
 
 ---
@@ -136,7 +136,8 @@ parent_asin
 | `app/data/new_keyword_fetcher.py` | — | ★多源候选词发现统一编排器（v3.21 新增）：flow_keywords/own_keyword_flow/competitor_reverse 三源并行 + 配额分配 + 来源合并去重 |
 | `app/workflow/steps/campaign_budget_reallocation.py` | 304 | ★组合预算回算（KB23）：优先 MCP portfolio 真实值 > 60/20/20 兜底；`available_for_increase` 增量约束；validate 加正增长额度校验 |
 | `app/workflow/steps/portfolio_execution.py` | — | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
-| `app/workflow/steps/advert_execution.py` | — | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表）；**v3.22 增强**：immediate_exit 确定性执行 + 灰度卡执行钩子 |
+| `app/workflow/steps/advert_execution.py` | — | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表）；**v3.22 增强**：immediate_exit 确定性执行 + 灰度卡执行钩子；**v3.24 重构**：终态异步轮询拆出 `task_poll_scheduler.py`，提交/轮询/回写三阶段解耦 |
+| `app/workflow/steps/task_poll_scheduler.py` | 206 | ★taskId 轮询调度器（v3.24 新增）：进程内有界队列 + 固定协程消费者（默认 2 消费者 × 20 队列），提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写 |
 | `app/persistence/erp_writer/advert_exec_mapper.py` | — | ★ERP 执行硬护栏 + 请求映射唯一真源 |
 | `app/persistence/erp_writer/repository.py` | — | ★ERP 读写仓库；**v3.22 增强**：灰度卡读写+池表同步+组合执行记录 |
 | `app/data/core_keyword_fetcher.py` | 414 | ★核心词发现数据编排器（v3.18 新增）：MCP 拉关键词+listing→LLM semantic_core 判定→落库 ERP `t_advert_agent_core_keyword` |
@@ -341,6 +342,8 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-30 | **配置镜像 API + Codex 批跑** | `config_mirror.py`（新）：Agent 配置保存镜像 API，双向同步运营配置到 state DB + ERP。`decision_config_reader.py`（+44）：批量读取增强。`batch_via_api_codex.py`（新，308行）：Codex 复核批量调度入口，替代旧 batch_via_api.py 集成 deepseek-v4-pro review hook。新增测试 `test_config_mirror.py` + `test_agent_config_mirror.py` + `test_agent_config_batch_reader.py`。6 files +370/-14。 |
 | 07-30 | **交接文档 v3.22 全面重构** | 历史迭代日志 §7-§27（~800行）压缩为 §7 摘要（40行）+ 新增 §8-§13 当前架构说明（经营模式/精准升降级/护栏/复评/执行层/核心词）。修正过时阈值（LOW_BID_MAX 0.21→0.20）、护栏规则数（11→12）、KB 预设表（6→13项完整预设）、_SYNTHESIS_ENABLED→settings。详见 commit `d0958c4`。 |
 | 07-30 | **分析闸门加固 + session 修复** | `mysql_state_manager.py`/`state_manager.py`/`schema.sql`：取消态补全。`campaign.py`/`decision.py` API：取消逻辑修复。`campaign_new.py`：闸门适配。`ad-asisitant-agent.html`：前端适配。新增 `test_campaign_cancellation_fencing.py` + `batch_via_api_codex.py`。13 files +681/-73。 |
+| 07-31 | **Campaign 双轮投票切除** | `campaign.py`（-510 行）：切除 R1+R2 双轮投票 → 单轮 LLM 直判。`campaign_guardrails.py`（+55）：护栏增强。`campaign_exact_transition.py`（+11）、`reasoner.py`、`models/campaign.py`、`settings.py`、`mappers.py`：适配单轮模式。`test_campaign_guardrails.py`（+47）。新增 `docs/Campaign切除双轮投票方案.md`，删除过期代码审计报告。17 files +827/-680。 |
+| 08-03 | **★ pending taskId 轮询调度器** | `task_poll_scheduler.py`（新，206 行）：进程内有界队列 + 固定协程消费者（2×20），提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写。`advert_execution.py`（720 行重构）：提交/轮询/回写三阶段解耦。`repository.py`（309 行）：执行仓库适配 + `write_pending_terminal` 精确回写。`decision.py`（+36）、`campaign.py`（+25）、`settings.py`（+5：`advert_task_poll_workers`/`advert_task_poll_queue_capacity`）、前端（+31）。测试重构：`test_task_poll_scheduler.py`（新，127 行）、`test_portfolio_match_and_exec.py`（-591 精简）、`test_erp_gray_cards.py`（-120）。新增 spec `2026-08-03-pending-taskid-polling-design.md`。13 files +1271/-1160。 |
 
 ---
 
@@ -541,6 +544,20 @@ EXACT 活动在四组间的确定性升降级逻辑：
 
 判定依据：ACOS 约束 + 3 日验证数据（连续 3 完整站点日，每日花费>$5，3 日聚合 ACOS < 目标 ACOS）。
 
+### 9.3 精准迁组与 LLM 调整的列级合并（最小实现，2026-08-03）
+
+**职责边界**：精准升降级规则只拥有活动迁组字段 `target_campaign_group_type`；LLM 只拥有预算、Bid、状态、Placement、否词及其原因/证据等调整字段。两者不得在 `campaign.py` 通过同一 `CampaignAdjustmentItem` 相互覆盖。
+
+**合并键**：同一 `decision_id + campaign_id`。最终只有一张建议卡和一组对应 Pending：
+
+- 已有 LLM 建议卡：复用该卡，Exact 仅对 `campaign_pending.target_campaign_group_type` 做迁组字段 upsert；不得改写 LLM 的 `action`、预算/Bid/Placement、`triggered_rule`、`reason`、`evidence`、`review_level`。
+- LLM 未返回该活动：仅在 Exact 命中真实迁组（升级/降级/淘汰）时建立一张纯迁组卡；该卡不携带规则引擎的预算、Bid、Placement 调整值。
+- `stay_with_adjustment` 无迁组 action：不建卡、不建 Pending、不改写已有 LLM 建议。
+
+**持久化规则**：迁组补丁与 LLM 调整通过 `campaign_pending` 的列级 upsert 合并。`target_campaign_group_type` 有值时写入；Exact 纯迁组写入不得将已有的 `old_state/new_state/old_budget/new_budget` 覆盖为 `NULL`，LLM 调整写入也不得将已有迁组目标清空。建议使用 `COALESCE(VALUES(column), column)` 保留另一来源的非空列值。
+
+**执行语义**：`advert_exec_mapper.py` 仍只读取 Pending；MCP 的组合迁移仅消费 `target_campaign_group_type`，预算/Bid 等仅消费 LLM 已确认写入的对应 Pending 字段。该合并不新增执行入口，也不改变 taskId 轮询状态机。
+
 ---
 
 ## 10. 护栏系统
@@ -661,6 +678,14 @@ confirm(CONFIRMED) → 调 `whp-advert-agent` MCP（6 工具）→ 落 4 张 `_r
 
 **v3.22 immediate_exit 确定性执行**：经营模式为 `IMMEDIATE_EXIT` 时，BROAD/PHRASE/AUTO 暂停 + EXACT 迁入低价捡漏组，不走 LLM 分析、直接生成确定性 ActionBundle。
 
+**v3.24 taskId 异步轮询调度器**（`task_poll_scheduler.py`，spec `2026-08-03-pending-taskid-polling-design.md`）：提交、轮询、回写三阶段解耦——
+
+- 每 Web 进程独立：固定数量 asyncio 协程消费者（`advert_task_poll_workers=2`）从有界队列（`advert_task_poll_queue_capacity=20`）取任务；单进程已受理上限 = 2+20 = 22。
+- 提交阶段先 `reserve()` 预留名额；容量满 → 拒绝提交，pending 保持 PENDING。
+- 消费者对每个 taskId 按 **3m/6m/12m/24m** 最多查询四次结果 MCP；每次只回写已终态行（未终态保持 IN_PROGRESS）。
+- 四次耗尽仍无终态 → 写 FAIL，文案 `POLL_EXHAUSTED_MSG` 标注需人工复核（区别于平台明确失败）。
+- 不持久化调度状态；进程重启丢失内存队列，已落库的 `pending.task_id` 供人工核对。
+
 ### 13.2 灰度卡
 
 ERP 执行过程中对部分失败的活动打灰度标记（gray card），分类展示：
@@ -679,7 +704,7 @@ ERP 执行过程中对部分失败的活动打灰度标记（gray card），分�
 
 | 链路 | pending 构参来源 | 自动下发 | taskId 终态轮询 | "提交"与"生效"区分 |
 |---|---|---|---|---|
-| 立即退出 | 是（确定性 ActionBundle → pending） | 是 | 有，前端轮询约 60 秒 | 基本有，依赖 ERP 回写 taskId |
+| 立即退出 | 是（确定性 ActionBundle → pending） | 是 | 有，`task_poll_scheduler` 3m/6m/12m/24m 异步轮询（v3.24） | 基本有，依赖 ERP 回写 taskId |
 | 清货优先 | 是（LLM 分析 → pending） | 否，前端人工确认 | 无 | 无，提交成功即写 SUCCESS |
 | 正常 Campaign | 是（LLM 分析 → pending） | 否，前端人工确认 | 无 | 无，提交成功即写 SUCCESS |
 
@@ -766,6 +791,10 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.24: pending taskId 轮询调度器（2026-08-03，本地未部署服务器）—— ①`task_poll_scheduler.py` 轮询调度器(新,206行)：进程内有界队列+固定协程消费者(2×20)，提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写 ②`advert_execution.py` 720 行重构：提交/轮询/回写三阶段解耦 ③`repository.py`(+309) 执行仓库适配+`write_pending_terminal` ④`settings.py` 新增 `advert_task_poll_workers`/`advert_task_poll_queue_capacity` ⑤测试重构：`test_task_poll_scheduler`(新)+`test_portfolio_match_and_exec`(-591)+`test_erp_gray_cards`(-120)。13 files +1271/-1160。*
+
+最后更新：2026-08-03
 
 *v3.23: 分析运行闸门 + 配置镜像 + Codex 批跑（2026-07-30~31，本地未部署服务器）—— ①`analysis_run_guard.py` 分析运行闸门(新)：防重复分析+session 取消态+前端放弃确认闭环 ②`config_mirror.py` 配置保存镜像(新)：运营配置双写 state DB+ERP ③`batch_via_api_codex.py` Codex 批跑入口(新,308行) ④`decision_config_reader.py` 批量读增强(+44) ⑤`mysql_state_manager`/`state_manager`/`schema.sql` session 取消态全链路 ⑥前端放弃确认弹窗闭环 ⑦测试 4 个新文件。17+6+13+4 files +1701/-173。*
 
