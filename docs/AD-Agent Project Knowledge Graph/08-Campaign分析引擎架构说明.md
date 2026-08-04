@@ -12,6 +12,7 @@
 - ViewModel：`ad-direction-agent/app/api/campaign_viewmodel.py`
 - 主编排：`ad-direction-agent/app/workflow/steps/campaign.py`
 - 数据获取：`ad-direction-agent/app/data/campaign_fetcher.py`
+- 活动级样本判定：`ad-direction-agent/app/core/campaign_sample.py`
 - 预过滤：`ad-direction-agent/app/data/campaign_prefilter.py`
 - 数据模型：`ad-direction-agent/app/models/campaign.py`
 - LLM Prompt/解析：`ad-direction-agent/app/llm/reasoner.py`
@@ -21,6 +22,7 @@
 - 预算汇总：`ad-direction-agent/app/workflow/steps/campaign_budget_summary.py`
 - 预算回算：`ad-direction-agent/app/workflow/steps/campaign_budget_reallocation.py`
 - 新建活动：`ad-direction-agent/app/workflow/steps/campaign_new.py`
+- 搜索词提精准：`ad-direction-agent/app/workflow/steps/campaign_search_term_promotion.py`
 - 淘汰复评：`ad-direction-agent/app/workflow/steps/campaign_restart.py`
 - 确定性护栏：`ad-direction-agent/app/workflow/steps/campaign_guardrails.py`
 - ACOS 约束：`ad-direction-agent/app/core/acos_constraints.py`
@@ -61,10 +63,10 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | Campaign 主流程 | `workflow/steps/campaign.py:253` `analyze_campaigns()`；`:310` `_analyze_campaigns_impl()` | 主分析编排 |
 | 策略上下文 | `campaign.py:1085` `build_campaign_strategy_context()` | 把前置工作流 long_term/P3 转成 Campaign 背景 |
 | 策略总览 | `campaign.py:1188` `_build_overview_facts()`；`:1239` `_run_overview()` | 生成 shared overview gate |
-| 分流分析 | `campaign.py:1269` `_analyze_one_stream()`；`:1416` `_run_round()` | exact/broad 分批、R1 单轮、护栏 R2/R3/R4 重判 |
+| 分流分析 | `campaign.py` `_analyze_one_stream()` / `_run_round()` | exact/broad 分批、R1 单轮、护栏 R2/R3/R4 重判；广泛流同时承载搜索词提精准候选 |
 | 护栏注入 | `campaign.py:2175` `_build_guardrail_alerts()`；`:2193` `_inject_alerts_to_summaries()`；`:2265` `_apply_campaign_guardrails()` | LLM 后的确定性修正和重判提示 |
 | CampaignData 拉取 | `app/data/campaign_fetcher.py:45` `fetch_campaigns()`；`:964` `_assemble()` | MCP 结果归一成 CampaignUnit |
-| 新建活动线 | `workflow/steps/campaign_new.py:263` `analyze_new_campaigns()`；`:484` `_run_round()` | 候选词、双轮 LLM、确定性补齐执行字段 |
+| 新建活动线 | `workflow/steps/campaign_new.py` `analyze_new_campaigns()` / `finalize_new_campaign_decisions()` | 来源 A 候选与广泛流来源 B 合流、按词去重、统一补齐执行字段和最终截断 |
 | Prompt 构造 | `app/llm/reasoner.py:366`、`:437`、`:488`、`:523`、`:578` | exact/broad/new/synthesis/overview/budget prompt |
 | ERP 映射/落库 | `persistence/erp_writer/mappers.py:357`；`repository.py:801` | CampaignAnalysisResult 转 card/pending/reason group |
 | Advert 执行 | `workflow/steps/advert_execution.py:255`；`persistence/erp_writer/advert_exec_mapper.py:82` | CONFIRMED pending 转 MCP 执行计划 |
@@ -147,31 +149,30 @@ Campaign 主入口需要：
 | 活动基础信息 | `ad_campaign_basic_info_v2` | `campaign_fetcher.py:177`；`:352` `_fetch_basic_batch_v2()` | current bid、budget、match type、state 等基础字段 |
 | 活动商品表现 | `ad_campaign_product_report` | `campaign_fetcher.py:186`；`:454` `_fetch_perf_one()` | ACOS、spend、sales、orders、clicks、CVR 等事实 |
 | placement | `ad_campaign_placement_report` | `campaign.py:1873` `_prefetch_placement()`；`campaign_fetcher.py:501` `fetch_placement_for()` | exact 流广告位建议和 P10 placement 护栏 |
-| search term | `ad_campaign_search_term_report` | `campaign.py:1985` `_prefetch_search_terms()`；`campaign_fetcher.py:560` `fetch_search_terms_for()` — 含预过滤+排序+截10 | broad/phrase/auto 流否定词、搜索词证据；预过滤规则见 §搜索词预过滤 |
+| search term | `ad_campaign_search_term_report` | `campaign.py` `_prefetch_search_terms()`；`campaign_fetcher.py` `fetch_search_terms_for()` / `build_search_term_bundle()` | 活动级样本门禁后并行取 7d+14d；7d 生成候选、低信号过滤、按订单/花费/点击排序并截取 20 条；仅 7d 样本不足词按同词键补 14d |
 | portfolio 预算+花费+ACOS | `ad_portfolio_list` (固定 1/3/7d 三窗口并行) | `campaign.py:546`；`campaign_fetcher.py:817` `fetch_portfolio_list()` | 原始预算→回算；日均花费→LLM prompt；1/3/7d 花费+ACOS→DB→前端看板 |
 | 自然排名 | `keyword_child_asins` / `own_keyword_flow` | `campaign_fetcher.py:920` 附近批量拉取 | exact/new campaign 的关键词自然位证据 |
-| 新建活动候选词 | `flow_keywords` / `own_keyword_flow` / 可选竞品反查 | `campaign_fetcher.py:602`；`:665`；`campaign_new.py:263` | 新建 exact/broad 活动候选池 |
+| 新建活动候选词 | 来源 A：`flow_keywords` / `own_keyword_flow` / 可选竞品反查；来源 B：广泛/词组/自动流搜索词候选 | `campaign_fetcher.py:602`；`:665`；`campaign_search_term_promotion.py`；`campaign_new.py` | 合流后的新建 exact/broad 活动候选池 |
 | 建议竞价 | `suggested_bid` 或竞品反查自带 bid | `campaign_fetcher.py:759`；`:746` | 新建活动 bid 补齐 |
 
 同一字段的多来源和兜底：
 
 - campaign_id 优先来自 `ad_campaign_list`，活动-关键词关系来自 `ad_campaign_product_keyword_list`；两路在 `fetch_campaigns()` 中并行合并，避免单一路径缺字段导致活动不可识别。
 - portfolio 预算+花费+ACOS 优先使用 `ad_portfolio_list` 真实值（固定 1/3/7d 三窗口并行，7d 失败→整体回退 60/20/20；1d/3d 失败仅对应窗口 NULL）。预算兜底只影响 LLM 回算，不伪造花费/ACOS 事实。花费/ACOS 不进入 `aggregate()` 或 LLM prompt，仅走 DB→快照→前端看板。
-- 新建活动候选词来自 `flow_keywords` 和 `own_keyword_flow`，竞品词源是可选增强；竞品不可用时不阻断主线。
+- 新建活动来源 A 来自 `flow_keywords` 和 `own_keyword_flow`，竞品词源是可选增强；来源 B 来自广泛/词组/自动流搜索词提精准。竞品不可用时不阻断主线，来源 B 也不另开 MCP 管道。
 - 当前链路是 MCP 真源，不再描述本地数仓直连兜底。
 
-### 搜索词预过滤
+### 搜索词活动门禁与 bundle 预处理
 
-在 `fetch_search_terms_for()` 内完成，位于 MCP 拉取后、注入 LLM prompt 前。每条搜索词按以下规则判定是否保留：
+`_prefetch_search_terms()` 先消费 `assess_campaign_sample()` 的活动级判定，再决定是否调用搜索词 MCP：
 
-| 优先级 | 条件 | 动作 | 理由 |
-|--------|------|------|------|
-| ① | 有订单 (`orders > 0`) | 保留 | 已验证有效，可判断否词 ACOS 或提取精准 |
-| ② | 点击 ≥ 3 | 保留 | 有复现，可判断转化方向 |
-| ③ | 曝光 ≥ 200 且 点击 ≤ 1 | 保留 | 高曝光零点击 = CTRL 异常信号 |
-| — | 点击 ≤ 1 且 0 订单 且 曝光 < 200 | **过滤** | 单次偶发点击 + 低曝光 = 纯噪音 |
+- 活动上线不足 3 天，或 7d 花费低于 `max($5, target_cpa×0.5)`，或 7d 点击少于 10：标记 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT`，不调用搜索词 MCP，也不向 LLM 透传逐词数据。
+- 活动样本充足：同一活动串行完成活动基础数据后，再同时请求 7d 和 14d 搜索词报告；不发起 30d 请求。
+- `build_search_term_bundle()` 以 7d 为唯一候选集，先按标准化词键聚合并删除完全无行为信号的词（订单、点击、花费均为 0 且曝光为 0/缺失）。
+- 候选按 7d `orders desc → cost desc → clicks desc → impressions desc → keyword asc` 排序，单活动技术上限为 `search_term_llm_max_terms_per_campaign=20`；旧的 Top10/花费排序不再适用。
+- 只对入选且 `term_sample_insufficient=true` 的 7d 词，按标准化词键补充 14d；14d 独有词、被过滤词和被截断词不进入 LLM。
 
-保留词按 **花费降序 → 同花费曝光降序** 排序，取前 10 条注入 LLM prompt。prompt 注入字段：keyword、clicks、cost、orders、impressions、ACOS。
+每个 bundle 记录原始行数、低信号删除数、容量截断数、最终词数、7d 样本不足数和 14d 同键命中数。LLM renderer 为每个词标注 `window=7d/14d` 与 `term_sample_insufficient`，7d 是动作基线，14d 只能辅助观察。
 
 ## 运行互斥和缓存
 
@@ -273,15 +274,26 @@ Campaign 引擎按 match type 分流：
 
 - 精准流：`EXACT`
 - 广泛流：非 `EXACT`，包括 `BROAD`、`PHRASE`、`AUTO`
-- 新建活动线：独立并行，不直接等同于 existing campaign 调整
+- 新建活动最终化：来源 A（`campaign_new.py` 的流量/自有/排名/竞品候选）与来源 B（广泛流中的搜索词提精准候选）合流；两者按归一化词去重后统一补齐执行字段并截断。
 
 精准流和广泛流使用不同 prompt 和证据：
 
 | 流 | 主要证据 | 主要动作 |
 | --- | --- | --- |
 | exact | product report、placement、关键词自然排名、策略上下文 | bid、budget、placement、淘汰、保持 |
-| broad/phrase/auto | product report、search term、否定词机会、策略上下文 | bid、budget、negative keywords、淘汰、保持 |
-| new_campaigns | flow keywords、own keyword flow、排名、搜索量、标题相关性、竞品可选源 | 新建 exact/broad 活动 |
+| broad/phrase/auto | product report、search term、否定词机会、策略上下文 | bid、budget、negative keywords、淘汰、保持；同时可产出搜索词提精准候选 |
+| new_campaigns | 来源 A 的 flow/own/rank/competitor 候选 + 来源 B 的 broad/phrase/auto 搜索词候选 | 合流后新建 exact/broad 活动 |
+
+### 广泛流搜索词到精准扩词的接线
+
+广泛、词组、自动活动统一进入非 `EXACT` 流。LLM 在同一份逐词搜索词证据中额外输出 `exact_promotion_candidates`；解析器只接受本批次实际注入的 `campaign_id + search_term`，并由代码回填订单、销售额、花费、ACOS 等权威指标，避免 LLM 编造事实。
+
+`campaign_search_term_promotion.py` 对候选执行确定性处理：
+
+- 直接词根/词条通道按单词证据做订单、销售额、ACOS 准入；
+- 词根通道按归一化 `keyword_root` 合并多个广泛/词组/自动活动的同根信号，再做订单或 ACOS 准入；
+- 已存在 EXACT 活动的词按归一化词排除；同一批多个来源的同词只保留一条；
+- 输出标准化 `NewCampaignDecision`，与来源 A 进入 `campaign_new.py` 的同一合流、去重、补齐和 `campaign_new_max_creates` 截断链路。
 
 ## 经营模式注入点
 
@@ -351,8 +363,8 @@ Prompt 组装细节：
 | 分支 | Prompt 入口 | KB 切片 | 输入事实 | 结构化输出 |
 | --- | --- | --- | --- | --- |
 | exact 调整 | `reasoner.py:366` `_build_campaign_system_prompt("exact")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:64` `campaign_adjustment_exact` | CampaignUnit、placement、自然排名、策略上下文、overview text | `CampaignAdjustmentItem[]` |
-| broad/phrase/auto 调整 | `reasoner.py:366` `_build_campaign_system_prompt("broad")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:67` `campaign_adjustment_broad` | CampaignUnit、search terms、否定词证据、策略上下文、overview text | `CampaignAdjustmentItem[]` |
-| new campaign | `reasoner.py:437` `_build_new_campaign_prompt()`；`:1813` `recommend_new_campaigns()` | `kb_loader.py:82` `new_campaign` | 候选词、自然排名、流量词、建议竞价、策略上下文、overview text | 新建活动候选决策，代码再补齐执行字段 |
+| broad/phrase/auto 调整 | `reasoner.py:366` `_build_campaign_system_prompt("broad")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:67` `campaign_adjustment_broad` | CampaignUnit、search terms、否定词证据、策略上下文、overview text | `CampaignAdjustmentItem[]` + `exact_promotion_candidates[]` |
+| new campaign | `reasoner.py:437` `_build_new_campaign_prompt()`；`:1813` `recommend_new_campaigns()` | `kb_loader.py:82` `new_campaign` | 来源 A 候选词、自然排名、流量词、建议竞价、策略上下文、overview text | 来源 A 候选决策；再与来源 B 合流并由代码补齐执行字段 |
 | synthesis | `reasoner.py:488` `_build_campaign_synthesis_prompt()`；`:2011` `recommend_campaign_synthesis()` | Campaign synthesis 相关切片 | 已有活动调整、新建活动、预算摘要、策略总览 | reason groups / specials |
 | budget reallocation | `reasoner.py:578` `_build_budget_realloc_prompt()`；`:2101` `recommend_budget_reallocation()` | `kb_loader.py:85` `budget_reallocation` | portfolio 预算、组别预算、调整建议、父级净增约束 | 组合预算重分配建议 |
 
@@ -470,7 +482,8 @@ R1 合并 → backfill(context) → backfill(复评保护)
 **P1 — 样本不足保护** (`_p1_new_campaign_protect`)
 
 - 触发：`action == eliminate_to_low_bid_pool` 且样本不足。
-- 样本不足判定（`_sample_insufficient` 共用函数）：`days_online ∈ [0,3]` 或 `perf_7d.cost < $5` 或 `perf_7d.clicks < 10` 或 `product_stage='测试期' 且 days_online < 14`
+- 活动级样本判定统一调用 `app/core/campaign_sample.py:assess_campaign_sample()`：上线不足 3 天，或 7d 花费低于 `max($5, target_cpa×0.5)`，或 7d 点击少于 10，即判定不足；缺失事实不按 0 处理。测试期的其他保护由独立规则负责，不混入此 helper。
+- 词级 `term_sample_insufficient_7d` 是搜索词 bundle 的传输事实，不替代活动级 P1 判定；14d 仅作为词级样本不足的辅助观察窗口。
 - P3 硬淘汰优先级高于 P1：在执行 `_force_keep` 之前先查 `_p3_should_force_eliminate(item)`——若 P3 会强制淘汰，P1 跳过（不写矛盾告警），交给 P3 处理
 - 动作：`_force_keep(item)`。仅禁淘汰，不拦调整——LLM 判 `adjust_bid` 等非淘汰 action 时不触发
 - KB 依据：KB21 §2 / KB17 §1.2 SAMPLE_INSUFFICIENT
@@ -707,25 +720,32 @@ Campaign 引擎维护四类组合语义：
 
 ## 新建活动线
 
-`campaign_new.py` 是独立并行管道。
+`campaign_new.py` 负责新增活动候选的共同最终化。来源 A 仍由该模块独立发现；来源 B 则由广泛/词组/自动流在同一轮搜索词分析中产出，再接入此处，不另起一条搜索词管道。
 
-候选来源：
+候选来源 A：
 
 - `flow_keywords`
 - `own_keyword_flow`
 - 自然排名信号
 - 可选竞品词源
 
+候选来源 B：
+
+- `campaign.py` 非 `EXACT` 流的 `exact_promotion_candidates`
+- `campaign_search_term_promotion.py` 对直接词和跨活动词根的确定性准入结果
+
 核心步骤：
 
 1. ASIN 级阻断判断，例如某些产品状态不适合新建。
 2. 候选词发现和去噪。
-3. 合并同词多来源信号。
+3. 合并同词多来源信号（来源 A/B 按归一化词去重）。
 4. 桶配额选择。
 5. 建议竞价查询。
-6. 双轮 LLM 选词。
-7. 两轮都判“建”的词取交集。
-8. 代码层补齐 match_type、bid、budget、campaign_name、目标子 ASIN、portfolio class。
+6. 来源 A 执行双轮 LLM 选词。
+7. 来源 A 两轮都判“建”的词取交集；来源 B 已在广泛流 LLM 输出后经过搜索词提精准的确定性准入，不再重复走来源 A 的新词双轮。
+8. 代码层补齐 match_type、bid、budget、campaign_name、目标子 ASIN、portfolio class；来源 B 的精准扩词也复用同一套名称、子 ASIN 指派和落库接线。
+
+合流后的统一约束：已有 EXACT 活动的词先排除；来源 A/B 同词只保留一条；最后按 `campaign_new_max_creates` 做新建输出上限截断。来源 B 不绕过 `campaign_new.py` 的公共最终化，也不改变来源 A 的业务规则。
 
 重要边界：
 
@@ -859,6 +879,7 @@ Campaign viewmodel 主入口通常走“分析 → 落库 → 读回快照 → v
 | `campaign_new_enabled` | 是否启用新建活动线 |
 | `campaign_new_max_count` | 新建候选最大数量 |
 | `campaign_new_max_creates` | 新建输出最大数量 |
+| `search_term_llm_max_terms_per_campaign` | 单活动搜索词进入 LLM 的技术容量上限；当前为 20，按 7d 订单数、花费、点击数、曝光数、归一化词排序，不恢复旧 Top10/花费截断 |
 | `campaign_restart_enabled` | 是否启用淘汰复评 |
 | `campaign_restart_review_days` | 入池后多少天可复评 |
 | `campaign_restart_fetch_concurrency` | 复评拉数并发 |
@@ -885,7 +906,7 @@ Campaign 分析本身不直接动真实广告。
 - 不要把 `campaign_key` 当数据库主键；它是业务匹配键，落库后仍以 decision/card/pending ID 为准。
 - 不要让 LLM 输出绕过 `_normalize_action()` 和 guardrails。
 - 不要把低价池预过滤理解为丢弃数据；它会进入灰卡和复评链路。
-- 不要把新建活动线当成 exact/broad 流的副产物；它是第三条并行管道。
+- 不要把来源 B 的搜索词精准扩词误认为一条独立新管道：它由广泛/词组/自动流的 LLM 同步产出，随后与来源 A 在 `campaign_new.py` 合流；来源 A 仍是独立候选发现线。
 - 不要把 `adjustments` 为空当成无结果，还要检查 `new_campaigns`、`budget_summary`、`skipped_campaigns` 和 `data_unavailable`。
 - 不要让前端直接拼 pending 逻辑；应优先通过 viewmodel。
 - 不要以为选了经营模式就自动生效。`IMMEDIATE_EXIT` 走确定性执行跳过 LLM，`CONTROLLED_CLEARANCE` 通过 `growth_analysis_enabled` 关闭增长流，其余模式通过 ACOS 容忍系数和 Ontology Card 间接约束——各模式的生效路径不同。
@@ -896,6 +917,7 @@ Campaign 分析本身不直接动真实广告。
 
 - 修改 `campaign.py` 主流程后，同步更新总数据流、分流、护栏和预算段。
 - 修改 `campaign_fetcher.py` 或 `mcp_mapping.py` 后，同步更新 CampaignData 构造和 MCP 文档。
+- 修改 `campaign_sample.py`、搜索词 bundle 过滤或 `campaign_search_term_promotion.py` 后，同步更新活动样本门禁、7d/14d 窗口、词根合流和新增活动来源 B。
 - 修改 `campaign_guardrails.py` 后，同步更新护栏段和测试地图。
 - 修改 `campaign_new.py` 后，同步更新新建活动线。
 - 修改 `campaign_restart.py` 或 pool entry 逻辑后，同步更新淘汰复评。

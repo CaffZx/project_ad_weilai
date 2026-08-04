@@ -209,7 +209,9 @@ MCP 工具在项目里有三种调用形态：
 
 ### `ad_campaign_search_term_report`
 
-功能：Campaign 搜索词报表，通常在 LLM 精细分析前懒加载。
+功能：Campaign 搜索词报表，通常在 LLM 精细分析前按活动懒加载。MCP 返回原始搜索词行；当前 Campaign 调用方在活动级样本门禁通过后并行请求 7d/14d，不请求 30d。
+
+当前消费约束（由 `campaign_fetcher.py` 实现，不是 MCP schema 本身的字段约束）：以 7d 结果生成候选集合，删除完全无信号词，按 7d 订单数、花费、点击数、曝光数和归一化词排序，单活动最多透传 20 条；仅 7d 词级样本不足的候选按归一化词键补入 14d 指标。渲染给 LLM 时必须标注窗口，7d 是动作基线，14d 是辅助观察。
 
 ### `ad_portfolio_list`
 

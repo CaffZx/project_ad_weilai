@@ -128,13 +128,13 @@ discovery 字段合并：
 - `ad_campaign_placement_report`
 - `ad_campaign_search_term_report`
 
-placement 和 search term 数据通常更重，会在精细分析或 LLM 前置上下文需要时加载。
+placement 和 search term 数据通常更重，会在精细分析或 LLM 前置上下文需要时加载。搜索词报告受活动基础数据门禁影响：活动上线不足 3 天、7d 花费低于 `max($5, target_cpa×0.5)` 或 7d 点击少于 10 时，直接标记活动样本不足，不调用搜索词 MCP，也不透传词级数据；活动样本充足时才并行拉取 7d/14d。
 
 报表拉取的消费边界：
 
 - product report 是 CampaignUnit 的核心绩效事实，直接进入 LLM 和护栏。
 - placement report 主要服务 exact 流和 P10 TOS 加价阻断。
-- search term report 主要服务 broad/phrase/auto 流的否定词机会，不作为 exact 主判断依据。
+- search term report 服务 broad/phrase/auto 流的否定词机会和搜索词提精准候选，不作为 exact 活动调整的主判断依据。bundle 以 7d 生成候选、过滤低信号词并按订单/花费/点击/曝光排序，单活动技术上限 20；只对 7d 样本不足词补入同词 14d 指标，LLM 输入显式标记窗口和词级样本状态。
 
 ## 阶段 4：自然排名和新增活动候选
 
@@ -145,7 +145,7 @@ placement 和 search term 数据通常更重，会在精细分析或 LLM 前置�
 - `keyword_child_asins`
 - 可选竞品词源
 
-候选经过桶配额、相关性、去重、已有活动排除、预算约束和 LLM 判断后进入 `NewCampaignItem`。
+候选经过桶配额、相关性、去重、已有活动排除、预算约束和 LLM 判断后进入 `NewCampaignItem`。除 `flow_keywords` 等来源 A 外，广泛/词组/自动流的搜索词 LLM 还可产出来源 B 精准扩词候选；两者在 `campaign_new.py` 统一按归一化词去重、补齐字段并应用新建输出上限。
 
 是否启用竞品词源、最大竞品数量、每竞品词数和超时由 Campaign new 相关配置控制。
 
