@@ -84,6 +84,7 @@ def apply_all(
     adjustments: list,
     *,
     product_stage: str = "",
+    target_cpa: float | None = None,
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
@@ -94,7 +95,9 @@ def apply_all(
     # 第一轮：保护类（禁止淘汰）—— P0-P2
     for item in adjustments:
         _p0_core_protect(item, gp)
-        _p1_new_campaign_protect(item, gp, product_stage=product_stage)
+        _p1_new_campaign_protect(
+            item, gp, product_stage=product_stage, target_cpa=target_cpa,
+        )
         _p2_reactivation_protect(item, gp)
 
     # 第二轮：裁决类 —— P3-P10
@@ -131,14 +134,22 @@ def _p0_core_protect(item, gp: GuardrailPass) -> None:
     ))
 
 
-def _p1_new_campaign_protect(item, gp: GuardrailPass, *, product_stage: str = "") -> None:
-    """新活动/样本不足保护：上线≤3天 OR 7d花费<$5 OR 7d点击<10 → 禁止淘汰 (KB21§2 / KB17 §1.2)。"""
+def _p1_new_campaign_protect(
+    item,
+    gp: GuardrailPass,
+    *,
+    product_stage: str = "",
+    target_cpa: float | None = None,
+) -> None:
+    """消费 KB17 活动样本口径，样本不足时禁止非硬淘汰。"""
     if item.action != "eliminate_to_low_bid_pool":
         return
     # P3 硬淘汰优先级高于 P1。触底场景不在 P1 写"禁止淘汰"告警，交给 P3/P4 处理。
     if _p3_should_force_eliminate(item):
         return
-    sample_insufficient, reasons = _sample_insufficient(item, product_stage=product_stage)
+    sample_insufficient, reasons = _sample_insufficient(
+        item, product_stage=product_stage, target_cpa=target_cpa,
+    )
     if not sample_insufficient:
         return
 
@@ -495,21 +506,33 @@ def _force_keep(item) -> None:
     item.placement_adjustments = []
 
 
-def _sample_insufficient(item, *, product_stage: str = "") -> tuple[bool, list[str]]:
+def _sample_insufficient(
+    item,
+    *,
+    product_stage: str = "",
+    target_cpa: float | None = None,
+) -> tuple[bool, list[str]]:
+    from app.core.campaign_sample import assess_campaign_sample
+
     days = getattr(item, "days_online", -1)
     perf = getattr(item, "perf_7d", {}) or {}
-
+    assessment = assess_campaign_sample(
+        days_online=days,
+        clicks_7d=perf.get("clicks"),
+        cost_7d=perf.get("cost"),
+        target_cpa=target_cpa,
+    )
     reasons: list[str] = []
-    if days >= 0 and days <= 3:
-        reasons.append(f"上线仅 {days} 天")
+    for reason in assessment.reasons:
+        if reason == "days_online_lt_3":
+            reasons.append(f"上线仅 {days} 天")
+        elif reason == "cost_7d_below_threshold":
+            reasons.append(f"7d花费${float(perf.get('cost') or 0):.1f}<${assessment.threshold:.1f}")
+        elif reason == "clicks_7d_lt_10":
+            reasons.append(f"7d点击{int(perf.get('clicks') or 0)}<10")
+    # 测试期保护是独立消费策略，不并入 KB17 活动 helper 的事实口径。
     if "测试" in (product_stage or "") and days >= 0 and days < 14:
         reasons.append(f"测试期且上线仅 {days} 天")
-    if "cost" in perf and float(perf.get("cost") or 0) < 5:
-        cost = float(perf.get("cost") or 0)
-        reasons.append(f"7d花费${cost:.1f}<$5")
-    if "clicks" in perf and int(perf.get("clicks") or 0) < 10:
-        clicks = int(perf.get("clicks") or 0)
-        reasons.append(f"7d点击{clicks}<10")
     return bool(reasons), reasons
 
 

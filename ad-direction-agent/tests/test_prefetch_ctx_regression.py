@@ -49,7 +49,39 @@ def test_prefetch_search_terms_no_unbound_ctx_site_aware():
     f = _fetcher("Amazon_DE")
     f.fetch_search_terms_for = AsyncMock(return_value={})
     summaries, lookup = _summaries_lookup()
+    lookup["k1"].perf_7d.clicks = 10
+    lookup["k1"].perf_7d.cost = 100
+    lookup["k1"].perf_7d.orders = 1
+    lookup["k1"].days_online = 7
     asyncio.run(C._prefetch_search_terms(f, "B0PARENT", 7, summaries, lookup))
     f.fetch_search_terms_for.assert_awaited_once()
     kw = f.fetch_search_terms_for.await_args.kwargs
     assert (kw["start_date"], kw["end_date"]) == make_date_window(7, "Amazon_DE")
+    assert (kw["start_date_14d"], kw["end_date_14d"]) == make_date_window(14, "Amazon_DE")
+
+
+def test_prefetch_search_terms_skips_activity_with_insufficient_sample():
+    f = _fetcher("Amazon_DE")
+    f.fetch_search_terms_for = AsyncMock(return_value={})
+    summaries, lookup = _summaries_lookup()
+    lookup["k1"].days_online = 2
+    lookup["k1"].perf_7d.clicks = 20
+    lookup["k1"].perf_7d.cost = 100
+    lookup["k1"].perf_7d.orders = 1
+
+    enriched = asyncio.run(C._prefetch_search_terms(f, "B0PARENT", 7, summaries, lookup))
+
+    f.fetch_search_terms_for.assert_not_awaited()
+    assert enriched[0]["search_term_fetch_status"] == "SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT"
+    assert "_search_term_data" not in enriched[0]
+
+
+def test_prefetch_search_terms_does_not_query_exact_campaign():
+    f = _fetcher("Amazon_DE")
+    f.fetch_search_terms_for = AsyncMock(return_value={})
+    summaries, lookup = _summaries_lookup()
+    lookup["k1"].match_type = "EXACT"
+
+    asyncio.run(C._prefetch_search_terms(f, "B0PARENT", 7, summaries, lookup))
+
+    f.fetch_search_terms_for.assert_not_awaited()

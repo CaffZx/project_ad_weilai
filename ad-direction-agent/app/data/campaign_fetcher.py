@@ -29,6 +29,189 @@ class _CallResult:
     error: str | None = None
 
 
+def _term_value(row: dict, *keys: str) -> Any:
+    for key in keys:
+        if key in row:
+            return row.get(key)
+    return None
+
+
+def _normalize_search_term(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _term_metrics(row: dict) -> dict:
+    """将 MCP 搜索词行归一为稳定的窗口指标。"""
+    impressions_raw = _term_value(row, "曝光量", "impressions", "曝光")
+    clicks = int(_to_float(_term_value(row, "点击量", "clicks", "点击")) or 0)
+    cost = _to_float(_term_value(row, "花费", "cost")) or 0.0
+    sales = _to_float(_term_value(row, "销售额", "sales", "广告销售额")) or 0.0
+    orders = int(_to_float(_term_value(row, "广告订单量", "orders", "订单量", "订单")) or 0)
+    impressions = int(_to_float(impressions_raw) or 0)
+    acos = _to_pct(_term_value(row, "ACOS", "acos"))
+    cvr = _to_pct(_term_value(row, "CVR", "cvr"))
+    acos_corrected = _to_pct(_term_value(row, "acos_corrected", "ACOS校正后", "校正后ACOS"))
+    cvr_corrected = _to_pct(_term_value(row, "cvr_corrected", "CVR校正后", "校正后CVR"))
+    sales_corrected = _to_float(_term_value(row, "sales_corrected", "校正后销售额"))
+    data_min_age_days = _to_float(_term_value(row, "data_min_age_days", "数据最小龄期"))
+    data_maturity = _to_float(_term_value(row, "data_maturity", "归因成熟度"))
+    return {
+        "clicks": clicks,
+        "cost": cost,
+        "sales": sales,
+        "orders": orders,
+        "impressions": impressions,
+        "acos_raw": acos,
+        "cvr_raw": cvr,
+        "acos_corrected": acos_corrected,
+        "cvr_corrected": cvr_corrected,
+        "sales_corrected": sales_corrected,
+        "data_min_age_days": int(data_min_age_days) if data_min_age_days is not None else None,
+        "data_maturity": data_maturity,
+        "maturity_basis": _term_value(row, "maturity_basis", "成熟度口径"),
+        "acos": acos,
+        "cvr": cvr,
+    }
+
+
+def _term_sample_insufficient(
+    metrics: dict,
+    *,
+    campaign_online_days: int,
+    target_cpa: float | None,
+) -> bool:
+    """KB31 词级 Tier 1；未知上线天数不强行判定为新词。"""
+    if campaign_online_days >= 0 and campaign_online_days < 3:
+        return True
+    threshold = max(15.0, float(target_cpa)) if target_cpa is not None else 15.0
+    return metrics["clicks"] < 10 and metrics["cost"] < threshold
+
+
+def build_search_term_bundle(
+    rows_7d: list[dict],
+    rows_14d: list[dict],
+    *,
+    campaign_online_days: int = 7,
+    target_cpa: float | None = None,
+    max_terms_per_campaign: int = 20,
+) -> dict:
+    """构建搜索词 bundle：7d 是唯一候选集，14d 只按键补充。"""
+    grouped_7d: dict[str, dict] = {}
+    dropped_low_signal = 0
+    raw_row_count = len(rows_7d)
+    for row in rows_7d:
+        if not isinstance(row, dict):
+            continue
+        keyword = str(_term_value(row, "搜索词", "keyword", "search_term") or "").strip()
+        key = _normalize_search_term(keyword)
+        if not key:
+            continue
+        metrics = _term_metrics(row)
+        no_signal = (
+            metrics["orders"] == 0
+            and metrics["clicks"] == 0
+            and metrics["cost"] == 0
+            and metrics["impressions"] == 0
+        )
+        if no_signal:
+            dropped_low_signal += 1
+            continue
+        if key not in grouped_7d:
+            grouped_7d[key] = {"keyword": keyword, "key": key, "metrics": metrics}
+        else:
+            # 同词多行先聚合事实；ACOS/CVR 由聚合后的销售额/花费重新计算。
+            current = grouped_7d[key]["metrics"]
+            for field in ("clicks", "cost", "sales", "orders", "impressions"):
+                current[field] += metrics[field]
+            current["acos_raw"] = (current["cost"] / current["sales"] * 100
+                                    if current["sales"] else None)
+            current["acos"] = current["acos_raw"]
+            current["cvr_raw"] = (current["orders"] / current["clicks"] * 100
+                                   if current["clicks"] else None)
+            current["cvr"] = current["cvr_raw"]
+
+    grouped_14d: dict[str, dict] = {}
+    for row in rows_14d:
+        if not isinstance(row, dict):
+            continue
+        keyword = str(_term_value(row, "搜索词", "keyword", "search_term") or "").strip()
+        key = _normalize_search_term(keyword)
+        if key:
+            metrics = _term_metrics(row)
+            if key not in grouped_14d:
+                grouped_14d[key] = metrics
+            else:
+                current = grouped_14d[key]
+                for field in ("clicks", "cost", "sales", "orders", "impressions"):
+                    current[field] += metrics[field]
+                current["acos_raw"] = current["cost"] / current["sales"] * 100 if current["sales"] else None
+                current["acos"] = current["acos_raw"]
+                current["cvr_raw"] = current["orders"] / current["clicks"] * 100 if current["clicks"] else None
+                current["cvr"] = current["cvr_raw"]
+
+    candidates: list[dict] = []
+    for item in grouped_7d.values():
+        metrics = item["metrics"]
+        insufficient = _term_sample_insufficient(
+            metrics, campaign_online_days=campaign_online_days, target_cpa=target_cpa,
+        )
+        candidates.append({
+            "keyword": item["keyword"],
+            "_term_key": item["key"],
+            "term_sample_insufficient": insufficient,
+            "term_sample_insufficient_basis": "7d",
+            "review_reason": ["term_sample_insufficient"] if insufficient else [],
+            "metrics_7d": metrics,
+            # 保持现有 reasoner/promotion 的扁平读取契约。
+            **metrics,
+        })
+
+    candidates.sort(key=lambda term: (
+        -term["orders"], -term["cost"], -term["clicks"],
+        -term["impressions"], term["_term_key"],
+    ))
+    cap = max(0, int(max_terms_per_campaign))
+    selected = candidates[:cap]
+    cap_truncated = max(0, len(candidates) - len(selected))
+    fourteen_matches = 0
+    for term in selected:
+        if not term["term_sample_insufficient"]:
+            continue
+        metrics_14d = grouped_14d.get(term["_term_key"])
+        if metrics_14d is None:
+            term["metrics_14d"] = {"available": False}
+        else:
+            fourteen_matches += 1
+            term["metrics_14d"] = {"available": True, **metrics_14d}
+        term.pop("_term_key", None)
+    for term in selected:
+        term.pop("_term_key", None)
+
+    summary_metrics = [term["metrics_7d"] for term in selected]
+    return {
+        "windows": {
+            "7d": {"available": bool(rows_7d)},
+            "14d": {"available": bool(rows_14d)},
+        },
+        "summary": {
+            "raw_row_count": raw_row_count,
+            "normalized_term_count": len(grouped_7d),
+            "orders": sum(m["orders"] for m in summary_metrics),
+            "cost": round(sum(m["cost"] for m in summary_metrics), 2),
+            "sales": round(sum(m["sales"] for m in summary_metrics), 2),
+            "term_sample_insufficient_7d_count": sum(
+                1 for term in selected if term["term_sample_insufficient"]
+            ),
+            "dropped_low_signal_count": dropped_low_signal,
+            "cap_truncated_count": cap_truncated,
+            "transmitted_term_count": len(selected),
+            "fourteen_day_match_count": fourteen_matches,
+            "prompt_deferred_count": 0,
+        },
+        "terms": selected,
+    }
+
+
 class CampaignFetcher:
     """MCP 主力拉取上下文 + 效果数据，不再回退 Doris。"""
 
@@ -632,64 +815,72 @@ class CampaignFetcher:
         shop_account: str,
         start_date: str = "",
         end_date: str = "",
-    ) -> dict[str, list]:
-        """按需拉取搜索词报告（仅广泛广告）。返回已预过滤、排序、截断。"""
-        results: dict[str, list] = {}
+        *,
+        start_date_14d: str = "",
+        end_date_14d: str = "",
+        campaign_online_days: dict[str, int] | None = None,
+        target_cpa: float | None = None,
+        skip_campaigns: set[str] | None = None,
+    ) -> dict[str, dict]:
+        """按需拉取 7d/14d 搜索词报告并构建 bundle。
+
+        7 天和 14 天是活动级统一取数策略；最终词集、排序、20 条截断和
+        14 天补充均由 :func:`build_search_term_bundle` 完成。
+        """
+        results: dict[str, dict] = {}
         sem = self._mcp_sem
 
-        async def _one(name: str):
+        async def _fetch_window(name: str, start: str, end: str) -> tuple[str, list[dict], str | None]:
             try:
                 async with sem:
                     res = await self._mcp().campaign_call_tool(
                         "ad_campaign_search_term_report", name, shop_account,
-                        start_date=start_date, end_date=end_date,
+                        start_date=start, end_date=end,
                     )
                 if res.ok:
-                    payload = _as_rows(res.value)
-                    terms = []
-                    for row in payload:
-                        orders = int(_to_float(row.get("广告订单量")) or 0)
-                        clicks = int(_to_float(row.get("点击量")) or 0)
-                        impressions = int(_to_float(row.get("曝光量")) or 0)
-                        # ── 搜索词预过滤 ──
-                        # 保留规则（优先级从高到低）：
-                        #   ① 有订单 → 已验证有效，可判断否词 ACOS 或提取精准
-                        #   ② 点击 ≥ 3 → 有复现，可判断转化方向
-                        #   ③ 曝光 ≥ 200 且 点击 ≤ 1 → 高曝光零点击 = CTRL 异常信号
-                        # 过滤规则：
-                        #   点击 ≤ 1 且 0 订单 且 曝光 < 200 → 单次偶发点击 = 纯噪音
-                        if orders > 0:
-                            pass
-                        elif clicks >= 3:
-                            pass
-                        elif impressions >= 200 and clicks <= 1:
-                            pass
-                        elif clicks <= 1 and orders == 0 and impressions < 200:
-                            continue
-                        terms.append({
-                            "keyword": str(row.get("搜索词") or ""),
-                            "clicks": clicks,
-                            "cost": _to_float(row.get("花费")) or 0.0,
-                            "sales": _to_float(row.get("销售额")) or 0.0,
-                            "orders": orders,
-                            "impressions": impressions,
-                            "acos": _to_pct(row.get("ACOS")),
-                            "cvr": _to_pct(row.get("CVR")),
-                        })
-                    # 花费降序 → 同花费曝光降序 → 取前10
-                    terms.sort(key=lambda t: (-t["cost"], -t["impressions"]))
-                    return name, terms[:10]
+                    return name, _as_rows(res.value), None
+                return name, [], res.error or "mcp_failed"
             except Exception as e:  # noqa: BLE001
                 logger.warning("search_term 解析失败 [%s]: %s", name, e)
-            return name, []
+                return name, [], str(e)
 
-        tasks = [_one(name) for name in campaign_names]
+        async def _one(name: str):
+            if skip_campaigns and name in skip_campaigns:
+                return name, None
+            online_days = (campaign_online_days or {}).get(name, 7)
+            seven_task = _fetch_window(name, start_date, end_date)
+            if start_date_14d or end_date_14d:
+                fourteen_task = _fetch_window(name, start_date_14d, end_date_14d)
+                seven, fourteen = await asyncio.gather(seven_task, fourteen_task)
+            else:
+                seven = await seven_task
+                fourteen = (name, [], None)
+            _, rows_7d, err_7d = seven
+            _, rows_14d, err_14d = fourteen
+            if err_7d:
+                return name, {
+                    "windows": {"7d": {"available": False}, "14d": {"available": not bool(err_14d)}},
+                    "summary": {"search_term_fetch_status": "FAILED_7D", "error": err_7d},
+                    "terms": [],
+                }
+            bundle = build_search_term_bundle(
+                rows_7d, rows_14d,
+                campaign_online_days=online_days,
+                target_cpa=target_cpa,
+                max_terms_per_campaign=settings.search_term_llm_max_terms_per_campaign,
+            )
+            if err_14d:
+                bundle["windows"]["14d"] = {"available": False, "error": err_14d}
+            return name, bundle
+
+        tasks = [_one(name) for name in dict.fromkeys(campaign_names)]
         raw = await asyncio.gather(*tasks, return_exceptions=True)
         for item in raw:
             if isinstance(item, BaseException):
                 continue
-            name, terms = item
-            results[name] = terms
+            name, bundle = item
+            if bundle is not None:
+                results[name] = bundle
         return results
 
     async def discover_new_keywords(
@@ -1251,6 +1442,11 @@ class CampaignFetcher:
         basic_source = basic.get("source", "mcp")
         perf_source = perf.get("source", "mcp")
         source = "mcp" if basic_source == "mcp" and perf_source == "mcp" else "mixed"
+        flags: list[str] = []
+        if perf_source == "mcp_fail":
+            flags.append("perf_7d_missing")
+        if basic_source == "mcp_fail":
+            flags.append("basic_info_missing")
 
         # days_online: -1=未知（保持，勿当 0）；basic 缺键时也按 -1
         days_raw = basic.get("days_online", -1)
@@ -1290,7 +1486,7 @@ class CampaignFetcher:
             current_portfolio_name=str(ctx.get("current_portfolio_name") or ""),
             current_group_type=self._resolve_group_type(str(ctx.get("current_portfolio_name") or "")),
             source=source,
-            flags=[],
+            flags=flags,
         )
 
     # ── 内部辅助 ──

@@ -34,8 +34,15 @@ from app.workflow.steps.campaign_portfolio import (
 )
 from app.workflow.steps.campaign_restart import analyze_eliminated_restart
 from app.workflow.steps.campaign_new import (
+    analyze_new_campaign_decisions,
     analyze_new_campaigns,
+    finalize_new_campaign_decisions,
+    _is_blocked_by_asin,
+    merge_new_campaign_decisions,
     pick_target_child_asin as _pick_target_child_asin,
+)
+from app.workflow.steps.campaign_search_term_promotion import (
+    build_search_term_promotion_decisions,
 )
 from app.models.campaign import (
     CampaignAdjustmentItem,
@@ -45,6 +52,7 @@ from app.models.campaign import (
     CampaignStrategicOverview,
     CampaignStrategyContext,
     CampaignUnit,
+    SearchTermPromotionCandidate,
 )
 from app.models.layers import AdPermission, OperatingMode, operating_mode_to_permission
 if TYPE_CHECKING:
@@ -479,14 +487,15 @@ async def _analyze_campaigns_impl(
                 overview_flag = flag if isinstance(flag, bool) else True
         return growth_analysis_enabled and overview_flag
 
-    async def _run_new_campaigns_if_enabled() -> tuple[list, list, dict]:
+    async def _run_new_campaigns_if_enabled(*, finalize: bool = True) -> tuple[list, list, dict]:
         """新增流统一包装：最终门禁 False 时返回空，否则调 analyze_new_campaigns。
         正常路径进三流 gather、全预过滤路径直接 await —— 两路径业务语义对称，仅在调度结构上不同。"""
         if not settings.campaign_new_enabled:
             return [], [], {}
         if not await _resolve_growth_analysis_enabled():
             return [], [], {}
-        return await analyze_new_campaigns(
+        runner = analyze_new_campaigns if finalize else analyze_new_campaign_decisions
+        return await runner(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
             shop_id=campaign_data.shop_id,
             parent_seller_sku=campaign_data.parent_seller_sku,
@@ -689,7 +698,7 @@ async def _analyze_campaigns_impl(
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
             cancel_check=cancel_check,
         ),
-        (_run_new_campaigns_if_enabled()),
+        (_run_new_campaigns_if_enabled(finalize=False)),
         return_exceptions=True,
     )
 
@@ -707,14 +716,15 @@ async def _analyze_campaigns_impl(
         if isinstance(r, BaseException):
             logger.exception("Stream %s 异常 [%s]: %s", label, parent_asin, r)
             warnings_list.append(f"{label} 流分析异常: {type(r).__name__}: {r}")
-            return [], {}, [], []
+            return [], {}, [], [], []
         return r
 
-    (exact_adjustments, exact_rd, exact_summaries, exact_skipped) = _unpack_stream(stream_results[0], "exact")
-    (broad_adjustments, broad_rd, broad_summaries, broad_skipped) = _unpack_stream(stream_results[1], "broad")
+    (exact_adjustments, exact_rd, exact_summaries, exact_skipped, _) = _unpack_stream(stream_results[0], "exact")
+    (broad_adjustments, broad_rd, broad_summaries, broad_skipped, promotion_candidates) = _unpack_stream(stream_results[1], "broad")
 
     # 新增活动线解包（返回 tuple[list[NewCampaignItem], list[str], dict[str,int]]）
     # 第 3 元 flow_sv_map = flow_keywords 全量搜索量映射，透传给预算回算 agent（零新增 MCP）。
+    source_a_decisions: list = []
     new_campaigns: list = []
     new_campaigns_warnings: list[str] = []
     flow_sv_map: dict = {}
@@ -723,8 +733,46 @@ async def _analyze_campaigns_impl(
         logger.exception("new_campaigns 流异常 [%s]: %s", parent_asin, nc_result)
         warnings_list.append(f"新增活动分析异常: {type(nc_result).__name__}: {nc_result}")
     else:
-        new_campaigns, new_campaigns_warnings, flow_sv_map = nc_result
+        source_a_decisions, new_campaigns_warnings, flow_sv_map = nc_result
         warnings_list.extend(new_campaigns_warnings)
+
+    # 广泛流的真实搜索词由 reasoner 按报表回填后在此转为精准建活动决策。
+    # 只占用新增流已有的名称、子 ASIN、建议竞价和最终 Top-N 装配能力；不新增查询管线。
+    promoted_decisions = []
+    if (
+        settings.campaign_new_enabled
+        and not _is_blocked_by_asin(strategy_context)
+        and promotion_candidates
+        and await _resolve_growth_analysis_enabled()
+    ):
+        exact_keywords = {
+            (cu.keyword_text or "").strip().lower()
+            for cu in campaign_data.campaigns
+            if (cu.match_type or "").upper() == "EXACT" and cu.keyword_text
+        }
+        promoted_decisions, promotion_warnings = build_search_term_promotion_decisions(
+            promotion_candidates,
+            existing_exact_keywords=exact_keywords,
+            target_acos=strategy_context.target_acos,
+        )
+        new_campaigns_warnings.extend(promotion_warnings)
+        warnings_list.extend(promotion_warnings)
+    if source_a_decisions or promoted_decisions:
+        try:
+            all_new_decisions = merge_new_campaign_decisions(source_a_decisions, promoted_decisions)
+            new_campaigns = await finalize_new_campaign_decisions(
+                all_new_decisions,
+                fetcher=fetcher,
+                parent_asin=parent_asin,
+                parent_seller_sku=campaign_data.parent_seller_sku,
+                shop_account=shop_account,
+                target_child_asin=target_child_asin,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("新增活动统一组装失败 [%s]: %s", parent_asin, e)
+            warning = f"新增活动统一组装失败: {type(e).__name__}: {e}"
+            new_campaigns_warnings.append(warning)
+            warnings_list.append(warning)
 
     rounds_detail["exact"] = exact_rd
     rounds_detail["broad"] = broad_rd
@@ -805,6 +853,7 @@ async def _analyze_campaigns_impl(
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
             adjustments,
             product_stage=strategy_context.product_stage,
+            target_cpa=strategy_context.target_cpa,
             inventory_days=strategy_context.inventory_days,
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
@@ -979,6 +1028,7 @@ async def _analyze_campaigns_impl(
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
             adjustments,
             product_stage=strategy_context.product_stage,
+            target_cpa=strategy_context.target_cpa,
             inventory_days=strategy_context.inventory_days,
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
@@ -1666,7 +1716,7 @@ async def _analyze_one_stream(
     *,
     core_keyword_set: set[str] | None = None,
     cancel_check: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict]]:
+) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict], list[SearchTermPromotionCandidate]]:
     _core_set: set[str] = core_keyword_set or set()
     """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1 单轮 → 合并。
 
@@ -1674,7 +1724,7 @@ async def _analyze_one_stream(
     skipped = 整批 LLM 失败或未返回 item 的活动（运营需人工补救；外层护栏循环会补答）。
     """
     if not campaigns:
-        return [], {}, [], []
+        return [], {}, [], [], []
 
     async def _cancel() -> None:
         if cancel_check:
@@ -1702,6 +1752,7 @@ async def _analyze_one_stream(
     else:
         summaries = await _prefetch_search_terms(
             fetcher, parent_asin, days, summaries, unit_lookup,
+            target_cpa=strategy_context.target_cpa,
         )
     _st(f"DONE prefetch ({len(campaigns)} campaigns)")
     await _cancel()
@@ -1728,9 +1779,13 @@ async def _analyze_one_stream(
     if task_type == "exact":
         _backfill_placement_pcts(adjustments, unit_lookup)
     _st(f"DONE merge ({len(adjustments)} items, {len(skipped)} skipped)")
+    promotion_candidates = (
+        [candidate for br in r1_results for candidate in br.exact_promotion_candidates]
+        if task_type == "broad" else []
+    )
     return adjustments, {
         "round1": _round_stats(r1_results), "round2": None, "round3": None,
-    }, summaries, skipped
+    }, summaries, skipped, promotion_candidates
 
 
 def _collect_skipped(
@@ -1836,9 +1891,28 @@ async def _run_round(
                         batch_idx, asin, normalized_cnt, len(items),
                     )
 
+                promotion_candidates: list[SearchTermPromotionCandidate] = []
+                if task_type == "broad":
+                    raw_candidates = parsed.get("exact_promotion_candidates", []) if isinstance(parsed, dict) else []
+                    if not isinstance(raw_candidates, list):
+                        logger.warning(
+                            "Batch %d [%s] exact_promotion_candidates 非列表，已忽略",
+                            batch_idx, asin,
+                        )
+                        raw_candidates = []
+                    for raw_candidate in raw_candidates:
+                        try:
+                            promotion_candidates.append(SearchTermPromotionCandidate(**raw_candidate))
+                        except Exception as e:
+                            logger.warning(
+                                "搜索词提精准候选解析失败 batch=%d [%s]: %s",
+                                batch_idx, asin, e,
+                            )
+
                 return CampaignBatchResult(
                     batch_id=batch_idx, round_number=round_number,
                     items=items,
+                    exact_promotion_candidates=promotion_candidates,
                     raw_llm_output=result.get("raw_output", "") or "",
                     temperature=temperature,
                     llm_success=bool(result.get("success", False)),
@@ -2198,14 +2272,40 @@ async def _prefetch_search_terms(
     days: int,
     summaries: list[dict],
     unit_lookup: dict[str, CampaignUnit],
+    *,
+    target_cpa: float | None = None,
 ) -> list[dict]:
-    """预取 BROAD/PHRASE/AUTO 活动的 search_term 数据并注入 summaries。"""
+    """活动门禁后统一预取 7d/14d search_term bundle。"""
     enriched = [dict(s) for s in summaries]
     search_term_names: set[str] = set()
+    campaign_online_days: dict[str, int] = {}
+    skipped: dict[str, object] = {}
+    from app.core.campaign_sample import assess_campaign_sample
+
     for s in summaries:
         cu = _find_campaign_unit(unit_lookup, s.get("campaign_key", ""))
         if cu:
-            search_term_names.add(cu.campaign_name)
+            if str(cu.match_type or "").strip().upper() == "EXACT":
+                continue
+            perf = cu.perf_7d
+            perf_missing = "perf_7d_missing" in (cu.flags or [])
+            assessment = assess_campaign_sample(
+                days_online=cu.days_online,
+                clicks_7d=None if perf_missing else perf.clicks,
+                cost_7d=None if perf_missing else perf.cost,
+                target_cpa=target_cpa,
+            )
+            campaign_online_days[cu.campaign_name] = cu.days_online
+            if assessment.insufficient:
+                skipped[cu.campaign_name] = assessment
+            else:
+                search_term_names.add(cu.campaign_name)
+
+    for item in enriched:
+        cu = _find_campaign_unit(unit_lookup, item.get("campaign_key", ""))
+        if cu and cu.campaign_name in skipped:
+            item["search_term_fetch_status"] = "SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT"
+            item["search_term_sample_reasons"] = list(skipped[cu.campaign_name].reasons)
 
     if not search_term_names:
         return enriched
@@ -2232,23 +2332,46 @@ async def _prefetch_search_terms(
         logger.warning("search_terms 预取跳过 [%s]: shop_account 为空", parent_asin)
         return enriched
 
-    sd, ed = _make_date_window(days, site_code)
+    sd, ed = _make_date_window(7, site_code)
+    sd14, ed14 = _make_date_window(14, site_code)
     result: dict = {}                          # 显式初始化：异常路径下 logger 也要能安全取长度
     try:
         result = await asyncio.wait_for(
             fetcher.fetch_search_terms_for(list(search_term_names), shop_account,
-                                           start_date=sd, end_date=ed),
+                                           start_date=sd, end_date=ed,
+                                           start_date_14d=sd14, end_date_14d=ed14,
+                                           campaign_online_days=campaign_online_days,
+                                           target_cpa=target_cpa,
+                                           skip_campaigns=set(skipped)),
             timeout=getattr(settings, "campaign_st_fetch_timeout", 180),
         ) or {}
         for name in enriched:
             s_name = name.get("campaign_name", "")
             if s_name in result:
                 name["_search_term_data"] = result[s_name]
+                summary = result[s_name].get("summary") or {}
+                if summary.get("search_term_fetch_status"):
+                    name["search_term_fetch_status"] = summary["search_term_fetch_status"]
     except Exception as e:
         logger.warning("search_term 预取失败 [%s]: %s", parent_asin, e)
 
-    logger.info("Campaign prefetch search_terms [%s]: %d/%d",
-                 parent_asin, len(result), len(search_term_names))
+    bundle_summaries = [
+        (bundle.get("summary") or {}) for bundle in result.values()
+        if isinstance(bundle, dict)
+    ]
+    logger.info(
+        "Campaign prefetch search_terms [%s]: fetched=%d/%d skipped_sample=%d "
+        "raw7d=%d transmitted=%d dropped_low_signal=%d cap_truncated=%d 7d_only=%d 7d+14d=%d",
+        parent_asin,
+        len(result), len(search_term_names), len(skipped),
+        sum(int(s.get("raw_row_count") or 0) for s in bundle_summaries),
+        sum(int(s.get("transmitted_term_count") or 0) for s in bundle_summaries),
+        sum(int(s.get("dropped_low_signal_count") or 0) for s in bundle_summaries),
+        sum(int(s.get("cap_truncated_count") or 0) for s in bundle_summaries),
+        sum(1 for bundle in result.values() for term in (bundle.get("terms") or [])
+            if not term.get("term_sample_insufficient")),
+        sum(int(s.get("fourteen_day_match_count") or 0) for s in bundle_summaries),
+    )
     return enriched
 
 
@@ -2527,6 +2650,7 @@ def _apply_campaign_guardrails(
     total_budget_limit: float | None = None,
     *,
     product_stage: str = "",
+    target_cpa: float | None = None,
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
@@ -2537,6 +2661,7 @@ def _apply_campaign_guardrails(
     gp = _apply_guardrails(
         adjustments,
         product_stage=product_stage,
+        target_cpa=target_cpa,
         inventory_days=inventory_days,
         refund_rate=refund_rate,
         rating=rating,
@@ -2610,6 +2735,7 @@ def _resolve_budget_conflicts(
     total_budget_limit: float | None = None,
     *,
     product_stage: str = "",
+    target_cpa: float | None = None,
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
@@ -2621,6 +2747,7 @@ def _resolve_budget_conflicts(
         adjustments,
         total_budget_limit,
         product_stage=product_stage,
+        target_cpa=target_cpa,
         inventory_days=inventory_days,
         refund_rate=refund_rate,
         rating=rating,

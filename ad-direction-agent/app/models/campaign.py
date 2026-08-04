@@ -182,10 +182,47 @@ class CampaignBatchResult(BaseModel):
     batch_id: int = 0
     round_number: int = 0
     items: list[CampaignAdjustmentItem] = Field(default_factory=list)
+    # 仅广泛流携带：LLM 标注后已由 reasoner 按原始搜索词报表回填并校验的提精准候选。
+    exact_promotion_candidates: list["SearchTermPromotionCandidate"] = Field(default_factory=list)
     raw_llm_output: str = ""
     temperature: float = 0.3
     llm_success: bool = True
     llm_error: str = ""
+
+
+class SearchTermPromotionCandidate(BaseModel):
+    """广泛流 LLM 标注、代码按原始搜索词报告回填后的提精准候选。"""
+    campaign_key: str
+    campaign_name: str
+    campaign_match_type: str
+    search_term: str
+    keyword_root: str = ""
+    keyword_class: str = ""
+    relevance_tier: str = ""
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    clicks: int = 0
+    orders: int = 0
+    cost: float = 0.0
+    sales: float = 0.0
+
+
+class NewCampaignDecision(BaseModel):
+    """已完成来源和匹配方式判断、待统一补齐执行参数的新增活动决策。"""
+    keyword_text: str
+    keyword_class: str = ""
+    relevance_tier: str = ""
+    source: str = ""
+    trigger_scene: str = ""
+    prescribed_match_type: Literal["EXACT", "BROAD"] = "BROAD"
+    reason: str = ""
+    evidence: list[str] = Field(default_factory=list)
+    confidence: str = "medium"
+    review_level: str = "MANUAL_REVIEW"
+    negative_strategy: str = ""
+    search_volume: int = 0
+    natural_rank: int | None = None
+    suggested_bid: float | None = None
 
 
 class NewCampaignCandidate(BaseModel):

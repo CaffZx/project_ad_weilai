@@ -34,7 +34,7 @@ def _run_impl(monkeypatch, fetcher, campaign_data=None):
     monkeypatch.setattr(
         campaign_steps,
         "_analyze_one_stream",
-        AsyncMock(return_value=([], {}, [], [])),
+        AsyncMock(return_value=([], {}, [], [], [])),
     )
     monkeypatch.setattr(campaign_steps, "_SANITY_CHECK_ENABLED", False)
     monkeypatch.setattr(campaign_steps, "_SYNTHESIS_ENABLED", False)

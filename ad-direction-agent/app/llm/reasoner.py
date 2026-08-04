@@ -14,7 +14,7 @@ from app.core.metrics_ops_language import format_keyword_acos_change, humanize_o
 from app.core.validation_ops import format_validation_item_ops
 from app.llm.client import DeepSeekClient, deepseek_client
 from app.llm.kb_loader import kb
-from app.models.campaign import CampaignUnit
+from app.models.campaign import CampaignUnit, SearchTermPromotionCandidate
 from app.models.layers import product_level_with_code
 
 # 运营正文禁止出现的规则编号 / 内部等级词
@@ -60,6 +60,51 @@ REASONING_DECISION_RULES = """
 """
 
 logger = logging.getLogger(__name__)
+
+
+def render_search_term_prompt_lines(search_term_data: dict | list) -> list[str]:
+    """把搜索词 bundle 渲染为带窗口与样本标记的提示词行。"""
+    if isinstance(search_term_data, list):
+        summary: dict = {}
+        terms = search_term_data
+    else:
+        summary = search_term_data.get("summary") or {}
+        terms = search_term_data.get("terms") or []
+    status = summary.get("search_term_fetch_status")
+    if status:
+        return [f"搜索词取数状态={status}（该活动不提供逐词搜索词证据）"]
+
+    def _fmt(value: object) -> object:
+        return "N/A" if value is None else value
+
+    def _line(keyword: str, metrics: dict, window: str, insufficient: bool) -> str:
+        return (
+            f"      [{keyword}] [window={window}] "
+            f"sample_insufficient_7d={'true' if insufficient else 'false'}: "
+            f"cost=${_fmt(metrics.get('cost'))}, sales=${_fmt(metrics.get('sales'))}, "
+            f"orders={_fmt(metrics.get('orders'))}, clicks={_fmt(metrics.get('clicks'))}, "
+            f"impressions={_fmt(metrics.get('impressions'))}, "
+            f"ACOS(raw)={_fmt(metrics.get('acos_raw', metrics.get('acos')))}%, "
+            f"ACOS(corrected)={_fmt(metrics.get('acos_corrected'))}%, "
+            f"CVR(raw)={_fmt(metrics.get('cvr_raw', metrics.get('cvr')))}%, "
+            f"CVR(corrected)={_fmt(metrics.get('cvr_corrected'))}%, "
+            f"data_min_age_days={_fmt(metrics.get('data_min_age_days'))}, "
+            f"data_maturity={_fmt(metrics.get('data_maturity'))}, "
+            f"maturity_basis={_fmt(metrics.get('maturity_basis'))}"
+        )
+
+    lines: list[str] = []
+    for term in terms:
+        if not isinstance(term, dict):
+            continue
+        keyword = str(term.get("keyword") or "?")
+        insufficient = bool(term.get("term_sample_insufficient", False))
+        metrics_7d = term.get("metrics_7d") or term
+        lines.append(_line(keyword, metrics_7d, "7d", insufficient))
+        metrics_14d = term.get("metrics_14d")
+        if insufficient and isinstance(metrics_14d, dict) and metrics_14d.get("available"):
+            lines.append(_line(keyword, metrics_14d, "14d", insufficient))
+    return lines
 
 
 _ANALYZE_TASK_PROMPT = """你是一个资深的亚马逊广告运营专家（广告投手），擅长分析 ASIN 广告数据并提供可执行的优化建议。
@@ -327,7 +372,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 3. **查动作矩阵**: KB 17 §3 按广告方向 × 问题类型取有序动作（广泛活动多走 §3.2 expand_keywords / §3.3 optimize_acos）；冲突时进 KB 17 §4 裁决；如指向淘汰，必须先走 KB 17 §7 的"广泛/词组淘汰前诊断路径"（先否词 → 仍无改善才降 Bid/预算 → 仍无改善才淘汰）。
 4. **取约束数值**: KB 15 §1（Bid 公式/保护规则/硬上下限）、KB 15 §2（预算范围 + 淡旺季系数）。
 5. **应用幅度系数**: 最终幅度 = KB 19 基础幅度 × KB 17 §5.2 阶段系数 × KB 17 §5.3 淡旺季系数。
-6. **否词决策**: 先读 KB 30 §2（必需数据）确认数据可用，再按 KB 30 §3 判断搜索词相关性，最后走 KB 30 §5 准入规则和 KB 30 §6 精准/词组选择。**注意**: 当前仅注入 7 天搜索词数据，不含更长时间窗口。若搜索词点击<10 且花费<$5，应输出 SAMPLE_INSUFFICIENT 而非强行否词或淘汰。
+6. **否词决策**: 仅对输入中带有逐词搜索词数据的活动判断否词；先读 KB 30 §2（必需数据）确认数据可用，再按 KB 30 §3 判断相关性，最后走 KB 30 §5 准入规则和 KB 30 §6 精准/词组选择。7d 是动作基线，14d 仅是长尾/低流量/样本不足词的辅助观察，不能单独触发动作。词级样本不足按 7d「点击<10 且花费<max($15, 目标 CPA)」判定；无逐词搜索词数据或取数状态为跳过/失败时，`negative_keywords=[]` 且不得输出该活动的提精准候选。证据中的点击、花费、订单、销售额、ACOS、CVR 数字必须明确写 7d 或 14d；校正指标不可用时不得用 raw 指标替代动作判断。
 7. **淘汰决策**: KB 21 §0-4。
 
 ## 输出格式
@@ -347,6 +392,17 @@ _CAMPAIGN_BROAD_PROMPT = (
       "review_level": "MANUAL_REVIEW"
     }
   ],
+  "exact_promotion_candidates": [
+    {
+      "cid": "C3",
+      "search_term": "sticky bra for dress",
+      "keyword_root": "sticky bra",
+      "keyword_class": "long_tail",
+      "relevance_tier": "R1",
+      "reason": "搜索词与产品本体直接相关",
+      "evidence": ["来自该活动本批搜索词报告"]
+    }
+  ],
   "batch_summary": {"total_analyzed": 6, "to_eliminate": 1, "to_adjust": 3, "to_keep": 2, "overall_notes": "..."}
 }
 
@@ -354,7 +410,15 @@ _CAMPAIGN_BROAD_PROMPT = (
 ### 必填结构字段
 - **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
 - proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
-- 必须判断 negative_keywords（每轮必读搜索词报告；无 neg 词时输出空数组 []；禁止 null）。每个否词必须包含 keyword（搜索词文本）、match_type（仅允许 NEGATIVE_EXACT）、reason（证据：点击/花费/订单数及否定原因）
+- 仅对当前活动输入中实际带有逐词搜索词数据时判断 `negative_keywords`；无逐词搜索词数据、取数跳过或失败时必须输出 `[]`，禁止 null。
+- 每个否词必须来自该 cid 实际展示的搜索词，包含 keyword、match_type（仅允许 NEGATIVE_EXACT）、reason。reason/evidence 中凡引用数字，必须同时标明 7d 或 14d；14d 只能作为辅助观察，不能独立触发否词。
+
+### 正向搜索词候选（新增精准活动接线）
+- `exact_promotion_candidates` 必须输出数组；无候选时填 `[]`，禁止 null。
+- 每条必须带当前批次原样 `cid`、该 cid 搜索词报告中原样出现的 `search_term`、`keyword_root`、`keyword_class`、`relevance_tier`、reason、evidence。
+- `keyword_root` 只能是该 `search_term` 中连续出现的词组；无法提取时填空字符串。
+- 只输出语义相关且至少 R1 的正向候选；禁止编造输入外搜索词、禁止输出订单/花费/销售额/ACOS/CVR 等数值字段。
+- 这是候选标注，不是最终建活动决策；Python 会按真实搜索词报告重新校验订单、ACOS、已有精准词和词根聚合。
 
 ### 淘汰活动
 - 是否淘汰、淘汰保护和淘汰前诊断路径均以本次注入的 KB 21 §0-4 为准。
@@ -402,6 +466,10 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 - **本产品标题** + **已投放关键词**（运营/系统已认定与本产品相关的词，作相关性参照）
 - 候选词列表：每个含 keyword_text / search_volume(流量词库搜索量) / search_rank(流量词库搜索排名) / week_search_volume(周搜索量) / week_rank(词的周排名) / natural_rank(当前自然位) / rank_trend(近7天自然位序列) / rank_tier(自然位分位) / sponsored_rank(广告排位) / history_state / trigger_scene / source。来源主要为「流量词库」与「自然位机会词」。
 
+## 来源与最终匹配契约
+- `source=flow` 的候选若 action=create，代码会固定组装为 BROAD 探索活动；因此 `negative_strategy` 必须填写非空的搜索词观察/否词策略。long_tail 只是关键词类别，不能据此留空。
+- `source=ranking_opportunity` / `source=competitor` 的最终匹配类型仍由代码按既有来源规则决定；你不输出、不猜测 match_type，`negative_strategy` 可以填空字符串。
+
 ## 排名数据使用规则（必须遵循）
 - `search_rank` 是流量词库的搜索排名，反映词的热度/竞争位置；它**不是** `week_rank`，也不能单独证明该词与本产品相关。
 - `natural_rank` 是当前自然位；有值时即可作为产品在该词下的排名事实。自然位数字越小越靠前，但不可脱离标题属性单独建词。
@@ -422,7 +490,7 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 - **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，不要因参照少就过度 skip——以标题为主判相关性。
 
 ## 词型偏好与运营目标类型（KB 06 + 运营配置）
-- **优先精准长尾词**（多词、含产品具体属性 → 相关性高、竞争低、ACOS 可控）。
+- **优先高相关长尾词**（多词、含产品具体属性 → 相关性高、竞争低、ACOS 可控）；匹配类型由来源和代码决定，勿把 long_tail 本身当作 EXACT 结论。
 - **审慎对待大词/泛词**（单词或品类大词，如 "skirt"/"dress"）：相关性弱、ACOS 难控；除非测试期/引流型否则倾向 skip；收割/盈利/维持期尤不应新建大词。
 - **运营目标关键词类型（软偏好）**：上文「目标关键词类型」是运营配置的偏好。在相关性达标前提下，**优先选择属于该类型的词**；不属于该类型的词需要更强相关性（R1）才建。这是倾向性引导，不是硬性排除。
 
@@ -434,9 +502,9 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
       "action": "create",
       "keyword_class": "long_tail",
       "relevance_tier": "R1",
-      "negative_strategy": "7天后读搜索词报告，点击>10次且无转化的词进入否词候选",
-      "reason": "(1) 现状：自然位 35 持续上升；(2) 原因：长尾词精确匹配标题属性 fishnet/plus size，相关性高且无精准承接；(3) 建议：新建精准活动承接。",
-      "evidence": ["搜索量 156", "自然排名第 35 位", "相关性 R1：精确匹配标题属性"]
+      "negative_strategy": "运行7天后读取搜索词报告，按相关性和样本门槛审阅精准否词候选",
+      "reason": "(1) 现状：流量词库有搜索量且当前尚未覆盖；(2) 原因：长尾词匹配标题属性 fishnet/plus size，相关性高；(3) 建议：纳入新活动验证。",
+      "evidence": ["搜索量 156", "相关性 R1：匹配标题具体属性"]
     }
   ]
 }
@@ -445,7 +513,7 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 - **每个词必须输出 relevance_tier（R1/R2/R3/R4）**；**R4 一律 action=skip**；R3 仅测试期可 create，且 reason 必须写明"为何判定可能相关"（KB28 §2）。
 - 不值得建的词（**与产品无关** / 相关性差 / 搜索量虚高但无意图 / 与现有词重复语义）→ action=skip，reason 说明原因。
 - **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与**标题具体属性**/已投词关联）；说不出相关性的不得 create。
-- action=create 的精准类词 negative_strategy 填空串 ""；广泛/词组词必须给否词观察规则。
+- `source=flow` 且 action=create 时，negative_strategy 必须填写非空；其他来源按上面的来源契约处理。不得根据 keyword_class 猜测最终匹配类型。
 - reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议；禁用规则编号 / 内部术语；evidence 引用具体数值。
 """
 
@@ -1798,18 +1866,19 @@ class LLMReasoner:
             # 搜索词懒加载数据 (KB 22 §3.3 / KB 19 §8)
             if s.get("_search_term_data"):
                 st_data = s["_search_term_data"]
-                terms = st_data if isinstance(st_data, list) else st_data.get("search_terms", [])
-                if terms:
-                    camp_parts.append(f"  - ★搜索词报告 ({len(terms)} 个搜索词):")
-                    for t in terms:
-                        if isinstance(t, dict):
-                            imp = t.get('impressions', 0)
-                            camp_parts.append(
-                                f"      [{t.get('keyword','?')}] 花费=${t.get('cost',0)}, "
-                                f"销售额=${t.get('sales',0)}, 订单={t.get('orders',0)}, "
-                                f"点击={t.get('clicks',0)}, 曝光={imp}, "
-                                f"ACOS={t.get('acos','N/A')}%"
-                            )
+                terms = st_data if isinstance(st_data, list) else st_data.get("terms", st_data.get("search_terms", []))
+                status = st_data.get("summary", {}).get("search_term_fetch_status") if isinstance(st_data, dict) else None
+                if status:
+                    camp_parts.append(f"  - 搜索词取数状态: {status}（不生成搜索词来源动作）")
+                elif terms:
+                    camp_parts.append(f"  - ★搜索词报告（7d 基线，{len(terms)} 个入选词）:")
+                    camp_parts.append("    字段口径：每行窗口独立；term_sample_insufficient 仅表示该词 7d 样本不足；14d 只作辅助事实，不能替代 7d 动作基线。")
+                    camp_parts.extend(render_search_term_prompt_lines(st_data))
+            elif s.get("search_term_fetch_status"):
+                camp_parts.append(
+                    f"  - 搜索词取数状态: {s['search_term_fetch_status']}（活动样本不足，仅观察；"
+                    "禁止生成搜索词来源的否词或提精准动作）"
+                )
 
         # 策略总览(执行总纲)preamble：非空时置于用户消息最前，作为本批逐活动判断的统一框架
         overview_text = (strategy_context.get("_strategic_overview_text") or "").strip()
@@ -1838,6 +1907,32 @@ class LLMReasoner:
             )
             parsed = self._parse_json(raw)
             raw_adjustments = parsed.get("campaign_adjustments", [])
+
+            def _norm_search_term(value: object) -> str:
+                return " ".join(str(value or "").strip().lower().split())
+
+            # broad 的否词和提精准共享同一份权威词索引：只包含本次实际
+            # 注入 LLM 的 7d 基线词。取数跳过/失败、空报告、被过滤或截断的词
+            # 均不在索引中，因而不能生成搜索词来源动作。
+            search_terms_by_cid: dict[str, dict[str, dict]] = {}
+            if task_type == "broad":
+                for cid, src in cid_map.items():
+                    raw_terms = src.get("_search_term_data") or []
+                    status = str(src.get("search_term_fetch_status") or "").strip()
+                    if isinstance(raw_terms, dict):
+                        summary = raw_terms.get("summary") or {}
+                        status = str(summary.get("search_term_fetch_status") or status).strip()
+                        raw_terms = raw_terms.get("terms", raw_terms.get("search_terms")) or []
+                    indexed: dict[str, dict] = {}
+                    if not status:
+                        for term in raw_terms:
+                            if not isinstance(term, dict):
+                                continue
+                            normalized = _norm_search_term(term.get("keyword"))
+                            if normalized:
+                                indexed[normalized] = term
+                    search_terms_by_cid[cid] = indexed
+
             # cid 回填：用代码持有的 cid_map 把 LLM 回吐的句柄解析回权威结构/现状字段，
             # 无条件覆盖 LLM 任何值（根治 LLM 抄错 campaign_key / 误报 current_*）。
             # 命中失败（越界/幻觉/重复 cid）→ 丢弃该条 → 该活动按"缺失"处理，由外层护栏补答循环补答。
@@ -1872,8 +1967,20 @@ class LLMReasoner:
                             asin, cid, nk.get("keyword"), nk_mt,
                         )
                         continue
+                    keyword = str(nk.get("keyword") or "").strip()
+                    if task_type == "broad":
+                        authoritative = search_terms_by_cid.get(cid, {}).get(
+                            _norm_search_term(keyword)
+                        )
+                        if authoritative is None:
+                            logger.warning(
+                                "Campaign batch [%s] cid=%s 丢弃非本轮搜索词否词 keyword=%r",
+                                asin, cid, keyword,
+                            )
+                            continue
+                        keyword = str(authoritative.get("keyword") or keyword).strip()
                     cleaned_neg.append({
-                        "keyword": (nk.get("keyword") or "").strip(),
+                        "keyword": keyword,
                         "match_type": "NEGATIVE_EXACT",
                         "reason": (nk.get("reason") or "")[:512],
                     })
@@ -1889,6 +1996,64 @@ class LLMReasoner:
                     for e in adj.get("evidence", [])
                 ]
             parsed["campaign_adjustments"] = adjustments
+
+            # 广泛流额外吐出“真实搜索词 -> 词根”候选；cid 与搜索词均由本层
+            # 校验/回填，后续策略层永不信任 LLM 自报的数值或活动身份。
+            promotion_candidates: list[dict] = []
+            if task_type == "broad":
+                def _is_contiguous_root(root: str, term: str) -> bool:
+                    if not root:
+                        return True
+                    root_tokens = root.split()
+                    term_tokens = term.split()
+                    width = len(root_tokens)
+                    return any(term_tokens[i:i + width] == root_tokens
+                               for i in range(len(term_tokens) - width + 1))
+
+                seen_pairs: set[tuple[str, str, str]] = set()
+                for raw_candidate in parsed.get("exact_promotion_candidates") or []:
+                    if not isinstance(raw_candidate, dict):
+                        continue
+                    cid = str(raw_candidate.get("cid") or "").strip()
+                    src = cid_map.get(cid)
+                    search_term = _norm_search_term(raw_candidate.get("search_term"))
+                    term = search_terms_by_cid.get(cid, {}).get(search_term)
+                    if src is None or term is None:
+                        logger.warning(
+                            "Campaign batch [%s] 丢弃无效提精准候选 cid=%r term=%r",
+                            asin, cid, raw_candidate.get("search_term"),
+                        )
+                        continue
+                    root = _norm_search_term(raw_candidate.get("keyword_root"))
+                    if not _is_contiguous_root(root, search_term):
+                        root = ""
+                    relevance_tier = str(raw_candidate.get("relevance_tier") or "").strip().upper()
+                    if relevance_tier != "R1":
+                        continue
+                    pair = (cid, search_term, root)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    candidate = SearchTermPromotionCandidate(
+                        campaign_key=str(src.get("campaign_key") or ""),
+                        campaign_name=str(src.get("campaign_name") or ""),
+                        campaign_match_type=str(src.get("match_type") or ""),
+                        search_term=str(term.get("keyword") or search_term).strip(),
+                        keyword_root=root,
+                        keyword_class=str(raw_candidate.get("keyword_class") or "").strip().lower(),
+                        relevance_tier=relevance_tier,
+                        reason=humanize_ops_text(self._sanitize_ops_text(
+                            raw_candidate.get("reason") or "",
+                        )),
+                        evidence=[humanize_ops_text(self._sanitize_ops_text(item))
+                                  for item in (raw_candidate.get("evidence") or []) if item],
+                        clicks=int(term.get("clicks") or 0),
+                        orders=int(term.get("orders") or 0),
+                        cost=float(term.get("cost") or 0.0),
+                        sales=float(term.get("sales") or 0.0),
+                    )
+                    promotion_candidates.append(candidate.model_dump())
+            parsed["exact_promotion_candidates"] = promotion_candidates
             logger.info("Campaign batch LLM 成功 [%s], %d items, temp=%.1f",
                         asin, len(adjustments), temperature)
             return {

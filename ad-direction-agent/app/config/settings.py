@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     campaign_global_llm_concurrency: int = 24
     campaign_llm_temperature: float = 0.3
     campaign_batch_size: int = 10
+    # 每个活动进入 Campaign LLM 的搜索词技术容量上限；按7d订单/花费/点击排序后截取。
+    search_term_llm_max_terms_per_campaign: int = 20
     # 纵深防御: 任务级总超时 (默认 900s=15min,防 Semaphore 饥饿永久挂死)
     campaign_total_timeout: int = 900
     # 信号量获取超时 (等 Semaphore 槽位的最长时间,防饿死在 sem 门前)
@@ -159,7 +161,7 @@ class Settings(BaseSettings):
     campaign_new_history_enabled: bool = False  # AZ history enrichment 开关（关闭则仅用 own 自然位，不查历史趋势）
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
     campaign_new_max_count: int = 40          # 单次分析最大候选词数 (排序后截断 Top-N；2026-06-18 20→40)
-    campaign_new_max_creates: int = 20        # 输出硬截断 (双轮交集后 Top-N，EXACT 优先)
+    campaign_new_max_creates: int = 15        # 输出硬截断 (两来源合流后 Top-N，已验证精准优先)
     #   ⚠ 与 KB03 §7「每日最大新词数=15」冲突，暂用 20 待 KB/运营定夺
     # ── 竞品词源 (Step3，reverse-only，默认关；live 验证返回结构后再开) ──
     campaign_new_competitor_enabled: bool = False     # 竞品词源总开关 (默认关)
