@@ -94,7 +94,7 @@ def test_upsert_agent_config_maps_strategy_patch_and_updates_only_patch_columns(
     assert conn.closed is True
 
 
-def test_upsert_agent_config_preserves_unpatched_columns_and_supports_explicit_null():
+def test_upsert_agent_config_preserves_unpatched_columns_and_skips_empty_values():
     repo, conn = _repo()
 
     repo.upsert_agent_config(
@@ -103,10 +103,30 @@ def test_upsert_agent_config_preserves_unpatched_columns_and_supports_explicit_n
     )
 
     sql, params = conn.cursor_obj.calls[0]
-    assert "target_acos_suggest=VALUES(target_acos_suggest)" in sql
+    assert "target_acos_suggest=VALUES(target_acos_suggest)" not in sql
     assert "daily_budget_suggest=VALUES(daily_budget_suggest)" not in sql
-    assert None in params
+    # 业务列区(base 6 列 + mapped patch)无 None;audit 列(user_id 非数字 → None)不属于业务列
+    assert None not in params[:6]
     assert conn.committed is True
+
+
+def test_upsert_agent_config_skips_empty_list_columns_without_blocking_others():
+    repo, conn = _repo()
+
+    repo.upsert_agent_config(
+        identity=_identity(),
+        patch={
+            "advert_purposes": [],
+            "advert_direction_types": [],
+            "target_acos_suggest": 25,
+        },
+    )
+
+    sql, params = conn.cursor_obj.calls[0]
+    assert "advert_purposes=VALUES(advert_purposes)" not in sql
+    assert "advert_direction_types=VALUES(advert_direction_types)" not in sql
+    assert "target_acos_suggest=VALUES(target_acos_suggest)" in sql
+    assert None not in params[:7]
 
 
 def test_upsert_agent_config_maps_list_and_decimal_fields():

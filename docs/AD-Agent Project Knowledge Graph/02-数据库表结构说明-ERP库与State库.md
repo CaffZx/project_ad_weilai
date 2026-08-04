@@ -301,7 +301,7 @@ CREATE TABLE IF NOT EXISTS t_advert_agent_campaign_exact_lifecycle (
 | `t_advert_agent_data_metrics` | 每个 decision 的 SUMMARY/DAILY 指标快照 | 我方 AD-Agent | `repository.py:1188 _upsert_legacy_metrics()` |
 | `t_advert_agent_decision` | 一次广告分析决策批次主表，含产品/阶段/季节/目标等快照 | 我方 AD-Agent | `repository.py:1234 _upsert_decision()` |
 | `t_advert_agent_decision_config` | 运营配置、定时分析开关及 ASIN 来源；最近决策回写字段也在此表 | 混合：ERP/运营维护配置，我方回写运行状态 | 读取：`app/data/decision_config_reader.py`；写入：`repository.py:1297 _upsert_decision_config()` |
-| `t_advert_agent_config` | **新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型），独立于分析事件，无 decision_id 绑定 | 我方 AD-Agent | 待接入 |
+| `t_advert_agent_config` | **Agent 配置表** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型/ACOS/预算/方向），无 decision_id 绑定（原名 `t_advet_agent_config`，2026-08-04 改名） | 我方 AD-Agent | 一键保存 `save-all` + 回读 `latest`（详见下文专节） |
 | `t_advert_agent_decision_config_bak_drop_codex` | `decision_config` 的历史备份表（当前生产库仍存在） | ERP/运维备份 | 本项目无读写锚点 |
 | `t_advert_agent_direction_recommend` | 前置方向推荐主表（结论 JSON） | 我方 AD-Agent | `repository.py:1112 _upsert_legacy_recommend()`；兼容路径 `:1520 _upsert_wizard_direction()` |
 | `t_advert_agent_direction_recommend_detail` | 前置方向推荐明细 | 我方 AD-Agent | `repository.py:1150 _upsert_legacy_details()`；兼容路径 `:1520 _upsert_wizard_direction()` |
@@ -674,10 +674,13 @@ CREATE TABLE `t_advert_agent_decision_config` (
 
 #### `t_advert_agent_config`
 
-- 功能：**新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型）
-- 与旧表区别：主键为 `BIGINT AUTO_INCREMENT`，无 `decision_id` 绑定，独立于分析事件；去掉了 `product_stage`（已由 `operating_mode` 替代）
-- 写入/维护方：我方 AD-Agent
-- 代码锚点：待接入
+- 功能：**Agent 配置表（单一真源）** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型/目标ACOS/预算/广告方向），独立于分析事件
+- 与旧表区别：主键为 `BIGINT AUTO_INCREMENT`，无 `decision_id` 绑定，独立于分析事件；去掉了 `product_stage`（已由 `operating_mode` 替代）；唯一键 `(parent_asin,parent_seller_sku,shop_id)` 三列（不含 site_code）
+- 表名：原名 `t_advet_agent_config`（历史缩写），**2026-08-04 改名 `t_advert_agent_config`**（migrate 脚本 `scripts/erp_db/2026-08-04-rename-advet-to-advert.sql`，`RENAME TABLE` 元数据级无损）；旧表 `t_advert_agent_decision_config` 是另一张"决策批次快照"表，勿混
+- 写入方：① 分散保存镜像（`mirror_agent_config`，各端点各写 1-2 列 partial）② **一键保存** `POST /long-term-config/{asin}/save-all`（8 列一次 atomic upsert，战略 3 列从 state DB 补齐）
+- 读取方：`GET /long-term-config/{asin}/latest`（C 态可编辑控件回读真源）、`decision_config_reader.py:56`（批跑配置读取）、`scripts/load_latest_config.py`（运维脚本）
+- 代码锚点：`repository.py:132` `upsert_agent_config`（写）/ `repository.py:239` `get_agent_config_row`（读）/ `app/api/long_term_config.py` `save_all_config`+`get_latest_config`
+- **空值守卫(2026-08-04)**：`upsert_agent_config` 对任何列(list/标量)的空值(空 list/空串/显式 None)**跳过该列不写**,不阻塞其它列——配置表永远保留最后一次非空值;清除操作(如 `clearP3Acos`/`clearP3Budget` 的 DELETE override)只清 state DB,不清配置表。标量列显式 `None` 亦跳过(不再写 NULL)。
 
 ```sql
 CREATE TABLE `t_advert_agent_config` (

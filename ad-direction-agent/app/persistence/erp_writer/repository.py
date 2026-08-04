@@ -177,7 +177,14 @@ class ErpDualWriterRepository:
             "daily_budget_suggest": lambda value: value,
             "advert_direction_types": map_direction_types_json,
         }
-        mapped_patch = {key: mappers[key](value) for key, value in patch.items()}
+        mapped_patch = {}
+        for key, value in patch.items():
+            mapped = mappers[key](value)
+            if mapped is None or mapped == "":
+                # 空值(含空 list / 空串 / 显式 None)跳过该列,不写 NULL,不阻塞其他列。
+                # 语义:配置表永远保留最后一次非空值;清除操作只清 state,不清配置表。
+                continue
+            mapped_patch[key] = mapped
 
         audit_user_id = _audit_int(identity.get("user_id"))
         now = datetime.now()
