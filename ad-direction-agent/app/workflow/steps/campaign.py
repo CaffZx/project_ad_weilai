@@ -946,7 +946,16 @@ async def _analyze_campaigns_impl(
                 _guardrail_replacement_summary(old_snapshot, replacement_by_key),
             )
 
-        # 回填 + 从 skipped 移除
+        # 回填上下文：替换项和新增项都缺 context 字段（LLM 重试输出不携带
+        # campaign_id/perf_7d/current_* 等），无条件整表回填，与改前语义一致。
+        _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
+                                              core_keyword_set=core_keyword_set)
+        _backfill_placement_pcts(adjustments, unit_by_key)
+        for item in adjustments:
+            cid = (item.campaign_id or "").strip()
+            item.days_since_reactivation = recent_reactivated.get(cid, -1)
+
+        # 从 skipped 移除（仅新增项）
         recovered_keys = {item.campaign_key for item in newly_appended}
         guardrail_rounds[round_label]["recovered"] = len(recovered_keys)
         if recovered_keys:
@@ -954,12 +963,6 @@ async def _analyze_campaigns_impl(
                 s for s in skipped_campaigns
                 if s.get("campaign_key") not in recovered_keys
             ]
-            _backfill_campaign_adjustment_context(adjustments, unit_by_key, keyword_class_map, _rank_evidence_line,
-                                                  core_keyword_set=core_keyword_set)
-            _backfill_placement_pcts(adjustments, unit_by_key)
-            for item in adjustments:
-                cid = (item.campaign_id or "").strip()
-                item.days_since_reactivation = recent_reactivated.get(cid, -1)
             logger.info(
                 "Guardrail %s recovered [%s]: %d campaigns, skipped now=%d",
                 round_label, parent_asin, len(recovered_keys), len(skipped_campaigns),
