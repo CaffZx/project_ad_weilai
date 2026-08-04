@@ -96,7 +96,7 @@ def test_p0_ignores_non_core():
 # ── P1: 样本不足只禁淘汰，调整透传 ────────────────────
 
 def test_p1_blocks_eliminate_when_sample_insufficient():
-    """cost < $5 or clicks < 10 or days ≤ 3 → 禁止淘汰"""
+    """days<3、cost<max($5,target_cpa*0.5) 或 clicks<10 → 禁止淘汰。"""
     item = _make_item(perf_7d={"cost": 2.0, "clicks": 3, "orders": 0},
                        days_online=30, action="eliminate_to_low_bid_pool",
                        negative_keywords=[{"keyword": "irrelevant query"}])
@@ -136,14 +136,27 @@ def test_p1_does_not_block_eliminate_when_sufficient():
     assert not any(r.rule_id == "P1_SAMPLE_INSUFFICIENT" for r in gp.results)
 
 
+def test_p1_uses_strategy_target_cpa_for_sample_threshold():
+    item = _make_item(
+        perf_7d={"cost": 10.0, "clicks": 10, "orders": 0},
+        days_online=10,
+        action="eliminate_to_low_bid_pool",
+    )
+
+    gp = apply_all([item], target_cpa=40.0)
+
+    assert any(r.rule_id == "P1_SAMPLE_INSUFFICIENT" for r in gp.results)
+    assert item.action == "keep"
+
+
 def test_p1_days_online_boundary():
-    """days_online=3 → 保护；days_online=4 → 不保护"""
-    item1 = _make_item(days_online=3, action="eliminate_to_low_bid_pool",
+    """KB17: days_online=2 → 保护；days_online=3 → 不因上线天数保护"""
+    item1 = _make_item(days_online=2, action="eliminate_to_low_bid_pool",
                         perf_7d={"cost": 100.0, "clicks": 100, "orders": 10})
     gp1 = apply_all([item1])
     assert any(r.rule_id == "P1_SAMPLE_INSUFFICIENT" for r in gp1.results)
 
-    item2 = _make_item(days_online=4, action="eliminate_to_low_bid_pool",
+    item2 = _make_item(days_online=3, action="eliminate_to_low_bid_pool",
                         perf_7d={"cost": 100.0, "clicks": 100, "orders": 10})
     gp2 = apply_all([item2])
     assert not any(r.rule_id == "P1_SAMPLE_INSUFFICIENT" for r in gp2.results)

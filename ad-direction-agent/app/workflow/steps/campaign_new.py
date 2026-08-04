@@ -21,6 +21,7 @@ from app.config.settings import settings
 from app.models.campaign import (
     CampaignStrategyContext,
     NewCampaignCandidate,
+    NewCampaignDecision,
     NewCampaignItem,
 )
 from app.workflow.steps.campaign_portfolio import PORTFOLIO_BROAD, PORTFOLIO_TEST
@@ -194,7 +195,14 @@ _CLASS_TO_MATCH_TYPE = {
 
 
 def _derive_match_type(keyword_class: str, cand: NewCampaignCandidate) -> str:
-    """从 LLM 判定的 keyword_class 推导 match_type；缺失时回退（有自然位→EXACT，否则 BROAD）。"""
+    """从来源事实优先推导 match_type。
+
+    未验证的流量词库候选一律先走 BROAD 获取搜索词样本；long_tail 分类只
+    描述词形/相关性，不能把探索词直接升级成精准词。排名机会与竞品来源
+    本轮维持既有独立规则，后续再按其完整数据契约单独收口。
+    """
+    if cand.source == "flow":
+        return "BROAD"
     kc = (keyword_class or "").strip().lower()
     if kc in _CLASS_TO_MATCH_TYPE:
         return _CLASS_TO_MATCH_TYPE[kc]
@@ -259,9 +267,121 @@ def _generate_campaign_name(keyword: str, match_type: str, today: str = "") -> s
     return f"{type_cn}-{kw_clean}-{d}"
 
 
+async def finalize_new_campaign_decisions(
+    decisions: list[NewCampaignDecision],
+    *,
+    fetcher: "CampaignFetcher",
+    parent_asin: str,
+    parent_seller_sku: str,
+    shop_account: str,
+    target_child_asin: str,
+) -> list[NewCampaignItem]:
+    """把已定来源/匹配方式的决策统一补齐为可执行新增活动。"""
+    if not decisions:
+        return []
+
+    by_keyword: dict[str, NewCampaignDecision] = {}
+    for decision in decisions:
+        key = " ".join((decision.keyword_text or "").strip().lower().split())
+        if not key:
+            continue
+        # 搜索词提精已验证，覆盖同词的流量词探索决策。
+        if key not in by_keyword or decision.trigger_scene == "KEYWORD_PROMOTED_FROM_BROAD":
+            by_keyword[key] = decision
+    selected = list(by_keyword.values())
+
+    bid_values: dict[str, float] = {}
+    missing = [d.keyword_text for d in selected if d.suggested_bid is None]
+    if missing:
+        try:
+            bid_values = await fetcher.fetch_suggested_bids(
+                missing, shop_account, parent_asin, parent_seller_sku,
+            )
+        except Exception as e:
+            logger.warning("Campaign new [%s]: 建议竞价查询失败 (非阻塞): %s", parent_asin, e)
+
+    items: list[NewCampaignItem] = []
+    for decision in selected:
+        mt = decision.prescribed_match_type
+        is_exact = mt == "EXACT"
+        suggested_bid = decision.suggested_bid
+        if suggested_bid is None:
+            suggested_bid = bid_values.get(decision.keyword_text)
+        bid_cand = NewCampaignCandidate(
+            keyword_text=decision.keyword_text,
+            suggested_bid=suggested_bid,
+        )
+        bid, bid_source = _calc_initial_bid(bid_cand)
+        items.append(NewCampaignItem(
+            keyword_text=decision.keyword_text,
+            child_asin=target_child_asin,
+            campaign_name=_generate_campaign_name(decision.keyword_text, mt),
+            campaign_type="精准广告" if is_exact else "广泛广告",
+            match_type=mt,
+            keyword_class=decision.keyword_class,
+            relevance_tier=decision.relevance_tier,
+            keywords_or_targets=[decision.keyword_text],
+            proposed_daily_budget=DEFAULT_NEW_BUDGET,
+            proposed_base_bid=bid,
+            primary_placement="头部" if is_exact else "N/A",
+            placement_adjustment="N/A",
+            negative_strategy=decision.negative_strategy if not is_exact else "",
+            trigger_scene=decision.trigger_scene,
+            source=decision.source,
+            reason=decision.reason,
+            evidence=decision.evidence,
+            ai_portfolio_class=PORTFOLIO_TEST if is_exact else PORTFOLIO_BROAD,
+            confidence=decision.confidence,
+            review_level=decision.review_level,
+            suggested_bid_source=bid_source,
+        ))
+
+    # 已验证搜索词优先，其余保持旧的精准优先/高置信优先的稳定排序。
+    items.sort(key=lambda item: (
+        item.trigger_scene != "KEYWORD_PROMOTED_FROM_BROAD",
+        item.match_type != "EXACT",
+        item.confidence != "high",
+        item.keyword_text,
+    ))
+    return items[:getattr(settings, "campaign_new_max_creates", 15)]
+
+
+def merge_new_campaign_decisions(
+    source_a_decisions: list[NewCampaignDecision],
+    search_term_decisions: list[NewCampaignDecision],
+) -> list[NewCampaignDecision]:
+    """合流新增活动决策，最终参数只由 ``finalize_new_campaign_decisions`` 组装一次。
+
+    搜索词提精准仅替换同词的普通 ``flow`` 探索项；排名机会词、竞品词仍按既有
+    管线保留，避免本次接线改变那两条尚未收口的数据契约。
+    """
+    by_keyword: dict[str, NewCampaignDecision] = {}
+    for item in source_a_decisions:
+        key = " ".join((item.keyword_text or "").strip().lower().split())
+        if key:
+            by_keyword[key] = item
+
+    for item in search_term_decisions:
+        key = " ".join((item.keyword_text or "").strip().lower().split())
+        if not key:
+            continue
+        existing = by_keyword.get(key)
+        if existing is None or (existing.source or "").strip().lower() == "flow":
+            by_keyword[key] = item
+
+    items = list(by_keyword.values())
+    items.sort(key=lambda item: (
+        item.trigger_scene != "KEYWORD_PROMOTED_FROM_BROAD",
+        item.prescribed_match_type != "EXACT",
+        item.confidence != "high",
+        item.keyword_text,
+    ))
+    return items
+
+
 # ── 4. 主入口 ─────────────────────────────────────────────────────────────
 
-async def analyze_new_campaigns(
+async def analyze_new_campaign_decisions(
     fetcher: "CampaignFetcher",
     reasoner: "LLMReasoner",
     parent_asin: str,
@@ -281,8 +401,8 @@ async def analyze_new_campaigns(
     overview_gate: "asyncio.Task | None" = None,
     product_title: str = "",          # 相关性锚点（来自 asin_data.title；brand/category 已去除：太粗易引品类级误匹配）
     cancel_check: Callable[[], Awaitable[None]] | None = None,
-) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
-    """完整新增活动分析（独立并行管道）。返回 (new_campaigns, warnings, search_volume_map)。
+) -> tuple[list[NewCampaignDecision], list[str], dict[str, int]]:
+    """发现并选择来源 A 的新增活动决策，暂不查询 bid 或组装最终卡片。
 
     search_volume_map = flow_keywords 全量 {keyword_lower: 搜索量}（含已有活动词），
     透传给预算回算 agent 用（KB23 §3.1A），零新增 MCP 调用；失败/未跑时为 {}。
@@ -476,38 +596,15 @@ async def analyze_new_campaigns(
         await overview_gate
     await _cancel()
 
-    # ③ 建议竞价与 LLM 并行（LLM 不消费 bid）
-    async def _fill_suggested_bids() -> None:
-        kw_texts = [c.keyword_text for c in candidates if c.suggested_bid is None]
-        if not kw_texts:
-            return
-        try:
-            bids = await fetcher.fetch_suggested_bids(
-                kw_texts, shop_account, parent_asin, parent_seller_sku,
-            )
-            for c in candidates:
-                sb = bids.get(c.keyword_text)
-                if sb is not None and c.suggested_bid is None:
-                    c.suggested_bid = sb
-            logger.info(
-                "Campaign new [%s]: MCP 建议竞价命中 %d/%d",
-                parent_asin, len([c for c in candidates if c.suggested_bid is not None]), len(candidates),
-            )
-        except Exception as e:
-            logger.warning("Campaign new [%s]: 建议竞价查询失败 (非阻塞): %s", parent_asin, e)
-
-    bid_task = asyncio.create_task(_fill_suggested_bids())
+    # ③ 双轮 LLM 选词；建议竞价统一延后到两来源合流后查询一次。
     try:
         (r1, r1_ok), (r2, r2_ok) = await asyncio.gather(_run_round(1), _run_round(2))
     except AnalysisRunCancelled:
-        bid_task.cancel()
         raise
     except Exception as e:  # noqa: BLE001
-        bid_task.cancel()
         logger.warning("new_campaigns 双轮 LLM 异常 [%s]: %s", parent_asin, e)
         warnings.append(f"new_campaigns LLM 异常: {type(e).__name__}: {e}")
         return [], warnings, search_volume_map
-    await bid_task
 
     # 4. 容错选词：
     #    两轮都成功执行 → 取交集（降幻觉，两轮 keyword_class 一致才 high）
@@ -529,11 +626,11 @@ async def analyze_new_campaigns(
         warnings.append("new_campaigns：双轮均失败，无新增建议")
         return [], warnings, search_volume_map
 
-    # 5. 组装（代码补齐 match_type/bid/budget/name/归组）
+    # 5. 形成来源 A 决策；最终参数统一延后到两来源合流后组装。
     #   相关性/词类型/建不建都是主观语义判断，交 LLM（已注入 KB28 §2：R4不建/R3仅测试期/
     #   量小≠不相关）；代码不再二次硬判，只把 LLM 的 relevance_tier 记录到输出供前端/审计。
     cand_by_kw = {c.keyword_text: c for c in candidates}
-    items: list[NewCampaignItem] = []
+    decisions: list[NewCampaignDecision] = []
     for kw in selected_keys:
         cand = cand_by_kw.get(kw)
         if cand is None:
@@ -556,43 +653,78 @@ async def analyze_new_campaigns(
             relevance_tier = _norm_tier(o1.get("relevance_tier"))
 
         mt = _derive_match_type(keyword_class, cand)
-        is_exact = mt == "EXACT"
-        bid, src = _calc_initial_bid(cand)
-        items.append(NewCampaignItem(
+        decisions.append(NewCampaignDecision(
             keyword_text=cand.keyword_text,
-            child_asin=target_child_asin,
-            campaign_name=_generate_campaign_name(cand.keyword_text, mt),
-            campaign_type="精准广告" if is_exact else "广泛广告",
-            match_type=mt,
+            prescribed_match_type=mt,
             keyword_class=keyword_class,
             relevance_tier=relevance_tier,
-            keywords_or_targets=[cand.keyword_text],
-            proposed_daily_budget=DEFAULT_NEW_BUDGET,
-            proposed_base_bid=bid,
-            primary_placement="头部" if is_exact else "N/A",   # 代码默认，不交 LLM
-            placement_adjustment="N/A",
-            negative_strategy=str(o1.get("negative_strategy", "")) if not is_exact else "",
+            negative_strategy=str(o1.get("negative_strategy", "")) if mt != "EXACT" else "",
             trigger_scene=cand.trigger_scene,
             source=cand.source,
             reason=str(o1.get("reason", "")),
             evidence=list(o1.get("evidence", []) or []),
-            ai_portfolio_class=PORTFOLIO_TEST if is_exact else PORTFOLIO_BROAD,
             confidence=conf,
             review_level=review,
-            suggested_bid_source=src,
+            search_volume=cand.search_volume,
+            natural_rank=cand.natural_rank,
+            suggested_bid=cand.suggested_bid,
         ))
 
-    # 输出排序：EXACT(精准) 优先 → 高置信优先；硬截断 Top-N。
-    # ⚠ KB03 §7「每日最大新词数=15」冲突，暂用 campaign_new_max_creates=20 待 KB/运营定夺。
-    # H5：EXACT 优先（用户「精准优先」）→ 同档内竞品来源优先（避免竞品 BROAD 词被截没）→ 高置信优先。
-    # competitor 关闭时无 competitor 来源项 → 退化为纯 EXACT-first（Step2 现状）。
-    items.sort(key=lambda x: (x.match_type != "EXACT", x.source != "competitor", x.confidence != "high"))
-    max_creates = getattr(settings, "campaign_new_max_creates", 20)
-    n_before = len(items)
-    if n_before > max_creates:
-        items = items[:max_creates]
     logger.info(
-        "Campaign new [%s]: R1=%d R2=%d 交集=%d → 输出 %d（上限 %d）",
-        parent_asin, len(r1), len(r2), n_before, len(items), max_creates,
+        "Campaign new [%s]: R1=%d R2=%d 交集=%d → 来源 A 决策 %d",
+        parent_asin, len(r1), len(r2), len(selected_keys), len(decisions),
+    )
+    return decisions, warnings, search_volume_map
+
+
+async def analyze_new_campaigns(
+    fetcher: "CampaignFetcher",
+    reasoner: "LLMReasoner",
+    parent_asin: str,
+    shop_id: int,
+    parent_seller_sku: str,
+    site_code: str,
+    shop_account: str,
+    existing_keywords: set[str],
+    pre_eliminated_count: int,
+    strategy_context: CampaignStrategyContext,
+    ctx_dict: dict,
+    temperature: float,
+    *,
+    target_child_asin: str = "",
+    days: int = 7,
+    sem: asyncio.Semaphore | None = None,
+    overview_gate: "asyncio.Task | None" = None,
+    product_title: str = "",
+    cancel_check: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
+    """来源 A 单独运行时的兼容包装；正常主流程在合流后只调用一次组装器。"""
+    decisions, warnings, search_volume_map = await analyze_new_campaign_decisions(
+        fetcher=fetcher,
+        reasoner=reasoner,
+        parent_asin=parent_asin,
+        shop_id=shop_id,
+        parent_seller_sku=parent_seller_sku,
+        site_code=site_code,
+        shop_account=shop_account,
+        existing_keywords=existing_keywords,
+        pre_eliminated_count=pre_eliminated_count,
+        strategy_context=strategy_context,
+        ctx_dict=ctx_dict,
+        temperature=temperature,
+        target_child_asin=target_child_asin,
+        days=days,
+        sem=sem,
+        overview_gate=overview_gate,
+        product_title=product_title,
+        cancel_check=cancel_check,
+    )
+    items = await finalize_new_campaign_decisions(
+        decisions,
+        fetcher=fetcher,
+        parent_asin=parent_asin,
+        parent_seller_sku=parent_seller_sku,
+        shop_account=shop_account,
+        target_child_asin=target_child_asin,
     )
     return items, warnings, search_volume_map

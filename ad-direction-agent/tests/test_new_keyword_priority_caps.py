@@ -112,3 +112,48 @@ async def test_top_40_caps_confirmed_priority_terms_by_search_volume(monkeypatch
 
     assert [len(batch) for batch in captured_batches] == [40, 40]
     assert {c["search_volume"] for c in captured_batches[0]} == set(range(502, 542))
+
+
+@pytest.mark.asyncio
+async def test_unverified_flow_long_tail_creates_broad_campaign(monkeypatch):
+    import app.data.new_keyword_fetcher as new_keyword_module
+
+    class FakeNewKeywordFetcher:
+        async def fetch(self, **kwargs):
+            return NewKeywordData(parent_asin="B0PARENT", records=[
+                NewKeywordRecord(
+                    keyword_text="long tail flow keyword",
+                    search_volume=500,
+                    source="flow",
+                    source_reason="流量词库",
+                ),
+            ])
+
+    class FakeCampaignFetcher:
+        async def fetch_suggested_bids(self, *args, **kwargs):
+            return {}
+
+    class FakeReasoner:
+        async def recommend_new_campaigns(self, *, candidates, **kwargs):
+            return {
+                "success": True,
+                "parsed": {"new_campaigns": [{
+                    "keyword_text": candidates[0]["keyword_text"],
+                    "action": "create",
+                    "keyword_class": "long_tail",
+                    "relevance_tier": "R1",
+                }]},
+            }
+
+    monkeypatch.setattr(new_keyword_module, "NewKeywordFetcher", FakeNewKeywordFetcher)
+    campaigns, _warnings, _sv = await analyze_new_campaigns(
+        fetcher=FakeCampaignFetcher(), reasoner=FakeReasoner(),
+        parent_asin="B0PARENT", shop_id=1, parent_seller_sku="SKU",
+        site_code="Amazon_US", shop_account="shop", existing_keywords=set(),
+        pre_eliminated_count=0, strategy_context=CampaignStrategyContext(),
+        ctx_dict={}, temperature=0.0, target_child_asin="B0CHILD",
+    )
+
+    assert len(campaigns) == 1
+    assert campaigns[0].match_type == "BROAD"
+    assert campaigns[0].campaign_type == "广泛广告"
