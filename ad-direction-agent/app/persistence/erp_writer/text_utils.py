@@ -130,6 +130,13 @@ _DIRECTION_ID_TO_ERP = {
     "BALANCE_MAINTENANCE": "BALANCE_MAINTAIN",
 }
 
+_DIRECTION_ERP_TO_ID = {
+    "PUSH_NATURAL": "push_natural",
+    "EXPAND_KEYWORDS": "expand_keywords",
+    "OPTIMIZE_ACOS": "optimize_acos",
+    "BALANCE_MAINTAIN": "balance_maintain",
+}
+
 _LEVEL_TO_SCORE = {"推荐": 80, "可选": 50, "不推荐": 20, "high": 80, "medium": 50, "low": 20}
 
 from app.workflow.steps.campaign_portfolio import GROUP_LABEL_TO_CODE, GROUP_CODE_TO_LABEL
@@ -307,6 +314,16 @@ def map_direction_type(direction_id: str | None) -> str:
         return _DIRECTION_ID_TO_ERP[key]
     upper = key.upper()
     return _DIRECTION_ID_TO_ERP.get(upper, upper)
+
+
+def unmap_direction_type(value: str | None) -> str | None:
+    """广告方向 ERP code/遗留 code → 前端与工作流使用的稳定方向 id。"""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    return _DIRECTION_ERP_TO_ID.get(map_direction_type(raw), raw)
 
 
 def normalize_site_code(site: str | None) -> str:

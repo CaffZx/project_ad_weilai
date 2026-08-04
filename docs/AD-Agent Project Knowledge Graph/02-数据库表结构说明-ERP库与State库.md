@@ -301,7 +301,7 @@ CREATE TABLE IF NOT EXISTS t_advert_agent_campaign_exact_lifecycle (
 | `t_advert_agent_data_metrics` | 每个 decision 的 SUMMARY/DAILY 指标快照 | 我方 AD-Agent | `repository.py:1188 _upsert_legacy_metrics()` |
 | `t_advert_agent_decision` | 一次广告分析决策批次主表，含产品/阶段/季节/目标等快照 | 我方 AD-Agent | `repository.py:1234 _upsert_decision()` |
 | `t_advert_agent_decision_config` | 运营配置、定时分析开关及 ASIN 来源；最近决策回写字段也在此表 | 混合：ERP/运营维护配置，我方回写运行状态 | 读取：`app/data/decision_config_reader.py`；写入：`repository.py:1297 _upsert_decision_config()` |
-| `t_advet_agent_config` | **新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型），独立于分析事件，无 decision_id 绑定 | 我方 AD-Agent | 待接入 |
+| `t_advert_agent_config` | **新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型），独立于分析事件，无 decision_id 绑定 | 我方 AD-Agent | 待接入 |
 | `t_advert_agent_decision_config_bak_drop_codex` | `decision_config` 的历史备份表（当前生产库仍存在） | ERP/运维备份 | 本项目无读写锚点 |
 | `t_advert_agent_direction_recommend` | 前置方向推荐主表（结论 JSON） | 我方 AD-Agent | `repository.py:1112 _upsert_legacy_recommend()`；兼容路径 `:1520 _upsert_wizard_direction()` |
 | `t_advert_agent_direction_recommend_detail` | 前置方向推荐明细 | 我方 AD-Agent | `repository.py:1150 _upsert_legacy_details()`；兼容路径 `:1520 _upsert_wizard_direction()` |
@@ -672,7 +672,7 @@ CREATE TABLE `t_advert_agent_decision_config` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC COMMENT='agent决策配置表'
 ```
 
-#### `t_advet_agent_config`
+#### `t_advert_agent_config`
 
 - 功能：**新增** 策略配置（产品定位/经营模式/淡旺季/广告目的/关键词类型）
 - 与旧表区别：主键为 `BIGINT AUTO_INCREMENT`，无 `decision_id` 绑定，独立于分析事件；去掉了 `product_stage`（已由 `operating_mode` 替代）
@@ -680,7 +680,7 @@ CREATE TABLE `t_advert_agent_decision_config` (
 - 代码锚点：待接入
 
 ```sql
-CREATE TABLE `t_advet_agent_config` (
+CREATE TABLE `t_advert_agent_config` (
   `id`                  bigint       NOT NULL AUTO_INCREMENT COMMENT '自增主键',
   `shop_id`             bigint       DEFAULT NULL COMMENT '店铺ID',
   `shop_account`        varchar(100) DEFAULT NULL COMMENT '店铺账号',

@@ -431,6 +431,79 @@ async def _analyze_campaigns_impl(
     growth_analysis_enabled = (
         ad_permission != AdPermission.CLEARANCE_ONLY
     )
+    # ↑ 经营模式门禁：同步确定性规则，"经营模式那一支"。
+    # 下游增长流(新增/复评)的最终门禁是 _resolve_growth_analysis_enabled()，
+    # = 经营模式门禁 AND 策略总览 allow_growth_analysis(默认 true, fail-open)。
+
+    # ── 提前初始化：策略总览 gate 需在 _maybe_restart_review / 新增流之前就能起跑 ──
+    # 全预过滤分支(L515)在原 ctx_dict 初始化(L604)与原 gate 创建(L617)之前 return，
+    # 不提前则该分支读不到总览布尔、gate 闭包也读不到 ctx_dict → NameError（P0）。
+    ctx_dict = strategy_context.model_dump()
+    strategic_overview: dict | None = None
+    _ov_holder: dict = {}
+    overview_gate: "asyncio.Task | None" = None
+    warnings_list: list[str] = []
+
+    if settings.campaign_overview_enabled:
+        _ov_facts = _build_overview_facts(campaign_data, llm_campaigns, strategy_context)
+
+        async def _run_overview_gate():
+            try:
+                obj = await _run_overview(reasoner, parent_asin, _ov_facts, ctx_dict, temperature)
+                _ov_holder["overview"] = obj.model_dump()
+                if obj.posture_brief:
+                    ctx_dict["_strategic_overview_text"] = obj.posture_brief  # 原地注入，三流共享引用
+                if obj.generated_by == "fallback":
+                    warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
+                _t("DONE strategic_overview")
+            except Exception:
+                logger.exception("策略总览 gate 异常 [%s]（fail-open，不阻塞三流）", parent_asin)
+                warnings_list.append("策略总览生成异常，仅展示现状数字（不影响明细）")
+
+        overview_gate = asyncio.create_task(_run_overview_gate())
+
+    async def _resolve_growth_analysis_enabled() -> bool:
+        """最终增长门禁 = 经营模式门禁 AND 策略总览增长门禁。
+        始终先 await overview_gate（若有）确保后台 task 被消费、不遗留；再乘上经营模式门禁。
+        fail-open：gate 未起 / 失败 / 缺键 / 类型错 / fallback → True。
+        """
+        overview_flag = True
+        if overview_gate is not None:
+            try:
+                await overview_gate                  # 始终消费 task，避免全预过滤+经营模式False 时遗留后台 task
+            except Exception:
+                pass                                  # gate 内已吞异常并 warning
+            ov = _ov_holder.get("overview")
+            if isinstance(ov, dict):
+                flag = ov.get("allow_growth_analysis", True)
+                overview_flag = flag if isinstance(flag, bool) else True
+        return growth_analysis_enabled and overview_flag
+
+    async def _run_new_campaigns_if_enabled() -> tuple[list, list, dict]:
+        """新增流统一包装：最终门禁 False 时返回空，否则调 analyze_new_campaigns。
+        正常路径进三流 gather、全预过滤路径直接 await —— 两路径业务语义对称，仅在调度结构上不同。"""
+        if not settings.campaign_new_enabled:
+            return [], [], {}
+        if not await _resolve_growth_analysis_enabled():
+            return [], [], {}
+        return await analyze_new_campaigns(
+            fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
+            shop_id=campaign_data.shop_id,
+            parent_seller_sku=campaign_data.parent_seller_sku,
+            site_code=campaign_data.site_code,
+            shop_account=shop_account,
+            existing_keywords=existing_kws,
+            pre_eliminated_count=pre_eliminated_count,
+            strategy_context=strategy_context,
+            ctx_dict=ctx_dict,
+            temperature=temperature,
+            target_child_asin=target_child_asin,
+            days=days,
+            sem=new_sem,
+            overview_gate=overview_gate,
+            product_title=(asin_data.title or "") if asin_data else "",
+            cancel_check=cancel_check,
+        )
 
     if skipped_eliminated:
         logger.info("Campaign 预过滤 [%s]: 跳过 %d 个疑似已淘汰活动 (budget≈$1, bid≈$0.2)",
@@ -484,7 +557,9 @@ async def _analyze_campaigns_impl(
     # ── 淘汰复评辅助函数（全预过滤 + 正常路径共用）─────────────────────
     async def _maybe_restart_review() -> tuple[list[CampaignAdjustmentItem], set[str]]:
         """KB21§7 淘汰复评。返回 (reactivate_items, reactivated_keys)。"""
-        if not (growth_analysis_enabled and settings.campaign_restart_enabled and pool_units):
+        if not settings.campaign_restart_enabled or not pool_units:
+            return [], set()
+        if not await _resolve_growth_analysis_enabled():
             return [], set()
         from app.persistence.erp_writer.repository import _get_repository
         repo = _get_repository()
@@ -510,8 +585,6 @@ async def _analyze_campaigns_impl(
             warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
             return [], set()
 
-    warnings_list: list[str] = []
-
     if total == 0:
         # ── 全预过滤：无活动可分析，但仍执行复评 + 新增活动分析 ──
         adjustments: list[CampaignAdjustmentItem] = []
@@ -525,27 +598,11 @@ async def _analyze_campaigns_impl(
 
         new_campaigns: list = []
         nc_warnings: list[str] = []
-        if settings.campaign_new_enabled and growth_analysis_enabled:
-            try:
-                new_campaigns, nc_warnings, _ = await analyze_new_campaigns(
-                    fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
-                    shop_id=campaign_data.shop_id,
-                    parent_seller_sku=campaign_data.parent_seller_sku,
-                    site_code=campaign_data.site_code,
-                    shop_account=shop_account,
-                    existing_keywords=existing_kws,
-                    pre_eliminated_count=pre_eliminated_count,
-                    strategy_context=strategy_context,
-                    ctx_dict={},
-                    temperature=temperature,
-                    target_child_asin=target_child_asin,
-                    days=days,
-                    sem=asyncio.Semaphore(cc),
-                    product_title=(asin_data.title or "") if asin_data else "",
-                )
-            except Exception as e:
-                logger.warning("新增活动分析异常 [%s] (全预过滤): %s", parent_asin, e)
-                nc_warnings.append(f"新增活动分析失败: {type(e).__name__}: {e}")
+        try:
+            new_campaigns, nc_warnings, _ = await _run_new_campaigns_if_enabled()
+        except Exception as e:
+            logger.warning("新增活动分析异常 [%s] (全预过滤): %s", parent_asin, e)
+            nc_warnings.append(f"新增活动分析失败: {type(e).__name__}: {e}")
         warnings_list.extend(nc_warnings)
 
         return CampaignAnalysisResult(
@@ -601,42 +658,21 @@ async def _analyze_campaigns_impl(
         for s in skipped_eliminated:
             s["portfolio"] = PORTFOLIO_ELIMINATE
 
-    ctx_dict = strategy_context.model_dump()
     exact_sem = asyncio.Semaphore(cc)   # 每流并发上限 = campaign_llm_concurrency
     broad_sem = asyncio.Semaphore(cc)
     new_sem = asyncio.Semaphore(cc)     # 新增活动线独立限流（与 exact/broad 对等）
     rounds_detail: dict[str, dict] = {}
     llm_rounds_completed = 1  # R1 必定执行；护栏重试轮次在循环内 max() 更新
 
-    # 4.5 策略总览(执行总纲)：改为 gate task，与三流的 prefetch【重叠】跑（prefetch 不读 ctx_dict）。
-    #     各流在 LLM 轮(_run_round)前 await gate → posture_brief 已注入，保证今日总纲一致。
-    #     fail-open：gate 异常仅 warning，不阻塞三流。结果在三流 gather 后从 _ov_holder 取。
-    strategic_overview: dict | None = None
-    _ov_holder: dict = {}
-    overview_gate: asyncio.Task | None = None
-    if settings.campaign_overview_enabled:
-        _ov_facts = _build_overview_facts(campaign_data, llm_campaigns, strategy_context)
-
-        async def _run_overview_gate():
-            try:
-                obj = await _run_overview(reasoner, parent_asin, _ov_facts, ctx_dict, temperature)
-                _ov_holder["overview"] = obj.model_dump()
-                if obj.posture_brief:
-                    ctx_dict["_strategic_overview_text"] = obj.posture_brief  # 原地注入，三流共享引用
-                if obj.generated_by == "fallback":
-                    warnings_list.append("策略总览 AI 生成失败/超时，仅展示现状数字（不影响明细）")
-                _t("DONE strategic_overview")
-            except Exception:
-                logger.exception("策略总览 gate 异常 [%s]（fail-open，不阻塞三流）", parent_asin)
-                warnings_list.append("策略总览生成异常，仅展示现状数字（不影响明细）")
-
-        overview_gate = asyncio.create_task(_run_overview_gate())
+    # 4.5 策略总览(执行总纲) gate 已在经营模式门禁之后创建(见上方 _run_overview_gate)，
+    #     _resolve_growth_analysis_enabled 首次 await gate 求总览增长门禁。
+    #     各流在 LLM 轮(_run_round)前 await gate → posture_brief 已注入。
 
     # 5. ★三股并行：精准流 / 广泛流 / 新增活动分析线（各自独立限流，互不阻塞）
     # return_exceptions=True：任一流抛未捕获异常 → 不连累其余流，转为 warning
     # 三股共享 ctx_dict（含 _strategic_overview_text = posture_brief），保证今日总纲一致
-    async def _no_op_new_campaigns():
-        return [], [], {}
+    # 新增流经 _run_new_campaigns_if_enabled 包装：内部 await gate 求最终门禁，False 则返回空，
+    # 不阻塞精准/广泛流 prefetch（它们各自在 LLM 轮前 await gate）。
 
     # ③ LLM 分批前
     await _cancel()
@@ -653,26 +689,7 @@ async def _analyze_campaigns_impl(
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
             cancel_check=cancel_check,
         ),
-        (analyze_new_campaigns(
-            fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
-            shop_id=campaign_data.shop_id,
-            parent_seller_sku=campaign_data.parent_seller_sku,
-            site_code=campaign_data.site_code,
-            shop_account=shop_account,
-            existing_keywords=existing_kws,
-            pre_eliminated_count=pre_eliminated_count,
-            strategy_context=strategy_context,
-            ctx_dict=ctx_dict,
-            temperature=temperature,
-            target_child_asin=target_child_asin,
-            days=days,
-            sem=new_sem,
-            overview_gate=overview_gate,
-            # 相关性锚点仅传标题（brand/category 已去除：品类太粗、会把 LLM 引向品类级误匹配，
-            # 判别"短裙≠中长裙"靠标题具体属性）
-            product_title=(asin_data.title or "") if asin_data else "",
-            cancel_check=cancel_check,
-        ) if settings.campaign_new_enabled and growth_analysis_enabled else _no_op_new_campaigns()),
+        (_run_new_campaigns_if_enabled()),
         return_exceptions=True,
     )
 
@@ -1618,6 +1635,7 @@ async def _run_overview(
             assessment_text=res.get("assessment_text", ""),
             direction_text=res.get("direction_text", ""),
             posture_brief=res.get("posture_brief", ""),
+            allow_growth_analysis=bool(res.get("allow_growth_analysis", True)),
             generated_by="ai",
         )
     except Exception as e:

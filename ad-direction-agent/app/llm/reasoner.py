@@ -531,8 +531,18 @@ _CAMPAIGN_OVERVIEW_PROMPT = """你是资深亚马逊广告策略分析师。基�
 {
   "assessment": "核心判断：用业务规则匹配现状，指出当前 ASIN 的关键矛盾/机会与整体定调，并说明命中了哪条业务逻辑（如：收割利润期要求收紧效率，但旺季准备要求保排名保转化，二者存在张力；产品定位 P0 受保护规则约束、核心权重不可降——故基调定为'控效率但不牺牲排名'）。2-4 句。",
   "direction": "宏观方向：基于判断给整体打法——以哪个广告方向为主、哪个为辅，低效流量如何处理，核心词/排名如何保护，并给原因。2-4 句，不含活动数字。",
-  "posture_brief": "给后续逐活动分析的统一判断基准，指令式、可直接套用：① 主/辅方向；② 必须保护、不可下调的对象；③ 优先处理的对象；④ 红线。例：主优化ACOS、辅平衡维持；P0核心词与排名型Bid不下调；零花费与高ACOS无单活动优先收缩；广泛词先否词再降价；缺数据维度不主动加价。"
+  "posture_brief": "给后续逐活动分析的统一判断基准，指令式、可直接套用：① 主/辅方向；② 必须保护、不可下调的对象；③ 优先处理的对象；④ 红线。例：主优化ACOS、辅平衡维持；P0核心词与排名型Bid不下调；零花费与高ACOS无单活动优先收缩；广泛词先否词再降价；缺数据维度不主动加价。",
+  "allow_growth_analysis": true
 }
+
+## allow_growth_analysis 判定准则（增长门禁，控制下游"新增扩词"与"淘汰复评"两道增长流）
+- 仅当**明确判断今日不应当做增长分析**时输出 `false`（必须为 JSON 布尔值 true/false，不可输出字符串）：
+  库存可售天数触红线（<7天）、退货率/评分触红线、经营模式已是清货优先、ACOS 危机未解、
+  预算吃紧需收缩而非扩张、本 ASIN 处于"立即退出"或"控量清货"运行态等收紧场景。
+- 当**应当增长 / 信号不明确 / 拿不准**时输出 `true` 或不出现该键：旺季准备、词池机会、
+  淘汰补位、量价齐升、扩词有助于补位/引流等扩张场景，以及任何不确定情况。
+- 准则由你自洽：复用上方已注入的经营模式/库存/退货率/评分/旺季/目标ACOS 等上下文，
+  不要求穷举条件。取倾向是 fail-open——宁可放过候选词，不要因 LLM 误判关掉本该跑的增长流。
 """
 
 
@@ -2099,10 +2109,14 @@ class LLMReasoner:
                 label="campaign_overview",
             )
             parsed = self._parse_json(raw)
+            raw_growth_flag = parsed.get("allow_growth_analysis", True)
+            # 严格类型：只接受 JSON boolean；字符串 "false"/数字/缺失一律 fail-open=True
+            allow_growth = raw_growth_flag if isinstance(raw_growth_flag, bool) else True
             out = {
                 "assessment_text": self._sanitize_ops_text(parsed.get("assessment", "") or ""),
                 "direction_text": self._sanitize_ops_text(parsed.get("direction", "") or ""),
                 "posture_brief": self._sanitize_ops_text(parsed.get("posture_brief", "") or ""),
+                "allow_growth_analysis": allow_growth,
             }
             logger.info("Campaign overview 成功 [%s]", asin)
             return out

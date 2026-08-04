@@ -9,7 +9,7 @@ It does not query MCP, infer defaults, or repair missing identity.
 
 
 _ASIN_KEYS = ("asin",)
-_SHOP_ID_KEYS = ("_shopId", "shopId")
+_SHOP_ID_KEYS = ("shop_id", "_shopId", "shopId")
 _PARENT_SKU_KEYS = ("_parentSellerSku", "parent_seller_sku")
 
 

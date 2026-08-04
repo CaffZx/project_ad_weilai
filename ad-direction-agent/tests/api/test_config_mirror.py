@@ -1,4 +1,4 @@
-"""保存配置到 t_advet_agent_config 的 API 镜像契约。"""
+"""保存配置到 t_advert_agent_config 的 API 镜像契约。"""
 from __future__ import annotations
 
 import logging

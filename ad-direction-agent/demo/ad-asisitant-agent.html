@@ -654,6 +654,58 @@ body.sidebar-collapsed #sidebarCollapseBtn { left: 0; }
 .announce-body strong { color: var(--primary-dark, #1d4ed8); }
 .announce-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; }
 .announce-empty { text-align: center; padding: 40px; color: var(--muted-fg); font-size: 13px; }
+
+/* ═══ 一键保存(2026-08-04) — 复用 codex_ux_patch 样式,接线新逻辑 ═══ */
+#codexSaveAllBar {
+  position: sticky; bottom: 0; z-index: 20;
+  padding: 8px 0 6px;
+  background: linear-gradient(to top, #fff 70%, rgba(255,255,255,0));
+  margin-top: auto;
+  display: none;
+}
+#codexSaveAllBar.codex-visible { display: block; }
+#codexSaveAllBtn {
+  width: 100%; padding: 6px 12px;
+  background: #1D4ED8; color: #fff;
+  border: 0; border-radius: 6px;
+  font-size: 12.5px; font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(29,78,216,.22);
+  transition: all .18s ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+}
+#codexSaveAllBtn:hover:not([disabled]) {
+  background: #1E40AF;
+  box-shadow: 0 3px 8px rgba(29,78,216,.28);
+}
+#codexSaveAllBtn[disabled] {
+  background: #94A3B8 !important; cursor: not-allowed !important; opacity: .85;
+  box-shadow: none !important;
+}
+#codexSaveAllBtn .spinner-mini {
+  display: inline-block; width: 11px; height: 11px;
+  border: 2px solid rgba(255,255,255,.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: codexSaveSpin .7s linear infinite;
+}
+@keyframes codexSaveSpin { to { transform: rotate(360deg); } }
+#codexSaveToast {
+  position: fixed; bottom: 24px; left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15,23,42,.94); color: #fff;
+  padding: 10px 20px; border-radius: 8px;
+  font-size: 12.5px; z-index: 9800;
+  box-shadow: 0 8px 24px rgba(0,0,0,.24);
+  animation: codexToastIn .22s ease-out;
+  max-width: 480px; text-align: center;
+}
+#codexSaveToast.success { background: rgba(6,95,70,.96); }
+#codexSaveToast.error   { background: rgba(153,27,27,.96); }
+@keyframes codexToastIn {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to   { opacity: 1; transform: translate(-50%, 0);   }
+}
 </style>
 </head>
 <body>
@@ -741,7 +793,7 @@ body.sidebar-collapsed #sidebarCollapseBtn { left: 0; }
             <input type="number" id="p3AcosLeftInput" min="5" max="100" step="5" oninput="recomputeNumDirty('acos')"
                    class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
             <span style="font-size:13px;color:var(--muted-fg);flex:0 0 auto">%</span>
-            <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
+            <button onclick="saveP3AcosLeft()" id="p3AcosLeftBtn" class="btn btn-primary btn-sm hidden" style="flex:0 0 auto">保存</button>
           </div>
           <div id="p3AcosLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
         </div>
@@ -751,7 +803,7 @@ body.sidebar-collapsed #sidebarCollapseBtn { left: 0; }
           <div style="display:flex;gap:8px;align-items:center">
             <input type="number" id="p3BudgetLeftInput" min="1" step="1" oninput="recomputeNumDirty('budget')"
                    class="input" style="flex:1;min-width:0" placeholder="AI 推荐">
-            <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
+            <button onclick="saveP3BudgetLeft()" id="p3BudgetLeftBtn" class="btn btn-primary btn-sm hidden" style="flex:0 0 auto">保存</button>
           </div>
           <div id="p3BudgetLeftStatus" class="hidden" style="font-size:10px;margin-top:3px"></div>
         </div>
@@ -782,12 +834,17 @@ body.sidebar-collapsed #sidebarCollapseBtn { left: 0; }
                 </button>
                 <div class="md-panel md-panel-up hidden" id="leftDirectionsOptions"></div>
               </div>
-              <button onclick="saveDirectionsLeft()" id="btnSaveDirections" class="btn btn-primary btn-sm" style="flex:0 0 auto">保存</button>
+              <button onclick="saveDirectionsLeft()" id="btnSaveDirections" class="btn btn-primary btn-sm hidden" style="flex:0 0 auto">保存</button>
             </div>
             <span id="leftDirectionsStatus" class="hidden" style="font-size:10px;margin-top:4px;display:block"></span>
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 一键保存(2026-08-04):取代 4 个分散保存键;仅 C 态且配置卡可见时显示 -->
+    <div id="codexSaveAllBar">
+      <button id="codexSaveAllBtn" type="button" onclick="saveAllConfig()">💾 一键保存</button>
     </div>
 
     </div>
@@ -1112,6 +1169,7 @@ function renderBatchBar(mode, ctx) {
     const b = batches.find(x => x.decision_id === id);
     if (b) switchBatch(b);
   };
+  if (typeof _syncSaveAllBar === 'function') _syncSaveAllBar();
 }
 
 // 统一三态分派：未配置→A / 有进行中事件→C / 已配置无进行中→B。
@@ -2149,8 +2207,14 @@ async function loadAll(skipContextRefresh = false) {
       resetMainEmptyDefault();
       return;
     }
-    if (!tact.returnVisit) {
-      setMainEmptyMessage(MAIN_EMPTY_NEED_STRATEGY);
+    if (_erpParams.shopId && _erpParams.parentSellerSku) {
+      const latestPath = `/long-term-config/${encodeURIComponent(asin)}/latest?shop_id=${encodeURIComponent(_erpParams.shopId)}&parent_seller_sku=${encodeURIComponent(_erpParams.parentSellerSku)}`;
+      try {
+        const snap = await callAPI(latestPath, null, API_TIMEOUT.default, 'GET');
+        applyConfigSnapshotToEditable(snap);
+      } catch (e) {
+        console.warn('读取 Agent 配置快照失败，保留当前可编辑值', e);
+      }
     }
   } catch (e) {
     err('errGlobal', e.message);
@@ -2459,8 +2523,18 @@ async function confirmStrategy() {
 function applyPersistedStrategySelection(config) {
   ['product_level','operating_mode','season_stage'].forEach(dim => {
     const value = config && config[dim];
-    if (!value) return;
-    const option = Array.from(qsa(`.dd-option[data-dim="${dim}"]`)).find(el =>
+    const options = Array.from(qsa(`.dd-option[data-dim="${dim}"]`));
+    if (!value) {
+      const btn = qs(`.dd-btn[data-dim="${dim}"]`);
+      const text = btn && btn.querySelector('.dd-text');
+      if (text) {
+        text.textContent = '请选择';
+        text.classList.remove('selected', 'dd-text-danger');
+      }
+      options.forEach(option => option.classList.remove('selected'));
+      return;
+    }
+    const option = options.find(el =>
       el.dataset.value === value || el.dataset.label === value
     );
     if (option) selectDropdown(option);
@@ -2530,7 +2604,7 @@ async function loadTactics() {
   // 两按钮内联渲染进 tacticsContent，id 与 onclick 不变；按 dim.id 绑定（与维度顺序无关）。
   const _ROW_BTN = {
     ad_purposes: `<button onclick="refreshTacticsRecommendations()" id="btnRefreshRec" class="btn btn-amber btn-sm">AI 重新推荐</button>`,
-    target_keyword_strategy: `<button onclick="confirmTactics()" id="btnTactics" class="btn btn-primary btn-sm">保存</button>`,
+    target_keyword_strategy: `<button onclick="confirmTactics()" id="btnTactics" class="btn btn-primary btn-sm hidden">保存</button>`,
   };
   let html = `<div style="display:flex;flex-direction:column;gap:10px">`;
   data.dimensions.forEach(dim => {
@@ -2560,7 +2634,7 @@ async function loadTactics() {
     _saved.purpose = _curMulti('ad_purposes'); _saved.keyword = _curMulti('target_keyword_strategy');
     recomputeTacticsDirty();
   }
-  show('btnTactics'); show('btnRefreshRec');
+  show('btnRefreshRec');  // btnTactics 由一键保存取代,不再单独显示(2026-08-04)
 
   // 关键词监控表 — 首次加载用 renderKeywordTable
   const kws = data.keyword_analysis || [];
@@ -2575,14 +2649,14 @@ async function loadTactics() {
   renderDataStatusBanner(data, 'dataStatusTab1');
 
   const returnVisit = !!(prefilled && sec1Confirmed);
-  if (returnVisit) {
-    sec2Confirmed = true; _strategyLayerSaved.tactics = true;
-    try {
-      await enableTabsForReturnVisit();
-    } catch (e) {
-      err('errGlobal', e.message || String(e));
-      return { ok: false };
-    }
+  sec2Confirmed = returnVisit;
+  _strategyLayerSaved.tactics = returnVisit;
+  try {
+    // 后续诊断、P3、方向只依赖已确认的战略层，不再等待策略层单独保存。
+    await enableTabsForReturnVisit();
+  } catch (e) {
+    err('errGlobal', e.message || String(e));
+    return { ok: false };
   }
   return { ok: true, data, returnVisit };
 }
@@ -2747,7 +2821,7 @@ async function enableTabsForReturnVisit() {
   show('cardP3Override');
   showMainContent();
   switchTab('tab1');
-  await loadMainInsightPanels();
+  await _ensureInsightPanelsLoaded();
   setTabEnabled('tab4', true);
 }
 
@@ -3820,6 +3894,197 @@ async function loadAnnounceContent(filename) {
   } catch(e) {
     body.innerHTML = `<div class="announce-empty">加载失败: ${e.message}</div>`;
   }
+}
+
+// ═══════════════ 一键保存(2026-08-04) ═══════════════
+// 取代 4 个分散保存键(btnTactics/p3AcosLeftBtn/p3BudgetLeftBtn/btnSaveDirections)。
+// 单后端端点 POST /long-term-config/{asin}/save-all 对 t_advert_agent_config 做
+// 单行原子 upsert，再执行可重试且逐项检查结果的 state DB 镜像。保存后回读 snapshot,
+// 用 applyConfigSnapshotToEditable 把所有可编辑控件回填真源值(空则显空)——与
+// "C 态初始化回读"用同一套函数(LoadAll 末尾调 GET .../latest),对称。
+// 后续面板不再等待 tactics confirm；原 4 键的反馈、renderP3、标签与徽标副作用
+// 集中到 applySaveAllSideEffects。快照态(B 态)严禁动。
+let _saveAllBusy = false;
+let _insightPanelsLoadPromise = null;
+
+function _lockSaveAllBtn(locked) {
+  const b = $('codexSaveAllBtn');
+  if (!b) return;
+  if (locked) { b.disabled = true; b.innerHTML = '<span class="spinner-mini"></span> 保存中…'; }
+  else { b.disabled = false; b.innerHTML = '💾 一键保存'; }
+}
+
+function _showSaveAllToast(msg, kind) {  // kind: 'success' | 'error' | ''
+  const old = document.getElementById('codexSaveToast');
+  if (old) old.remove();
+  if (!msg) return;
+  const w = document.createElement('div');
+  w.id = 'codexSaveToast';
+  if (kind) w.className = kind;
+  w.textContent = msg;
+  document.body.appendChild(w);
+  const ms = kind === 'error' ? 4200 : 2200;
+  setTimeout(() => {
+    if (w.parentNode) { w.style.transition = 'opacity .3s'; w.style.opacity = '0';
+      setTimeout(() => { if (w.parentNode) w.remove(); }, 320); }
+  }, ms);
+}
+
+function _checkedVals(dim) {
+  return Array.from(qsa(`input[data-dim="${dim}"]:checked`)).map(cb => cb.value);
+}
+function _numOrBlank(id, min, max) {  // 空=null(沿用);超界=null 并 toast;5-100 / >0
+  const el = $(id); if (!el) return null;
+  const raw = (el.value || '').trim();
+  if (raw === '') return null;
+  const n = Number(raw);
+  const ok = (min != null ? n >= min : true) && (max != null ? n <= max : true) && !isNaN(n);
+  if (!ok) { _showSaveAllToast(`请输入${min != null && max != null ? min+'-'+max : '>= '+min} 的数值`, 'error'); return '__INVALID__'; }
+  return id === 'p3AcosLeftInput' ? Math.round(n) : n;
+}
+
+// 收集当前可编辑控件值 → 构造 save-all 请求体
+function _collectSaveAllBody() {
+  const ap = _checkedVals('ad_purposes');
+  const kt = _checkedVals('target_keyword_strategy');
+  const dirs = _checkedVals('directions');
+  const acos = _numOrBlank('p3AcosLeftInput', 5, 100);
+  if (acos === '__INVALID__') return null;
+  const budget = _numOrBlank('p3BudgetLeftInput', 1, null);
+  if (budget === '__INVALID__') return null;
+  // 空数组拦截(单一配置不允许保存为空)——与原 confirmTactics/saveDirectionsLeft 校验一致
+  if (ap.length === 0 || kt.length === 0) { _showSaveAllToast('请至少选择一项广告目的/关键词策略', 'error'); return null; }
+  if (dirs.length === 0) { _showSaveAllToast('请至少选择一个广告方向', 'error'); return null; }
+  return {
+    asin,
+    shop_id: window._erpParams?.shopId, parent_seller_sku: window._erpParams?.parentSellerSku,
+    shop_account: window._erpParams?.shopAccount, site_code: window._erpParams?.siteCode,
+    ad_purposes: ap, target_keyword_strategy: kt,
+    target_acos: acos, daily_budget: budget, directions: dirs,
+  };
+}
+
+// 统一回读:把 snap 的 8 字段回填所有可编辑控件 + 刷新所有标签(空则显空)。
+// 与"保存后回读"对称;C 态初始化(loadAll 末尾)也用同一套。
+function applyConfigSnapshotToEditable(snap) {
+  if (!snap) return;
+  // 战略层 3 列(由 confirmStrategy 写过的 state DB long_term_config 经 save-all 补齐 ERP;
+  // 这里回填可编辑下拉显示真源)
+  applyPersistedStrategySelection(snap);
+  _setSavedStrategyBaseline(snap);
+  // 策略层 2 列:勾选 + 更新标签
+  _applyPersistedMulti('ad_purposes', snap.ad_purposes);
+  _applyPersistedMulti('target_keyword_strategy', snap.target_keyword_strategy);
+  // ACOS/预算 input:有值显值,空则清空(显空)
+  const aIn = $('p3AcosLeftInput'), bIn = $('p3BudgetLeftInput');
+  if (aIn) { aIn.value = snap.target_acos != null ? snap.target_acos : ''; aIn.placeholder = snap.target_acos != null ? '' : 'AI 推荐'; }
+  if (bIn) { bIn.value = snap.daily_budget != null ? snap.daily_budget : ''; bIn.placeholder = snap.daily_budget != null ? '' : 'AI 推荐'; }
+  // 方向:勾选 + 更新标签
+  _applyPersistedMulti('directions', snap.directions);
+  // 脏/已存标签基准刷新(全字段→saved;空→hidden)
+  _saved.purpose = _curMulti('ad_purposes'); _saved.keyword = _curMulti('target_keyword_strategy');
+  _saved.acos = snap.target_acos ?? null; _saved.budget = snap.daily_budget ?? null;
+  _saved.directions = _curMulti('directions');
+  _prevCfg.acos = snap.target_acos ?? null; _prevCfg.budget = snap.daily_budget ?? null;
+  ['purpose','keyword','acos','budget','directions'].forEach(k => {
+    const has = (_saved[k] != null && _saved[k] !== '' && !(Array.isArray(_saved[k]) && _saved[k].length === 0));
+    _dirty[k] = false; _manualTouched[k] = false;
+    setSaveTag(k, has ? 'saved' : 'hidden');
+  });
+  // P3 manual_override flag + renderP3(若 snap.p3 给了)
+  if (snap.p3) {
+    window._p3data = snap.p3;
+    renderP3(window._p3data);
+  }
+  // 策略层整体徽标
+  _strategyLayerSaved.tactics = (_saved.purpose && _saved.keyword);
+  _strategyLayerSaved.acos = !!snap.p3?.target_acos?.manual_override;
+  _strategyLayerSaved.budget = !!snap.p3?.budget_bid?.manual_override;
+  _strategyLayerSaved.directions = !!(_saved.directions && _saved.directions.length);
+  refreshStrategyLayerBadge();
+}
+
+function _applyPersistedMulti(dim, vals) {  // 勾选 + 更新标签(不标手动)
+  if (!Array.isArray(vals)) return;
+  const set = new Set(vals.map(String));
+  qsa(`input[data-dim="${dim}"]`).forEach(cb => { cb.checked = set.has(String(cb.value)); });
+  updateMultiTags(dim, { fromUser: false });
+}
+
+function _ensureInsightPanelsLoaded() {
+  if (diagnosisLoaded) return Promise.resolve();
+  if (!_insightPanelsLoadPromise) {
+    _insightPanelsLoadPromise = loadMainInsightPanels()
+      .finally(() => { _insightPanelsLoadPromise = null; });
+  }
+  return _insightPanelsLoadPromise;
+}
+
+// 保留原 4 键的全部副作用,集中执行一遍。
+// 持久化成功后的面板刷新不阻塞保存结果；仅在后台复用同一在途请求。
+function applySaveAllSideEffects(snap, saved, aiSnapshot) {
+  // 来自 confirmTactics 末段
+  setTabEnabled('tab2', true); setTabEnabled('tab3', true);
+  show('cardP3Override');
+  setTabEnabled('tab4', false);
+  showMainContent();
+  if (!activeTab) switchTab('tab1');
+  fbCaptureTactics(_lastTacticsAiRec.ad_purposes, _lastTacticsAiRec.target_keyword_strategy, saved.ad_purposes, saved.target_keyword_strategy);
+  // 来自 saveP3*
+  fbCaptureP3Acos(aiSnapshot.target_acos, saved.target_acos);
+  fbCaptureP3Budget(aiSnapshot.daily_budget, saved.daily_budget);
+  // 来自 saveDirectionsLeft
+  fbCaptureExecution(_lastExecAiDirs, saved.directions);
+  // 徽标已在 applyConfigSnapshotToEditable 刷;确保 cardP3Override 显示
+  // 首次加载 insight panels 放到后台，不阻塞已完成的 ERP 写入/回读。
+  if (diagnosisLoaded) {
+    setTabEnabled('tab4', true);
+  } else {
+    _ensureInsightPanelsLoaded()
+      .then(() => setTabEnabled('tab4', true))
+      .catch(e => err('errGlobal', '分析数据加载失败: ' + (e.message || e)));
+  }
+  // 显示一键保存按钮(若 cardP3Override 已 show,observer 也会同步;此处兜底)
+  _syncSaveAllBar();
+}
+
+async function saveAllConfig() {
+  if (_saveAllBusy) return;
+  const body = _collectSaveAllBody();
+  if (!body) return;  // 校验失败 toast 已发
+  const aiSnapshot = {
+    target_acos: window._p3data?.target_acos?.recommended_target ?? null,
+    daily_budget: window._p3data?.budget_bid?.suggested ?? null,
+  };
+  _saveAllBusy = true; _lockSaveAllBtn(true);
+  try {
+    const snap = await callAPI(`/long-term-config/${encodeURIComponent(asin)}/save-all`, body, API_TIMEOUT.default);
+    applyConfigSnapshotToEditable(snap);
+    applySaveAllSideEffects(snap, body, aiSnapshot);
+    _showSaveAllToast('✓ 已保存', 'success');
+  } catch (e) {
+    _showSaveAllToast('✗ 保存失败: ' + (e.message || ''), 'error');
+  }
+  _lockSaveAllBtn(false); _saveAllBusy = false;
+}
+
+// 一键保存只属于 C 态；B 态同样展示 cardP3Override 的只读快照，不能只看卡片显隐。
+function _syncSaveAllBar() {
+  const bar = document.getElementById('codexSaveAllBar');
+  if (!bar) return;
+  const card = document.getElementById('cardP3Override');
+  const editable = !!((_decisionContext || {}).in_progress) && !shouldUseSnapshotMode();
+  const visible = editable && card && !card.classList.contains('hidden');
+  bar.classList.toggle('codex-visible', !!visible);
+}
+// MutationObserver 单点监听 cardP3Override 显隐,免改 4 个业务调用点
+if (typeof MutationObserver !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    const card = document.getElementById('cardP3Override');
+    if (!card) return;
+    new MutationObserver(() => _syncSaveAllBar()).observe(card, { attributes: true, attributeFilter: ['class'] });
+    _syncSaveAllBar();
+  });
 }
 
 // ═══════════════ 启动入口 ═══════════════

@@ -287,6 +287,7 @@ class CampaignStrategicOverview(BaseModel):
     assessment_text: str = ""                        # 1. 核心判断(KB×现状匹配 → 关键矛盾/机会 + 定调)
     direction_text: str = ""                         # 2. 宏观方向 + 原因
     posture_brief: str = ""                          # 注入后续逐活动分析的判断基准(指令式)
+    allow_growth_analysis: bool = True               # 策略总览增长门禁：LLM 明确判断不应当新增扩词/淘汰复评时输出 false；默认 true(fail-open)
     generated_by: str = "ai"                         # "ai" | "fallback"
 
 

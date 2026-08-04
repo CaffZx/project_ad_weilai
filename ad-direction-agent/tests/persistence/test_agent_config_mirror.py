@@ -1,4 +1,4 @@
-"""t_advet_agent_config 的字段级镜像写入契约。"""
+"""t_advert_agent_config 的字段级镜像写入契约。"""
 from __future__ import annotations
 
 from decimal import Decimal
@@ -11,6 +11,7 @@ from app.persistence.erp_writer.repository import ErpDualWriterRepository
 class _Cursor:
     def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
+        self.row = None
 
     def __enter__(self):
         return self
@@ -20,6 +21,9 @@ class _Cursor:
 
     def execute(self, sql: str, params: tuple):
         self.calls.append((sql, params))
+
+    def fetchone(self):
+        return self.row
 
 
 class _Connection:
@@ -78,7 +82,7 @@ def test_upsert_agent_config_maps_strategy_patch_and_updates_only_patch_columns(
     )
 
     sql, params = conn.cursor_obj.calls[0]
-    assert "INSERT INTO t_advet_agent_config" in sql
+    assert "INSERT INTO t_advert_agent_config" in sql
     assert "product_position=VALUES(product_position)" in sql
     assert "operating_mode=VALUES(operating_mode)" in sql
     assert "season_type=VALUES(season_type)" in sql
@@ -136,3 +140,18 @@ def test_upsert_agent_config_rejects_incomplete_identity_before_connecting():
 
     assert conn.cursor_obj.calls == []
     assert conn.closed is False
+
+
+def test_get_agent_config_row_reads_by_unique_identity_without_site_filter():
+    repo, conn = _repo()
+    conn.cursor_obj.row = {"product_position": "P2_PRODUCT"}
+
+    row = repo.get_agent_config_row(_identity(site_code="Amazon_US"))
+
+    sql, params = conn.cursor_obj.calls[0]
+    assert "FROM t_advert_agent_config" in sql
+    assert "parent_asin=%s AND parent_seller_sku=%s AND shop_id=%s" in sql
+    assert "site_code=%s" not in sql
+    assert params == ("B0TEST", "SKU-1", 1622)
+    assert row == {"product_position": "P2_PRODUCT"}
+    assert conn.closed is True

@@ -179,6 +179,126 @@ def test_demo_native_unified_strategy_save_and_preserves_manual_inputs():
     assert "保存配置" in html
 
 
+def test_one_click_config_loads_downstream_without_tactics_confirmation():
+    html = read(DEMO)
+    start = html.index("async function loadTactics()")
+    end = html.index("async function confirmTactics()", start)
+    load_tactics = html[start:end]
+
+    assert "await enableTabsForReturnVisit();" in load_tactics
+    assert "if (returnVisit)" not in load_tactics
+    assert 'id="btnTactics" class="btn btn-primary btn-sm hidden"' in load_tactics
+    load_all_start = html.index("async function loadAll(")
+    load_all_end = html.index("// ═══════════════ 战略层", load_all_start)
+    assert "if (!tact.returnVisit)" not in html[load_all_start:load_all_end]
+
+
+def test_one_click_config_latest_read_uses_identity_query_and_only_runs_in_editable_path():
+    html = read(DEMO)
+    start = html.index("async function loadAll(")
+    end = html.index("// ═══════════════ 战略层", start)
+    load_all = html[start:end]
+
+    assert "shouldUseSnapshotMode()" in load_all
+    assert "shop_id=${encodeURIComponent(_erpParams.shopId)}" in load_all
+    assert "parent_seller_sku=${encodeURIComponent(_erpParams.parentSellerSku)}" in load_all
+    assert "applyConfigSnapshotToEditable(snap)" in load_all
+
+
+def test_one_click_save_bar_is_explicitly_gated_to_c_state():
+    html = read(DEMO)
+    start = html.index("function _syncSaveAllBar()")
+    end = html.index("// MutationObserver", start)
+    sync = html[start:end]
+
+    assert "_decisionContext" in sync
+    assert ".in_progress" in sync
+    assert "!shouldUseSnapshotMode()" in sync
+
+
+def test_one_click_save_uses_canonical_erp_page_identity_names():
+    html = read(DEMO)
+    start = html.index("function _collectSaveAllBody()")
+    end = html.index("// 统一回读", start)
+    collect = html[start:end]
+
+    assert "_erpParams?.shopId" in collect
+    assert "_erpParams?.parentSellerSku" in collect
+    assert "_erpParams?.shopAccount" in collect
+    assert "_erpParams?.siteCode" in collect
+    assert "_erpParams?.shop_id" not in collect
+
+
+def test_one_click_snapshot_resets_strategy_dirty_baseline_and_can_render_empty():
+    html = read(DEMO)
+    start = html.index("function applyConfigSnapshotToEditable(snap)")
+    end = html.index("function _applyPersistedMulti", start)
+    apply_snapshot = html[start:end]
+    strategy_start = html.index("function applyPersistedStrategySelection(config)")
+    strategy_end = html.index("function refreshStrategyContext", strategy_start)
+    strategy = html[strategy_start:strategy_end]
+
+    assert "_setSavedStrategyBaseline(snap)" in apply_snapshot
+    assert "text.textContent = '请选择'" in strategy
+    assert "option.classList.remove('selected')" in strategy
+
+
+def test_one_click_feedback_keeps_ai_values_before_snapshot_replaces_p3_data():
+    html = read(DEMO)
+    save_start = html.index("async function saveAllConfig()")
+    save_end = html.index("// 一键保存只属于 C 态", save_start)
+    save = html[save_start:save_end]
+    side_start = html.index("function applySaveAllSideEffects")
+    side_end = html.index("async function saveAllConfig()", side_start)
+    side = html[side_start:side_end]
+
+    assert save.index("const aiSnapshot") < save.index("applyConfigSnapshotToEditable(snap)")
+    assert "applySaveAllSideEffects(snap, body, aiSnapshot)" in save
+    assert "aiSnapshot.target_acos" in side
+    assert "aiSnapshot.daily_budget" in side
+
+
+def test_one_click_save_does_not_wait_for_insight_panel_refresh():
+    html = read(DEMO)
+    start = html.index("function applySaveAllSideEffects")
+    end = html.index("async function saveAllConfig()", start)
+    side = html[start:end]
+    save = html[html.index("async function saveAllConfig()"):]
+
+    assert "await loadMainInsightPanels()" not in side
+    assert "_ensureInsightPanelsLoaded()" in side
+    assert "await applySaveAllSideEffects" not in save
+
+
+def test_return_visit_and_save_share_one_insight_panel_load_promise():
+    html = read(DEMO)
+    helper_start = html.index("function _ensureInsightPanelsLoaded")
+    helper_end = html.index("function applySaveAllSideEffects", helper_start)
+    helper = html[helper_start:helper_end]
+    return_start = html.index("async function enableTabsForReturnVisit()")
+    return_end = html.index("// ═══════════════ 诊断层", return_start)
+    return_visit = html[return_start:return_end]
+    side_start = html.index("function applySaveAllSideEffects")
+    side_end = html.index("async function saveAllConfig()", side_start)
+    side = html[side_start:side_end]
+
+    assert "if (!_insightPanelsLoadPromise)" in helper
+    assert "return _insightPanelsLoadPromise" in helper
+    assert "await _ensureInsightPanelsLoaded()" in return_visit
+    assert "_ensureInsightPanelsLoaded()" in side
+
+
+def test_one_click_snapshot_trusts_backend_per_field_manual_override_flags():
+    html = read(DEMO)
+    start = html.index("function applyConfigSnapshotToEditable(snap)")
+    end = html.index("function _applyPersistedMulti", start)
+    apply_snapshot = html[start:end]
+
+    assert "window._p3data = snap.p3" in apply_snapshot
+    assert "manual_override = (snap.target_acos != null)" not in apply_snapshot
+    assert "manual_override = (snap.daily_budget != null)" not in apply_snapshot
+
+
 def test_demo_native_error_retry_button():
     html = read(DEMO)
 

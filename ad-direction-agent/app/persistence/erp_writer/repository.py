@@ -220,7 +220,7 @@ class ErpDualWriterRepository:
             now,
         )
         sql = f"""
-        INSERT INTO t_advet_agent_config ({", ".join(columns)})
+        INSERT INTO t_advert_agent_config ({", ".join(columns)})
         VALUES ({", ".join(["%s"] * len(columns))})
         ON DUPLICATE KEY UPDATE {", ".join(updates)}
         """
@@ -233,6 +233,34 @@ class ErpDualWriterRepository:
         except Exception:
             conn.rollback()
             raise
+        finally:
+            conn.close()
+
+    def get_agent_config_row(self, identity: dict[str, Any]) -> dict | None:
+        """按 Agent 配置表唯一商品身份读取当前配置。"""
+        parent_asin = str(identity.get("parent_asin") or "").strip()
+        parent_seller_sku = str(identity.get("parent_seller_sku") or "").strip()
+        try:
+            shop_id = int(identity.get("shop_id"))
+        except (TypeError, ValueError):
+            shop_id = 0
+        if not parent_asin or not parent_seller_sku or shop_id <= 0:
+            return None
+
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT product_position, operating_mode, season_type,
+                              advert_purposes, target_keyword_types,
+                              target_acos_suggest, daily_budget_suggest,
+                              advert_direction_types, update_time
+                       FROM t_advert_agent_config
+                       WHERE parent_asin=%s AND parent_seller_sku=%s AND shop_id=%s
+                       LIMIT 1""",
+                    (parent_asin, parent_seller_sku, shop_id),
+                )
+                return cur.fetchone()
         finally:
             conn.close()
 

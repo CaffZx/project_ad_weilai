@@ -553,3 +553,29 @@ class LongTermConfigUpdateRequest(ProductIdentityMixin):
     operating_mode: OperatingMode | None = None
     ad_purposes: list[AdPurpose] | None = None
     target_keyword_strategy: list[TargetKeywordStrategy] | None = None
+
+
+class SaveAllConfigRequest(ProductIdentityMixin):
+    """一次保存策略、P3 和广告方向配置。战略层仍由独立确认入口维护。"""
+
+    ad_purposes: list[str] = Field(min_length=1)
+    target_keyword_strategy: list[str] = Field(min_length=1)
+    target_acos: int | None = Field(default=None, ge=5, le=100)
+    daily_budget: float | None = Field(default=None, gt=0)
+    directions: list[str] = Field(min_length=1)
+
+
+class ConfigSnapshotResponse(BaseModel):
+    """Agent 配置表反向映射后的前端可编辑态快照。"""
+
+    asin: str
+    product_level: str | None = None
+    operating_mode: str | None = None
+    season_stage: str | None = None
+    ad_purposes: list[str] = Field(default_factory=list)
+    target_keyword_strategy: list[str] = Field(default_factory=list)
+    target_acos: int | None = None
+    daily_budget: float | None = None
+    directions: list[str] = Field(default_factory=list)
+    p3: dict | None = None
+    last_modified: str = ""

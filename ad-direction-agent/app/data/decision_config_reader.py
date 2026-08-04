@@ -53,7 +53,7 @@ def load_batch_layer14(asin: str, parent_seller_sku: str | None, shop_id: int | 
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT product_position, operating_mode, season_type, advert_direction_types "
-                    "FROM t_advet_agent_config "
+                    "FROM t_advert_agent_config "
                     "WHERE parent_asin=%s AND parent_seller_sku=%s AND shop_id=%s LIMIT 1",
                     (asin, sku, sid),
                 )

@@ -14,6 +14,7 @@ from app.persistence.erp_writer.text_utils import (
     normalize_advert_direction_types_list,
     normalize_site_code,
     to_enum_list,
+    unmap_direction_type,
     unmap_operating_mode,
 )
 
@@ -53,6 +54,8 @@ def test_direction_types_json():
     assert json.loads(raw) == ["PUSH_NATURAL", "OPTIMIZE_ACOS"]
     assert map_direction_type("balance_maintain") == "BALANCE_MAINTAIN"
     assert map_direction_type("ADD_KEYWORD_EXPANSION") == "EXPAND_KEYWORDS"
+    assert unmap_direction_type("PUSH_NATURAL") == "push_natural"
+    assert unmap_direction_type("BALANCE_MAINTENANCE") == "balance_maintain"
 
 
 def test_normalize_advert_direction_types_legacy():
