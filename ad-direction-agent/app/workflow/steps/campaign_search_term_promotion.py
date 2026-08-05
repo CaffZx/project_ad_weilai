@@ -56,6 +56,11 @@ def _decision(
 ) -> NewCampaignDecision:
     source = "SRC_CONVERTED" if any(item.orders > 0 for item in items) else "SRC_BROAD_DERIVED"
     first = items[0]
+    # 聚合全来源的 distinct reason（与 evidence 同理：多个活动的同词候选不应只保留首条）
+    reasons: list[str] = []
+    for item in items:
+        if item.reason and item.reason not in reasons:
+            reasons.append(item.reason)
     return NewCampaignDecision(
         keyword_text=keyword,
         keyword_class=first.keyword_class,
@@ -63,7 +68,7 @@ def _decision(
         source=source,
         trigger_scene="KEYWORD_PROMOTED_FROM_BROAD",
         prescribed_match_type="EXACT",
-        reason=first.reason,
+        reason="；".join(reasons) if reasons else "",
         evidence=_evidence(channel, items),
         confidence="high",
         review_level="MANUAL_REVIEW",

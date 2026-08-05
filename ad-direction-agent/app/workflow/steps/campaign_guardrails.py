@@ -340,12 +340,6 @@ def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
     spend_raw = perf.get("cost", perf.get("spend"))
     if spend_raw is None:
         return
-    if item.proposed_budget <= item.current_budget:
-        return
-    perf = getattr(item, "perf_7d", {}) or {}
-    spend_raw = perf.get("cost", perf.get("spend"))
-    if spend_raw is None:
-        return
     spend = float(spend_raw or 0)
     current_budget = float(item.current_budget or 0)
     if current_budget <= 0:
