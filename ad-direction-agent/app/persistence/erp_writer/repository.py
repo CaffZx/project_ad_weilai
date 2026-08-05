@@ -1189,11 +1189,12 @@ class ErpDualWriterRepository:
         summary_id = stable_id("sum", run.decision_id)
         s = run.summary or {}
         eliminate_count = int(s.get("to_eliminate") or 0)
+        paused_count = int(s.get("to_paused") or 0)
         adjust_count = int(s.get("to_adjust") or 0)
         keep_count = int(s.get("to_keep") or 0)
         reactivate_count = int(s.get("to_reactivate") or 0)
-        # categorized_total 纳入所有动作桶（含复评），告警只在真实漏桶时触发
-        categorized_total = eliminate_count + adjust_count + keep_count + reactivate_count
+        # categorized_total 纳入所有动作桶（含复评、暂停），告警只在真实漏桶时触发
+        categorized_total = eliminate_count + paused_count + adjust_count + keep_count + reactivate_count
         declared_total = int(run.total_campaigns or 0)
 
         base_warnings = list(run.raw_payload.get("warnings") or [])
@@ -1223,7 +1224,7 @@ class ErpDualWriterRepository:
         sql = """
         INSERT INTO t_advert_agent_modify_suggest_summary (
             id, decision_id, shop_id, parent_asin, parent_seller_sku, site_code, batch_no,
-            total_count, eliminate_count, adjust_count, keep_count, reactivate_count,
+            total_count, eliminate_count, paused_count, adjust_count, keep_count, reactivate_count,
             confidence_high_count, confidence_medium_count, confidence_low_count,
             budget_impact, validation_passed, alert_count, alert_msg,
             main_push_count, main_push_budget, broad_auto_count, broad_auto_budget,
@@ -1242,7 +1243,7 @@ class ErpDualWriterRepository:
             create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,
@@ -1261,6 +1262,7 @@ class ErpDualWriterRepository:
             batch_no=VALUES(batch_no),
             total_count=VALUES(total_count),
             eliminate_count=VALUES(eliminate_count),
+            paused_count=VALUES(paused_count),
             adjust_count=VALUES(adjust_count),
             keep_count=VALUES(keep_count),
             reactivate_count=VALUES(reactivate_count),
@@ -1324,6 +1326,7 @@ class ErpDualWriterRepository:
                 run.batch_no,
                 total_count_to_write,
                 eliminate_count,
+                paused_count,
                 adjust_count,
                 keep_count,
                 reactivate_count,
@@ -1668,7 +1671,7 @@ class ErpDualWriterRepository:
         # ⚠ key_to_card 按 c.campaign_key（现为关键词级）映射；card 仅存主 adjustment
         # 的 campaign_key，synthesis 中引用非主 key 的成员会映射失败被静默跳过。
         key_to_card = {c.campaign_key: c.card_id for c in run.cards if c.campaign_key}
-        _cat = {"eliminate_to_low_bid_pool": "ELIMINATE", "keep": "KEEP"}
+        _cat = {"eliminate_to_low_bid_pool": "ELIMINATE", "paused": "PAUSED", "keep": "KEEP"}
 
         def _s(v: Any, n: int) -> str | None:
             if v is None:

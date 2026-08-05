@@ -1215,6 +1215,7 @@ async def _analyze_campaigns_impl(
     # 9. 汇总统计
     summary_stats = {
         "to_eliminate": sum(1 for a in adjustments if a.action == "eliminate_to_low_bid_pool"),
+        "to_paused": sum(1 for a in adjustments if a.action == "paused"),
         "to_adjust": sum(1 for a in adjustments if a.action.startswith("adjust")),
         "to_keep": sum(1 for a in adjustments if a.action == "keep"),
         "to_reactivate": sum(1 for a in adjustments if (a.action or "").startswith("reactivate")),
@@ -2489,6 +2490,8 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
       - action 不应该由 LLM 决定 (LLM 经常 action=keep 但又填了不同 proposed,
         或者 action=adjust_bid 但 proposed_bid==current_bid)
       - eliminate_to_low_bid_pool 是业务语义特殊保留 LLM 决定 (淘汰 ≠ 简单调到 $1)
+      - paused_campaign 是 LLM 语境动作码,出 LLM 即翻译为后端统一枚举 paused;
+        paused 与淘汰一样由 LLM 决定、代码不推导覆盖 (暂停不依赖 proposed/current 差异)
       - 其他全部代码 derive: budget 变 → adjust_budget; bid 变 → adjust_bid;
         placement 非空 → adjust_placement; 全没变 → keep
       - 多维同时变: 按业务优先级 budget > bid > placement 选 1 个 (单 action 字段限制)
@@ -2497,8 +2500,12 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
     Returns:
         bool: True 表示 action 被改写过 (用于日志统计)
     """
-    # 淘汰由 LLM 决定,代码不干预 (淘汰组业务语义)
-    if item.action == "eliminate_to_low_bid_pool":
+    # 暂停：LLM 动作码 → 后端统一枚举 paused（唯一翻译点）；与淘汰一样代码不推导覆盖
+    if item.action == "paused_campaign":
+        item.action = "paused"
+        return False
+    # 淘汰 / 已翻译的暂停由 LLM 决定,代码不干预 (二次归一化也不会改回 keep/adjust)
+    if item.action in ("eliminate_to_low_bid_pool", "paused"):
         return False
 
     _EPS = 0.001

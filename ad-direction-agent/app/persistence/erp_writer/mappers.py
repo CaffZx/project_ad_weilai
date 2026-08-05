@@ -55,6 +55,9 @@ _ACTION_TO_CATEGORY = {
     # 漏此键 → 淘汰卡 suggest_category 落默认 ADJUST，淘汰复评 WHERE='ELIMINATE' 永远 0 候选。
     # 快照渲染侧 _card_action 已含 ELIMINATE 分支 + group_type 兜底，对齐 DDL「启用 ELIMINATE 枚举」。
     "eliminate_to_low_bid_pool": "ELIMINATE",
+    # 暂停（LLM 动作码 paused_campaign 翻译后）；与淘汰同级但分类码区分，
+    # 保护淘汰复评 WHERE='ELIMINATE' 查询不被停活动卡污染。
+    "paused": "PAUSED",
     # 复评（KB21 §7）两种 action_type 单独归类，前端照 _actionLabel 显示「复评」而非默认 ADJUST。
     # 执行钩子按 trigger_rule 以 'REACTIVATE_' 开头判离池，与此映射无关。
     "reactivate_budget_only": "REACTIVATE",
@@ -63,7 +66,7 @@ _ACTION_TO_CATEGORY = {
     "keep": "KEEP",
 }
 
-_CATEGORY_PRIORITY = {"ELIMINATE": 0, "REACTIVATE": 1, "ADJUST": 2, "KEEP": 3}
+_CATEGORY_PRIORITY = {"ELIMINATE": 0, "PAUSED": 0, "REACTIVATE": 1, "ADJUST": 2, "KEEP": 3}
 
 _PORTFOLIO_LABELS = ALL_PORTFOLIOS
 
@@ -277,6 +280,21 @@ def _pending_lists_from_adjustment(
     match_type: str | None,
     kw_lookup: dict[tuple[str, str, str], str],
 ) -> tuple[list[KeywordPendingCanonical], list[CampaignPendingCanonical], list[PlacementCanonical], list[str], list[str]]:
+    # 暂停专用状态通道：paused（LLM 动作码 paused_campaign 翻译后）只写活动级状态，
+    # 不生成预算/Bid/广告位/否词 pending，也不带 target_campaign_group_type（暂停不触发组合迁移）。
+    # 必须优先于下方 budget/bid 判断——否则纯状态调整在现有函数里一个 pending 都不会生成。
+    if str(adj.get("action") or "").strip().lower() == "paused":
+        return (
+            [],
+            [CampaignPendingCanonical(
+                old_state=None, new_state="paused",
+                old_budget=None, new_budget=None,
+            )],
+            [],
+            [],
+            [],
+        )
+
     keyword_pending: list[KeywordPendingCanonical] = []
     if campaign_id and any(v is not None for v in (adj.get("current_bid"), adj.get("proposed_bid"))):
         kw_id = _warehouse_id(adj.get("keyword_id")) or _resolve_keyword_id(

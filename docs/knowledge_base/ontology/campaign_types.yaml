@@ -4,7 +4,7 @@
 
 version: v3.4.0
 description: 各 Campaign Type 允许/禁止动作、目标类型、所需报表
-# v3.4.0 修正两处错误源：
+# 修正记录：
 #  1) broad/phrase/auto 的 allowed_actions 曾含 eliminate_to_low_bid_pool，
 #     与 ONT-016 / ONT-RUNTIME-002 / budget_groups.classification_rules / 21号 / 05号§7 全部冲突。
 #     actions.yaml 侧本来就是对的（forbidden: campaign_match_type_not_exact），本文件是唯一错误源。
@@ -31,8 +31,8 @@ campaign_types:
       - campaign_budget_decrease
       - placement_adjustment              # TOS 上限按 03号§6.2 产品定位四档
       - eliminate_to_low_bid_pool         # 仅 EXACT 可用
-      - demote_to_exact_testing           # v3.4.0：主力组中度回落（32号§2.3）
-      - promote_to_exact_core             # v3.4.0：测试组升组（23号§3.5）
+      - demote_to_exact_testing           # 主力组中度回落（32号§2.3）
+      - promote_to_exact_core             # 测试组升组（23号§3.5）
       - create_campaign                   # 新建单关键词精准活动（16号）
       - enable_campaign
       - reactivate_budget_only            # 21号§7 情况一
@@ -50,7 +50,7 @@ campaign_types:
           - split_campaign_by_match_type
           - manual_campaign_level_negative_in_console
         note: >
-          v3.3.0 只 block 不给替代路径，运营看到一个没有下一步的空动作，
+          只 block 不给替代路径，运营看到一个没有下一步的空动作，
           会绕过系统直接在后台改，反而失去可观测性。对比 ONT-001 是给了
           allowed_alternatives 的。
     required_reports:
@@ -79,9 +79,9 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
-      - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
+      - expand_keywords                   # 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # 退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -110,9 +110,9 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
-      - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
+      - expand_keywords                   # 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # 退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -138,9 +138,9 @@ campaign_types:
       - campaign_budget_decrease
       - add_negative_search_term
       - promote_search_term_to_keyword
-      - expand_keywords                   # v3.4.0 补齐（28号 是其决策层）
+      - expand_keywords                   # 补齐（28号 是其决策层）
       - create_campaign                   # 新建广泛/词组测词活动（16号）
-      - stop_campaign                    # v3.4.0：退出动作，取代 eliminate_to_low_bid_pool
+      - stop_campaign                    # 退出动作，取代 eliminate_to_low_bid_pool
       - balance_maintain_no_action
     forbidden_actions:
       - placement_adjustment
@@ -170,13 +170,13 @@ campaign_types:
       - placement_adjustment              # PP 优先，ONT-010
       - expand_keywords                   # 扩 ASIN / 类目 Target（非关键词）
       - create_campaign                   # 竞品截流窗口触发时新建（16号§1）
-      - stop_campaign                    # v3.4.0：退出动作
+      - stop_campaign                    # 退出动作
       - balance_maintain_no_action
     forbidden_actions:
       - keyword_match_type_adjustment
       - add_negative_search_term          # 无搜索词，不做否词
       - eliminate_to_low_bid_pool         # ONT-016：不进低价捡漏组
-    portfolio_group: auto_broad_group          # v3.4.3：收回为子桶
+    portfolio_group: auto_broad_group          # 收回为子桶
     portfolio_subtype: product_targeting       # 子桶身份（广告位权限按子桶放开）
     exact_main_validation_applicable: false
     required_reports:
@@ -206,10 +206,10 @@ stop_campaign_exit_types:          # 退出走 stop_campaign 的类型（ONT-RUN
   - auto_discovery
   - product_targeting
 
-# campaign_type → 组合归属（v3.4.0，与 budget_groups.yaml 一致）
+# campaign_type → 组合归属（与 budget_groups.yaml 一致）
 portfolio_mapping:
   exact_keyword: [exact_core_group, exact_testing_group, low_bid_retention_group]
   broad_keyword: [auto_broad_group]
   phrase_keyword: [auto_broad_group]
   auto_discovery: [auto_broad_group]
-  product_targeting: [auto_broad_group]      # v3.4.3：子桶归属父组
+  product_targeting: [auto_broad_group]      # 子桶归属父组

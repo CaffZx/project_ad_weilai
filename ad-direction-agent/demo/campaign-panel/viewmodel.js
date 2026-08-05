@@ -23,7 +23,9 @@ export const PORTFOLIO_NAMES = [
 ];
 
 const ACTION_KLASS_MAP = {
-  'eliminate_to_low_bid_pool': 'eliminate',
+  // 暂停与淘汰同为退出/关停类，共用中性样式名 eliminate_or_paused（防误显，非美化）
+  'eliminate_to_low_bid_pool': 'eliminate_or_paused',
+  'paused': 'eliminate_or_paused',
   'adjust_bid': 'adjust',
   'adjust_budget': 'adjust',
   'adjust_placement': 'adjust',

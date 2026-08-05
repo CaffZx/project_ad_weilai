@@ -22,8 +22,12 @@ import json
 
 def _action_klass(action: str) -> str:
     """action 字段 → CSS klass."""
+    # 淘汰与暂停同为退出/关停类，统一中性样式名 eliminate_or_paused，
+    # 与前端 ACTION_KLASS_MAP / _badgeKlass / 筛选 value 对齐（精确匹配）
     if action == "eliminate_to_low_bid_pool":
-        return "eliminate"
+        return "eliminate_or_paused"
+    if action == "paused":
+        return "eliminate_or_paused"
     if action.startswith("reactivate"):
         return "reactivate"
     if action.startswith("adjust"):
@@ -94,6 +98,8 @@ def _snapshot_action(card: dict) -> str:
     grp = card.get("campaign_group_type") or ""
     if cat == "ELIMINATE":
         return "eliminate_to_low_bid_pool"
+    if cat == "PAUSED":
+        return "paused"
     if cat == "CREATE":
         return "create_campaign"
     if cat == "KEEP":
@@ -251,6 +257,8 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
     summary = {
         "total": srow.get("total_count") or len(cards),
         "eliminate": srow.get("eliminate_count") or 0,
+        # 暂停计数与其他动作码对称，落 summary.paused_count 列（DDL 已加）
+        "paused": srow.get("paused_count") or 0,
         "adjust": srow.get("adjust_count") or 0,
         "keep": srow.get("keep_count") or 0,
         "create": create_count,
@@ -330,6 +338,7 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
     #   保证前端"全选本组/跳转成员"按 data-key(item_id) 命中。
     _CAT_TO_ACTION = {
         "ELIMINATE": "eliminate_to_low_bid_pool",
+        "PAUSED": "paused",
         "REACTIVATE": "reactivate_budget_only",
         "KEEP": "keep", "ADJUST": "adjust_bid",
     }

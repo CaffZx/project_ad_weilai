@@ -122,7 +122,7 @@ def main():
     print("\n" + "=" * 60)
     print("ENUM: suggest_category & confidence_level")
     print("=" * 60)
-    VALID_CAT = {"ELIMINATE", "REACTIVATE", "ADJUST", "KEEP", "CREATE"}
+    VALID_CAT = {"ELIMINATE", "PAUSED", "REACTIVATE", "ADJUST", "KEEP", "CREATE"}
     VALID_CONF = {"high", "medium", "low"}
     cur.execute("SELECT suggest_category, COUNT(1) AS n FROM t_advert_agent_modify_suggest_card GROUP BY suggest_category")
     for r in cur.fetchall():

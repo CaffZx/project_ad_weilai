@@ -63,7 +63,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
           <!-- 分析概览统计 -->
           <div id="camp-summary" class="camp-summary-grid hidden">
             <div class="stat"><div class="num" id="camp-sum-total">-</div><div class="lab">总活动</div></div>
-            <div class="stat"><div class="num" id="camp-sum-elim">0</div><div class="lab">淘汰</div></div>
+            <div class="stat"><div class="num" id="camp-sum-elim">0</div><div class="lab">淘汰/暂停</div></div>
             <div class="stat"><div class="num" id="camp-sum-adj">0</div><div class="lab">调整</div></div>
             <div class="stat"><div class="num" id="camp-sum-keep">0</div><div class="lab">保持</div></div>
             <div class="stat"><div class="num" id="camp-sum-new">0</div><div class="lab">新增/复评</div></div>
@@ -90,7 +90,7 @@ export async function mountCampaignPanel(containerEl, options = {}) {
               <span class="filter-label">动作</span>
               <select id="camp-filter-action">
                 <option value="">全部</option>
-                <option value="eliminate">淘汰</option>
+                <option value="eliminate_or_paused">淘汰/暂停</option>
                 <option value="adjust">调整</option>
                 <option value="reactivate">复评</option>
                 <option value="keep">保持</option>

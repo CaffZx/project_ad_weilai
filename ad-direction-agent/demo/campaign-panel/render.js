@@ -83,6 +83,7 @@ function _renderPlacementsBrief(adj) {
 function _actionLabel(a) {
   return {
     eliminate_to_low_bid_pool: '淘汰',
+    paused: '暂停',
     adjust: '调整',
     adjust_bid: '调出价',
     adjust_budget: '调预算',
@@ -97,7 +98,8 @@ function _actionLabel(a) {
 }
 
 function _badgeKlass(action) {
-  if (action === 'eliminate_to_low_bid_pool') return 'eliminate';
+  // 暂停与淘汰同为退出/关停类，共用红色警示样式；中性名避免"暂停挂 eliminate"误导维护
+  if (action === 'eliminate_to_low_bid_pool' || action === 'paused') return 'eliminate_or_paused';
   if ((action || '').startsWith('reactivate')) return 'reactivate';
   if (action === 'create_campaign') return 'create';
   if ((action || '').startsWith('adjust')) return 'adjust';
@@ -220,7 +222,7 @@ function _renderWarningsPanel(vm) {
 function _renderSummaryStats(vm) {
   const s = vm.summary || {};
   _$('camp-sum-total').textContent = s.total ?? '-';
-  _$('camp-sum-elim').textContent = s.eliminate ?? 0;
+  _$('camp-sum-elim').textContent = (s.eliminate ?? 0) + (s.paused ?? 0);
   _$('camp-sum-adj').textContent = s.adjust ?? 0;
   _$('camp-sum-keep').textContent = s.keep ?? 0;
   // 「新增/复评」合并位（KB16 新增 + KB21§7 复评）

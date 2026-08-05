@@ -212,7 +212,7 @@ actions:
 
   eliminate_to_low_bid_pool:
     scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
-    # v3.4.4：复合动作展开成多条物理动作，各自 scope 不同
+    # 复合动作展开成多条物理动作，各自 scope 不同
     # （move_portfolio/adjust_budget 在 CAMPAIGN，adjust_bid 在 TARGET）。
     # 不声明跨度，校验器按单一 scope 比对会把 Bid 子动作判成 ACTION_SCOPE_INVALID。
     sub_scopes: [CAMPAIGN, TARGET]
@@ -234,10 +234,10 @@ actions:
       - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 stop_campaign
       - campaign_age_under_3_days
       - core_keyword_ranking_support
-      - high_priority_protected_keyword        # v3.4.0：标题词/后台ST词/核心卖点词/is_core_keyword
+      - high_priority_protected_keyword        # 标题词/后台ST词/核心卖点词/is_core_keyword
       - pre_elimination_diagnosis_incomplete
       - target_group_not_low_bid_retention_group
-      - observation_window_not_satisfied       # v3.4.0：降级型≥7天 / 原生型≥14天（32号§2.4）
+      - observation_window_not_satisfied       # 降级型≥7天 / 原生型≥14天（32号§2.4）
     missing_report_policy: {}
     validation_rule_refs:
       - ONT-013
@@ -249,7 +249,7 @@ actions:
       - must_recalculate_ad_budget_group: true
       - must_recalculate_parent_asin_budget: true
       - low_bid_retention_group_budget_fixed: 1.0
-      - low_bid_retention_bid_rule: min(current_bid, 0.20)   # v3.4.0（C-10）：不得抬高已低于 0.20 的 Bid
+      - low_bid_retention_bid_rule: min(current_bid, 0.20)   # 不得抬高已低于 0.20 的 Bid
       - target_group_must_be: low_bid_retention_group
 
   balance_maintain_no_action:
@@ -274,7 +274,7 @@ actions:
     validation_rule_refs:
       - ONT-007
 
-  stop_campaign:                               # v3.4.0 新增（C-03）
+  stop_campaign:
     scope: CAMPAIGN
     label_zh: 停止投放（退出投放）
     target_objects:
@@ -309,8 +309,7 @@ actions:
       - GROUP-003
     note: >
       与 pause_campaign 的区别见 30号§2：close 是退出投放（不可逆程度高），
-      pause 是临时停投（有明确恢复条件）。v3.3.0 没有 close 动作，
-      21号/18号/budget_groups 里写的「关闭」实际全部落成 pause，与 10号§1.6 冲突。
+      pause 是临时停投（有明确恢复条件）。
 
   pause_campaign:
     scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
@@ -326,9 +325,9 @@ actions:
     review_level: HIGH_RISK_REVIEW
     note: 极少使用。没有明确恢复条件的停投一律用 stop_campaign。
 
-  demote_to_exact_testing:                     # v3.4.0 新增（32号§2.3）
+  demote_to_exact_testing:
     scope: CAMPAIGN
-    # v3.4.4：复合动作展开成多条物理动作，各自 scope 不同
+    # 复合动作展开成多条物理动作，各自 scope 不同
     # （move_portfolio/adjust_budget 在 CAMPAIGN，adjust_bid 在 TARGET）。
     # 不声明跨度，校验器按单一 scope 比对会把 Bid 子动作判成 ACTION_SCOPE_INVALID。
     sub_scopes: [CAMPAIGN, TARGET]
@@ -360,7 +359,7 @@ actions:
       - GROUP-002
       - GROUP-003
 
-  promote_to_exact_core:                       # v3.4.0 新增（23号§3.5）
+  promote_to_exact_core:
     scope: CAMPAIGN
     label_zh: 升入精准主力组
     target_objects:
@@ -389,7 +388,7 @@ actions:
       - ONT-004
       - ONT-012
 
-  expand_keywords:                             # v3.4.0 补齐（评审 B12）
+  expand_keywords:
     scope: CAMPAIGN
     label_zh: 扩词（向现有广告组新增 Target）
     target_objects:
@@ -417,11 +416,8 @@ actions:
       inventory_status: block_growth_actions
     review_level: MANUAL_REVIEW
     validation_rule_refs: [ONT-004, ONT-018, ONT-019]
-    note: >
-      v3.3.0 里 12号§三 的 action_type 枚举含 expand_keywords、28号§7 声称
-      「actions.yaml expand_keywords 动作已注册」，但本文件实际没有它 —— 三处不一致。
 
-  create_campaign:                             # v3.4.0 补齐
+  create_campaign:
     scope: CAMPAIGN
     label_zh: 新建广告活动
     target_objects:
@@ -446,7 +442,7 @@ actions:
     review_level: MANUAL_REVIEW
     validation_rule_refs: [ONT-004, ONT-018, ONT-019]
 
-  enable_campaign:                             # v3.4.0 补齐
+  enable_campaign:
     scope: CAMPAIGN
     label_zh: 启用活动
     target_objects:

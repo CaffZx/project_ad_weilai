@@ -204,8 +204,9 @@ def _p3_force_eliminate(item, gp: GuardrailPass, *, product_stage: str = "") -> 
     days_since_reactivation = getattr(item, "days_since_reactivation", -1)
     if days_since_reactivation >= 0 and days_since_reactivation <= 3:
         return
-    # KB10 §1.6 / ONT-016: 低价捡漏组仅允许精准活动；BROAD/PHRASE/AUTO 退出走
-    # stop_campaign（当前引擎未实现，不做强制淘汰，留给 LLM 判断）
+    # KB10 §1.6 / ONT-016: 低价捡漏组仅允许精准活动；BROAD/PHRASE/AUTO 退出动作 =
+    # paused_campaign（LLM 动作码，出 LLM 翻译为 paused，见 _normalize_action）。
+    # 本期护栏不处理 paused（应当经过护栏，延后立项），此处不做强制淘汰、留给后续判断。
     if (item.match_type or "").upper() != "EXACT":
         return
     if not _p3_should_force_eliminate(item):
@@ -272,8 +273,8 @@ def _p5_protection_reversal(item, gp: GuardrailPass) -> None:
 
     P0(核心词) 和 P2(复评保护) 高于 P3，P1(样本不足) 低于 P3。
     非精准活动（BROAD/PHRASE/AUTO/PRODUCT_TARGETING）不得迁入低价捡漏组
-    （KB10 §1.6 / ONT-016），退出应走 stop_campaign；当前引擎无该动作，
-    先拉回 keep 留待后续判断。
+    （KB10 §1.6 / ONT-016），退出动作 = paused_campaign → paused（已接入 _normalize_action）；
+    本期护栏不处理 paused（应当经过护栏，延后立项）。
     此处兜底处理：若 P3 之后的规则链把受保护项又变成淘汰，则在 P5 阶段拉回。
     """
     if item.action != "eliminate_to_low_bid_pool":

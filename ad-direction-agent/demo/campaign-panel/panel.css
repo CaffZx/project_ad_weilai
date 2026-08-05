@@ -157,7 +157,8 @@
               0 0 0 1px rgba(59,130,246,.2),
               0 2px 8px rgba(59,130,246,.08);
 }
-.camp-adjustment-card.eliminate { border-left-color: #DC2626; }
+.camp-adjustment-card.eliminate,
+.camp-adjustment-card.eliminate_or_paused { border-left-color: #DC2626; }  /* 淘汰/暂停共用红色警示 */
 .camp-adjustment-card.adjust    { border-left-color: #F59E0B; }
 .camp-adjustment-card.keep      { border-left-color: #374151; }
 .camp-adjustment-card.create    { border-left-color: #16A34A; }

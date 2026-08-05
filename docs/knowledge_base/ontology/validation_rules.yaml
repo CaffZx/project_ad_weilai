@@ -5,9 +5,7 @@
 version: v3.4.0
 description: >
   Agent 输出前 ontology 合法性校验规则；预算组合算术规则见 budget_groups.yaml。
-  v3.4.0：本文件由 app/core/ontology_validator.py 实际执行（v3.3.0 从未被任何代码加载，
-  ONT-* 与 GROUP-* 全部没有运行时执行者，12号 要求的 ontology_validation_status 与
-  ontology_rule_refs 只能由 LLM 自述，等于自证合法）。
+  本文件由 app/core/ontology_validator.py 实际执行。
 
 severity_levels:
   hard_block: 必须阻断或放入 blocked_actions，不得作为 proposed_actions 输出
@@ -273,10 +271,8 @@ validation_rules:
       status: blocked
       message: 低价捡漏组预算锁死 $1、Bid 不得高于 min(current_bid, 0.20)，不可参与新增或二次分配接收
     bid_rule_note: |
-      v3.4.0 修正（C-10）：v3.3.0 写死「proposed_bid != 0.20 即 block」。
-      遇到本来 Bid = $0.15 的词，转组时会被强行抬到 $0.20 —— 等于给一个正在淘汰的词加价 33%。
-      这是真实存在的漏洞（由运营在 v3.3.0 评审中发现）。
-      同时 $0.20 被误当作全站 Bid 硬下限，阻断了所有低于 $0.20 的合法策略
+      遇到本来 Bid = $0.15 的词，转组时不得被强行抬到 $0.20 —— 等于给一个正在淘汰的词加价 33%。
+      同时 $0.20 不得被误当作全站 Bid 硬下限，阻断所有低于 $0.20 的合法策略
       （女装长尾里 $0.10–0.18 的 Bid 是常见的）。
       三概念分离见 03号§8.1：全站上限 $3.00 / 全站下限 $0.02（US）/ 低价捡漏组 min(current_bid, 0.20)。
     severity: hard_block
@@ -295,12 +291,12 @@ validation_rules:
     then:
       status: blocked
       message: 精准广告只能调整 Target Bid、Campaign 预算/广告位、迁组或关闭，不执行否词
-      recommended_next_step:                       # v3.4.0 新增（C-19）
+      recommended_next_step:
         - split_campaign_by_match_type
         - manual_campaign_level_negative_in_console
       note: >
-        v3.3.0 只 block 不给替代路径（对比 ONT-001 是给了 allowed_alternatives 的），
-        运营看到一个没有下一步的空动作，会绕过系统直接在后台改，反而失去可观测性。
+        只 block 不给替代路径，运营看到一个没有下一步的空动作，
+        会绕过系统直接在后台改，反而失去可观测性。
         Amazon 的 EXACT 匹配实际会匹配近义变体（复数、拼写、词序），多关键词 EXACT
         活动更会真实交叉抢量，这些场景运营确实需要处理手段。
     severity: hard_block
@@ -310,7 +306,7 @@ validation_rules:
     rule: 广泛、词组、自动、商品定投活动退出时使用 stop_campaign，不得进入低价捡漏组
     if:
       campaign_match_type:
-        in: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]   # v3.4.0 补入 PRODUCT_TARGETING
+        in: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
       target_group_type: low_bid_retention_group
     then:
       status: blocked
@@ -333,9 +329,7 @@ validation_rules:
       reason_codes: [KEYWORD_NOT_IN_INPUT, WORD_ROOT_FABRICATED]
       message: 候选词不在本轮输入数据中，或词根无法从实际搜索词提取
     severity: hard_block
-    note: >
-      v3.4.0 实际注册。v3.3.0 里 28号§1 引用「25 号§4 词保真」，28号§7 又声称
-      「ONT-018 校验」——但 25号 文件不存在、ONT-018 也不存在，规则完全悬空。
+    note: 词保真校验；候选词必须存在于本轮输入数据。
     maps_to:
       - 执行规则/25-目标ACOS预算Bid推荐.md §4
       - 执行规则/28-新增词来源相关性与场景化配额规则.md §1
@@ -360,7 +354,6 @@ validation_rules:
         status: review_required
         review_level: HIGH_RISK_REVIEW
     severity: hard_block
-    note: v3.4.0 实际注册（v3.3.0 里 28号§7 只是「建议新增」）。
     maps_to:
       - 执行规则/28-新增词来源相关性与场景化配额规则.md §1 / §2 / §4
 
@@ -396,9 +389,8 @@ validation_rules:
       stage_acos_addon_override: 0
     severity: hard_block
     note: >
-      v3.4.0 新增（C-17）。v3.3.0 对 testing 超期没有任何规则，而 testing 同时享受
-      最高 ACOS 容忍加值（+15%）、×0.5 幅度抑制、以及免淘汰评估三项优待——
-      一个卡在 testing 不动的产品会变成永不被优化的黑洞。
+      testing 超期同时享受最高 ACOS 容忍加值（+15%）、×0.5 幅度抑制、以及免淘汰评估
+      三项优待——一个卡在 testing 不动的产品会变成永不被优化的黑洞。
       Agent 不得自行改产品阶段标签（02号§2 权限为「仅建议」），故只能冻结 + 逼出人工确认。
     maps_to:
       - 03-阈值参数.md §2
@@ -431,12 +423,10 @@ validation_rules:
         why: 立即退出由人工前置标签授权；仅豁免成熟度门，仍保留其他 Ontology 与最终执行确认
     severity: hard_block
     note: >
-      v3.4.1 新增。Amazon 7 天点击归因使 T+1 数据系统性低报销售，
-      未成熟窗口上的不可逆动作是方向一致的持续性错误。判定内核在
-      app/core/attribution_maturity.maturity_gate，由 OntologyValidator 执行。
+      Amazon 7 天点击归因使 T+1 数据系统性低报销售，
+      未成熟窗口上的不可逆动作是方向一致的持续性错误。
     maps_to:
       - 03-阈值参数.md §12
-      - app/core/attribution_maturity.py
 
   ONT-017:
     name: mixed_match_campaign_requires_split
@@ -560,10 +550,9 @@ group_validation_rules:
       message: 组合存量超配已超 2 倍，本轮只允许降预算或提升组合预算
     severity: hard_block
     note: >
-      v3.4.0 新增（G2）。v3.3.0 里交接文档§8/§12 写「不得超过 2 倍」（硬阻断），
-      而 23号§4.3 与 budget_groups.health_tiers 写「> 2.0 → MANUAL_REVIEW」（人工确认），直接矛盾。
-      统一硬阻断会让历史已超配的组合陷入死锁；统一 MANUAL_REVIEW 会让预算失控的唯一防线
-      变成人工，而这类提案很多、容易被批量点过。分两级同时避免两个问题。
+      分两级处理：Agent 造成的越界必拦（BLOCKED），历史遗留的超配交人工但限制动作方向
+      （只允许降预算）——统一硬阻断会让历史已超配的组合陷入死锁；统一 MANUAL_REVIEW
+      会让预算失控的唯一防线变成人工，而这类提案很多、容易被批量点过。
     maps_to:
       - 执行规则/23-广告组合与预算分配规则.md §4.3
       - 10-安全护栏.md §1.9
@@ -585,9 +574,9 @@ group_validation_rules:
       required_field: exact_push_share_note
     severity: review_required
     note: >
-      v3.4.0 新增（C-18）。v3.3.0 规则是「未设置即一律 MANUAL_REVIEW」，
-      但该字段可选、实际大概率没人填 —— 结果所有 active_promotion 的预算动作全部堆到人工，
-      运营必然开始批量点过，护栏形式上存在、实质上失效。
+      该字段可选、实际大概率没人填 —— 如果未设置即一律 MANUAL_REVIEW，所有
+      active_promotion 的预算动作会全部堆到人工，运营必然批量点过，
+      护栏形式上存在、实质上失效。故仅超出规模阈值时才要求人工确认。
     maps_to:
       - 执行规则/23-广告组合与预算分配规则.md §7.2
 
@@ -679,7 +668,7 @@ acceptance_checklist:
     check: max_exact_push_share 未设置且推词加预算 > 可分配预算 50% 时升 MANUAL_REVIEW
     rule_ref: GROUP-011
   - id: AC-26
-    check: PRODUCT_TARGETING 路由到 auto_broad_group + subtype=product_targeting，reason_code 可辨识（非 unknown 兜底），广告位权限仍放开（v3.4.3 子桶）
+    check: PRODUCT_TARGETING 路由到 auto_broad_group + subtype=product_targeting，reason_code 可辨识（非 unknown 兜底），广告位权限仍放开（子桶）
     rule_ref: ROUTE-005 / ONT-012
   - id: AC-27
     check: 不可逆动作在数据龄不足或未知时被阻断并由 Agent 自动延后；R3/R4 相关性否词豁免；immediate_exit 退出动作仅豁免成熟度

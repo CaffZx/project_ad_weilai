@@ -31,16 +31,14 @@ operating_modes:
   - active_promotion
   - profit_harvest
 
-# 六模式全部补全（v3.4.0，C-06）。v3.3.0 只有 4 条且 stable_operation / profit_harvest 完全空白，
-# 代码里其余 4 模式一律 NORMAL、无差异化行为——运营却以为选了模式就生效。
-# 权威表见 docs/knowledge_base/09-冲突裁决规则.md §4。
+# 六模式全部补全；权威表见 docs/knowledge_base/09-冲突裁决规则.md §4。
 # stage_acos_coefficient：阶段 ACOS 正加值的乘数，见 09号§3.2 / 15号§4.1A。
 mode_policies:
   immediate_exit:
     ad_permission: stop
     llm_decision_required: false
     exact_action: move_to_low_bid_retention_group
-    broad_phrase_auto_action: stop_campaign          # v3.4.0：由 pause_campaign 改为 stop_campaign
+    broad_phrase_auto_action: stop_campaign          # 由 pause_campaign 改为 stop_campaign
     product_targeting_action: stop_campaign
     new_campaigns_forbidden: true
     human_approval_required: true
@@ -72,7 +70,7 @@ mode_policies:
     forbidden_actions: [aggressive_expansion, exploratory_new_campaigns]
     budget_bias: exact_core_high_efficiency_priority
 
-# 未知或缺失经营模式的处理（v3.4.0；v3.3.0 是静默降级为 NORMAL，经营模式会无声失效）
+# 未知或缺失经营模式的处理：不得静默降级为 NORMAL（经营模式会无声失效）
 mode_fallback:
   unknown_value:
     behavior: force_manual_review
@@ -99,7 +97,7 @@ portfolio_groups:
     allowed_match_types: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
     placement_forbidden: true                    # 但子桶可覆盖，见 subtypes
     exit_action: stop_campaign
-    # v3.4.3：商品定投从第五个物理组合收回为本组内的逻辑子桶。
+    # 商品定投为本组内的逻辑子桶。
     # 账户侧组合数 = 4（低价捡漏组单列不瓜分）。子桶不参与顶层预算切分。
     subtypes:
       product_targeting:
@@ -114,7 +112,7 @@ portfolio_groups:
     label: 低价捡漏组
     allowed_match_types: [EXACT]
     fixed_group_budget: 1
-    bid_rule: min(current_bid, 0.20)             # v3.4.0：不再写死 0.20（C-10）
+    bid_rule: min(current_bid, 0.20)             # 不再写死 0.20
     excluded_from_parent_active_budget: true
 
 portfolio_routing:
@@ -130,32 +128,27 @@ portfolio_routing:
   - rule_id: ROUTE-004
     when: match_type == EXACT and exact_main_validation != passed
     route_to: exact_testing_group
-  - rule_id: ROUTE-005                            # v3.4.3 改为子桶路由
+  - rule_id: ROUTE-005                            # 子桶路由
     when: match_type == PRODUCT_TARGETING
     route_to: auto_broad_group
     subtype: product_targeting
     expected_reason_code: product_targeting_subbucket_of_auto_broad
     note: >
-      沿革：v3.3.0 无此路由，PRODUCT_TARGETING 落入代码兜底
-      （reason_code=unknown_match_type_safe_route）被塞进 auto_broad_group ——
-      既看不出身份、也拿不到 PP 权限，且违反 ONT-012。
-      v3.4.0（C-05）提为第五个物理组合解决了辨识问题，但带来账户结构变更成本
-      （Amazon 后台新建 Portfolio + ERP 组合汇总表加列）。
-      v3.4.3 按经营决定收回为子桶：归属 auto_broad_group，身份由 subtype 承载，
+      PRODUCT_TARGETING 归属 auto_broad_group，身份由 subtype 承载；
       **广告位权限按子桶放开** —— placement_adjustment_allowed() 必须同时看
       组合与子桶，只看组合会把它误判为「广泛自动组 → 禁止广告位」而丢掉 ONT-010。
-      与 v3.3.0 的关键区别：reason_code 可辨识，不是 unknown 兜底。
+      reason_code 可辨识，不是 unknown 兜底。
   - rule_id: ROUTE-999
     when: match_type not in [EXACT, BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
     route_to: BLOCKED
     reason_code: UNKNOWN_MATCH_TYPE
-    note: v3.4.0 不再静默兜底到 auto_broad_group；未知匹配类型必须阻断并转人工。
+    note: 不静默兜底到 auto_broad_group；未知匹配类型必须阻断并转人工。
 
 exact_main_validation:
   required_complete_local_days: 3
   days_must_be_consecutive: true
   daily_spend_operator: greater_than
-  # v3.4.3 经营决定撤回 C-08：恢复已验证的固定 $5，严格大于。
+  # 恢复已验证的固定 $5，严格大于。
   # 比例能力仅可由显式实验开关启用，不是当前生产 Ontology 口径。
   daily_spend_threshold_mode: fixed_usd
   daily_spend_threshold_usd: 5.0
@@ -225,23 +218,22 @@ hard_rules:
       - campaign_contains_exact_and_non_exact_targets
     forbidden_actions: [move_portfolio]
     recommended_next_step: split_campaign_by_match_type
-  - rule_id: ONT-RUNTIME-007                       # v3.4.0 新增（C-03）
+  - rule_id: ONT-RUNTIME-007
     description: 广泛/词组/自动/商品定投的退出动作是 stop_campaign，不得使用 eliminate_to_low_bid_pool
     match_types: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
     forbidden_actions: [eliminate_to_low_bid_pool]
     required_exit_action: stop_campaign
-  - rule_id: ONT-RUNTIME-008                       # v3.4.0 新增（C-10）
+  - rule_id: ONT-RUNTIME-008
     description: 转入低价捡漏组的 Bid 必须为 min(current_bid, 0.20)，不得抬高已低于 0.20 的 Bid
     portfolio: low_bid_retention_group
     bid_rule: min(current_bid, 0.20)
     forbidden_when: [proposed_bid_greater_than_current_bid]
-  - rule_id: ONT-RUNTIME-009                       # v3.4.0 新增（C-02）
+  - rule_id: ONT-RUNTIME-009
     description: 未在 30-动作词表与映射.md 注册的 action_code 一律阻断
     forbidden_when: [action_code_not_registered, action_code_physical_mismatch, action_scope_invalid]
     reason_codes: [ACTION_NOT_REGISTERED, ACTION_CODE_MISMATCH, ACTION_SCOPE_INVALID]
 
-# v3.4.0：build_ontology_card() 必须注入全部 ONT-RUNTIME-*（v3.3.0 只注入 001-005，
-# 006 从未被注入，实际靠 filter_portfolio_routing_conflicts() 代码硬实现）
+# build_ontology_card() 必须注入全部 ONT-RUNTIME-*
 ontology_card_injection:
   always_inject: [ONT-RUNTIME-002, ONT-RUNTIME-003, ONT-RUNTIME-004, ONT-RUNTIME-005,
                   ONT-RUNTIME-006, ONT-RUNTIME-007, ONT-RUNTIME-008, ONT-RUNTIME-009]
@@ -253,7 +245,7 @@ action_bundle:
   per_action_approval: true
   lifecycle:
     - proposed
-    - blocked            # v3.4.0：终态，不进入流转。见 30号§4
+    - blocked            # 终态，不进入流转。见 30号§4
     - validated
     - human_approved
     - erp_accepted
