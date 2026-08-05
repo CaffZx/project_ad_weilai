@@ -185,16 +185,12 @@ def _calc_initial_bid(cand: NewCampaignCandidate) -> tuple[float, str]:
 
 
 def _derive_match_type(_keyword_class: str, cand: NewCampaignCandidate) -> str:
-    """来源驱动：有验证信号→EXACT，无验证信号→BROAD 探词拿样本。
+    """来源驱动：仅搜索词提精准（来源B）可建 EXACT；其余一律 BROAD 探词拿样本。
 
     keyword_class 只描述词形/相关性，不参与 match_type 推导（KB16 §4：
-    BROAD=低成本拿搜索词样本，Exact=词已验证有效）。竞品词虽常见于 EXACT，
-    但此处仅定 match_type；门槛（HIGH_RISK_REVIEW/单轮上限等）由调用方按
-    KB28 §4.1 执行。
+    BROAD=低成本拿搜索词样本，Exact=词已验证有效）。
     """
-    if cand.source in ("flow", "ranking_opportunity"):
-        return "BROAD"
-    return "EXACT"
+    return "BROAD"
 
 
 # ── KB28 §2 相关性档位 (R1精确 > R2扩展 > R3试探 > R4风险) ────────────────────
