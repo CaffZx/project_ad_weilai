@@ -184,29 +184,17 @@ def _calc_initial_bid(cand: NewCampaignCandidate) -> tuple[float, str]:
     return BID_PLACEHOLDER, "placeholder"
 
 
-# keyword_class → match_type 推导 (KB 06 §1-5 + KB 16 §4)
-_CLASS_TO_MATCH_TYPE = {
-    "generic": "BROAD",      # 大词测词，广泛起步
-    "long_tail": "EXACT",    # 长尾相关性高，精准承接
-    "competitor": "EXACT",   # 竞品截流，精准
-    "brand": "EXACT",        # 品牌平替，KB 06 §4「精确匹配」
-    "custom": "EXACT",       # 自定义词池，KB 06 §5「精确匹配」
-}
+def _derive_match_type(_keyword_class: str, cand: NewCampaignCandidate) -> str:
+    """来源驱动：有验证信号→EXACT，无验证信号→BROAD 探词拿样本。
 
-
-def _derive_match_type(keyword_class: str, cand: NewCampaignCandidate) -> str:
-    """从来源事实优先推导 match_type。
-
-    未验证的流量词库候选一律先走 BROAD 获取搜索词样本；long_tail 分类只
-    描述词形/相关性，不能把探索词直接升级成精准词。排名机会与竞品来源
-    本轮维持既有独立规则，后续再按其完整数据契约单独收口。
+    keyword_class 只描述词形/相关性，不参与 match_type 推导（KB16 §4：
+    BROAD=低成本拿搜索词样本，Exact=词已验证有效）。竞品词虽常见于 EXACT，
+    但此处仅定 match_type；门槛（HIGH_RISK_REVIEW/单轮上限等）由调用方按
+    KB28 §4.1 执行。
     """
-    if cand.source == "flow":
+    if cand.source in ("flow", "ranking_opportunity"):
         return "BROAD"
-    kc = (keyword_class or "").strip().lower()
-    if kc in _CLASS_TO_MATCH_TYPE:
-        return _CLASS_TO_MATCH_TYPE[kc]
-    return "EXACT" if cand.natural_rank is not None else "BROAD"
+    return "EXACT"
 
 
 # ── KB28 §2 相关性档位 (R1精确 > R2扩展 > R3试探 > R4风险) ────────────────────
