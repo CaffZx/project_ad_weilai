@@ -2142,6 +2142,7 @@ async function loadAll(skipContextRefresh = false) {
   // 重置状态
   sec1Confirmed = false; sec2Confirmed = false; diagnosisLoaded = false;
   _strategyLayerSaved.tactics = _strategyLayerSaved.acos = _strategyLayerSaved.budget = _strategyLayerSaved.directions = false;
+  _latestConfigSnap = null;
   resetSaveTags();
   ['tab1','tab2','tab3','tab4','tab5'].forEach(t => { tabState[t] = false; setTabEnabled(t, false); });
   // 换 ASIN 时卸载旧的 campaign panel
@@ -2211,6 +2212,7 @@ async function loadAll(skipContextRefresh = false) {
       const latestPath = `/long-term-config/${encodeURIComponent(asin)}/latest?shop_id=${encodeURIComponent(_erpParams.shopId)}&parent_seller_sku=${encodeURIComponent(_erpParams.parentSellerSku)}`;
       try {
         const snap = await callAPI(latestPath, null, API_TIMEOUT.default, 'GET');
+        _latestConfigSnap = snap;   // 供 loadExecution 选项替换后按真源重勾方向
         applyConfigSnapshotToEditable(snap);
       } catch (e) {
         console.warn('读取 Agent 配置快照失败，保留当前可编辑值', e);
@@ -2324,12 +2326,6 @@ function refreshStrategyLayerBadge() {
   const all = _strategyLayerSaved.tactics && _strategyLayerSaved.acos
            && _strategyLayerSaved.budget && _strategyLayerSaved.directions;
   if (all) show('sec2Done'); else hide('sec2Done');
-}
-// 从 /execution/recommend 响应回写 ACOS/预算 保存态（manual_override = 用户已保存的手动值）。
-function _setP3SavedFlags(data) {
-  _strategyLayerSaved.acos = !!(data && data.target_acos && data.target_acos.manual_override);
-  _strategyLayerSaved.budget = !!(data && data.budget_bid && data.budget_bid.manual_override);
-  refreshStrategyLayerBadge();
 }
 
 // ═══════════════ 防呆：保存状态(脏/已存)统一常驻标签 + 消费前拦截 (2026-06-18) ═══════════════
@@ -2813,6 +2809,8 @@ function renderKeywordTable(kws) {
 }
 
 // ═══════════════ 回访模式：数据就绪后再展示右侧 ═══════════════
+// 2026-08-05:面板加载改后台,不再阻塞 loadTactics → 配置表回读(latest)可立即执行,
+// 方向/ACOS/预算"进入即回显",不再等 /execution/options LLM 链。
 async function enableTabsForReturnVisit() {
   setTabEnabled('tab1', true);
   setTabEnabled('tab2', true);
@@ -2821,8 +2819,9 @@ async function enableTabsForReturnVisit() {
   show('cardP3Override');
   showMainContent();
   switchTab('tab1');
-  await _ensureInsightPanelsLoaded();
-  setTabEnabled('tab4', true);
+  _ensureInsightPanelsLoaded()
+    .then(() => setTabEnabled('tab4', true))
+    .catch(e => err('errGlobal', '分析数据加载失败: ' + (e.message || e)));
 }
 
 // ═══════════════ 诊断层 → Tab2 ═══════════════
@@ -2980,10 +2979,8 @@ async function loadP3Rec() {
     }
     const data = await callAPI('/execution/recommend', { asin, refresh: false, days }, API_TIMEOUT.fetch);
     window._p3data = data;
-    autoFillLeftInputs(data);
     restoreManualInputs(manualSnapshot);
     renderP3(data);
-    _setP3SavedFlags(data);
     // 反馈：捕获 AI P3 推荐值
     const ta = data.target_acos, bb = data.budget_bid;
     if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
@@ -3007,10 +3004,8 @@ async function refreshP3() {
   try {
     const data = await callAPI('/execution/recommend', { asin, refresh: true, days }, API_TIMEOUT.fetch);
     window._p3data = data;
-    autoFillLeftInputs(data);
     restoreManualInputs(null);
     renderP3(data);
-    _setP3SavedFlags(data);
     const ta = data.target_acos, bb = data.budget_bid;
     if (ta) fbCaptureP3Acos(ta.recommended_target, ta.manual_override ? $('p3AcosLeftInput').value || null : null);
     if (bb) fbCaptureP3Budget(bb.suggested, bb.manual_override ? $('p3BudgetLeftInput').value || null : null);
@@ -3104,18 +3099,7 @@ function renderP3(data) {
   else hide('p3Warnings');
 }
 
-// ── 左侧输入：不再预填 AI 值；input 默认留空，placeholder 灰显「前次配置值」(仅手动覆盖过才有，否则空) ──
-function autoFillLeftInputs(data) {
-  const ta = data.target_acos, bb = data.budget_bid;
-  _prevCfg.acos = (ta && ta.manual_override && ta.recommended_target != null) ? Number(ta.recommended_target) : null;
-  _prevCfg.budget = (bb && bb.manual_override && bb.suggested != null) ? Math.round(bb.suggested) : null;
-  const aIn = $('p3AcosLeftInput'), bIn = $('p3BudgetLeftInput');
-  aIn.value = ''; aIn.placeholder = _prevCfg.acos != null ? String(_prevCfg.acos) : '';
-  bIn.value = ''; bIn.placeholder = _prevCfg.budget != null ? String(_prevCfg.budget) : '';
-  // 已手动保存过 → 以前次值为已存基准(空输入=沿用，不算未保存)；否则标签隐藏
-  _saved.acos = _prevCfg.acos; _dirty.acos = false; setSaveTag('acos', _prevCfg.acos != null ? 'saved' : 'hidden');
-  _saved.budget = _prevCfg.budget; _dirty.budget = false; setSaveTag('budget', _prevCfg.budget != null ? 'saved' : 'hidden');
-}
+// ── 左侧 ACOS/预算输入框：值由配置表回读(latest)独占,不再有 AI/override 灰值预览(2026-08-05 切除) ──
 
 // ═══════════════ P3 手动覆盖（左侧） ═══════════════
 const _btn = (id) => {
@@ -3438,12 +3422,11 @@ async function loadExecution() {
   if (_optsEl) {
     _optsEl.innerHTML = optsHtml;
     restoreManualInputs(manualSnapshot);
-    // 页面重载后 _manualTouched 为 false，restoreManualInputs 无法恢复；
-    // 此时从后端 state 里的 selected_directions 兜底，恢复运营已保存方向。
-    const savedDirs = data && data.selected_directions;
-    if (!_manualTouched.directions && savedDirs && savedDirs.length) {
+    // 选项被替换成带评分版后,勾选按配置表真源(latest 回读)重做;
+    // 不再读 state selected_directions(旧值/首次为空),防止覆盖回读值(2026-08-05)。
+    if (!_manualTouched.directions && _latestConfigSnap && Array.isArray(_latestConfigSnap.directions)) {
       qsa('input[data-dim="directions"]').forEach(cb => {
-        cb.checked = savedDirs.includes(cb.value);
+        cb.checked = _latestConfigSnap.directions.includes(cb.value);
       });
     }
     updateMultiTags('directions', { fromUser: false });
@@ -3905,6 +3888,7 @@ async function loadAnnounceContent(filename) {
 // 后续面板不再等待 tactics confirm；原 4 键的反馈、renderP3、标签与徽标副作用
 // 集中到 applySaveAllSideEffects。快照态(B 态)严禁动。
 let _saveAllBusy = false;
+let _latestConfigSnap = null;   // 最近一次配置表回读快照;loadExecution 选项替换后按它重勾方向,防 state 旧值覆盖
 let _insightPanelsLoadPromise = null;
 
 function _lockSaveAllBtn(locked) {

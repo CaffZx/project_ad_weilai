@@ -347,7 +347,7 @@ async def finalize_new_campaign_decisions(
 
 
 def merge_new_campaign_decisions(
-    source_a_decisions: list[NewCampaignDecision],
+    traffic_source_decisions: list[NewCampaignDecision],
     search_term_decisions: list[NewCampaignDecision],
 ) -> list[NewCampaignDecision]:
     """合流新增活动决策，最终参数只由 ``finalize_new_campaign_decisions`` 组装一次。
@@ -356,7 +356,7 @@ def merge_new_campaign_decisions(
     管线保留，避免本次接线改变那两条尚未收口的数据契约。
     """
     by_keyword: dict[str, NewCampaignDecision] = {}
-    for item in source_a_decisions:
+    for item in traffic_source_decisions:
         key = " ".join((item.keyword_text or "").strip().lower().split())
         if key:
             by_keyword[key] = item

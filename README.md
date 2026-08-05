@@ -110,7 +110,7 @@ docs/
 │   ├── ontology/              # 本体定义（7 个 YAML + 部署方案）
 │   └── 执行规则/              # 15-19,21-24,28,29,31,32
 ├── AD-Agent Project Knowledge Graph/  # 项目知识图谱（16 篇）
-├── Campaign分析引擎交接文档.md        # ★ 技术交接主文档（v3.23, 最全）
+├── Campaign分析引擎交接文档.md        # ★ 技术交接主文档（v3.25, 最全）
 ├── Campaign切除双轮投票方案.md
 ├── announcements/            # 前端版本公告
 ├── sql/                      # SQL 迁移脚本
@@ -207,7 +207,7 @@ MCP 上下文 → 预过滤 → basic_info + product_report 并行
 
 | 文档 | 说明 |
 |------|------|
-| [docs/Campaign分析引擎交接文档.md](docs/Campaign分析引擎交接文档.md) | ★ Campaign 引擎技术交接（v3.23，最全） |
+| [docs/Campaign分析引擎交接文档.md](docs/Campaign分析引擎交接文档.md) | ★ Campaign 引擎技术交接（v3.25，最全） |
 | [docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md](docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md) | KB 全景索引 + preset 权威定义（v3.4.8） |
 | [docs/Campaign切除双轮投票方案.md](docs/Campaign切除双轮投票方案.md) | R1+R2 双轮投票切除方案 |
 | [docs/精准组合确定性升降级实施方案.md](docs/精准组合确定性升降级实施方案.md) | 精准组合升降级方案 |

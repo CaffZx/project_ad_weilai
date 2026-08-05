@@ -25,7 +25,7 @@ def test_normal_path_finalizes_source_a_and_b_once_after_broad_returns(monkeypat
         cost=12,
         sales=60,
     )
-    source_a = NewCampaignDecision(
+    traffic_source = NewCampaignDecision(
         keyword_text="flow keyword",
         source="flow",
         trigger_scene="KEYWORD_POOL_EXPANSION",
@@ -43,7 +43,7 @@ def test_normal_path_finalizes_source_a_and_b_once_after_broad_returns(monkeypat
     monkeypatch.setattr(
         campaign_steps,
         "analyze_new_campaign_decisions",
-        AsyncMock(return_value=([source_a], [], {})),
+        AsyncMock(return_value=([traffic_source], [], {})),
     )
     monkeypatch.setattr(campaign_steps, "finalize_new_campaign_decisions", finalizer)
     monkeypatch.setattr(settings, "campaign_new_enabled", True)

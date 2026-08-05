@@ -724,7 +724,7 @@ async def _analyze_campaigns_impl(
 
     # 新增活动线解包（返回 tuple[list[NewCampaignItem], list[str], dict[str,int]]）
     # 第 3 元 flow_sv_map = flow_keywords 全量搜索量映射，透传给预算回算 agent（零新增 MCP）。
-    source_a_decisions: list = []
+    traffic_source_decisions: list = []
     new_campaigns: list = []
     new_campaigns_warnings: list[str] = []
     flow_sv_map: dict = {}
@@ -733,7 +733,7 @@ async def _analyze_campaigns_impl(
         logger.exception("new_campaigns 流异常 [%s]: %s", parent_asin, nc_result)
         warnings_list.append(f"新增活动分析异常: {type(nc_result).__name__}: {nc_result}")
     else:
-        source_a_decisions, new_campaigns_warnings, flow_sv_map = nc_result
+        traffic_source_decisions, new_campaigns_warnings, flow_sv_map = nc_result
         warnings_list.extend(new_campaigns_warnings)
 
     # 广泛流的真实搜索词由 reasoner 按报表回填后在此转为精准建活动决策。
@@ -757,9 +757,9 @@ async def _analyze_campaigns_impl(
         )
         new_campaigns_warnings.extend(promotion_warnings)
         warnings_list.extend(promotion_warnings)
-    if source_a_decisions or promoted_decisions:
+    if traffic_source_decisions or promoted_decisions:
         try:
-            all_new_decisions = merge_new_campaign_decisions(source_a_decisions, promoted_decisions)
+            all_new_decisions = merge_new_campaign_decisions(traffic_source_decisions, promoted_decisions)
             new_campaigns = await finalize_new_campaign_decisions(
                 all_new_decisions,
                 fetcher=fetcher,

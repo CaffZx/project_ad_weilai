@@ -145,7 +145,7 @@ placement 和 search term 数据通常更重，会在精细分析或 LLM 前置�
 - `keyword_child_asins`
 - 可选竞品词源
 
-候选经过桶配额、相关性、去重、已有活动排除、预算约束和 LLM 判断后进入 `NewCampaignItem`。除 `flow_keywords` 等来源 A 外，广泛/词组/自动流的搜索词 LLM 还可产出来源 B 精准扩词候选；两者在 `campaign_new.py` 统一按归一化词去重、补齐字段并应用新建输出上限。
+候选经过桶配额、相关性、去重、已有活动排除、预算约束和 LLM 判断后进入 `NewCampaignItem`。除 `flow_keywords` 等流量来源外，广泛/词组/自动流的搜索词 LLM 还可产出搜索词来源精准扩词候选；两者在 `campaign_new.py` 统一按归一化词去重、补齐字段并应用新建输出上限。
 
 是否启用竞品词源、最大竞品数量、每竞品词数和超时由 Campaign new 相关配置控制。
 

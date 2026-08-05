@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-08-03（版本日志见文末，最新 v3.24：pending taskId 轮询调度器）
-> **版本**: v3.24
+> **最后更新**: 2026-08-05（版本日志见文末，最新 v3.25：搜索词精准扩词双来源）
+> **版本**: v3.25
 > **分支**: chenv3.2
 
 ---
@@ -23,7 +23,7 @@
 - **自动发现**：从 MCP 获取 ASIN 下所有广告活动的维度信息
 - **AI 分析**：基于 KB 知识库规则（18/17/15/19/22/21/31/32，精准/广泛分流切片），对每个活动给出淘汰/调整/保持建议
 - **分流策略**：精准广告（EXACT）和广泛广告（BROAD/PHRASE/AUTO）使用不同的调整维度
-- **多轮投票**：R1+R2 并行 → 投票比对 → R3 tiebreaker（分歧时触发），保证决策可靠性
+- **单轮直判 + 护栏重试**：R1 单轮 LLM 直判 → 护栏拦截后带 retry_instruction 回灌重判（R2/R3/R4），R4 后不再 R5，最终护栏兜底（2026-07-31 切除 R1+R2 双轮投票）
 - **AI 汇总**：将 N 条单活动建议合成为按共同原因分组的运营叙事
 
 ### 1.3 姐妹项目
@@ -51,9 +51,9 @@ parent_asin
   ├─ ★组合预分类 → 4 类判定: 主推/广泛自动/测试新增/淘汰 (campaign_portfolio.py)
   ├─ ★拉取组合预算 (ad_portfolio_list MCP, fail-open → 回退 60/20/20 兜底, 2026-07-09 新增)
   ├─ ★三股并行 (strategic_overview 后, 共享 ctx_dict/posture_brief, return_exceptions 隔离):
-  │   ├─ 精准流: EXACT, 预取 placement → _EXACT_PROMPT → 分批投票
-  │   ├─ 广泛流: BROAD+PHRASE+AUTO, 预取 search_term → _BROAD_PROMPT → 分批投票
-  │   └─ ★新增活动线: 候选词发现→硬过滤→双轮取交集 (KB16+06, campaign_new.py, 详见 §9)
+  │   ├─ 精准流: EXACT, 预取 placement → _EXACT_PROMPT → R1 单轮直判
+  │   ├─ 广泛流: BROAD+PHRASE+AUTO, 预取 7d/14d search_term bundle → _BROAD_PROMPT → R1 单轮直判 + 提精准候选标注 (exact_promotion_candidates)
+  │   └─ ★新增活动线: 候选词发现→硬过滤→双轮 LLM 选词取交集 + 搜索词提精准 双来源合流 (KB16+06+28, campaign_new.py, 详见 §15)
   ├─ 合并两流结果 + ★组合终分类 (LLM action 补淘汰判定); new_campaigns 独立挂载
   ├─ ★action 归一化 (_normalize_action: proposed vs current 差值 derive 权威 action)
   ├─ ★护栏裁决 → 冲突修正 + R3/R4 LLM 重试 (campaign_guardrails.py, v3.15)
@@ -70,9 +70,9 @@ parent_asin
 |------|------|
 | campaign_key = "活动名 × 子ASIN#匹配类型#关键词ID"（关键词级，2026-07-16 改） | 关键词投放单元的唯一标识；⚠ 同活动多关键词单元合并时 card 聚合有后写覆盖风险，见 §4.2 待办 |
 | 精准/广泛分流 | 不同匹配类型使用不同 prompt 和调整维度（Placement vs SearchTerm） |
-| 分批大小 = 6 | 每批 6 个活动送入 LLM，平衡覆盖率和输出质量 |
-| R1+R2 并行投票 | 两轮不同随机种子排序 → 比对 action + direction → 一致=high，分歧=low |
-| R3 tiebreaker | 仅在 R1+R2 分歧时触发，从未真触发（B0B7S3PWWB 全部一致） |
+| 分批大小 = 10 | 每批 10 个活动送入 LLM，平衡覆盖率和输出质量 |
+| R1 单轮直判 | 每流单轮 LLM 直判（2026-07-31 切除 R1+R2 双轮投票）；护栏拦截后带 retry_instruction 回灌重判（R2/R3/R4），R4 后不再 R5 |
+| 护栏兜底 | R4 后不再 R5，最终由 `apply_all()` 12 条规则裁决（§10.2） |
 | Sanity 仅校验低置信 | 高/中置信跳过，节省 LLM 调用 |
 | 策略上下文注入 | 每批 LLM 看到产品阶段/广告目的/目标ACOS/毛利率等 12 个字段 |
 | 组合预算来源 | ★ v3.13: ad_portfolio_list MCP 拉取真实 portfolio 预算（按 4 关键词模糊匹配），fail-open 回退 60/20/20 兜底；KB23 回算起点=current_group_budget |
@@ -82,11 +82,13 @@ parent_asin
 
 ### 2.3 置信度划分
 
-| 等级 | 条件 |
+> ⚠ 2026-07-31 切除 R1+R2 双轮投票后，主调整项经单轮直判统一打 `confidence="medium"`（`campaign.py` 单轮路径硬编码，见 `:978`/`:1776`）。`_sanity_check_batched` 仍只校验 `confidence=low` 项——当前 `low_conf` 恒空，Sanity 对主调整项为 no-op。置信度枚举仍保留，仅新增流（`campaign_new.py`）继续使用 `high`（双轮 keyword_class 一致）/ `low`（退化单轮）。
+
+| 等级 | 现状 |
 |------|------|
-| **high** | R1+R2 的 action + direction 完全一致，取保守幅度 |
-| **medium** | 仅单轮（<2批）不投票；或 R3 tiebreaker 打破僵局 |
-| **low** | 两轮分歧且 R3 未解决；或仅一轮有结果 |
+| **high** | 仅新增流双轮 LLM keyword_class 一致时打（主调整项不再使用） |
+| **medium** | 主调整项单轮直判统一等级 |
+| **low** | 仅新增流退化单轮时打（主调整项恒空） |
 
 ### 2.4 调整类型
 
@@ -114,10 +116,10 @@ parent_asin
 | `app/workflow/steps/campaign_guardrails.py` | 504 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 12 条规则（P0-P11）含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
 | `app/workflow/steps/campaign_exact_transition.py` | — | ★精准组合确定性升降级（v3.22 新增）：EXACT 活动四组升降级逻辑，ACOS 约束驱动 |
 | `app/core/acos_constraints.py` | — | ★ACOS 约束核心模块（v3.22 新增）：目标 ACOS/预算的硬约束计算 |
-| `app/llm/reasoner.py` | 2295 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入 |
+| `app/llm/reasoner.py` | 2295 | LLM Prompt 构建 + `recommend_campaign_batch()` + `recommend_campaign_synthesis()` + `recommend_semantic_core()`（含四层工作流+核心词语义判定全部 prompt）；护栏告警注入；**v3.25**：广泛流搜索词行渲染（`render_search_term_prompt_lines`）+ LLM 回吐 `exact_promotion_candidates` 按原始搜索词报表权威回填校验 |
 | `app/llm/kb_loader.py` | 327 | KB 加载器。**权威预设定义见 `docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md` §4.1（KB v3.4.8）**。完整 preset 清单：`campaign_overview`(02/04/09)、`campaign_adjustment_exact`(18/17/15/19/22/21/10/03/14/30/29)、`campaign_adjustment_broad`(18/17/15/19/22/21/10/03/14/30/31/28)、`campaign_adjustment_product_targeting`(18/17/15/19/22/08/07/30)、`budget_reallocation`(23/30)、`portfolio_degrade`(32/21/23/30)、`new_campaign`(16/06/02/28/24)、`semantic_core`(29/28/24)、`p3_recommend`(01/03/05/09/10/11/14/25)、`purpose_tactics`(01/02/03/04/06/09/14)、`execution_direction`(01/02/03/04/05/09/14/22)、`analyze_report`(02/05/09/12/14)、`chat`(02/14)。大部分预设使用节级切片（如 `18:1,3`），非整文件注入。 |
-| `app/models/campaign.py` | 336 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary/NewCampaignCandidate/NewKeywordCandidate) |
-| `app/data/campaign_fetcher.py` | 1433 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算 + spend 多周期窗口）；**v3.22 增强**：补 search_term 数据源+三日验证数据 |
+| `app/models/campaign.py` | 336 | 全部 Campaign 数据模型 (含 portfolio/ai_portfolio_class/budget_summary/NewCampaignCandidate/NewKeywordCandidate/**SearchTermPromotionCandidate**/**NewCampaignDecision**) |
+| `app/data/campaign_fetcher.py` | 1433 | 数据编排器：MCP 上下文→预筛选→MCP→回落（含排名旁路 `_fetch_keyword_ranks` + 竞品词源 `discover_competitor_keywords` + `fetch_portfolio_list` 组合预算 + spend 多周期窗口）；**v3.25 增强**：`build_search_term_bundle` 活动级 7d/14d 搜索词 bundle（KB31 样本不足标注 `search_term_fetch_status`），供广泛流 LLM 标注提精准候选 |
 | `app/data/campaign_prefilter.py` | 130 | 硬过滤纯函数（`filter_campaigns` 多词去重+否定词排除+补维度字段+`__prefiltered` 标记 + `filter_eliminated_pool` 淘汰池预过滤，供前端预过滤卡展示） |
 | `app/api/campaign.py` | 634 | API 端点（6 个）：`/campaign/analyze`·`/viewmodel`·`/snapshot`·`/confirm`·`/execute`·`/execute-portfolio-budget`（详见 §3.3） |
 | `app/api/campaign_viewmodel.py` | 376 | DB 快照→ViewModel 反向 mapper；审核等级转中文标签（`_REVIEW_LEVEL_LABELS`），兼容旧枚举 `AUTO_BATCHABLE`/`SENIOR_APPROVAL` |
@@ -132,8 +134,10 @@ parent_asin
 | `app/api/config_mirror.py` | — | ★配置保存镜像（v3.23 新增）：Agent 配置双向同步 API，保证运营配置与 state DB/ERP 一致性 |
 | `app/workflow/steps/campaign_portfolio.py` | — | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
 | `app/workflow/steps/campaign_budget_summary.py` | — | ★预算汇总：3 组约束分配 (主力/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
-| `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→相关性→长尾优先排序→双轮取交集→组装；`pick_target_child_asin` 选投放子ASIN。**v3.21 减负**：多源发现委托 `new_keyword_fetcher.py` |
-| `app/data/new_keyword_fetcher.py` | — | ★多源候选词发现统一编排器（v3.21 新增）：flow_keywords/own_keyword_flow/competitor_reverse 三源并行 + 配额分配 + 来源合并去重 |
+| `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→双轮 LLM 选词取交集→**与搜索词提精准双来源合流**（`merge_new_campaign_decisions`）→统一组装（`finalize_new_campaign_decisions`，bid/预算/命名代码确定性产出）；**v3.25**：`_derive_match_type` 对 `source=flow` 候选一律先建 BROAD（词形分类不再决定 EXACT） |
+| `app/data/new_keyword_fetcher.py` | — | ★多源候选词发现统一编排器（v3.21 新增）：flow_keywords/own_keyword_flow/competitor_reverse 三源并行 + 配额分配 + 来源合并去重（供流量来源） |
+| `app/workflow/steps/campaign_search_term_promotion.py` | 104 | ★搜索词提精准确定性准入（v3.25 新增）：`build_search_term_promotion_decisions()` 按 KB23 §3.4 订单通道（7d 订单≥3 且 ACOS≤目标）/词根通道（聚合订单≥3 或 ACOS ok）从搜索词报告候选生成 EXACT 决策，`source=SRC_CONVERTED`/`SRC_BROAD_DERIVED`；CVR 通道缺品类基准刻意不伪造 |
+| `app/core/campaign_sample.py` | 68 | ★活动级样本不足判定（v3.25 新增）：KB17 事实判定（`assess_campaign_sample`：上线<3 天 / 7d 花费<max($5,CPA×0.5) / 点击<10），不阻止 MCP、不清空候选，仅作搜索词取数门禁（`SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT`） |
 | `app/workflow/steps/campaign_budget_reallocation.py` | 304 | ★组合预算回算（KB23）：优先 MCP portfolio 真实值 > 60/20/20 兜底；`available_for_increase` 增量约束；validate 加正增长额度校验 |
 | `app/workflow/steps/portfolio_execution.py` | — | ★组合预算调整真实执行（`/campaign/execute-portfolio-budget` 后端，06-17 新增） |
 | `app/workflow/steps/advert_execution.py` | — | ★广告调整 MCP 真实执行（Part 6，6 工具→落 4 record 表）；**v3.22 增强**：immediate_exit 确定性执行 + 灰度卡执行钩子；**v3.24 重构**：终态异步轮询拆出 `task_poll_scheduler.py`，提交/轮询/回写三阶段解耦 |
@@ -154,8 +158,10 @@ parent_asin
 ```python
 # Campaign LLM
 campaign_llm_concurrency: int = 50  # 单 ASIN 批次并发数（per-stream sem；2026-06-18 实测值）
-campaign_batch_size: int = 6        # 每批活动数
+campaign_batch_size: int = 10        # 每批活动数
 campaign_llm_temperature: float = 0.3
+# ★ v3.25: 每个活动进入广泛流 LLM 的搜索词技术容量上限；按 7d 订单/花费/点击排序后截取。
+search_term_llm_max_terms_per_campaign: int = 20
 
 # Campaign 数据管道
 campaign_discovery_timeout: float = 90.0
@@ -344,6 +350,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-30 | **分析闸门加固 + session 修复** | `mysql_state_manager.py`/`state_manager.py`/`schema.sql`：取消态补全。`campaign.py`/`decision.py` API：取消逻辑修复。`campaign_new.py`：闸门适配。`ad-asisitant-agent.html`：前端适配。新增 `test_campaign_cancellation_fencing.py` + `batch_via_api_codex.py`。13 files +681/-73。 |
 | 07-31 | **Campaign 双轮投票切除** | `campaign.py`（-510 行）：切除 R1+R2 双轮投票 → 单轮 LLM 直判。`campaign_guardrails.py`（+55）：护栏增强。`campaign_exact_transition.py`（+11）、`reasoner.py`、`models/campaign.py`、`settings.py`、`mappers.py`：适配单轮模式。`test_campaign_guardrails.py`（+47）。新增 `docs/Campaign切除双轮投票方案.md`，删除过期代码审计报告。17 files +827/-680。 |
 | 08-03 | **★ pending taskId 轮询调度器** | `task_poll_scheduler.py`（新，206 行）：进程内有界队列 + 固定协程消费者（2×20），提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写。`advert_execution.py`（720 行重构）：提交/轮询/回写三阶段解耦。`repository.py`（309 行）：执行仓库适配 + `write_pending_terminal` 精确回写。`decision.py`（+36）、`campaign.py`（+25）、`settings.py`（+5：`advert_task_poll_workers`/`advert_task_poll_queue_capacity`）、前端（+31）。测试重构：`test_task_poll_scheduler.py`（新，127 行）、`test_portfolio_match_and_exec.py`（-591 精简）、`test_erp_gray_cards.py`（-120）。新增 spec `2026-08-03-pending-taskid-polling-design.md`。13 files +1271/-1160。 |
+| 08-04 | **★ 搜索词精准扩词双来源 + 样本过滤** | `campaign_search_term_promotion.py`（新，104 行）：搜索词提精准确定性准入（KB23 §3.4 订单/词根两通道，CVR 缺品类基准刻意不伪造），产出 EXACT 决策（`SRC_CONVERTED`/`SRC_BROAD_DERIVED`）。`campaign_sample.py`（新，68 行）：KB17 活动级样本不足判定；样本不足活动搜索词取数标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察、不进提精准。`campaign_fetcher.py`（+284）：`build_search_term_bundle` 活动级 7d/14d 搜索词 bundle。`reasoner.py`（+207）：广泛流搜索词行渲染 + LLM 回吐 `exact_promotion_candidates` 按原始搜索词报表权威回填校验。`campaign_new.py`（+244）：`merge_new_campaign_decisions` 双来源合流（搜索词提精准覆盖同词 flow 探索项）+ `finalize_new_campaign_decisions` 统一组装一次；`_derive_match_type` 对 `source=flow` 候选一律先建 BROAD（词形分类不再决定 EXACT）。`models/campaign.py`（+37）：`SearchTermPromotionCandidate`/`NewCampaignDecision` 模型。`settings.py`（+4）：`search_term_llm_max_terms_per_campaign=20`、`campaign_new_max_creates 20→15`。`campaign.py`（+176）/`campaign_guardrails.py`（+51）：编排接入。测试 8 个（`test_campaign_search_term_promotion.py`+367、`test_campaign_dual_source_orchestration.py`+95、`test_campaign_search_term_bundle.py`+101 等）。20 files +1733/-166。 |
 
 ---
 
@@ -362,7 +369,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 |------|--------|------|
 | ~~策略总览(执行总纲)恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `campaign_overview_enabled=True`，并改造为"判断驱动"(去现状数字复述)。详见 §7.1 |
 | ~~Synthesis 汇总合成恢复~~ | ✅ 已完成 | 2026-06-08 恢复 `settings.campaign_synthesis_enabled=True`（当前默认 False），并改造(去 KB / 组数 5-7 / special≤5-15 / max_tokens 8192)。详见 §7.1 |
-| R3 tiebreaker 端到端验证 | P1 | `_same_direction` 变严后会首次真触发，需构造分歧用例 |
+| ~~R3 tiebreaker 端到端验证~~ | ✅ 已移除 | 2026-07-31 切除 R1+R2 双轮投票，tiebreaker 机制随之删除，由护栏 R2/R3/R4 重试替代 |
 | 策略上下文→决策联动 | P1 | KB 19/21/22 缺策略联动规则（KB 03 已在 campaign preset 外） |
 | ~~**新增广告活动分析**~~ | ✅ 已完成（2026-06-10/11） | 三股并行独立分析线。**剩余子项**（2026-07-04 核实）：① suggestedBid 数据源仍未接入（bid 占位 $0.30，改 `_calc_initial_bid` 一处即可）；② KEYWORD_PROMOTED_FROM_BROAD 等 5 个触发场景确认仅作展示标签、不做门禁（设计决策，非待办）；③ ~~新增活动预算接入组合回算~~ → ✅ 已实现（`campaign_budget_reallocation.py:160-178`，new_campaigns 整笔 proposed 入组 delta）；④ ERP 写入 → 已通过 `write_full` 统一落库 |
 | ~~DB 落库~~ | ✅ 已完成 | `t_advert_agent_campaign_analysis` + `_adjustment` 表已通过 `write_full` → `_upsert_modern_summary` + `_upsert_campaign_cards` 全链路落库 |
@@ -393,7 +400,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | `aggregator.fetch` 120s 超时 | 500 | warning「数据拉取超时」+ 空 result |
 | LLM 单批挂 60s | 该 batch 失败但其他 OK | 同（既有） |
 | LLM 返回非 dict | AttributeError → 整流崩 | 转单批失败 warning |
-| LLM action 不一致 | 投票阶段分歧增多 | `_normalize_action()` 代码 derive,降低无谓 R3 |
+| LLM action 不一致 | 投票阶段分歧增多 | `_normalize_action()` 代码 derive 权威 action，护栏兜底（切单轮后无投票分歧） |
 | `TargetAcosRecommender` 内部 AttributeError | 500 | warning「分析失败: AttributeError」+ 空 result |
 | sanity / synthesis | 挂 10 分钟无返回 | flag 禁用 → 跳过 + warning |
 | exact 流抛异常 | broad 流被 cancel | broad 流照常完成，exact warning 入栈 |
@@ -788,9 +795,56 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 ---
 
+## 15. 搜索词精准扩词双来源（v3.25）
+
+> 2026-08-04 接入。补新增活动线"只靠流量词库探索、未利用搜索词报告已验证词"的缺口：把搜索词报告里有成交 / 词根聚合可验证的词，确定性提升为 EXACT 精准活动，与流量词库探索（流量来源）双来源合流。
+
+### 15.1 数据流
+
+```
+三股并行中的新增活动线（双来源合流）:
+  ├─ 流量来源（流量词库探索）: NewKeywordFetcher (flow/own/竞品三源) → 硬过滤 → 双轮 LLM 选词取交集
+  │     → NewCampaignDecision (source=flow/ranking_opportunity/competitor; flow 一律 BROAD 起步)
+  ├─ 搜索词来源（搜索词提精准）: 广泛流 LLM 对 search_term bundle 标注 → exact_promotion_candidates
+  │     → build_search_term_promotion_decisions() 确定性准入 (KB23 §3.4 订单/词根两通道)
+  │     → EXACT 决策 (source=SRC_CONVERTED / SRC_BROAD_DERIVED)
+  └─ merge_new_campaign_decisions(流量来源, 搜索词来源) → 搜索词提精准覆盖同词 flow 探索项
+        → finalize_new_campaign_decisions() 统一补齐 bid/预算/命名/投放子ASIN（一次组装）
+```
+
+### 15.2 关键模块
+
+| 文件 | 角色 |
+|------|------|
+| `app/workflow/steps/campaign_search_term_promotion.py` | 确定性准入：`build_search_term_promotion_decisions(candidates, existing_exact_keywords, target_acos)` |
+| `app/core/campaign_sample.py` | KB17 活动级样本不足判定 `assess_campaign_sample`；样本不足 → 搜索词标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察、不产生提精准候选 |
+| `app/workflow/steps/campaign_new.py` | `merge_new_campaign_decisions` 合流 + `finalize_new_campaign_decisions` 统一组装（bid/预算/命名代码确定性产出） |
+| `app/data/campaign_fetcher.py` | `build_search_term_bundle`：活动级 7d/14d 搜索词 bundle（按 7d 订单/花费/点击排序，`search_term_llm_max_terms_per_campaign=20` 截断） |
+| `app/llm/reasoner.py` | 广泛流搜索词行渲染（`render_search_term_prompt_lines`）+ LLM 回吐 `exact_promotion_candidates` 按原始搜索词报表权威回填校验（防 LLM 改词） |
+
+### 15.3 确定性准入规则（KB23 §3.4，`campaign_search_term_promotion.py`）
+
+- **订单通道**：搜索词 7d 订单 ≥ 3 且 ACOS ≤ 目标 ACOS → `source=SRC_CONVERTED`，EXACT。
+- **词根通道**：按 `keyword_root` 聚合同一词根的多条搜索词，聚合订单 ≥ 3 或 ACOS ok → EXACT。
+- **CVR 通道**：缺品类基准，刻意不在此处伪造（代码明确不做）。
+- **样本不足**：活动级样本不足（`assess_campaign_sample`）的活动，搜索词只观察、不进提精准。
+- **去重**：已存在 EXACT 活动的词（`existing_exact_keywords`）跳过；候选按 `(campaign_key, search_term)` 去重。
+
+### 15.4 匹配方式来源优先（KB16 §4 / KB28 SRC_FLOW_EXPLORATION）
+
+- `source=flow`（流量词库，未经搜索词表现验证）候选：`_derive_match_type` 一律返回 `BROAD` 先拿搜索词样本；`long_tail` 词形分类只描述词形/相关性，不单独证明应建 EXACT。
+- 搜索词提精准候选：固定 `prescribed_match_type=EXACT`，进入精准测试组。
+- 排名机会词 / 竞品词：各自专门规则判定，不被本节覆盖。
+
+---
+
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.25: 搜索词精准扩词双来源 + 样本过滤（2026-08-04，本地未部署服务器）—— ①`campaign_search_term_promotion.py` 搜索词提精准确定性准入(新,104行)：KB23 §3.4 订单/词根两通道，CVR 刻意不伪造 ②`campaign_sample.py` 活动级样本不足判定(新,68行)：样本不足活动搜索词标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察 ③`campaign_fetcher.py`(+284) `build_search_term_bundle` 活动级 7d/14d 搜索词 bundle ④`reasoner.py`(+207) 广泛流搜索词行渲染+`exact_promotion_candidates` 权威回填校验 ⑤`campaign_new.py`(+244) 双来源合流 `merge_new_campaign_decisions`+统一组装 `finalize_new_campaign_decisions`；`_derive_match_type` 对 flow 一律 BROAD ⑥`models/campaign.py`(+37) `SearchTermPromotionCandidate`/`NewCampaignDecision` ⑦`settings.py`(+4) `search_term_llm_max_terms_per_campaign=20`、`campaign_new_max_creates 20→15` ⑧`campaign.py`(+176)/`campaign_guardrails.py`(+51) 编排接入 ⑨测试 8 个（`test_campaign_search_term_promotion`+367 等）。20 files +1733/-166。*
+
+最后更新：2026-08-05
 
 *v3.24: pending taskId 轮询调度器（2026-08-03，本地未部署服务器）—— ①`task_poll_scheduler.py` 轮询调度器(新,206行)：进程内有界队列+固定协程消费者(2×20)，提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写 ②`advert_execution.py` 720 行重构：提交/轮询/回写三阶段解耦 ③`repository.py`(+309) 执行仓库适配+`write_pending_terminal` ④`settings.py` 新增 `advert_task_poll_workers`/`advert_task_poll_queue_capacity` ⑤测试重构：`test_task_poll_scheduler`(新)+`test_portfolio_match_and_exec`(-591)+`test_erp_gray_cards`(-120)。13 files +1271/-1160。*
 

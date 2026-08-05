@@ -284,7 +284,9 @@ def test_return_visit_and_save_share_one_insight_panel_load_promise():
 
     assert "if (!_insightPanelsLoadPromise)" in helper
     assert "return _insightPanelsLoadPromise" in helper
-    assert "await _ensureInsightPanelsLoaded()" in return_visit
+    # 2026-08-05:回访路径改后台加载,不 await 面板(否则配置表回读被 LLM 链阻塞)
+    assert "await _ensureInsightPanelsLoaded()" not in return_visit
+    assert "_ensureInsightPanelsLoaded()" in return_visit
     assert "_ensureInsightPanelsLoaded()" in side
 
 
@@ -297,6 +299,27 @@ def test_one_click_snapshot_trusts_backend_per_field_manual_override_flags():
     assert "window._p3data = snap.p3" in apply_snapshot
     assert "manual_override = (snap.target_acos != null)" not in apply_snapshot
     assert "manual_override = (snap.daily_budget != null)" not in apply_snapshot
+
+
+def test_editable_readback_owns_inputs_no_gray_preview_overwrite():
+    """2026-08-05:进入即回读,灰值预览已切除,后续加载不得覆盖回读值。"""
+    html = read(DEMO)
+    # 灰值预览函数已整体切除
+    assert "function autoFillLeftInputs" not in html
+    assert "function _setP3SavedFlags" not in html
+    # latest 回读存 snap,供后续防覆盖
+    latest_idx = html.index("const latestPath")
+    latest_block = html[latest_idx:latest_idx + 600]
+    assert "_latestConfigSnap = snap" in latest_block
+    # 回访路径不 await 面板(否则 latest 被 LLM 链阻塞)
+    return_start = html.index("async function enableTabsForReturnVisit()")
+    return_visit = html[return_start:return_start + 700]
+    assert "await _ensureInsightPanelsLoaded()" not in return_visit
+    # loadExecution 方向勾选按配置表真源重做,不再读 state selected_directions
+    exec_start = html.index("async function loadExecution()")
+    exec_block = html[exec_start:exec_start + 3000]
+    assert "_latestConfigSnap.directions.includes(cb.value)" in exec_block
+    assert "const savedDirs = data && data.selected_directions" not in exec_block
 
 
 def test_demo_native_error_retry_button():

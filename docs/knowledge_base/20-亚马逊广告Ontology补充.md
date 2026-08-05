@@ -3,8 +3,6 @@
 > **状态：`reference_only`**（`00号§4.2`）。本文是 Ontology 的**设计说明文档**，不注入 prompt 切片。
 > 运行时口径由 `ontology/runtime_contract.yaml`（注入 Ontology Card）与 `OntologyValidator`
 > （执行 `ONT-*` / `GROUP-*` 校验）承担。
->
-> v3.3.0 本文连 `kb_loader._FILE_PATHS` 里都没有 fid，加载器不认识它——既不是切片也没标注，属规则悬空。
 
 > 本文件为新增补充文件，不修改原有 SOP 规则。  
 > 目的：先把 Amazon 官方业务对象、广告对象层级、投放类型、动作合法性、报表证据关系补齐，后续可再拆成独立 ontology 层。
