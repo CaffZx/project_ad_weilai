@@ -303,7 +303,7 @@ validation_rules:
 
   ONT-016:
     name: non_exact_cannot_enter_low_bid_retention
-    rule: 广泛、词组、自动、商品定投活动退出时使用 stop_campaign，不得进入低价捡漏组
+    rule: 广泛、词组、自动、商品定投活动退出时使用 paused_campaign，不得进入低价捡漏组
     if:
       campaign_match_type:
         in: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
@@ -311,7 +311,7 @@ validation_rules:
     then:
       status: blocked
       message: 非精准活动禁止迁入低价捡漏组
-      required_exit_action: stop_campaign
+      required_exit_action: paused_campaign
       note: >
         低价捡漏组的语义是「保留一个已验证精准词的低成本存在感」。
         商品定投没有关键词、捡不到漏，$0.20 的 Bid 在 ASIN 定投上基本不会有曝光，留着只是账面噪声。
@@ -402,7 +402,7 @@ validation_rules:
     rule: 不可逆动作（淘汰/关闭/否词/降组/升组）要求决策窗口最新数据龄 ≥ 03号§12.2 的最小龄
     if:
       action_code:
-        in: [eliminate_to_low_bid_pool, stop_campaign, add_negative_search_term,
+        in: [eliminate_to_low_bid_pool, paused_campaign, add_negative_search_term,
              demote_to_exact_testing, promote_to_exact_core]
       any_of:
         - data_min_age_days: "< 03号§12.2 最小龄"
@@ -418,7 +418,7 @@ validation_rules:
       - action_code: add_negative_search_term
         when: relevance_tier in [R3, R4]
         why: 相关性驱动的否词是语义判定（31号§4 档4 无数据门槛），不依赖表现数据成熟度
-      - action_code: [eliminate_to_low_bid_pool, stop_campaign]
+      - action_code: [eliminate_to_low_bid_pool, paused_campaign]
         when: operating_mode == immediate_exit
         why: 立即退出由人工前置标签授权；仅豁免成熟度门，仍保留其他 Ontology 与最终执行确认
     severity: hard_block
@@ -656,7 +656,7 @@ acceptance_checklist:
     check: testing 超期时增长型动作被冻结且阶段 ACOS 加值归零
     rule_ref: ONT-021
   - id: AC-22
-    check: 广泛/词组/自动/商品定投的退出动作为 stop_campaign，且未迁入低价捡漏组
+    check: 广泛/词组/自动/商品定投的退出动作为 paused_campaign，且未迁入低价捡漏组
     rule_ref: ONT-016
   - id: AC-23
     check: 精准活动否词被阻断且输出了 recommended_next_step

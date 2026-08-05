@@ -380,12 +380,14 @@ _CAMPAIGN_BROAD_PROMPT = (
   "campaign_adjustments": [
     {
       "cid": "C3（原样回填输入中该活动的句柄，用于代码定位活动）",
-      "action": "eliminate_to_low_bid_pool",
-      "direction": {"bid": "down", "budget": "down"},
-      "triggered_rule": "IRRELEVANT_NO_IMPROVEMENT",
+      # 示例为调整场景（加预算），避免 eliminate 示例的 proposed_budget/proposed_bid
+      # 与淘汰规则（固定 $1 / min bid）矛盾——淘汰由代码展开，不受 LLM 输出数值控制
+      "action": "adjust_budget",
+      "direction": {"bid": "keep", "budget": "up"},
+      "triggered_rule": "BUDGET_EXHAUSTED",
       "reason": "".join(["(1) 现状诊断", "(2) 原因分析", "(3) 调整建议"]),
-      "proposed_budget": 8.0, "proposed_bid": 0.40,
-      "evidence": ["7天花费$12.0", "否词5个后搜索词质量仍差"],
+      "proposed_budget": 12.0, "proposed_bid": 0.40,
+      "evidence": ["预算利用率连续3天>90%", "近7天ACOS低于目标"],
       "negative_keywords": [
         {"keyword": "wedding dress", "match_type": "NEGATIVE_EXACT", "reason": "7天点击12次、零订单、无转化"}
       ],
@@ -409,14 +411,36 @@ _CAMPAIGN_BROAD_PROMPT = (
 ## 输出约束
 ### 必填结构字段
 - **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
-- proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
+- proposed_budget / proposed_bid **除 `paused_campaign` 外**必须填写具体数值，禁止留 null。`paused_campaign` 是唯一例外——暂停仅状态变更，不填 proposed_budget/proposed_bid（填了也会被代码忽略）
+
+### action 合法枚举（必须且只能输出其中之一）
+- `keep`：保持
+- `adjust_bid`：调出价（配合 proposed_bid）
+- `adjust_budget`：调预算（配合 proposed_budget）
+- `eliminate_to_low_bid_pool`：淘汰至低价捡漏（复合动作，代码展开为迁组+预算$1+bid min）
+- `paused_campaign`：**暂停活动（关停）**。出 LLM 即由代码翻译为后端 `paused`；仅活动级状态变更，proposed_budget/proposed_bid 数值会被代码忽略，勿用它承载"暂停+调价"组合（暂停优先）
+- **禁止输出 `adjust_placement`**（广泛/词组/自动禁止广告位调整，ONT-002；placement_adjustments 一律 N/A）
+- 多维同时调整时 action 只能选一个主动作，其余靠 direction/proposed 数值表达
+
+### triggered_rule 命名空间（必须遵守）
+- 只输出 **KB17 问题类型码**：BLOCKED_INVENTORY / STAGE_EXPIRED_TESTING / SAMPLE_INSUFFICIENT / CVR_WEAK / HIGH_ACOS_NO_ORDER / HIGH_ACOS_LOW_ORDER / HIGH_ACOS_WITH_ORDER / BUDGET_NO_SPEND / BUDGET_CANT_SPEND / BUDGET_EXHAUSTED / RANK_OPPORTUNITY / RANK_DROPPING / KEYWORD_POOL_DIRTY / KEYWORD_POOL_EXHAUSTED / PLACEMENT_INEFFICIENT / ALL_HEALTHY
+- 禁止填入淘汰条件码（如 NO_CVR_HIGH_SPEND / IRRELEVANT_NO_IMPROVEMENT 等 KB21 condition_code）——那是另一命名空间
+
+### review_level 枚举
+- `AUTO_APPROVED` / `MANUAL_REVIEW` / `HIGH_RISK_REVIEW`（不可输出其他值）
 - 仅对当前活动输入中实际带有逐词搜索词数据时判断 `negative_keywords`；无逐词搜索词数据、取数跳过或失败时必须输出 `[]`，禁止 null。
 - 每个否词必须来自该 cid 实际展示的搜索词，包含 keyword、match_type（仅允许 NEGATIVE_EXACT）、reason。reason/evidence 中凡引用数字，必须同时标明 7d 或 14d；14d 只能作为辅助观察，不能独立触发否词。
+
+### 预算调整资格（必须遵守，代码已判定）
+- 加预算仅允许在活动级「加预算资格(代码判定)=✅」且策略上下文「库存≥30天」时；幅度按活动级「预算资格档位(代码判定)」：`>90%`→可大涨、`70-90%`→可小涨、`50-70%`→维持、`<50%`→不加预算。
+- reason 中凡建议加预算，必须引用代码判定的资格字段与档位，不得自行推导门槛（如"表现好就加"）；`budget_increase_eligible=false` 或库存不足时不得加预算。
 
 ### 正向搜索词候选（新增精准活动接线）
 - `exact_promotion_candidates` 必须输出数组；无候选时填 `[]`，禁止 null。
 - 每条必须带当前批次原样 `cid`、该 cid 搜索词报告中原样出现的 `search_term`、`keyword_root`、`keyword_class`、`relevance_tier`、reason、evidence。
 - `keyword_root` 只能是该 `search_term` 中连续出现的词组；无法提取时填空字符串。
+- **标注 ≠ 准入**：你只做语义识别（判相关性 + R1）；订单/ACOS 门槛（订单≥3 且 ACOS≤目标 / 词根聚合）由代码用真实搜索词数据校验。低置信或语义不确定的候选不标。
+- 词级样本不足词（sample_insufficient_7d=true）可保留审阅（14 天仅辅助观察，不能独立触发动作）；活动级样本不足（SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT）的活动禁止输出候选。
 - 只输出语义相关且至少 R1 的正向候选；禁止编造输入外搜索词、禁止输出订单/花费/销售额/ACOS/CVR 等数值字段。
 - 这是候选标注，不是最终建活动决策；Python 会按真实搜索词报告重新校验订单、ACOS、已有精准词和词根聚合。
 
@@ -1706,8 +1730,22 @@ class LLMReasoner:
 
         if target_acos is not None and p.acos is not None:
             summary["acos_vs_target"] = round(p.acos - target_acos, 1)
-        if cu.current_budget > 0 and p.cost > 0:
+        # 预算为正即注入利用率（含 0 花费 → 显式 0.0%，让 LLM 区分"已知 0%"与"字段缺失/N/A"）。
+        # budget<=0（未知）时不注入 → LLM 按缺失处理，不得当 0。
+        if cu.current_budget > 0:
             summary["budget_utilization_pct"] = round(p.cost / (cu.current_budget * 7) * 100, 1)
+        # P0-E 预算资格：利用率档位 + 加预算资格（代码预计算，LLM 只在此范围内选幅度）
+        if "budget_utilization_pct" in summary:
+            _pct = summary["budget_utilization_pct"]
+            if _pct > 90:
+                summary["budget_utilization_tier"] = ">90%（可大涨档）"
+            elif _pct >= 70:
+                summary["budget_utilization_tier"] = "70-90%（可小涨档）"
+            elif _pct >= 50:
+                summary["budget_utilization_tier"] = "50-70%（维持档）"
+            else:
+                summary["budget_utilization_tier"] = "<50%（花不完档，不加预算）"
+            summary["budget_increase_eligible"] = _pct > 70
         if keyword_class:
             summary["keyword_class"] = keyword_class
         if is_core:
@@ -1768,6 +1806,20 @@ class LLMReasoner:
         ctx_parts.append(f"  - 退货率: {'%.1f%%' % strategy_context['refund_rate'] if strategy_context.get('refund_rate') is not None else 'N/A'}")
         inv_days = strategy_context.get("inventory_days")
         ctx_parts.append(f"  - 库存可售天数: {'%.0f天' % inv_days if inv_days is not None else 'N/A'}")
+        # P0-E 预算资格：代码已算好，透传 LLM（LLM 不必自行重算容忍上限/CPA/平均订单金额）
+        _acos_tol = strategy_context.get("effective_acos_tolerance")
+        if _acos_tol is not None:
+            ctx_parts.append(f"  - 有效容忍上限(代码已算): {_acos_tol}%")
+        _cpa = strategy_context.get("target_cpa")
+        if _cpa is not None:
+            ctx_parts.append(f"  - 目标CPA(代码已算): ${_cpa:.2f}")
+        _aov = strategy_context.get("avg_order_value")
+        if _aov is not None:
+            ctx_parts.append(f"  - 平均订单金额(代码已算): ${_aov:.2f}")
+        if inv_days is not None:
+            ctx_parts.append(
+                f"  - 加预算前提·库存门槛: {'✅ 库存≥30天' if inv_days >= 30 else '⚠ 库存<30天，不得加预算'}"
+            )
         ctx_parts.append(f"  - 自然单占比: {'%.1f%%' % strategy_context['natural_order_ratio'] if strategy_context.get('natural_order_ratio') is not None else 'N/A'}")
         ctx_parts.append(f"  - 日均销量(30d): {'%.1f单' % strategy_context['avg_daily_sales_30d'] if strategy_context.get('avg_daily_sales_30d') is not None else 'N/A'}")
         if strategy_context.get("target_acos"):
@@ -1821,6 +1873,10 @@ class LLMReasoner:
                 camp_parts.append(f"  - ACOS vs 目标: {'+' if s['acos_vs_target'] > 0 else ''}{s['acos_vs_target']}%")
             if "budget_utilization_pct" in s:
                 camp_parts.append(f"  - 预算利用率: {s['budget_utilization_pct']}%")
+            if s.get("budget_utilization_tier"):
+                camp_parts.append(f"  - 预算资格档位(代码判定): {s['budget_utilization_tier']}")
+            if "budget_increase_eligible" in s:
+                camp_parts.append(f"  - 加预算资格(代码判定): {'✅ 可加预算' if s['budget_increase_eligible'] else '❌ 不可加预算'}")
             # 广告位加价比例 (KB 19 §5 决策矩阵 — 来自 basic_info，非 placement_report)
             ppcts = s.get("_placement_pcts", {})
             if ppcts:

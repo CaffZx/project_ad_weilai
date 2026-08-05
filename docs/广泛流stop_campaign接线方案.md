@@ -157,25 +157,25 @@ if item.action in ("eliminate_to_low_bid_pool", "paused"):
 
 ---
 
-## 7. 延后项（提示词治理 / LLM 产出）
+## 7. 提示词治理 / LLM 产出
 
-- [ ] `reasoner.py` 广泛流输出约束：把 `paused_campaign` 加入 action 合法枚举（与 P0-A 诊断报告枚举清单一起做）；LLM 产出 `paused_campaign` 后由归一化层（5.1）翻译为 `paused`
-- [ ] 知识库投影层对齐：广泛/词组/自动退出动作统一 `paused_campaign`（不再提 `stop_campaign`）
-- [ ] LLM 真正产出 `paused_campaign` 后端到端回归
+- [x] `reasoner.py` 广泛流输出约束：action 合法枚举加入 `paused_campaign`（与 P0-A 诊断报告枚举清单一起完成——含 action 枚举表、triggered_rule 问题类型码命名空间、review_level 枚举、修正输出示例的非法触发码 IRRELEVANT_NO_IMPROVEMENT → HIGH_ACOS_NO_ORDER）；LLM 产出 `paused_campaign` 后由归一化层（5.1）翻译为 `paused`
+- [~] 知识库投影层对齐：广泛/词组/自动退出动作统一 `paused_campaign`（30号/ontology/31号§13/10号§1.6/18号 已改；03:382、25:207、28:132 当前规则残留待改；00/01 为历史修订记录可保留）
+- [ ] LLM 真正产出 `paused_campaign` 后端到端回归（随线上数据验证）
 
 ---
 
 ## 8. 测试计划
 
-- [ ] **T1 归一化（完整链路）**：`_normalize_action` 对 `paused_campaign` → `paused` 且不被改写；**完整链路测试**（首次归一化 → 护栏 → 终态归一化 :2697）断言终态仍为 `paused`（非 keep/adjust）
-- [ ] **T2 落库分类**：`paused` → `suggest_category="PAUSED"`、`campaign_pending.new_state="paused"`；**不产生** keyword/placement/budget/Bid pending（即使 LLM 填了 proposed 数值）
-- [ ] **T3 执行构参**：new_state="paused" → MCP vo **仅含** `{campaignId, campaignState:"paused"}`——**不含** budget/bid/placement，**也不含 `campaignGroupType`**（状态通道不填 `target_campaign_group_type`，暂停不触发组合迁移）
-- [ ] **T4 快照读回（全映射链）**：`suggest_category=PAUSED` → `_snapshot_action`→"paused" → `_action_klass`→"eliminate_or_paused" → reason group `_cat`（repository.py:1671）→"PAUSED" → 前端 action="paused"
-- [ ] **T5 前端**：_actionLabel "暂停"、badge `eliminate_or_paused`、筛选器与淘汰同级
-- [ ] **T6 统计桶**：to_paused 计入，`declared_total == categorized_total`
-- [ ] **T7 健康检查**：db_health_check 对 PAUSED 不报 INVALID
+- [x] **T1 归一化（完整链路）**：`test_paused_campaign.py` 覆盖 `paused_campaign`→`paused` 翻译 + 二次归一化保留（首次→护栏→终态）
+- [x] **T2 落库分类**：状态通道只生成 `campaign_pending(new_state="paused")`，不产 budget/bid/placement/keyword（含 LLM 填数值场景）
+- [x] **T3 执行构参**：`test_advert_exec_child_asin.py` 已断言 `new_state="paused"` → `campaignState:"paused"`（复用既有测试）
+- [x] **T4 快照读回（全映射链）**：`_snapshot_action`→"paused"、`_action_klass`→"eliminate_or_paused"、reason group `_cat`→"PAUSED"
+- [x] **T5 前端**：demo 已改 `_actionLabel`"暂停"、badge `eliminate_or_paused`、筛选/统计"淘汰/暂停"（含筛选 value 与 klass 精确匹配修复）
+- [x] **T6 统计桶**：`to_paused` 计入 + summary 表 `paused_count` 列（本地+生产已加）
+- [x] **T7 健康检查**：`db_health_check` VALID_CAT 加 "PAUSED"
 
-回归：`test_campaign_cancellation_fencing.py`、`test_campaign_guardrails.py`、`test_advert_exec_child_asin.py`、erp_writer 落库相关测试。
+回归：`test_campaign_cancellation_fencing.py`、`test_campaign_guardrails.py`、`test_advert_exec_child_asin.py`、erp_writer 落库相关测试（通过；预存失败 test_kb_slicing / test_erp_auto_push 与本次无关）。
 
 ---
 
@@ -188,13 +188,15 @@ if item.action in ("eliminate_to_low_bid_pool", "paused"):
 
 ## 10. 知识库修正任务（业务定夺：亚马逊无 stop，只有 paused）
 
-知识库 30号（动作词表）及引用 `stop_campaign`/`archived` 的章节为**错误表述**，需修正为"暂停= `paused`"统一口径：
+知识库 30号（动作词表）及引用 `stop_campaign`/`archived` 的章节原为错误表述，修正为"暂停= `paused`"统一口径。**进度：核心动作码已由知识库调整完成，残留 3 处当前规则引用待改。**
 
-- [ ] `docs/knowledge_base/30-动作词表与映射.md`：删除/改写 `stop_campaign`(archived) 条目与 §2 的 stop/pause 区分表（:60、:157）——统一为 `paused_campaign`（LLM 动作码）→ `paused`（物理）
-- [ ] `docs/knowledge_base/执行规则/31-广泛自动词组调整规则.md` §13：`stop_campaign` 退出表述 → `paused_campaign`
-- [ ] `docs/knowledge_base/10-安全护栏.md` §1.6：`stop_campaign`/`pause_campaign` 区分表述 → 统一 paused
-- [ ] `docs/knowledge_base/执行规则/18-广告执行调整流程.md`：引用 `stop_campaign` 处 → 统一
-- [ ] `docs/knowledge_base/ontology/actions.yaml`：`stop_campaign` 动作码 → `paused_campaign`（LLM 侧）
-- [ ] 以上修正后，`campaign_budget_reallocation.py` 对 `paused` 的预算回算语义另行立项（本期不含）
+- [x] `docs/knowledge_base/30-动作词表与映射.md`：已改——`paused_campaign`（LLM 动作码）+ 语义/ERP 映射（`campaign_state = paused`）
+- [x] `docs/knowledge_base/执行规则/31-广泛自动词组调整规则.md` §13：已改（无 stop_campaign 残留）
+- [x] `docs/knowledge_base/10-安全护栏.md` §1.6：已改（无 stop_campaign 残留）
+- [x] `docs/knowledge_base/执行规则/18-广告执行调整流程.md`：已改（无 stop_campaign 残留）
+- [x] `docs/knowledge_base/ontology/actions.yaml`：已改（`paused_campaign` 定义 + 退出映射）
+- [ ] **当前规则残留（3 处）**：`03:382`（ONT-022 不可逆动作最小数据龄清单：`stop_campaign` → `paused_campaign`）、`25:207`（清仓期"可 stop_campaign" → `paused_campaign`）、`28:132`（淘汰导致萎缩"或 stop_campaign(广泛/商品定投)" → `paused_campaign`）
+- [ ] 历史修订记录（`00:115/133`、`01:19/47` 描述 v3.4.0 决策史）：保留（非当前规则）或按需改写
+- [ ] 预算回算语义（`campaign_budget_reallocation.py` 对 `paused` 的处理）另行立项（本期不含）
 
 > 知识库修正与代码本期解耦：代码本期先支持 `paused_campaign`→`paused` 链路；知识库/投影层/提示词统一为 `paused_campaign` 在延后项与本节完成。

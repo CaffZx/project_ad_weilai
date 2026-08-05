@@ -1357,6 +1357,7 @@ CREATE TABLE `t_advert_agent_modify_suggest_summary` (
   `batch_no` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '批次号',
   `total_count` int DEFAULT '0' COMMENT '活动总数',
   `eliminate_count` int DEFAULT '0' COMMENT '淘汰数',
+  `paused_count` int DEFAULT '0' COMMENT '暂停数（LLM 动作码 paused_campaign → 归一化 paused）',
   `adjust_count` int DEFAULT '0' COMMENT '调整数',
   `keep_count` int DEFAULT '0' COMMENT '保持数',
   `reactivate_count` int NOT NULL DEFAULT '0' COMMENT 'KB21 §7 复评活动数（reactivate_budget_only / reactivate_with_calibrated_bid）',

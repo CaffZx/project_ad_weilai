@@ -92,13 +92,18 @@ class KnowledgeBase:
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,3,4",
             "19:1,2,3,4,5,6,9", "22:0,2", "21:0,1,2,3,4",
             "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
-            "30", "32",
+            "30:0,1,2", "32",
         ],
         "campaign_adjustment_broad": [
             "18:1,3", "17:1,2,3.1,3.2,3.3,3.4,4,5,7", "15:1,2,4",
             "19:1,2,3,4,6,7,8", "22:0", "21:0,1,2,3,4",
             "10:1,2", "03:7,8,10,12", "14:1,9,16,20,21",
-            "30", "31",
+            # 投影层重切（P1-2）：
+            # 30号 只注入业务语义（两套码原理/动作总表/paused_campaign），排除 3-7（复合展开/生命周期/ERP映射/幂等/未注册 = 代码层）
+            "30:0,1,2",
+            # 31号 只注入广泛侧决策要点（核心结论/探索强度/经营模式/四档分支/自动投放组/转精准后处理/停止投放/扩词），
+            # 排除 1(与18/22重复) 5/6(19号有) 7(18号有) 9(ONT有) 10(23号有) 11(精准侧) 15(输出字段=代码管)
+            "31:0,2,3,4,8,12,13,14",
         ],
         # Campaign 策略总览(执行总纲)
         "campaign_overview":    ["02", "04", "09"],
@@ -225,45 +230,57 @@ class KnowledgeBase:
 
     @cached_property
     def _ontology_contract(self) -> dict:
-        """懒加载 runtime_contract.yaml。缺失时 fail-fast —— 宁可拒绝启动也不在零约束下运行。"""
+        """懒加载 runtime_contract.yaml。缺失/损坏时返回空契约 —— 不注入 Ontology Card，不阻断分析。"""
         path = self.ROOT / "ontology" / "runtime_contract.yaml"
-        if not path.exists():
-            raise FileNotFoundError(f"Ontology 运行时契约缺失: {path}")
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        try:
+            if not path.exists():
+                raise FileNotFoundError(f"Ontology 运行时契约缺失: {path}")
+            parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception as e:
+            logger.warning("Ontology 运行时契约加载失败 [%s]: %s（本次不注入 Ontology Card）", path, e)
+            return {}
 
     def build_ontology_card(self, task_type: str) -> str:
         """从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt。
 
         精准流不注入 ONT-RUNTIME-001（广泛/词组/自动禁止广告位）——
         精准广告允许广告位调整，这条规则对其是噪声。
+        契约缺失/解析失败时返回空串：不注入、不阻断 AI 分析。
         """
-        contract = self._ontology_contract
-        injection = contract.get("ontology_card_injection") or {}
-        common_ids = set(injection.get("always_inject") or [])
-        if not common_ids:  # 兜底：契约未声明时注入除 001 外的全部
-            common_ids = {
-                r["rule_id"] for r in contract.get("hard_rules", [])
-                if r.get("rule_id") != "ONT-RUNTIME-001"
-            }
-        if task_type != "exact":
-            common_ids.update(injection.get("inject_unless_exact") or ["ONT-RUNTIME-001"])
+        try:
+            contract = self._ontology_contract
+            if not contract:
+                return ""
+            injection = contract.get("ontology_card_injection") or {}
+            common_ids = set(injection.get("always_inject") or [])
+            if not common_ids:  # 兜底：契约未声明时注入除 001 外的全部
+                common_ids = {
+                    r["rule_id"] for r in contract.get("hard_rules", [])
+                    if r.get("rule_id") != "ONT-RUNTIME-001"
+                }
+            if task_type != "exact":
+                common_ids.update(injection.get("inject_unless_exact") or ["ONT-RUNTIME-001"])
 
-        selected = [
-            r for r in contract.get("hard_rules", [])
-            if r.get("rule_id") in common_ids
-        ]
-        card = {
-            "ontology_version": contract.get("version", ""),
-            "execution_layers": contract.get("decision_grain", {}).get("execution_layers", {}),
-            "mode_policies": contract.get("mode_policies", {}),
-            "portfolio_groups": contract.get("portfolio_groups", {}),
-            "portfolio_routing": contract.get("portfolio_routing", {}),
-            "hard_rules": selected,
-            "action_bundle": contract.get("action_bundle", {}),
-        }
-        return "【Ontology Runtime Contract】\n" + yaml.safe_dump(
-            card, allow_unicode=True, sort_keys=False,
-        ).strip()
+            selected = [
+                r for r in contract.get("hard_rules", [])
+                if r.get("rule_id") in common_ids
+            ]
+            card = {
+                "ontology_version": contract.get("version", ""),
+                "execution_layers": contract.get("decision_grain", {}).get("execution_layers", {}),
+                "mode_policies": contract.get("mode_policies", {}),
+                "portfolio_groups": contract.get("portfolio_groups", {}),
+                "portfolio_routing": contract.get("portfolio_routing", {}),
+                "hard_rules": selected,
+                "action_bundle": contract.get("action_bundle", {}),
+            }
+            return "【Ontology Runtime Contract】\n" + yaml.safe_dump(
+                card, allow_unicode=True, sort_keys=False,
+            ).strip()
+        except Exception as e:
+            logger.warning("Ontology Card 拼装失败 [%s]: %s（本次不注入 Ontology Card）", task_type, e)
+            return ""
 
     def build_campaign_adjustment(
         self,
@@ -303,7 +320,9 @@ class KnowledgeBase:
                 break
         knowledge = self._build_specs(preset, ids)
         ontology_card = self.build_ontology_card(task_type)
-        return f"{knowledge}\n\n---\n\n{ontology_card}"
+        if ontology_card:
+            return f"{knowledge}\n\n---\n\n{ontology_card}"
+        return knowledge
 
     def _build_specs(self, preset: str, ids: list[str]) -> str:
         """按已解析的 spec 列表拼接内容，供静态和运行时 preset 复用。"""

@@ -103,7 +103,7 @@ group_types:
         不套三日验证（无关键词）。reason_code 必须可辨识，不得落 unknown 兜底。
       placement_allowed: true             # 覆盖父组的 ONT-002 禁令
       placement_preference: product_pages # PP 优先，ONT-010
-      exit_action: stop_campaign         # 不进低价捡漏组（ONT-016）
+      exit_action: paused_campaign         # 不进低价捡漏组（ONT-016）
       budget_note: 预算计入 auto_broad_group；子桶只影响组内压缩顺序与统计口径
     negative_keyword_applicable: false    # 无搜索词
     allocation_weight_default: dynamic
@@ -133,13 +133,13 @@ classification_rules:
       group: auto_broad_group
       note: >
         无论预算、退出状态或是否多 Target，始终属于广泛自动组；
-        需要退出时执行 stop_campaign（30号§1 #13），不进入低价捡漏组（ONT-016）
+        需要退出时执行 paused_campaign（30号§1 #13），不进入低价捡漏组（ONT-016）
     - condition: campaign_type = product_targeting        # 子桶
       group: auto_broad_group
       subtype: product_targeting
       note: >
         硬路由（ROUTE-005）→ auto_broad_group + subtype=product_targeting；
-        不套三日验证；退出时 stop_campaign，不进低价捡漏组；
+        不套三日验证；退出时 paused_campaign，不进低价捡漏组；
         广告位权限按子桶放开（ONT-010），不受父组 ONT-002 禁令约束
     - condition: campaign_type=exact_keyword AND multi_keyword_campaign
       group: low_bid_retention_group
@@ -544,8 +544,8 @@ group_action_policies:
   auto_broad_group__product_targeting_subtype:   # 子桶策略（父组 auto_broad_group）
     - competitor_intercept_window: 可新建，PP 主投
     - pp_outperforms_tos_ros: 允许 PP 方向加价（ONT-010），仍需过库存/Listing/预算护栏
-    - high_spend_no_order: 先降广告位加价 → 再降 Bid → 仍无改善评估 stop_campaign
-    - low_relevance: 降 Bid 或 stop_campaign；不做否词（无搜索词）
+    - high_spend_no_order: 先降广告位加价 → 再降 Bid → 仍无改善评估 paused_campaign
+    - low_relevance: 降 Bid 或 paused_campaign；不做否词（无搜索词）
     - budget_tight: 在 auto_broad_group 内**先于**广泛/词组/自动被压缩
   low_bid_retention_group:
     - group_budget: fixed_1

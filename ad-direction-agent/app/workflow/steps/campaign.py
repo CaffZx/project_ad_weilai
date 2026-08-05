@@ -2696,7 +2696,31 @@ def _apply_campaign_guardrails(
             ))
 
     # 终态 action 归一: proposed 可能被改回 current,
-    # 这种情况 action 从 adjust_X 变 keep。淘汰组 action 不变。
+    # 这种情况 action 从 adjust_X 变 keep。淘汰组/暂停组 action 不变
+    # (_normalize_action 内部已保留 eliminate/paused)。
+    re_normalized = 0
+    for adj in adjustments:
+        if _normalize_action(adj):
+            re_normalized += 1
+    if re_normalized:
+        logger.info("_resolve_budget_conflicts: 终态 action 二次归一改写 %d 条", re_normalized)
+
+    # 预算硬下限：proposed_budget < 1 → 强制翻回 1（兜底，与 P6 上限 $200 对称）。
+    # 排除淘汰（P4 已固定 $1，有自己的逻辑）。
+    for adj in adjustments:
+        if adj.proposed_budget is not None and 0 < adj.proposed_budget < 1:
+            if adj.action != "eliminate_to_low_bid_pool":
+                adj.proposed_budget = 1.0
+
+    # 暂停动作最终审核等级强制 HIGH_RISK_REVIEW（人工确认，KB31 §13 停止投放前诊断路径）。
+    # 放在终态归一之后，确保只处理最终 action 仍为 paused 的记录（P3/P5 可能把部分 paused 改写成 eliminate/keep）。
+    paused_count = 0
+    for adj in adjustments:
+        if adj.action == "paused":
+            adj.review_level = "HIGH_RISK_REVIEW"
+            paused_count += 1
+    if paused_count > 0:
+        logger.info("_resolve_budget_conflicts: paused=%d 条 → review_level 强制 HIGH_RISK_REVIEW", paused_count)
     re_normalized = 0
     for adj in adjustments:
         if adj.action == "eliminate_to_low_bid_pool":

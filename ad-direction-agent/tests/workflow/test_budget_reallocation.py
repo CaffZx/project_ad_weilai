@@ -264,3 +264,36 @@ def test_classify_eliminate_and_broad_unaffected_by_proposed():
 def test_classify_elimination_pool_stays_by_current_no_revival_gate():
     # 本期不加复活闸：在淘汰池($1/$0.20)即归淘汰组，即使 proposed=$6
     assert classify(_unit(1.0, cur_bid=0.20), llm_action="adjust_budget", effective_budget=6.0) == PORTFOLIO_ELIMINATE
+
+
+# ── P0-D 暂停(paused)预算释放 ──────────────────────────────
+
+def test_aggregate_pause_releases_full_budget():
+    """暂停释放整预算（可再分配）；不迁低价池（low_bid_release 不含暂停）。"""
+    adj = [
+        _adj("camp_pause1", "Pause1", 20.0, 20.0, PORTFOLIO_BROAD, action="paused", match="BROAD"),
+        _adj("camp_pause2", "Pause2", 10.0, 10.0, PORTFOLIO_BROAD, action="paused", match="BROAD"),
+    ]
+    agg = aggregate(adj, [], _ctx(140.0))
+    p = agg["parent"]
+    assert p["other_campaign_release"] == 30.0, "暂停释放应等于活动当前预算之和"
+    assert p["low_bid_retention_release"] == 0.0, "暂停不迁低价池，不得计入 low_bid_release"
+    assert p["available_for_increase"] == 30.0  # 暂停释放可再分配（allowed=0）
+    # 会计平衡：有加就有减——暂停活动从 auto_broad_group 释放，组需求 -30
+    by = {g["group"]: g for g in agg["groups"]}
+    assert by[PORTFOLIO_BROAD]["group_requested_delta"] == -30.0, \
+        "暂停活动应从所属组扣减预算（组需求 -cur）"
+
+
+def test_aggregate_eliminate_and_pause_releases_separate():
+    """淘汰（留$1）与暂停（整释放）并行，各自独立记账。"""
+    adj = [
+        _adj("camp_elim", "Elim", 21.0, 1.0, PORTFOLIO_ELIMINATE,
+             action="eliminate_to_low_bid_pool"),
+        _adj("camp_pause", "Pause", 15.0, 15.0, PORTFOLIO_BROAD, action="paused", match="BROAD"),
+    ]
+    agg = aggregate(adj, [], _ctx(140.0))
+    p = agg["parent"]
+    assert p["low_bid_retention_release"] == 20.0   # eliminate: 21-1（留 $1 在低价池）
+    assert p["other_campaign_release"] == 15.0      # pause: 整 15
+    assert p["available_for_increase"] == 35.0      # 20+15+allowed 0

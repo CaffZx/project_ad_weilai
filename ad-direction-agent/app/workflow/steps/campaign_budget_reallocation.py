@@ -45,6 +45,8 @@ logger = logging.getLogger(__name__)
 _ACTIVE_GROUPS = (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD)
 _LOW_BID_FIXED = 1.0
 _ELIMINATE_ACTION = "eliminate_to_low_bid_pool"
+# 暂停（LLM 动作码 paused_campaign 归一化后）：纯释放、不迁低价池、无复评
+_PAUSE_ACTION = "paused"
 _TOL = 0.5  # 美元舍入容差
 
 # 加权触发：产品定位 P0/P1（KB §7.2），product_level 为中文 label
@@ -170,10 +172,20 @@ def aggregate(
 
     low_bid_release = 0.0
     low_bid_moved = 0
+    # 暂停释放（关停活动整预算释放，可再分配；区别于淘汰的低价池保留 $1）
+    other_campaign_release = 0.0
 
     for item in adjustments:
         cur = _f(item.current_budget)
         action = item.action or ""
+        if action == _PAUSE_ACTION:
+            # 会计平衡：有加就有减——暂停活动从所属组释放预算（组需求 -cur），
+            # 释放金额进入可再分配池（other_campaign_release += cur）。
+            other_campaign_release += max(0.0, cur)
+            src = _current_group_of(item)
+            if src in groups:
+                groups[src]["group_requested_delta"] -= cur
+            continue
         if action == _ELIMINATE_ACTION or _group_of(item) == PORTFOLIO_ELIMINATE:
             if action == _ELIMINATE_ACTION:
                 low_bid_release += max(0.0, cur - _LOW_BID_FIXED)
@@ -213,8 +225,8 @@ def aggregate(
     all_active_zero = all(groups[g]["current_group_budget"] <= 0 for g in _ACTIVE_GROUPS)
 
     pool = round((parent_target or 0.0) + parent_allowed, 2)
-    # 本轮可用于覆盖正增长的最大额度（含淘汰释放）
-    available_for_increase = round(low_bid_release + parent_allowed, 2)
+    # 本轮可用于覆盖正增长的最大额度（含淘汰释放 + 暂停释放）
+    available_for_increase = round(low_bid_release + other_campaign_release + parent_allowed, 2)
     purposes = ctx.ad_purposes or []
     directions = ctx.ad_directions or []
     return {
@@ -226,6 +238,7 @@ def aggregate(
             "budget_pool": pool,
             "available_for_increase": available_for_increase,
             "low_bid_retention_release": round(low_bid_release, 2),
+            "other_campaign_release": round(other_campaign_release, 2),
             "constraint_basis": constraint_basis,
             "all_active_zero": all_active_zero,
             "priority_context": {

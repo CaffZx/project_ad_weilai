@@ -51,12 +51,12 @@ def test_real_kb_sections_indexed():
     assert kb._sections.get("08", {}) == {}
 
 
-# ── 体量压缩（不回退整文件 48K）────────────────────────────
+# ── 体量压缩（投影层重切后基线，不回退整文件 48K）────────────────
 
 @pytest.mark.parametrize("preset,ceiling", [
-    ("campaign_adjustment_exact", 32000),   # 实测 ~24K，整文件 48K
-    ("campaign_adjustment_broad", 32000),   # 实测 ~22K
-    ("new_campaign", 11000),                # 实测 ~7.8K，整文件 ~14K
+    ("campaign_adjustment_exact", 47000),   # 投影层后实测 ~45.5K（含精准特有 广告位/32号），整文件 48K+
+    ("campaign_adjustment_broad", 40000),   # 投影层后实测 ~36.3K（30/31 已重切排除代码层），整文件 48K+
+    ("new_campaign", 11000),                # 实测 ~7.1K，整文件 ~14K
 ])
 def test_preset_compressed(preset, ceiling):
     assert 0 < len(kb.build(preset)) < ceiling

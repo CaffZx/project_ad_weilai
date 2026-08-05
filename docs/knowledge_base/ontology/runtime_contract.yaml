@@ -38,15 +38,15 @@ mode_policies:
     ad_permission: stop
     llm_decision_required: false
     exact_action: move_to_low_bid_retention_group
-    broad_phrase_auto_action: stop_campaign          # 由 pause_campaign 改为 stop_campaign
-    product_targeting_action: stop_campaign
+    broad_phrase_auto_action: paused_campaign
+    product_targeting_action: paused_campaign
     new_campaigns_forbidden: true
     human_approval_required: true
   controlled_clearance:
     ad_permission: clearance_only
     optional_human_field: clearance_deadline
     new_campaigns_forbidden: true
-    allowed_actions: [adjust_bid_down, adjust_budget_down, add_negative, stop_campaign, adjust_placement_pp]
+    allowed_actions: [adjust_bid_down, adjust_budget_down, add_negative, paused_campaign, adjust_placement_pp]
     forbidden_actions: [campaign_budget_increase, bid_up_for_ranking, placement_tos_increase, expand_keywords]
   limited_repair:
     ad_permission: normal
@@ -96,7 +96,7 @@ portfolio_groups:
     input_aliases: [自动广泛组, 广泛/自动]
     allowed_match_types: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
     placement_forbidden: true                    # 但子桶可覆盖，见 subtypes
-    exit_action: stop_campaign
+    exit_action: paused_campaign
     # 商品定投为本组内的逻辑子桶。
     # 账户侧组合数 = 4（低价捡漏组单列不瓜分）。子桶不参与顶层预算切分。
     subtypes:
@@ -106,7 +106,7 @@ portfolio_groups:
         placement_allowed: true                  # 覆盖父组 placement_forbidden
         placement_preference: product_pages      # PP 优先，ONT-010
         exact_main_validation_applicable: false  # 无关键词，三日验证不适用
-        exit_action: stop_campaign              # 不进低价捡漏组（ONT-016）
+        exit_action: paused_campaign              # 不进低价捡漏组（ONT-016）
         budget_note: 预算计入父组；子桶只影响组内压缩顺序与统计
   low_bid_retention_group:
     label: 低价捡漏组
@@ -219,10 +219,10 @@ hard_rules:
     forbidden_actions: [move_portfolio]
     recommended_next_step: split_campaign_by_match_type
   - rule_id: ONT-RUNTIME-007
-    description: 广泛/词组/自动/商品定投的退出动作是 stop_campaign，不得使用 eliminate_to_low_bid_pool
+    description: 广泛/词组/自动/商品定投的退出动作是 paused_campaign，不得使用 eliminate_to_low_bid_pool
     match_types: [BROAD, PHRASE, AUTO, PRODUCT_TARGETING]
     forbidden_actions: [eliminate_to_low_bid_pool]
-    required_exit_action: stop_campaign
+    required_exit_action: paused_campaign
   - rule_id: ONT-RUNTIME-008
     description: 转入低价捡漏组的 Bid 必须为 min(current_bid, 0.20)，不得抬高已低于 0.20 的 Bid
     portfolio: low_bid_retention_group

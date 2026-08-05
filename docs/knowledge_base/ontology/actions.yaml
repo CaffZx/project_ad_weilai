@@ -231,7 +231,7 @@ actions:
       - diagnosis_path_complete
     physical_action_codes: [move_portfolio, adjust_budget, adjust_bid]   # 复合，展开见 30号§3.1
     forbidden_objects_or_scenes:
-      - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 stop_campaign
+      - campaign_match_type_not_exact          # BROAD/PHRASE/AUTO/PRODUCT_TARGETING 走 paused_campaign
       - campaign_age_under_3_days
       - core_keyword_ranking_support
       - high_priority_protected_keyword        # 标题词/后台ST词/核心卖点词/is_core_keyword
@@ -274,12 +274,12 @@ actions:
     validation_rule_refs:
       - ONT-007
 
-  stop_campaign:
+  paused_campaign:
     scope: CAMPAIGN
-    label_zh: 停止投放（退出投放）
+    label_zh: 暂停活动（关停）
     target_objects:
       - Campaign
-    physical_action_codes: [stop_campaign]
+    physical_action_codes: [pause]
     is_growth_action: false
     applicable_campaign_types:
       - broad_keyword
@@ -308,22 +308,8 @@ actions:
       - GROUP-002
       - GROUP-003
     note: >
-      与 pause_campaign 的区别见 30号§2：close 是退出投放（不可逆程度高），
-      pause 是临时停投（有明确恢复条件）。
-
-  pause_campaign:
-    scope: CAMPAIGN                      # 与 30号§1 的 scope 列一致
-    label_zh: 临时暂停活动
-    target_objects:
-      - Campaign
-    physical_action_codes: [pause]
-    is_growth_action: false
-    required_signals:
-      - explicit_resume_condition               # 必须有明确恢复条件，否则应用 stop_campaign
-    forbidden_objects_or_scenes:
-      - no_explicit_resume_condition
-    review_level: HIGH_RISK_REVIEW
-    note: 极少使用。没有明确恢复条件的停投一律用 stop_campaign。
+      暂停/关停：可逆性由 paused 承载（MCP campaignState=paused）。
+      LLM 语境动作码 paused_campaign，出 LLM 翻译为后端 paused。
 
   demote_to_exact_testing:
     scope: CAMPAIGN
@@ -526,10 +512,10 @@ growth_actions:
 # 退出类动作汇总（供 30号§2 与 ONT-RUNTIME-007 引用）
 exit_actions:
   exact_keyword: eliminate_to_low_bid_pool
-  broad_keyword: stop_campaign
-  phrase_keyword: stop_campaign
-  auto_discovery: stop_campaign
-  product_targeting: stop_campaign
+  broad_keyword: paused_campaign
+  phrase_keyword: paused_campaign
+  auto_discovery: paused_campaign
+  product_targeting: paused_campaign
 
 # 复合动作汇总（供 ActionBundle 展开与同批回滚使用，见 30号§3）
 composite_actions:

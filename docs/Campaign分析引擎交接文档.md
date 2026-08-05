@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-08-05（版本日志见文末，最新 v3.25：搜索词精准扩词双来源）
-> **版本**: v3.25
+> **最后更新**: 2026-08-05（版本日志见文末，最新 v3.26：暂停活动 paused 接线）
+> **版本**: v3.26
 > **分支**: chenv3.2
 
 ---
@@ -95,12 +95,15 @@ parent_asin
 | action | 说明 | 精准流额外字段 | 广泛流额外字段 |
 |--------|------|--------------|--------------|
 | `eliminate_to_low_bid_pool` | 淘汰至低竞价池 (Bid=$0.20, Budget=$1) | placement_adjustments | negative_keywords |
+| `paused` | 暂停活动（LLM 动作码 `paused_campaign` 翻译，v3.26） | — | — |
 | `adjust_bid` | 调整出价 | placement_adjustments | negative_keywords |
 | `adjust_budget` | 调整预算 | placement_adjustments | negative_keywords |
 | `adjust_placement` | 调整广告位分配（仅精准） | placement_adjustments | — |
 | `reactivate_budget_only` | 复评：仅恢复预算（不改 Bid） | — | — |
 | `reactivate_with_calibrated_bid` | 复评：恢复预算+标定 Bid | placement_adjustments | — |
 | `keep` | 保持现状 | — | — |
+
+> **paused（v3.26 新增）**：LLM 动作码 `paused_campaign` 在 `_normalize_action` 翻译为后端统一枚举 `paused`（唯一翻译点，代码不按 proposed/current 差值推导覆盖）。只生成活动级 `new_state=paused` pending，不带预算/Bid/广告位/否词，不触发组合迁移；`_ACTION_TO_CATEGORY["paused"]="PAUSED"`（与淘汰同级优先级，防污染淘汰复评 `WHERE='ELIMINATE'`）。当前护栏不处理 paused（延后立项）。
 
 ---
 
@@ -112,7 +115,7 @@ parent_asin
 
 | 文件 | 行数 | 角色 |
 |------|------|------|
-| `app/workflow/steps/campaign.py` | 2846 | ★编排引擎：分流→分批→投票→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；`_resolve_budget_conflicts` 预算冲突修正 + 护栏 `_apply_campaign_guardrails` 附加校验 + R3/R4 LLM 重试编排；operating_mode 接入；`campaign_exact_transition` 调度 |
+| `app/workflow/steps/campaign.py` | 2846 | ★编排引擎：分流→分批→R1 单轮→护栏 R2/R3/R4 重试→校验→合成；action 归一化；组合分类调度；portfolio 拉取+透传；`_resolve_budget_conflicts` 预算冲突修正 + 护栏 `_apply_campaign_guardrails` 附加校验 + R3/R4 LLM 重试编排；operating_mode 接入；`campaign_exact_transition` 调度 |
 | `app/workflow/steps/campaign_guardrails.py` | 504 | ★护栏独立模块（v3.14 新增，v3.15 增强）：`apply_all()` + 12 条规则（P0-P11）含 retry_instruction 回灌；P3 硬淘汰 > P1 样本保护优先级；`_sample_insufficient`/`_p3_should_force_eliminate` 公共谓词 |
 | `app/workflow/steps/campaign_exact_transition.py` | — | ★精准组合确定性升降级（v3.22 新增）：EXACT 活动四组升降级逻辑，ACOS 约束驱动 |
 | `app/core/acos_constraints.py` | — | ★ACOS 约束核心模块（v3.22 新增）：目标 ACOS/预算的硬约束计算 |
@@ -351,6 +354,7 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 07-31 | **Campaign 双轮投票切除** | `campaign.py`（-510 行）：切除 R1+R2 双轮投票 → 单轮 LLM 直判。`campaign_guardrails.py`（+55）：护栏增强。`campaign_exact_transition.py`（+11）、`reasoner.py`、`models/campaign.py`、`settings.py`、`mappers.py`：适配单轮模式。`test_campaign_guardrails.py`（+47）。新增 `docs/Campaign切除双轮投票方案.md`，删除过期代码审计报告。17 files +827/-680。 |
 | 08-03 | **★ pending taskId 轮询调度器** | `task_poll_scheduler.py`（新，206 行）：进程内有界队列 + 固定协程消费者（2×20），提交前 reserve 名额，按 3m/6m/12m/24m 最多查 4 次终态，精确回写每行 pending，耗尽按 FAIL 回写。`advert_execution.py`（720 行重构）：提交/轮询/回写三阶段解耦。`repository.py`（309 行）：执行仓库适配 + `write_pending_terminal` 精确回写。`decision.py`（+36）、`campaign.py`（+25）、`settings.py`（+5：`advert_task_poll_workers`/`advert_task_poll_queue_capacity`）、前端（+31）。测试重构：`test_task_poll_scheduler.py`（新，127 行）、`test_portfolio_match_and_exec.py`（-591 精简）、`test_erp_gray_cards.py`（-120）。新增 spec `2026-08-03-pending-taskid-polling-design.md`。13 files +1271/-1160。 |
 | 08-04 | **★ 搜索词精准扩词双来源 + 样本过滤** | `campaign_search_term_promotion.py`（新，104 行）：搜索词提精准确定性准入（KB23 §3.4 订单/词根两通道，CVR 缺品类基准刻意不伪造），产出 EXACT 决策（`SRC_CONVERTED`/`SRC_BROAD_DERIVED`）。`campaign_sample.py`（新，68 行）：KB17 活动级样本不足判定；样本不足活动搜索词取数标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察、不进提精准。`campaign_fetcher.py`（+284）：`build_search_term_bundle` 活动级 7d/14d 搜索词 bundle。`reasoner.py`（+207）：广泛流搜索词行渲染 + LLM 回吐 `exact_promotion_candidates` 按原始搜索词报表权威回填校验。`campaign_new.py`（+244）：`merge_new_campaign_decisions` 双来源合流（搜索词提精准覆盖同词 flow 探索项）+ `finalize_new_campaign_decisions` 统一组装一次；`_derive_match_type` 对 `source=flow` 候选一律先建 BROAD（词形分类不再决定 EXACT）。`models/campaign.py`（+37）：`SearchTermPromotionCandidate`/`NewCampaignDecision` 模型。`settings.py`（+4）：`search_term_llm_max_terms_per_campaign=20`、`campaign_new_max_creates 20→15`。`campaign.py`（+176）/`campaign_guardrails.py`（+51）：编排接入。测试 8 个（`test_campaign_search_term_promotion.py`+367、`test_campaign_dual_source_orchestration.py`+95、`test_campaign_search_term_bundle.py`+101 等）。20 files +1733/-166。 |
+| 08-05 | **★ 暂停活动（paused）接线** | `campaign.py`：`_normalize_action` 翻译 LLM 动作码 `paused_campaign` → `paused`（唯一翻译点，代码不推导覆盖）+ summary `to_paused` 计数。`mappers.py`：`paused`→`PAUSED` 分类（与淘汰同级优先级，防污染淘汰复评 `WHERE='ELIMINATE'`）；仅生成活动级 `new_state=paused` pending，不带预算/Bid/广告位/否词/组合迁移。`repository.py`：summary 表 `paused_count` 列 + `categorized_total` 纳入。`campaign_viewmodel.py`：`PAUSED`→`paused` 动作、`eliminate_or_paused` 中性样式、summary 计数。`campaign_guardrails.py`：注释对齐——BROAD/PHRASE/AUTO 退出=paused_campaign，**护栏当前不处理 paused（延后立项）**。前端 panel：淘汰/暂停合并标签 + 筛选 value `eliminate_or_paused`。`db_health_check.py`：VALID_CAT 加 `PAUSED`。ontology 5 YAML 清理 v3.4.0 注解。新增 `test_paused_campaign.py`（T1-T4）+ `广泛流stop_campaign接线方案.md`。17 files +448/-129。 |
 
 ---
 
@@ -458,6 +462,7 @@ Campaign 分析成功后可选 write_full 到 ERP 测试库（`api/campaign.py:_
 | Campaign 输出 | 目标表 | 字段 |
 |--------------|--------|------|
 | `eliminate_to_low_bid_pool` | `t_advert_agent_modify_campaign_pending` | STATE: ENABLED→PAUSED |
+| `paused`（v3.26） | `t_advert_agent_modify_campaign_pending` | STATE: →paused（仅活动级状态，无预算/Bid/广告位/否词，无组合迁移） |
 | `adjust_bid` | `t_advert_agent_modify_keyword_pending` | BID: old→new |
 | `adjust_budget` | `t_advert_agent_modify_campaign_pending` | BUDGET: old→new |
 | `adjust_placement` | `t_advert_agent_modify_placement_pending` | percent: old→new |
@@ -586,6 +591,8 @@ EXACT 活动在四组间的确定性升降级逻辑：
 ### 10.2 R3/R4 LLM 重试编排
 
 护栏拦截后按 `campaign_key` 带 `retry_instruction` 回灌 LLM 重判，最多 R3→R4 两轮。R4 后不再 R5，最终护栏兜底。`_build_guardrail_alerts` 仅用 `retry_instruction`，不回落 `message`（避免规则编号泄露给 LLM）。
+
+> **paused 与护栏（v3.26）**：暂停活动（`paused`）当前**不经过护栏**（`_p3_force_eliminate`/`_p5_protection_reversal` 已注释对齐，BROAD/PHRASE/AUTO 退出动作 = `paused_campaign`）。应当经过护栏但延后立项，现为已知缺口。
 
 ### 10.3 淘汰多环节阈值（有意不同）
 
@@ -841,6 +848,10 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.26: 暂停活动(paused)全链路接线（2026-08-05，本地未部署服务器）—— ①`_normalize_action` 翻译 LLM 动作码 `paused_campaign`→`paused`（唯一翻译点，代码不推导覆盖）+ summary `to_paused` ②`mappers.py` `paused`→`PAUSED` 分类（与淘汰同级优先级，防污染淘汰复评 `WHERE='ELIMINATE'`）；仅生成活动级 `new_state=paused` pending，不带预算/Bid/广告位/否词/组合迁移 ③`repository.py` summary 表 `paused_count` 列 ④`campaign_viewmodel.py` `PAUSED`→`paused`、`eliminate_or_paused` 中性样式 ⑤护栏暂不处理 paused（延后立项）⑥前端淘汰/暂停合并标签 ⑦`db_health_check.py` VALID_CAT 加 `PAUSED` ⑧ontology 5 YAML 清理注解 ⑨`test_paused_campaign.py`(新,T1-T4)+接线方案文档。17 files +448/-129。*
+
+最后更新：2026-08-05
 
 *v3.25: 搜索词精准扩词双来源 + 样本过滤（2026-08-04，本地未部署服务器）—— ①`campaign_search_term_promotion.py` 搜索词提精准确定性准入(新,104行)：KB23 §3.4 订单/词根两通道，CVR 刻意不伪造 ②`campaign_sample.py` 活动级样本不足判定(新,68行)：样本不足活动搜索词标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察 ③`campaign_fetcher.py`(+284) `build_search_term_bundle` 活动级 7d/14d 搜索词 bundle ④`reasoner.py`(+207) 广泛流搜索词行渲染+`exact_promotion_candidates` 权威回填校验 ⑤`campaign_new.py`(+244) 双来源合流 `merge_new_campaign_decisions`+统一组装 `finalize_new_campaign_decisions`；`_derive_match_type` 对 flow 一律 BROAD ⑥`models/campaign.py`(+37) `SearchTermPromotionCandidate`/`NewCampaignDecision` ⑦`settings.py`(+4) `search_term_llm_max_terms_per_campaign=20`、`campaign_new_max_creates 20→15` ⑧`campaign.py`(+176)/`campaign_guardrails.py`(+51) 编排接入 ⑨测试 8 个（`test_campaign_search_term_promotion`+367 等）。20 files +1733/-166。*
 

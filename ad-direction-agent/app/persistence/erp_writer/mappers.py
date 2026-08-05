@@ -284,6 +284,9 @@ def _pending_lists_from_adjustment(
     # 不生成预算/Bid/广告位/否词 pending，也不带 target_campaign_group_type（暂停不触发组合迁移）。
     # 必须优先于下方 budget/bid 判断——否则纯状态调整在现有函数里一个 pending 都不会生成。
     if str(adj.get("action") or "").strip().lower() == "paused":
+        # EXACT 精准活动不得暂停（知识库仅广泛/词组/自动允许 paused_campaign），静默丢弃
+        if (adj.get("match_type") or "").upper() == "EXACT":
+            return ([], [], [], [], [])
         return (
             [],
             [CampaignPendingCanonical(

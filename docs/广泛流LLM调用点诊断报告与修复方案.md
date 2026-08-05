@@ -97,20 +97,24 @@
 
 ## 三、修复方案
 
+> **本期范围（2026-08-05 更新）**：护栏与预算回算已纳入本期；知识库侧（版本记录 + stop_campaign 全部清理）已完成，无需核验。P0-A 动作契约定案、P0-B 枚举清单已完成。
+
 ### 修复建议总览
 
-| 级别 | 项 | 内容 |
-|---|---|---|
-| P0-A | 动作契约定案 | Prompt / 知识库 / 模型注释 / `_normalize_action` / guardrails 对动作定义不一致（知识库说 stop_campaign、示例用 eliminate、归一化只保留 eliminate、guardrails 标注 stop_campaign 未实现）。先确定广泛流真实动作集，再决定 prompt 与代码改法 |
-| P0-B | 枚举清单 | prompt 输出约束补合法值表（action 不含 adjust_placement；stop_campaign 需代码接通后才声明；triggered_rule 与 condition_code 命名空间分离） |
-| P0-C | 预算资格代码化 | LLM 无近1天/近3天/有效容忍上限/目标CPA/平均订单金额数据，无法自行执行 19号§4——由代码预计算预算资格，LLM 只在资格范围内选幅度 |
-| P1 | 候选标注桥接 | 输出约束写明"标注≠准入"；词级样本不足词**保留审阅**（14天辅助观察），不一律禁标；最终准入由代码按 7d 校正指标 |
-| P1 | 切片净化（投影层） | 不直接改权威 KB 正文；建"广泛流决策投影层"，只注入当前有效规则/动作集/准入语义/窗口口径/输出契约；版本历史、代码实现、ERP 映射、待确认项排除 |
-| P1 | 校正指标接入准入 | bundle 已取 acos_corrected/cvr_corrected/data_maturity，但 `campaign_search_term_promotion._metrics` 仍用 raw——准入须改用校正口径 |
-| P1 | 输出契约与 KB31 对齐 | KB31 要求 action_code/physical_action_code/branch_hit/search_term_action/promotion_channel/lookback_window，当前 prompt 用 action/direction/triggered_rule/review_level——选一套唯一输出契约，KB 投影标注其余字段仅业务说明 |
-| P1 | 数值窗口校验 | reason/evidence 的 7d/14d 标注无结构化校验——候选事实回填与落库前保留结构化窗口事实，LLM 文案视为解释文本 |
-| P1 | 预算利用率 0 省略 | `_campaign_to_prompt_dict` 仅 cost>0 时注入利用率，0 花费活动字段缺失、LLM 无法区分"0% 与 N/A"——显式携带 0 或 N/A |
-| P2 | 容量风险 | 广泛流 KB 注入实测 59,378 字符/1,869 行，含大量版本历史——投影层优先于扩注入 |
+| 级别 | 项 | 内容 | 状态 |
+|---|---|---|---|
+| P0-A | 动作契约定案 | 广泛流真实动作集 = keep/adjust_bid/adjust_budget/eliminate_to_low_bid_pool/**paused_campaign**；归一化保留 eliminate/paused；guardrails 注释对齐 | ✅ 已完成 |
+| P0-B | 枚举清单 | reasoner broad prompt 输出约束补合法值表（action 含 paused_campaign、禁 adjust_placement；triggered_rule 与 condition_code 命名空间分离；review_level 枚举；修正非法示例触发码） | ✅ 已完成 |
+| P0-C | **护栏（paused 纳入本期）** | paused 走 guardrails：核心词/保护词所在活动不得 paused；样本不足不得暂停；KB31 §13 停止投放前诊断路径（高点击无单→否词→降 bid/预算→仍无改善才暂停）+ HIGH_RISK_REVIEW 人工确认 | 本期 |
+| P0-D | **预算回算（paused 纳入本期）** | `campaign_budget_reallocation` 识别 paused：暂停释放金额 = current_daily_budget，计入 `other_campaign_budget_decrease`（与 eliminate 释放一致，但 eliminate 还迁低价池、暂停纯释放） | 本期 |
+| P0-E | 预算资格代码化 | 透传已算好的 `effective_acos_tolerance`/`target_cpa`/`avg_order_value`（helper 已存在，LLM 不必重算）+ 代码预计算利用率档位/库存门槛；近1/3天暂不支持（无数据源，退化为 7 天+利用率+容忍上限） | 本期 |
+| P1 | 候选标注桥接 | 输出约束写明"标注≠准入"（LLM 只做语义识别+R1，准入由代码计算）；词级样本不足词**保留审阅**（14天辅助观察），不一律禁标 | 本期 |
+| P1 | 切片净化（投影层） | 建"广泛流决策投影层"，只注入当前有效规则/动作集/准入语义/窗口口径/输出契约；版本历史、代码实现、ERP 映射、待确认项排除（知识库已清理版本记录/stop） | 本期 |
+| P1 | 校正指标接入准入 | bundle 已取 acos_corrected/cvr_corrected/data_maturity，但 `campaign_search_term_promotion._metrics` 仍用 raw——准入须改用校正口径 | 本期 |
+| P1 | 输出契约对齐后端 | 输出契约合法值 = 后端代码消费值（P0-B 枚举）；KB 投影标注 KB31 字段（action_code 等）非输出，不诱导 LLM 输出代码不消费字段 | 本期 |
+| P1 | 数值窗口校验 | reason/evidence 的 7d/14d 标注无结构化校验——候选事实回填与落库前保留结构化窗口事实，LLM 文案视为解释文本 | 本期 |
+| P1 | 预算利用率 0 省略 | `_campaign_to_prompt_dict` 仅 cost>0 时注入利用率，0 花费活动字段缺失、LLM 无法区分"0% 与 N/A"——显式携带 0 或 N/A | 本期 |
+| P2 | 容量风险 | 广泛流 KB 注入实测 59,378 字符/1,869 行，含大量版本历史——投影层优先于扩注入 | **延后** |
 
 ### P0-A：动作契约与执行代码不一致（审计新增，最高优先）
 
@@ -134,19 +138,50 @@
 
 **修正示例**：广泛流输出示例的 `action` 由 `eliminate_to_low_bid_pool` 改为 keep/adjust 中性示例；`triggered_rule` 示例替换为 17号问题类型码（如 `HIGH_ACOS_NO_ORDER`）；淘汰卡同时携带问题类型与淘汰条件（若新增 condition_code 字段）。
 
-### P0-C：预算资格由代码预计算（审计修正——原"补利用率门槛文案"不完整）
+### P0-C：护栏——paused 纳入 guardrails（本期新增）
 
-原方案 P0-2 建议在输出约束补"利用率>90% 才可大涨"文案，**审计核实不可行**：当前 prompt **未注入**近1天/近3天数据、`effective_acos_tolerance`、`target_cpa`、平均订单金额、产品阶段（reasoner.py:1758 产品阶段已被注释，由经营模式替代），LLM 即使严格遵循提示也无法完整执行 19号§4 的预算规则（该规则要求"近1天表现好 + 利用率 + 库存≥30天 + 近3天趋势"多条件组合）。
+**解决问题**：暂停动作绕过护栏，核心词/样本不足等活动可能被 LLM 误暂停。
 
-**改为代码先算预算资格**，LLM 只在资格范围内选幅度和解释：
+当前 `campaign_guardrails` 只处理 `eliminate_to_low_bid_pool`，paused 不经过任何保护。纳入本期后：
+
+- [ ] `campaign_guardrails.py`：增加 `paused` 分支——
+  - **P0 核心词保护**：`is_core=True` 或 29号 核心词所在活动**不得 paused**（与 eliminate 同类保护，`_p0_core_protect` 的 action 判断加 `paused`）
+  - **样本不足保护**：活动上线 <3 天或命中 `SAMPLE_INSUFFICIENT` **不得 paused**（与样本保护 `_p1_new_campaign_protect` 对齐）
+  - **KB31 §13 停止投放前诊断路径**：高点击无单 → 先否词 → 降 bid/预算 → 仍无改善才允许 paused；paused 建议必须 `HIGH_RISK_REVIEW`（人工确认）
+- [ ] 测试：guardrails 对 `paused` 的核心词保护 / 样本保护 / 诊断路径拦截
+
+### P0-D：预算回算——paused 纳入 budget_reallocation（本期新增）
+
+**解决问题**：暂停关停后预算不释放、组合/父级预算不回算——暂停活动空占预算。
+
+当前 `campaign_budget_reallocation.py:47` 只识别 `eliminate_to_low_bid_pool`。纳入本期后：
+
+- [ ] `campaign_budget_reallocation.py`：识别 `paused`——暂停释放金额 = `current_daily_budget`，计入 `other_campaign_budget_decrease`（与停止投放语义一致，见 30号/31号§13）
+  - 与 eliminate 的区别：eliminate 还迁低价池（预算 $1 + bid min）并触发复评体系；paused 是纯释放、无迁池、无复评
+- [ ] 暂停不进入低价捡漏组复评（reactivate 体系只服务淘汰池）——释放金额不回流低价池
+- [ ] 测试：paused 触发预算释放 + 回算，组合/父级预算正确更新
+
+### P0-E：预算资格由代码预计算（审计修正——原"补利用率门槛文案"不完整）
+
+原方案建议在输出约束补"利用率>90% 才可大涨"文案，**审计核实不可行**：当前 prompt **未注入**有效容忍上限、目标CPA、平均订单金额——这些**代码已算好但未透传**（`fill_acos_constraints` campaign.py:1462 填充 `strat_ctx.effective_acos_tolerance/target_cpa/avg_order_value`，prompt 只告诉 LLM"先算容忍度"却没给现成值）。而**近1天/近3天活动级数据暂不支持**（活动级仅 `perf_7d`，无 1d/3d 数据源）。
+
+**改为代码先算/透传预算资格**，LLM 只在资格范围内选幅度和解释：
+
 ```text
-budget_increase_eligible   # 布尔：利用率+近1天表现+库存门槛 是否放行加预算
-budget_utilization_tier    # >90% | 70-90% | 50-70% | <50%
-recent_1d_good             # 近1天 ACOS≤目标（由代码计算）
-recent_3d_trend            # 近3天趋势（由代码计算）
-inventory_gate             # 库存≥30天
+# 代码已算好 → 透传 prompt（helper 已存在，无需 LLM 重算）
+effective_acos_tolerance   # 有效容忍上限（fill_acos_constraints 已算）
+target_cpa                 # 目标 CPA（已算）
+avg_order_value            # 平均订单金额（已算）
+
+# 代码预计算（当前可算集合）
+budget_utilization_tier    # >90% | 70-90% | 50-70% | <50%（现有利率）
+budget_increase_eligible   # 布尔：利用率档位 + 库存门槛 是否放行加预算
+inventory_gate             # 库存≥30天（strat_ctx.inventory_days）
 ```
-prompt 输出约束改为："加预算仅允许在 `budget_increase_eligible=true` 时；幅度按 `budget_utilization_tier` 档位；reason 必须引用代码给出的资格字段，不得自行推导门槛。"
+
+**暂不支持（待数据源）**：`recent_1d_good` / `recent_3d_trend` 依赖近1天/近3天活动级数据（当前无源）——预算幅度判断退化为基于 7 天 + 利用率档位 + 有效容忍上限；数据源接入后再补。
+
+prompt 输出约束改为："加预算仅允许在 `budget_increase_eligible=true` 时；幅度按 `budget_utilization_tier` 档位与 `effective_acos_tolerance` 对照；reason 必须引用代码给出的资格字段，不得自行推导门槛。"
 
 ### P1-1：候选标注层桥接 31号§10 准入（审计修正——原"样本不足词一律不标"不采纳）
 
@@ -190,11 +225,13 @@ bundle 取数层已携带校正指标（campaign_fetcher.py:53-70：`acos_correc
 
 修正：`_metrics()` 改用校正口径（校正后 ACOS/CVR 参与通道判定；校正指标不可用时按 03号§12 标数据缺失而非 raw 顶替），并保留 `data_maturity` 到 evidence。
 
-### P1-4：知识库输出结构与当前 Prompt 结构漂移（审计新增）
+### P1-4：输出契约与后端代码合法值对齐（用户定夺——对齐后端，非对齐 KB31）
 
-KB31 要求的字段（action_code / physical_action_code / branch_hit / search_term_action / promotion_channel / lookback_window / placement_adjustments）与当前广泛流实际输出字段（action / direction / triggered_rule / review_level / exact_promotion_candidates）**不是同一套契约**——模型可能依据 KB31 输出额外字段被代码静默忽略，或把 `condition_code` 当 `triggered_rule`。
+**用户定夺**：输出契约的合法值**以后端代码实际消费为准**（reasoner 解析 + Pydantic 字段 + `_normalize_action` 消费的 `action`/`direction`/`triggered_rule`/`review_level`，即 P0-B 枚举表）——**不是去适配 KB31 字段**。
 
-修正：选定"当前广泛流唯一输出契约"（P0-B 枚举表），KB 投影中明确标记 KB31 字段仅为业务规则说明、非本调用点输出字段。
+KB31 的 `action_code`/`physical_action_code`/`branch_hit`/`search_term_action`/`promotion_channel`/`lookback_window` 是知识库业务语言，**代码不消费**；LLM 若输出会被静默忽略（或把 `condition_code` 当 `triggered_rule`）。
+
+修正：① prompt 输出契约 = 后端合法值（P0-B 已完成）；② KB 投影（P1-2）标注 KB31 字段仅为业务规则说明、非本调用点输出字段，**不诱导 LLM 输出代码不消费的字段**。
 
 ### P1-5：数值证据窗口无结构化校验（审计新增）
 
@@ -225,13 +262,16 @@ Prompt 要求数字证据标注 7d/14d、renderer 已输出窗口标签，但 LL
 
 ## 四、实施顺序建议
 
-1. **P0-A 动作契约定案**（前置）：确定广泛流真实动作集；若需 stop_campaign，先接通代码（模型 → 归一化 → 护栏 → Mapper → ERP → 前端），接通前不改 prompt 示例
-2. **P0-B 枚举清单** + **P0-C 预算资格代码化**（prompt + 资格预计算，可快速验证）→ 跑广泛流相关测试 + 样例 prompt 目检
-3. **P1-1 候选标注桥接** + **P1-5 窗口事实结构化** + **P1-6 预算利用率 0 显式化**（prompt + 解析端小改）→ 同上
-4. **P1-3 校正指标接入准入**（campaign_search_term_promotion._metrics 改校正口径）→ 单测覆盖
-5. **P1-2 投影层**（改动面最大）→ kb_loader 投影 + `test_kb_slicing.py` 回归 + 注入文本目检 + token 对比
-6. **P1-4 输出契约收敛** + **P2-1 解析端校验** → 单元测试覆盖非法值路径
-7. **P2-2 观测**（含跨活动聚合统计）→ 上线后看日志
+> P0-A 动作契约定案、P0-B 枚举清单 **已完成**。以下为剩余项顺序：
+
+1. **P0-C 护栏**（paused 纳入 guardrails：核心词/样本保护 + KB31§13 诊断路径）→ 单测覆盖
+2. **P0-D 预算回算**（paused 纳入 budget_reallocation：预算释放 + 回算）→ 单测覆盖
+3. **P0-E 预算资格代码化**（prompt + 资格预计算，可快速验证）→ 跑广泛流相关测试 + 样例 prompt 目检
+4. **P1-1 候选标注桥接** + **P1-5 窗口事实结构化** + **P1-6 预算利用率 0 显式化**（prompt + 解析端小改）→ 同上
+5. **P1-3 校正指标接入准入**（campaign_search_term_promotion._metrics 改校正口径）→ 单测覆盖
+6. **P1-2 投影层**（改动面最大）→ kb_loader 投影 + `test_kb_slicing.py` 回归 + 注入文本目检 + token 对比
+7. **P1-4 输出契约收敛** + **P2-1 解析端校验** → 单元测试覆盖非法值路径
+8. **P2-2 观测**（含跨活动聚合统计）→ 上线后看日志
 
 每步独立 commit，便于回滚。P0 三项先行，P1 按依赖顺序，P2 最后。
 

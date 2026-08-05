@@ -40,7 +40,8 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 
 - 发现父 ASIN 下的 Campaign、子 ASIN、关键词、match type、预算、bid、placement。
 - 按精准流和广泛/词组/自动流分流分析。
-- 对每个活动产出淘汰、调价、调预算、调广告位、保持等建议。
+- 对每个活动产出淘汰、暂停、调价、调预算、调广告位、保持等建议。
+- 暂停动作：LLM 动作码 `paused_campaign` 出 LLM 即在 `_normalize_action` 翻译为后端统一枚举 `paused`，落库 `suggest_category=PAUSED` + `campaign_pending.new_state=paused`，执行走 `campaignState:"paused"`（与立即退出共用执行管道）。
 - 发现新增活动候选词并生成新建建议。
 - 做组合预算汇总和预算回算。
 - 对低价池/淘汰池活动做复评。
@@ -392,6 +393,8 @@ LLM 输出的 action 不是最终真源。`_normalize_action()` 会根据 propos
 - placement 变化 → `adjust_placement`
 - 低价池淘汰 → `eliminate_to_low_bid_pool`
 - 无变化 → `keep`
+
+**豁免（LLM 决定，代码不推导覆盖）**：`eliminate_to_low_bid_pool` 与 `paused`；其中 LLM 动作码 `paused_campaign` 出 LLM 即翻译为后端统一枚举 `paused`（唯一翻译点），二次归一化也不会把它改回 keep/adjust。
 
 多维同时变化时，由单 action 字段限制按业务优先级归一。后续预算冲突裁决后还会二次归一，避免 pending 与展示动作不一致。
 

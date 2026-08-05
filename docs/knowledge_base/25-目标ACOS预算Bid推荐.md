@@ -204,7 +204,7 @@ Agent 输出的任何关键词、搜索词、否定词、Target，**必须能在
 | --- | --- |
 | 清仓期触发任何扩词场景 | `status = blocked`，`reason_code = LIQUIDATING_NO_EXPANSION` |
 | **唯一例外**：节日款尾货承接 | 按 `24号§4.2` `SEA-001`：允许少量 R1 词，单轮 ≤2 个，强制 `HIGH_RISK_REVIEW`，需运营显式确认 |
-| 清仓期已有活动 | 可调 Bid / 预算（只降不升）、可否词、可 `stop_campaign`；**仅精准广告**可 PP 加价（按 `15号§3.1` liquidating 行）；广泛/词组/自动/商品定投 Placement 统一 `N/A` |
+| 清仓期已有活动 | 可调 Bid / 预算（只降不升）、可否词、可 `paused_campaign`；**仅精准广告**可 PP 加价（按 `15号§3.1` liquidating 行）；广泛/词组/自动/商品定投 Placement 统一 `N/A` |
 
 **与经营模式的关系**：`liquidating` 是产品阶段（客观状态），`controlled_clearance` 是经营模式
 （经营意图）。两者可同时为真，也可只有其一。禁扩词由**产品阶段**触发；

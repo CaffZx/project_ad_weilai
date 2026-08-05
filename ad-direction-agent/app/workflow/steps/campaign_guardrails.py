@@ -118,17 +118,17 @@ def apply_all(
 # ── 规则函数 ───────────────────────────────────────────
 
 def _p0_core_protect(item, gp: GuardrailPass) -> None:
-    """核心词禁淘汰。is_core=True → action 不得为 eliminate。"""
-    if not (getattr(item, "is_core", False) and item.action == "eliminate_to_low_bid_pool"):
+    """核心词禁淘汰/禁暂停。is_core=True → action 不得为 eliminate 或 paused。"""
+    if not (getattr(item, "is_core", False) and item.action in ("eliminate_to_low_bid_pool", "paused")):
         return
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P0_CORE_PROTECT", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
-        original_action="eliminate_to_low_bid_pool", new_action="keep",
+        original_action=item.action, new_action="keep",
         message=f"[{item.campaign_name}] 核心词受保护，已强制修正为 keep",
         retry_instruction=(
-            f"[{item.campaign_name}] 核心词不得淘汰。若当前表现偏弱，可结合活动事实评估小幅降 bid、"
+            f"[{item.campaign_name}] 核心词不得淘汰/暂停。若当前表现偏弱，可结合活动事实评估小幅降 bid、"
             "降预算、调整广告位或维持观察。"
         ),
     ))
@@ -141,10 +141,10 @@ def _p1_new_campaign_protect(
     product_stage: str = "",
     target_cpa: float | None = None,
 ) -> None:
-    """消费 KB17 活动样本口径，样本不足时禁止非硬淘汰。"""
-    if item.action != "eliminate_to_low_bid_pool":
+    """消费 KB17 活动样本口径，样本不足时禁止非硬淘汰/暂停。"""
+    if item.action not in ("eliminate_to_low_bid_pool", "paused"):
         return
-    # P3 硬淘汰优先级高于 P1。触底场景不在 P1 写"禁止淘汰"告警，交给 P3/P4 处理。
+    # P3 硬淘汰优先级高于 P1。触底场景不在 P1 写"禁止淘汰/暂停"告警，交给 P3/P4 处理。
     if _p3_should_force_eliminate(item):
         return
     sample_insufficient, reasons = _sample_insufficient(
@@ -153,15 +153,15 @@ def _p1_new_campaign_protect(
     if not sample_insufficient:
         return
 
-    # 仅禁淘汰，不改非淘汰调整；若 LLM 已判淘汰，则强制恢复到 keep 基准态。
+    # 仅禁淘汰/暂停，不改非淘汰调整；若 LLM 已判淘汰/暂停，则强制恢复到 keep 基准态。
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P1_SAMPLE_INSUFFICIENT", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
-        original_action="eliminate_to_low_bid_pool", new_action="keep",
-        message=f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})，受样本保护，禁止淘汰，已强制修正为 keep (KB17 §1.2)",
+        original_action=item.action, new_action="keep",
+        message=f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})，受样本保护，禁止淘汰/暂停，已强制修正为 keep (KB17 §1.2)",
         retry_instruction=(
-            f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})时不得直接淘汰；若同时命中无订单且 bid/预算触底，"
+            f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})时不得直接淘汰/暂停；若同时命中无订单且 bid/预算触底，"
             "按硬淘汰判断。其他情况下，可结合事实评估小幅 bid、预算、广告位调整或维持。"
         ),
     ))
@@ -330,9 +330,15 @@ def _p6_budget_cap(item, gp: GuardrailPass) -> None:
 
 def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
     """预算花不完禁加：近 7 天预算利用率 < 50% → cap proposed_budget ≤ current。"""
-    if item.action == "eliminate_to_low_bid_pool":
+    if item.action in ("eliminate_to_low_bid_pool", "paused"):
         return
     if item.proposed_budget is None or item.current_budget is None:
+        return
+    if item.proposed_budget <= item.current_budget:
+        return
+    perf = getattr(item, "perf_7d", {}) or {}
+    spend_raw = perf.get("cost", perf.get("spend"))
+    if spend_raw is None:
         return
     if item.proposed_budget <= item.current_budget:
         return
@@ -363,7 +369,7 @@ def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
 
 def _p8_bid_amplitude(item, gp: GuardrailPass) -> None:
     """Bid 振幅上限：变动 >50% 且 clicks<10 → 收敛到 30%。"""
-    if item.action == "eliminate_to_low_bid_pool":
+    if item.action in ("eliminate_to_low_bid_pool", "paused"):
         return
     if item.proposed_bid is None or item.current_bid is None or item.current_bid == 0:
         return
@@ -467,8 +473,8 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
     days = getattr(item, "days_online", -1)
     if not (days >= 0 and days <= 3):
         return
-    if item.action == "eliminate_to_low_bid_pool":
-        return  # P4 已处理淘汰值
+    if item.action in ("eliminate_to_low_bid_pool", "paused"):
+        return  # P4 已处理淘汰值；暂停不调 bid
     if item.action == "keep" and getattr(item, "days_online", -1) <= 3:
         # P1 只改了 action=keep，没动 proposed 值 → 仍须检查降幅
         pass
