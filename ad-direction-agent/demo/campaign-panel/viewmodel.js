@@ -157,6 +157,7 @@ export function normalizeViewModel(raw) {
       summary: {
         total: raw.total_campaigns ?? 0,
         eliminate: s.to_eliminate ?? 0,
+        paused: s.to_paused ?? 0,
         adjust: s.to_adjust ?? 0,
         keep: s.to_keep ?? 0,
         create: (raw.new_campaigns || []).length,
@@ -189,7 +190,7 @@ export function normalizeViewModel(raw) {
     days: 7,
     run_id: '',
     snapshot_time: null,
-    summary: { total: 0, eliminate: 0, adjust: 0, keep: 0, create: 0, reactivate: 0, prefiltered: 0, lost: 0,
+    summary: { total: 0, eliminate: 0, paused: 0, adjust: 0, keep: 0, create: 0, reactivate: 0, prefiltered: 0, lost: 0,
                confidence_high: 0, confidence_medium: 0, confidence_low: 0,
                budget_impact: null, sanity_check_passed: null },
     overview: null,

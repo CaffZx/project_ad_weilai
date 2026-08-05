@@ -8,7 +8,7 @@
   P4: 淘汰值硬填充 ($1.00/$0.20, 清 placement/neg_kw)
   P5: 淘汰反修正 (受保护活动/非精准活动被误判 → 强制改 keep)
   P6: 日预算上限 ($200, KB15 §1.4)
-  P7: 预算花不完禁加 (7d 花费 / 日预算×7 < 50% → cap)
+  P7: 预算花不完禁加 (7d 花费 / 日预算×7 < 70% → cap)
   P8: Bid 振幅上限 (>50% 且 clicks<10 → 收敛到 30%)
   P9: Bid 硬上限 ($3.00, KB15 §1.4)
   P10: 广告位 TOS 加价阻断 (库存<15天 / 退货率≥30% / 评分<3.8, KB15 §3.2)
@@ -329,7 +329,7 @@ def _p6_budget_cap(item, gp: GuardrailPass) -> None:
 
 
 def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
-    """预算花不完禁加：近 7 天预算利用率 < 50% → cap proposed_budget ≤ current。"""
+    """预算花不完禁加：近 7 天预算利用率 < 70% → cap proposed_budget ≤ current。"""
     if item.action in ("eliminate_to_low_bid_pool", "paused"):
         return
     if item.proposed_budget is None or item.current_budget is None:
@@ -345,17 +345,17 @@ def _p7_budget_low_spend(item, gp: GuardrailPass) -> None:
     if current_budget <= 0:
         return
     budget_utilization_pct = spend / (current_budget * 7) * 100
-    if budget_utilization_pct >= 50:
+    if budget_utilization_pct >= 70:
         return
     item.proposed_budget = item.current_budget
     gp.add(GuardrailResult(
         rule_id="P7_BUDGET_LOW_SPEND", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
-        message=(f"[{item.campaign_name}] 预算利用率 {budget_utilization_pct:.1f}% < 50%，"
+        message=(f"[{item.campaign_name}] 预算利用率 {budget_utilization_pct:.1f}% < 70%，"
                  "禁加预算"),
         retry_instruction=(
             f"[{item.campaign_name}] 近 7 天总花费 ${spend:.1f}，当前日预算 ${current_budget:.0f}，"
-            f"预算利用率 {budget_utilization_pct:.1f}% 低于 50%，"
+            f"预算利用率 {budget_utilization_pct:.1f}% 低于 70%，"
             "不应上调预算。可结合事实评估维持预算、下调预算、调整 bid 或广告位。"
         ),
     ))

@@ -411,7 +411,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 ## 输出约束
 ### 必填结构字段
 - **每个活动都必须填写**: cid（原样回填输入句柄）, action, direction, triggered_rule, proposed_budget, proposed_bid, evidence, review_level
-- proposed_budget / proposed_bid **除 `paused_campaign` 外**必须填写具体数值，禁止留 null。`paused_campaign` 是唯一例外——暂停仅状态变更，不填 proposed_budget/proposed_bid（填了也会被代码忽略）
+- proposed_budget / proposed_bid 必须填写具体数值，禁止留 null
 
 ### action 合法枚举（必须且只能输出其中之一）
 - `keep`：保持
@@ -1745,7 +1745,7 @@ class LLMReasoner:
                 summary["budget_utilization_tier"] = "50-70%（维持档）"
             else:
                 summary["budget_utilization_tier"] = "<50%（花不完档，不加预算）"
-            summary["budget_increase_eligible"] = _pct > 70
+            summary["budget_increase_eligible"] = _pct >= 70
         if keyword_class:
             summary["keyword_class"] = keyword_class
         if is_core:

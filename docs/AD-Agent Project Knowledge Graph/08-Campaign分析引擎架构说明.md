@@ -73,6 +73,7 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | Advert 执行 | `workflow/steps/advert_execution.py:255`；`persistence/erp_writer/advert_exec_mapper.py:82` | CONFIRMED pending 转 MCP 执行计划 |
 | 经营模式权限闸 | `campaign.py:414` `ad_permission`；`:417` `growth_analysis_enabled` | 经营模式 → AdPermission，控制增长流（复评/新建）开关 |
 | ACOS 容忍上限 | `campaign.py:1246` `fill_acos_constraints()` → `acos_constraints.py:55` `compute_acos_tolerance()` | 预计算 effective_acos_tolerance / target_cpa，注入策略上下文 |
+| 否词花费门槛 | `campaign.py` 策略上下文透传段 (`_run_round`) | 预计算 `max($20, target_cpa × 1.5)`（03号§7.3），注入策略上下文供 LLM 直接比较；7d花费 < 门槛不得否词 |
 | 精准升降级 | `campaign.py:1153` `_apply_exact_transition_rules()` → `campaign_exact_transition.py:172` `evaluate_exact_transition()` | 32号规则引擎：EXACT 单关键词活动的迁组/诊断，LLM 合并后护栏前执行 |
 | 组合目标收拢 | `campaign.py:2101` `_reconcile_portfolio_targets()` | 落库前唯一可信挪组 target：广泛→auto_broad，精准仅 EXACT_TRANSITION 结果可写 |
 | Ontology Card | `kb_loader.py:232` `build_ontology_card()` | 从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt |
@@ -331,6 +332,7 @@ Campaign 引擎在运行时消费经营模式（`OperatingMode`），但不将�
 
 - 经营模式不参与 `_reconcile_portfolio_targets()` 的迁组授权（`campaign.py:2110` 注释：「经营模式只能影响前序分析与护栏，不参与此处迁组授权」）。
 - `fill_acos_constraints()` 在 LLM 分析前预计算 `effective_acos_tolerance`，存入 `CampaignStrategyContext`，后续精准升降级和护栏均消费此值。
+- 否词花费门槛 `max($20, target_cpa × 1.5)`（03号§7.3）在策略上下文透传段**提前算好注入 prompt**（与 P0-E 预算资格同模式），LLM 逐词比较 7d花费 与门槛，低于门槛不否词。
 - 未知经营模式按 `mode_fallback.unknown_value` 处理：强制人工复核（`force_manual_review`），禁止静默降级为 NORMAL。
 
 ## 策略总览 overview gate

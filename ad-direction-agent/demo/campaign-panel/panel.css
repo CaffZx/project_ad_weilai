@@ -234,7 +234,8 @@
 .camp-badge {
   font-size: 10px; padding: 2px 8px; border-radius: 9999px; font-weight: 600;
 }
-.camp-badge-eliminate { background: #FEE2E2; color: #991B1B; }
+.camp-badge-eliminate,
+.camp-badge-eliminate_or_paused { background: #FEE2E2; color: #991B1B; }  /* 淘汰/暂停共用红色 */
 .camp-badge-adjust    { background: #FEF3C7; color: #92400E; }
 .camp-badge-keep      { background: #E5E7EB; color: #374151; }
 .camp-badge-create    { background: #DCFCE7; color: #166534; }
