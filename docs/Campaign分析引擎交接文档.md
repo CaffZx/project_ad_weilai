@@ -137,7 +137,7 @@ parent_asin
 | `app/api/config_mirror.py` | — | ★配置保存镜像（v3.23 新增）：Agent 配置双向同步 API，保证运营配置与 state DB/ERP 一致性 |
 | `app/workflow/steps/campaign_portfolio.py` | — | ★组合分类器 + 双向映射归一化来源（`GROUP_CODE_TO_LABEL`/`GROUP_LABEL_TO_CODE`）；阈值常量从 guardrails re-export |
 | `app/workflow/steps/campaign_budget_summary.py` | — | ★预算汇总：3 组约束分配 (主力/测试/广泛)，优先 MCP portfolio 真实值，淘汰不参与约束 |
-| `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→双轮 LLM 选词取交集→**与搜索词提精准双来源合流**（`merge_new_campaign_decisions`）→统一组装（`finalize_new_campaign_decisions`，bid/预算/命名代码确定性产出）；**v3.25**：`_derive_match_type` 对 `source=flow` 候选一律先建 BROAD（词形分类不再决定 EXACT） |
+| `app/workflow/steps/campaign_new.py` | — | ★新增活动分析线 (KB 16/28)：候选词发现(flow/own/竞品)→硬过滤→双轮 LLM 选词取交集→**与搜索词提精准双来源合流**（`merge_new_campaign_decisions`）→统一组装（`finalize_new_campaign_decisions`，bid/预算/命名代码确定性产出）；**v3.25**：`_derive_match_type` 删除 `_CLASS_TO_MATCH_TYPE` 硬映射，改为来源驱动——流量来源全链路（flow/ranking_opportunity/competitor）一律 BROAD，仅搜索词提精准（来源B）可建 EXACT |
 | `app/data/new_keyword_fetcher.py` | — | ★多源候选词发现统一编排器（v3.21 新增）：flow_keywords/own_keyword_flow/competitor_reverse 三源并行 + 配额分配 + 来源合并去重（供流量来源） |
 | `app/workflow/steps/campaign_search_term_promotion.py` | 104 | ★搜索词提精准确定性准入（v3.25 新增）：`build_search_term_promotion_decisions()` 按 KB23 §3.4 订单通道（7d 订单≥3 且 ACOS≤目标）/词根通道（聚合订单≥3 或 ACOS ok）从搜索词报告候选生成 EXACT 决策，`source=SRC_CONVERTED`/`SRC_BROAD_DERIVED`；CVR 通道缺品类基准刻意不伪造 |
 | `app/core/campaign_sample.py` | 68 | ★活动级样本不足判定（v3.25 新增）：KB17 事实判定（`assess_campaign_sample`：上线<3 天 / 7d 花费<max($5,CPA×0.5) / 点击<10），不阻止 MCP、不清空候选，仅作搜索词取数门禁（`SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT`） |
@@ -837,11 +837,11 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 - **样本不足**：活动级样本不足（`assess_campaign_sample`）的活动，搜索词只观察、不进提精准。
 - **去重**：已存在 EXACT 活动的词（`existing_exact_keywords`）跳过；候选按 `(campaign_key, search_term)` 去重。
 
-### 15.4 匹配方式来源优先（KB16 §4 / KB28 SRC_FLOW_EXPLORATION）
+### 15.4 匹配方式来源驱动（KB16 §4 / KB28 SRC_FLOW_EXPLORATION）
 
-- `source=flow`（流量词库，未经搜索词表现验证）候选：`_derive_match_type` 一律返回 `BROAD` 先拿搜索词样本；`long_tail` 词形分类只描述词形/相关性，不单独证明应建 EXACT。
-- 搜索词提精准候选：固定 `prescribed_match_type=EXACT`，进入精准测试组。
-- 排名机会词 / 竞品词：各自专门规则判定，不被本节覆盖。
+- 流量来源全链路（flow / ranking_opportunity / competitor）候选：`_derive_match_type` 一律返回 `BROAD` 先拿搜索词样本；`keyword_class`（long_tail 等）只描述词形/相关性，不参与 match_type 推导。
+- 搜索词提精准候选：固定 `prescribed_match_type=EXACT`，进入精准测试组。只有这一条路径可建 EXACT。
+- `_CLASS_TO_MATCH_TYPE` 旧表已删除，不再有 keyword_class → match_type 硬映射。
 
 ---
 

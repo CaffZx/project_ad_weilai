@@ -121,11 +121,12 @@ def _p0_core_protect(item, gp: GuardrailPass) -> None:
     """核心词禁淘汰/禁暂停。is_core=True → action 不得为 eliminate 或 paused。"""
     if not (getattr(item, "is_core", False) and item.action in ("eliminate_to_low_bid_pool", "paused")):
         return
+    original = item.action
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P0_CORE_PROTECT", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
-        original_action=item.action, new_action="keep",
+        original_action=original, new_action="keep",
         message=f"[{item.campaign_name}] 核心词受保护，已强制修正为 keep",
         retry_instruction=(
             f"[{item.campaign_name}] 核心词不得淘汰/暂停。若当前表现偏弱，可结合活动事实评估小幅降 bid、"
@@ -154,11 +155,12 @@ def _p1_new_campaign_protect(
         return
 
     # 仅禁淘汰/暂停，不改非淘汰调整；若 LLM 已判淘汰/暂停，则强制恢复到 keep 基准态。
+    original = item.action
     _force_keep(item)
     gp.add(GuardrailResult(
         rule_id="P1_SAMPLE_INSUFFICIENT", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
-        original_action=item.action, new_action="keep",
+        original_action=original, new_action="keep",
         message=f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})，受样本保护，禁止淘汰/暂停，已强制修正为 keep (KB17 §1.2)",
         retry_instruction=(
             f"[{item.campaign_name}] 样本不足({'; '.join(reasons)})时不得直接淘汰/暂停；若同时命中无订单且 bid/预算触底，"

@@ -748,7 +748,7 @@ Campaign 引擎维护四类组合语义：
 5. 建议竞价查询。
 6. 流量来源执行双轮 LLM 选词。
 7. 流量来源两轮都判“建”的词取交集；搜索词来源已在广泛流 LLM 输出后经过搜索词提精准的确定性准入，不再重复走流量来源的新词双轮。
-8. 代码层补齐 match_type、bid、budget、campaign_name、目标子 ASIN、portfolio class；搜索词来源的精准扩词也复用同一套名称、子 ASIN 指派和落库接线。
+8. 代码层补齐 match_type、bid、budget、campaign_name、目标子 ASIN、portfolio class；流量来源全链路 match_type 一律 BROAD（`_derive_match_type` 来源驱动），仅有验证信号的搜索词来源才进 EXACT；其余执行字段由代码确定性补齐。
 
 合流后的统一约束：已有 EXACT 活动的词先排除；流量来源/搜索词来源同词只保留一条；最后按 `campaign_new_max_creates` 做新建输出上限截断。搜索词来源不绕过 `campaign_new.py` 的公共最终化，也不改变流量来源的业务规则。
 
