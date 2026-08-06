@@ -626,7 +626,7 @@ function _renderPortfolioFilterPills(state) {
     countByName[p]++;
     budgetByName[p].cur += Number(it.current_budget) || 0;
     budgetByName[p].prop += state._selection.has(it.item_id)
-      ? (p === LOW_BID ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0))
+      ? (it.action === 'paused' ? 0 : (p === LOW_BID ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0)))
       : (Number(it.current_budget) || 0);
   });
 
@@ -872,7 +872,7 @@ function _renderBudgetSummary(state) {
     totalCount++;
     const p = it.ai_portfolio_class || '自动广泛组';
     if (state._selection.has(it.item_id)) {
-      execTotal += (p === LOW_BID) ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0);
+      execTotal += it.action === 'paused' ? 0 : ((p === LOW_BID) ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0));
       selectedCount++;
     } else {
       execTotal += Number(it.current_budget) || 0;

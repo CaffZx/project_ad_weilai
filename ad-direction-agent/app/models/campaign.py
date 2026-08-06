@@ -223,6 +223,9 @@ class NewCampaignDecision(BaseModel):
     search_volume: int = 0
     natural_rank: int | None = None
     suggested_bid: float | None = None
+    color_flags: dict[str, bool] | None = None   # LLM 输出：{black: true, red: true}
+    holiday_flags: dict[str, bool] | None = None  # LLM 输出：{halloween: true}
+    assigned_child_asin: str = ""                 # 代码回填：颜色→子ASIN 指派（空=用默认 target_child_asin）
 
 
 class NewCampaignCandidate(BaseModel):

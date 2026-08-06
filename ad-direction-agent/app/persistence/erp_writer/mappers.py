@@ -122,7 +122,12 @@ def _portfolio_groups_from_payload(
             continue
         counts[label] += 1
         try:
-            budget_sums[label] += float(adj.get("proposed_budget") or adj.get("current_budget") or 0)
+            _action = str(adj.get("action") or "").strip().lower()
+            if _action == "paused":
+                _pb = 0.0
+            else:
+                _pb = adj.get("proposed_budget")
+            budget_sums[label] += float(_pb if _pb is not None else (adj.get("current_budget") or 0))
         except (TypeError, ValueError):
             pass
     constraints = (budget_summary or {}).get("portfolio_constraints") or {}

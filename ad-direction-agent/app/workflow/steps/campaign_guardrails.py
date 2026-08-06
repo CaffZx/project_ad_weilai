@@ -18,8 +18,12 @@
 """
 
 from __future__ import annotations
+
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.models.campaign import CampaignAdjustmentItem
@@ -224,7 +228,13 @@ def _p3_force_eliminate(item, gp: GuardrailPass, *, product_stage: str = "") -> 
     else:
         item.proposed_bid = cbid
     item.placement_adjustments = []
+    _neg_before = len(item.negative_keywords)
     item.negative_keywords = []
+    if _neg_before:
+        logger.info(
+            "护栏 P3 清否词 campaign=%s campaign_id=%s 原否词数=%d",
+            item.campaign_name, getattr(item, "campaign_id", ""), _neg_before,
+        )
     gp.add(GuardrailResult(
         rule_id="P3_FORCE_ELIMINATE", corrected=True,
         campaign_key=getattr(item, "campaign_key", ""),
@@ -257,7 +267,12 @@ def _p4_elimination_fill(item, gp: GuardrailPass) -> None:
     if item.placement_adjustments:
         item.placement_adjustments = []; changed = True
     if item.negative_keywords:
+        _neg_before = len(item.negative_keywords)
         item.negative_keywords = []; changed = True
+        logger.info(
+            "护栏 P4 清否词 campaign=%s campaign_id=%s 原否词数=%d",
+            item.campaign_name, getattr(item, "campaign_id", ""), _neg_before,
+        )
     if changed:
         gp.add(GuardrailResult(
             rule_id="P4_ELIMINATION_FILL", corrected=True,

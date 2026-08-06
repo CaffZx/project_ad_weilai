@@ -74,6 +74,9 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | 经营模式权限闸 | `campaign.py:414` `ad_permission`；`:417` `growth_analysis_enabled` | 经营模式 → AdPermission，控制增长流（复评/新建）开关 |
 | ACOS 容忍上限 | `campaign.py:1246` `fill_acos_constraints()` → `acos_constraints.py:55` `compute_acos_tolerance()` | 预计算 effective_acos_tolerance / target_cpa，注入策略上下文 |
 | 否词花费门槛 | `campaign.py` 策略上下文透传段 (`_run_round`) | 预计算 `max($20, target_cpa × 1.5)`（03号§7.3），注入策略上下文供 LLM 直接比较；7d花费 < 门槛不得否词 |
+| **Listing 五点+类目+颜色** | `mcp_registry.py` `erp_listing_product_info()` | azlisting MCP，全局限流 5req/10s。父级字段（五点/类目）注入新增流 prompt 作相关性锚点；子体字段按 asin 收拢颜色/尺码，构建 `color_to_asin` 映射 |
+| **颜色/节日标记** | `campaign_new.py` `_normalize_color()` + `_build_color_asin_map()` | 从 listing 变体提取去重归一化颜色列表；LLM 产出 `color_flags`/`holiday_flags` 后校验合法性（非法颜色拒绝），合法则指派对应颜色花费最高子 ASIN。**不校验关键词拼写**（LLM 识别 `blak`→`black`）。节日 >60天 LLM 自行 skip |
+| **否词日志（护栏前/后）** | `campaign.py` L826(前) + L1075(后) | 两段日志分别记录护栏前 LLM 产出和护栏后终态，差值即 P3/P4 清除的淘汰活动否词 |
 | 精准升降级 | `campaign.py:1153` `_apply_exact_transition_rules()` → `campaign_exact_transition.py:172` `evaluate_exact_transition()` | 32号规则引擎：EXACT 单关键词活动的迁组/诊断，LLM 合并后护栏前执行 |
 | 组合目标收拢 | `campaign.py:2101` `_reconcile_portfolio_targets()` | 落库前唯一可信挪组 target：广泛→auto_broad，精准仅 EXACT_TRANSITION 结果可写 |
 | Ontology Card | `kb_loader.py:232` `build_ontology_card()` | 从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt |
@@ -367,7 +370,7 @@ Prompt 组装细节：
 | --- | --- | --- | --- | --- |
 | exact 调整 | `reasoner.py:366` `_build_campaign_system_prompt("exact")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:64` `campaign_adjustment_exact` | CampaignUnit、placement、自然排名、策略上下文、overview text | `CampaignAdjustmentItem[]` |
 | broad/phrase/auto 调整 | `reasoner.py:366` `_build_campaign_system_prompt("broad")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:67` `campaign_adjustment_broad` | CampaignUnit、search terms、否定词证据、策略上下文、overview text | `CampaignAdjustmentItem[]` + `exact_promotion_candidates[]` |
-| new campaign | `reasoner.py:437` `_build_new_campaign_prompt()`；`:1813` `recommend_new_campaigns()` | `kb_loader.py:82` `new_campaign` | 流量来源候选词、自然排名、流量词、建议竞价、策略上下文、overview text | 流量来源候选决策；再与搜索词来源合流并由代码补齐执行字段 |
+| new campaign | `reasoner.py:437` `_build_new_campaign_prompt()`；`:1813` `recommend_new_campaigns()` | `kb_loader.py:82` `new_campaign` | 流量来源候选词、自然排名、流量词、建议竞价、策略上下文、overview text、**产品五点+类目（erp_listing_product_info）**、**产品颜色列表（动态）**、**站点当地时间+节日参考** | 流量来源候选决策；LLM 标记颜色/节日 → 代码校验后合流 |
 | synthesis | `reasoner.py:488` `_build_campaign_synthesis_prompt()`；`:2011` `recommend_campaign_synthesis()` | Campaign synthesis 相关切片 | 已有活动调整、新建活动、预算摘要、策略总览 | reason groups / specials |
 | budget reallocation | `reasoner.py:578` `_build_budget_realloc_prompt()`；`:2101` `recommend_budget_reallocation()` | `kb_loader.py:85` `budget_reallocation` | portfolio 预算、组别预算、调整建议、父级净增约束 | 组合预算重分配建议 |
 

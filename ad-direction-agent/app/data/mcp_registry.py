@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from app.config.settings import settings
 from app.data.mcp_client import StreamableHttpMcpInvoker
+from app.data.mcp_normalizers import _as_rows
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,71 @@ for t in _STARROCKS_TOOLS:
 # ── AZ 工具注册 ──
 _AZ_TOOLS = [
     "erp_listing_asin_keyword_rank_history",
+    "erp_listing_product_info",
 ]
 for t in _AZ_TOOLS:
     registry.register_tool(t, "azlisting")
+
+
+async def erp_listing_product_info(
+    shop_account: str,
+    parent_asin: str,
+    parent_seller_sku: str,
+) -> dict | None:
+    """调 azlisting ``erp_listing_product_info``, 取回父级类目+五点 + 各子 ASIN 尺码颜色。
+
+    fail-open: 失败返回 None。
+    """
+    import json as _json
+
+    try:
+        rt = registry.resolve("erp_listing_product_info")
+        raw = await rt.get_invoker().call_tool(
+            "erp_listing_product_info",
+            {"paramsJson": _json.dumps({
+                "shopAccount": shop_account,
+                "parentAsin": parent_asin,
+                "parentSellerSku": parent_seller_sku,
+            })},
+        )
+    except Exception:
+        logger.exception("erp_listing_product_info 失败 [%s]", parent_asin)
+        return None
+
+    rows = _as_rows(raw)
+    if not rows:
+        return None
+
+    # ── 父级字段：第一行取即可（所有子体共享）──
+    r0 = rows[0]
+    bullets = []
+    for i in range(1, 6):
+        b = str(r0.get(f"fiveBulletPoint{i}") or "").strip()
+        if b:
+            bullets.append(b)
+
+    category = ""
+    cat_raw = str(r0.get("lastCategory") or "")
+    try:
+        cat_list = _json.loads(cat_raw)
+        if cat_list and isinstance(cat_list, list):
+            category = str(cat_list[0].get("title") or "")
+    except (_json.JSONDecodeError, IndexError, KeyError):
+        pass
+
+    # ── 子体字段：遍历所有行，按 asin 收拢颜色/尺寸 ──
+    variants: dict[str, dict] = {}
+    for r in rows:
+        asin = str(r.get("asin") or "").strip()
+        if not asin:
+            continue
+        variants[asin] = {
+            "color": str(r.get("productColor") or "").strip(),
+            "size": str(r.get("productSize") or "").strip(),
+        }
+
+    return {
+        "bullets": bullets,
+        "category": category,
+        "variants": variants,
+    }

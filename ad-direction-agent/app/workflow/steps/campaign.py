@@ -494,6 +494,22 @@ async def _analyze_campaigns_impl(
             return [], [], {}
         if not await _resolve_growth_analysis_enabled():
             return [], [], {}
+
+        # 拉取 Listing 五点+属性（azlisting MCP），fail-open
+        listing_info = None
+        if shop_account and parent_asin and campaign_data.parent_seller_sku:
+            from app.data.mcp_registry import erp_listing_product_info
+            listing_info = await erp_listing_product_info(
+                shop_account, parent_asin, campaign_data.parent_seller_sku,
+            )
+
+        # 颜色映射 + 站点日期
+        from app.workflow.steps.campaign_new import _normalize_color, _build_color_asin_map
+        _colors, _color_to_asin = _build_color_asin_map(listing_info, campaign_data.campaigns)
+        from app.data.mcp_mapping import make_date_window
+        _sd, _ed = make_date_window(1, campaign_data.site_code or "")
+        _today = _ed  # end = 站点当地昨天（保守取前一天，避免时区差）
+
         runner = analyze_new_campaigns if finalize else analyze_new_campaign_decisions
         return await runner(
             fetcher=fetcher, reasoner=reasoner, parent_asin=parent_asin,
@@ -511,6 +527,10 @@ async def _analyze_campaigns_impl(
             sem=new_sem,
             overview_gate=overview_gate,
             product_title=(asin_data.title or "") if asin_data else "",
+            listing_info=listing_info,
+            colors=_colors or None,
+            color_to_asin=_color_to_asin or None,
+            today_date=_today,
             cancel_check=cancel_check,
         )
 
@@ -803,6 +823,14 @@ async def _analyze_campaigns_impl(
     action_order = {"eliminate_to_low_bid_pool": 0, "adjust_bid": 1, "adjust_budget": 1, "adjust_placement": 1, "keep": 2}
     adjustments.sort(key=lambda x: action_order.get(x.action, 9))
 
+    if broad_list:
+        _bw_neg = sum(1 for a in broad_adjustments if a.negative_keywords)
+        _bw_total = sum(len(a.negative_keywords) for a in broad_adjustments)
+        logger.info(
+            "Campaign [%s] 广泛流否词落地(护栏前 LLM 产出): %d/%d 条带否词，共 %d 个否词",
+            parent_asin, _bw_neg, len(broad_adjustments), _bw_total,
+        )
+
     # 6b. 组合终分类: 用 LLM action 把"建议淘汰"的活动从主推/广泛重分到淘汰组
     #     必须在 _resolve_budget_conflicts 之前——后者会把淘汰活动 budget 改成 $1,
     #     之后再走 _is_in_elimination_pool 会误判一批"刚被强制淘汰"的活动。
@@ -1045,6 +1073,15 @@ async def _analyze_campaigns_impl(
         }
 
     rounds_detail["guardrail"] = guardrail_rounds
+
+    # 护栏后否词终态（与护栏前对比，P3/P4 可能已清除淘汰活动的否词）
+    if broad_list:
+        _bw_neg_final = sum(1 for a in broad_adjustments if a.negative_keywords)
+        _bw_total_final = sum(len(a.negative_keywords) for a in broad_adjustments)
+        logger.info(
+            "Campaign [%s] 广泛流否词落库终态(护栏后): %d/%d 条带否词，共 %d 个否词",
+            parent_asin, _bw_neg_final, len(broad_adjustments), _bw_total_final,
+        )
 
     # 6d. 精准确定性规则（32号）—— LLM 全部轮次（R1-R4）结束后执行。
     #     只生成独立迁组补丁，不覆写 LLM 调整字段；补丁不会被 LLM 重试丢失。
@@ -2302,6 +2339,16 @@ async def _prefetch_search_terms(
             else:
                 search_term_names.add(cu.campaign_name)
 
+    if skipped:
+        _skip_details = [
+            f"{name}({','.join(getattr(a, 'reasons', ()))})"
+            for name, a in skipped.items()
+        ]
+        logger.info(
+            "Campaign [%s] 搜索词预取跳过 %d 个活动(样本不足): %s",
+            parent_asin, len(skipped), "; ".join(_skip_details),
+        )
+
     for item in enriched:
         cu = _find_campaign_unit(unit_lookup, item.get("campaign_key", ""))
         if cu and cu.campaign_name in skipped:
@@ -2501,8 +2548,11 @@ def _normalize_action(item: CampaignAdjustmentItem) -> bool:
         bool: True 表示 action 被改写过 (用于日志统计)
     """
     # 暂停：LLM 动作码 → 后端统一枚举 paused（唯一翻译点）；与淘汰一样代码不推导覆盖
+    # 预算/Bid 置零：暂停=停止花费，卡片展示和前端预算之和均需体现
     if item.action == "paused_campaign":
         item.action = "paused"
+        item.proposed_budget = 0.0
+        item.proposed_bid = 0.0
         return False
     # 淘汰 / 已翻译的暂停由 LLM 决定,代码不干预 (二次归一化也不会改回 keep/adjust)
     if item.action in ("eliminate_to_low_bid_pool", "paused"):

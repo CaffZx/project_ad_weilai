@@ -212,6 +212,53 @@ def _conservative_tier(a, b) -> str:
     return ta if _TIER_ORDER[ta] >= _TIER_ORDER[tb] else tb
 
 
+def _normalize_color(raw: str) -> str | None:
+    """"Black5"→"black", "Red2"→"red", "One Size"→None"""
+    import re as _re
+    s = raw.strip().lower()
+    if not s or s in ("one size",):
+        return None
+    s = _re.sub(r"\d+$", "", s).strip()
+    return s or None
+
+
+def _build_color_asin_map(
+    listing_info: dict | None,
+    campaigns: list,
+) -> tuple[list[str], dict[str, str]]:
+    """从 listing_info.variants + campaign 7d 花费构建颜色→子ASIN 映射。"""
+    colors: list[str] = []
+    color_to_asin: dict[str, str] = {}
+    if not listing_info:
+        return colors, color_to_asin
+    variants = listing_info.get("variants") or {}
+    if not variants:
+        return colors, color_to_asin
+
+    child_spend: dict[str, float] = {}
+    for cu in campaigns:
+        ca = (getattr(cu, "child_asin", "") or "").strip()
+        if not ca:
+            continue
+        cost = getattr(cu.perf_7d, "cost", 0.0) if getattr(cu, "perf_7d", None) else 0.0
+        child_spend[ca] = child_spend.get(ca, 0.0) + cost
+
+    seen: set[str] = set()
+    for asin, v in variants.items():
+        c = _normalize_color(v.get("color", ""))
+        if not c:
+            continue
+        if c not in seen:
+            seen.add(c)
+            colors.append(c)
+        spent = child_spend.get(asin, 0)
+        if c not in color_to_asin or spent > child_spend.get(color_to_asin[c], 0):
+            color_to_asin[c] = asin
+
+    colors.sort()
+    return colors, color_to_asin
+
+
 def pick_target_child_asin(campaigns: list) -> str:
     """新增活动的投放目标子 ASIN。
 
@@ -298,7 +345,7 @@ async def finalize_new_campaign_decisions(
         bid, bid_source = _calc_initial_bid(bid_cand)
         items.append(NewCampaignItem(
             keyword_text=decision.keyword_text,
-            child_asin=target_child_asin,
+            child_asin=decision.assigned_child_asin or target_child_asin,
             campaign_name=_generate_campaign_name(decision.keyword_text, mt),
             campaign_type="精准广告" if is_exact else "广泛广告",
             match_type=mt,
@@ -383,7 +430,11 @@ async def analyze_new_campaign_decisions(
     days: int = 7,
     sem: asyncio.Semaphore | None = None,
     overview_gate: "asyncio.Task | None" = None,
-    product_title: str = "",          # 相关性锚点（来自 asin_data.title；brand/category 已去除：太粗易引品类级误匹配）
+    product_title: str = "",          # 相关性锚点（来自 asin_data.title）
+    listing_info: dict | None = None,  # {bullets, category, variants}（来自 erp_listing_product_info）
+    colors: list[str] | None = None,    # 去重+归一化的颜色列表，注入 LLM prompt
+    color_to_asin: dict[str, str] | None = None,  # 颜色→花费最高子 ASIN
+    today_date: str = "",               # 站点当地时间 YYYY-MM-DD
     cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[list[NewCampaignDecision], list[str], dict[str, int]]:
     """发现并选择来源 A 的新增活动决策，暂不查询 bid 或组装最终卡片。
@@ -544,6 +595,9 @@ async def analyze_new_campaign_decisions(
                     strategy_context=ctx_dict,           # 含 posture_brief
                     temperature=temperature, timeout_override=55,
                     product_title=product_title,
+                    listing_info=listing_info,
+                    colors=colors,
+                    today_date=today_date,
                     existing_keywords=sorted(existing_keywords),  # 相关性参照锚点
                 )
             await _cancel()
@@ -637,6 +691,31 @@ async def analyze_new_campaign_decisions(
             relevance_tier = _norm_tier(o1.get("relevance_tier"))
 
         mt = _derive_match_type(keyword_class, cand)
+
+        # 颜色校验 + 子 ASIN 指派
+        assigned_asin = ""
+        valid_colors = set(colors) if colors else set()
+        raw_cf = o1.get("color_flags") or {}
+        cf: dict[str, bool] | None = None
+        if isinstance(raw_cf, dict) and raw_cf:
+            illegal = [k for k in raw_cf if k not in valid_colors]
+            if illegal:
+                logger.warning(
+                    "Campaign new [%s]: 颜色非法 kw=%r colors=%s → skip",
+                    parent_asin, kw, illegal,
+                )
+                continue  # 拒绝该候选词
+            cf = {k: bool(v) for k, v in raw_cf.items() if bool(v)}
+            if cf:
+                first_color = next(iter(cf))
+                assigned_asin = (color_to_asin or {}).get(first_color, "")
+
+        # 节日标记：透传，不做硬校验（LLM 自行判断节日距离）
+        hf_raw = o1.get("holiday_flags") or {}
+        hf: dict[str, bool] | None = None
+        if isinstance(hf_raw, dict) and hf_raw:
+            hf = {k: bool(v) for k, v in hf_raw.items() if bool(v)}
+
         decisions.append(NewCampaignDecision(
             keyword_text=cand.keyword_text,
             prescribed_match_type=mt,
@@ -652,6 +731,9 @@ async def analyze_new_campaign_decisions(
             search_volume=cand.search_volume,
             natural_rank=cand.natural_rank,
             suggested_bid=cand.suggested_bid,
+            color_flags=cf,
+            holiday_flags=hf,
+            assigned_child_asin=assigned_asin,
         ))
 
     logger.info(
@@ -680,6 +762,10 @@ async def analyze_new_campaigns(
     sem: asyncio.Semaphore | None = None,
     overview_gate: "asyncio.Task | None" = None,
     product_title: str = "",
+    listing_info: dict | None = None,  # {bullets, category, variants}（来自 erp_listing_product_info）
+    colors: list[str] | None = None,
+    color_to_asin: dict[str, str] | None = None,
+    today_date: str = "",
     cancel_check: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[list[NewCampaignItem], list[str], dict[str, int]]:
     """来源 A 单独运行时的兼容包装；正常主流程在合流后只调用一次组装器。"""
@@ -701,6 +787,10 @@ async def analyze_new_campaigns(
         sem=sem,
         overview_gate=overview_gate,
         product_title=product_title,
+        listing_info=listing_info,
+        colors=colors,
+        color_to_asin=color_to_asin,
+        today_date=today_date,
         cancel_check=cancel_check,
     )
     items = await finalize_new_campaign_decisions(

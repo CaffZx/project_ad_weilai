@@ -510,7 +510,8 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 - **R3 试探相关**：可能相关、需验证（跨类目联想词等）；**仅测试期可承接，且 reason 必须写明"为何判定可能相关"**。
 - **R4 风险相关**：词义偏离、易招无效点击 → **一律 action=skip**。
 - **属性级精准，不是品类级**：仅"同品类"不够。例：标题"短裙 mini skirt"→"中长裙 midi/maxi""连衣裙 dress"长度/款式不符 → 判 R4 并 skip；reason 点明属性是否吻合。
-- **信号怎么综合**：可用自然位/周排名靠前 + 标题属性吻合 → 倾向 R1；**搜索量高但与标题属性不符 → 不因量大就抬档**（量大≠相关）；**搜索量低但属性精确吻合或有可用自然位 → 仍可 R1**（低量精准长尾是运营偏好，勿因量小误杀）。历史状态非 ok 时，不得把缺失数据当作负面证据。
+- **五点 + 运营搜索词是强锚点**（若上下文提供）：五点描述产品功能/材质/场景/人群，是相关性判断的**事实依据**——候选词若命中五点中的用词或同义表达 → 倾向 R1。五点可以补标题信息不足，但不参与搜索量权衡。
+- **信号怎么综合**：可用自然位/周排名靠前 + 标题属性吻合 → 倾向 R1；**搜索量高但与标题/五点属性不符 → 不因量大就抬档**（量大≠相关）；**搜索量低但属性精确吻合或有可用自然位 → 仍可 R1**（低量精准长尾是运营偏好，勿因量小误杀）。历史状态非 ok 时，不得把缺失数据当作负面证据。
 - **锚点稀薄保护**：当"已投放关键词"为空、标题信息少（新品/小 ASIN）时，不要因参照少就过度 skip——以标题为主判相关性。
 
 ## 词型偏好与运营目标类型（KB 06 + 运营配置）
@@ -529,6 +530,25 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
       "negative_strategy": "运行7天后读取搜索词报告，按相关性和样本门槛审阅精准否词候选",
       "reason": "(1) 现状：流量词库有搜索量且当前尚未覆盖；(2) 原因：长尾词匹配标题属性 fishnet/plus size，相关性高；(3) 建议：纳入新活动验证。",
       "evidence": ["搜索量 156", "相关性 R1：匹配标题具体属性"]
+    },
+    {
+      "keyword_text": "black fishnet stockings plus size",
+      "action": "create",
+      "keyword_class": "long_tail",
+      "relevance_tier": "R1",
+      "negative_strategy": "运行7天后读取搜索词报告，按相关性和样本门槛审阅精准否词候选",
+      "reason": "(1) 现状：流量词库有搜索量且含颜色修饰词 black；(2) 原因：长尾词匹配标题属性 fishnet/plus size，且含产品可用颜色 black；(3) 建议：纳入新活动验证，指派 black 颜色子 ASIN。",
+      "evidence": ["搜索量 89", "相关性 R1：匹配标题具体属性 + 颜色 black"],
+      "color_flags": {"black": true}
+    },
+    {
+      "keyword_text": "halloween fishnet stockings",
+      "action": "skip",
+      "keyword_class": "long_tail",
+      "relevance_tier": "R2",
+      "reason": "(1) 现状：流量词库有搜索量，含节日词 halloween；(2) 原因：距 Halloween 约 85 天 > 60 天，非投放期；(3) 建议：Halloween 前 60 天再评估。",
+      "evidence": ["搜索量 200", "距 Halloween 85 天"],
+      "holiday_flags": {"halloween": true}
     }
   ]
 }
@@ -539,6 +559,20 @@ _NEW_CAMPAIGN_PROMPT = """你是亚马逊广告新增活动决策助手。基于
 - **每个 create 的词，reason 第(2)段必须写出与本产品的相关性依据**（如何与**标题具体属性**/已投词关联）；说不出相关性的不得 create。
 - `source=flow` 且 action=create 时，negative_strategy 必须填写非空；其他来源按上面的来源契约处理。不得根据 keyword_class 猜测最终匹配类型。
 - reason 三段式：(1) 现状诊断 (2) 原因分析 (3) 建议；禁用规则编号 / 内部术语；evidence 引用具体数值。
+
+## 颜色词与节日词标记（可选字段，仅在命中时输出）
+### color_flags
+- 仅当候选词中包含产品颜色的具体表述时输出：{颜色英文: true}。示例：「fishnet stockings black」→ `{"black": true}`；「red lace top」→ `{"red": true}`。
+- 颜色名必须在上下文「产品可用颜色」列表中。一个词可含多个颜色（如「red and black fishnet」→ `{"red": true, "black": true}`）。
+- 非颜色词（不含颜色修饰的通用词）→ 不输出 color_flags 字段或输出 `{}`。
+- **禁止编造颜色**：只能使用上下文给出的「产品可用颜色」列表中的值。
+
+### holiday_flags
+- 仅当候选词带节日意图时输出：{节日英文小写: true}。示例：「halloween fishnet」→ `{"halloween": true}`；「christmas gift」→ `{"christmas": true}`。
+- **节日词谨慎创建**：以「当前日期」为基准，距节日 **>60 天** → 一律 action=skip，reason 写明「距 X 节日约 Y 天，非投放期」；≤60 天可创建，reason 写明距节日天数作为投放窗口参考。
+- 已投词中的节日词不构成扩词依据——那可能是在当时节日季投放的，不代表当前应该扩。
+- 不明显的节日词（如「gift」「party」无特定节日指向）→ 不输出 holiday_flags。
+- 非节日词 → 不输出 holiday_flags 字段或输出 `{}`。
 """
 
 
@@ -2013,11 +2047,15 @@ class LLMReasoner:
                 # 否词闸门：仅保留精准否定，词组否定在本层丢弃，下游永无感知
                 raw_neg = adj.get("negative_keywords") or []
                 cleaned_neg = []
+                _neg_total = len(raw_neg)
+                _neg_dropped_not_exact = 0
+                _neg_dropped_not_in_data = 0
                 for nk in raw_neg:
                     if not isinstance(nk, dict):
                         continue
                     nk_mt = str(nk.get("match_type", "")).strip().upper()
                     if nk_mt != "NEGATIVE_EXACT":
+                        _neg_dropped_not_exact += 1
                         logger.warning(
                             "Campaign batch [%s] cid=%s 丢弃非精准否词 keyword=%r match_type=%r",
                             asin, cid, nk.get("keyword"), nk_mt,
@@ -2029,6 +2067,7 @@ class LLMReasoner:
                             _norm_search_term(keyword)
                         )
                         if authoritative is None:
+                            _neg_dropped_not_in_data += 1
                             logger.warning(
                                 "Campaign batch [%s] cid=%s 丢弃非本轮搜索词否词 keyword=%r",
                                 asin, cid, keyword,
@@ -2040,6 +2079,11 @@ class LLMReasoner:
                         "match_type": "NEGATIVE_EXACT",
                         "reason": (nk.get("reason") or "")[:512],
                     })
+                if _neg_total > 0:
+                    logger.info(
+                        "Campaign batch [%s] cid=%s 否词闸门: LLM产出=%d 通过=%d 丢弃非EXACT=%d 丢弃非搜索词=%d",
+                        asin, cid, _neg_total, len(cleaned_neg), _neg_dropped_not_exact, _neg_dropped_not_in_data,
+                    )
                 adj["negative_keywords"] = cleaned_neg
                 adjustments.append(adj)
             # 后处理：规则编号脱敏 + 文风清洗
@@ -2140,6 +2184,9 @@ class LLMReasoner:
         *,
         product_title: str = "",
         existing_keywords: list[str] | None = None,   # 已投放关键词（相关性参照锚点）
+        listing_info: dict | None = None,              # {bullets, category}（来自 erp_listing_product_info）
+        colors: list[str] | None = None,               # 去重归一化的产品颜色列表
+        today_date: str = "",                          # 站点当地时间 YYYY-MM-DD
     ) -> dict:
         """KB 16+06 新增活动批量分析（单批）。LLM 只判 action + keyword_class + 文本，数值代码定。
 
@@ -2176,6 +2223,44 @@ class LLMReasoner:
             anchor_parts.append(f"  - 已投放关键词({len(_exist)}个，相关性参照): {', '.join(_exist)}")
         else:
             anchor_parts.append("  - 已投放关键词: 无（新品/小 ASIN，锚点稀薄 → 以标题为主判相关性，勿过度 skip）")
+
+        # 五点 + 类目（相关性锚点，来自 Listing 后台 erp_listing_product_info）
+        if listing_info and isinstance(listing_info, dict):
+            attr_parts = ["## 产品五点 + 类目（相关性锚点，来自 Listing 后台）"]
+            bullets = listing_info.get("bullets") or []
+            if bullets:
+                attr_parts.append("  - 五点:")
+                for i, b in enumerate(bullets, 1):
+                    attr_parts.append(f"    {i}. {b}")
+            cat = listing_info.get("category") or ""
+            if cat:
+                attr_parts.append(f"  - 类目: {cat}")
+            anchor_parts.append("")
+            anchor_parts.extend(attr_parts)
+
+        # 产品颜色 + 当前日期
+        extra_parts = []
+        if colors:
+            extra_parts.append(f"## 产品可用颜色（来自 Listing 变体）")
+            extra_parts.append(f"  {', '.join(colors)}")
+        if today_date:
+            extra_parts.append(f"## 当前日期（站点当地时间）")
+            extra_parts.append(f"  {today_date}")
+
+            # 计算距离主要节日的天数（纯提示，不计算具体日期差）
+            extra_parts.append(f"  主要节日参考：")
+            extra_parts.append(f"    - Halloween（10月31日）")
+            extra_parts.append(f"    - Christmas（12月25日）")
+            extra_parts.append(f"    - Valentine's Day（2月14日）")
+            extra_parts.append(f"    - Easter（春分月圆后第一个周日）")
+            extra_parts.append(f"    - Mother's Day（5月第二个周日）")
+            extra_parts.append(f"    - Father's Day（6月第三个周日）")
+            extra_parts.append(f"    - Black Friday/Cyber Monday（11月感恩节后）")
+            extra_parts.append(f"    - Prime Day（通常在7月）")
+            extra_parts.append(f"    - Back to School（8-9月）")
+        if extra_parts:
+            anchor_parts.append("")
+            anchor_parts.extend(extra_parts)
 
         # 今日执行总纲 preamble（与 batch 流一致，注入 posture_brief）
         overview_text = (strategy_context.get("_strategic_overview_text") or "").strip()
