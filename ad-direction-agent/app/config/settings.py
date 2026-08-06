@@ -161,7 +161,7 @@ class Settings(BaseSettings):
     campaign_new_history_enabled: bool = False  # AZ history enrichment 开关（关闭则仅用 own 自然位，不查历史趋势）
     campaign_new_batch_size: int = 10         # 每批送 LLM 的候选词数
     campaign_new_max_count: int = 40          # 单次分析最大候选词数 (排序后截断 Top-N；2026-06-18 20→40)
-    campaign_new_max_creates: int = 15        # 输出硬截断 (两来源合流后 Top-N，已验证精准优先)
+    campaign_new_max_creates: int = 50        # 输出硬截断 (两来源合流后 Top-N，已验证精准优先) — 临时上调定位噪音源
     #   ⚠ 与 KB03 §7「每日最大新词数=15」冲突，暂用 20 待 KB/运营定夺
     # ── 竞品词源 (Step3，reverse-only，默认关；live 验证返回结构后再开) ──
     campaign_new_competitor_enabled: bool = False     # 竞品词源总开关 (默认关)

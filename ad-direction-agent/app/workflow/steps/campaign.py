@@ -577,6 +577,7 @@ async def _analyze_campaigns_impl(
                     timeout=getattr(_ss, "mcp_context_timeout", 30.0),
                 )
                 shop_account = (_shop_ctx.shop_account if _shop_ctx else "") or ""
+                fetcher._last_shop_account = shop_account  # 回写，供 _run_restart_review 等下游读取
             except Exception:
                 shop_account = ""
         else:
@@ -758,6 +759,23 @@ async def _analyze_campaigns_impl(
 
     # 广泛流的真实搜索词由 reasoner 按报表回填后在此转为精准建活动决策。
     # 只占用新增流已有的名称、子 ASIN、建议竞价和最终 Top-N 装配能力；不新增查询管线。
+
+    # 词根提取：收集所有广泛流搜索词去重 → LLM 语义映射
+    root_map: dict[str, str] = {}
+    if promotion_candidates:
+        all_terms = sorted({
+            c.search_term for c in promotion_candidates
+            if c.search_term and c.relevance_tier == "R1"
+        })
+        if len(all_terms) >= 2:  # 至少 2 个词才有根聚合价值
+            try:
+                root_map = await asyncio.wait_for(
+                    reasoner.recommend_keyword_roots(parent_asin, all_terms),
+                    timeout=30,
+                ) or {}
+            except Exception:
+                logger.warning("Campaign [%s] 词根提取失败，跳过词根通道", parent_asin)
+
     promoted_decisions = []
     if (
         settings.campaign_new_enabled
@@ -774,6 +792,7 @@ async def _analyze_campaigns_impl(
             promotion_candidates,
             existing_exact_keywords=exact_keywords,
             target_acos=strategy_context.target_acos,
+            root_map=root_map,
         )
         new_campaigns_warnings.extend(promotion_warnings)
         warnings_list.extend(promotion_warnings)

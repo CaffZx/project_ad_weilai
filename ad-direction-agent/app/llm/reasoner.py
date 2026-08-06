@@ -398,7 +398,6 @@ _CAMPAIGN_BROAD_PROMPT = (
     {
       "cid": "C3",
       "search_term": "sticky bra for dress",
-      "keyword_root": "sticky bra",
       "keyword_class": "long_tail",
       "relevance_tier": "R1",
       "reason": "搜索词与产品本体直接相关",
@@ -437,8 +436,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 
 ### 正向搜索词候选（新增精准活动接线）
 - `exact_promotion_candidates` 必须输出数组；无候选时填 `[]`，禁止 null。
-- 每条必须带当前批次原样 `cid`、该 cid 搜索词报告中原样出现的 `search_term`、`keyword_root`、`keyword_class`、`relevance_tier`、reason、evidence。
-- `keyword_root` 只能是该 `search_term` 中连续出现的词组；无法提取时填空字符串。
+- 每条必须带当前批次原样 `cid`、该 cid 搜索词报告中原样出现的 `search_term`、`keyword_class`、`relevance_tier`、reason、evidence。
 - **标注 ≠ 准入**：你只做语义识别（判相关性 + R1）；订单/ACOS 门槛（订单≥3 且 ACOS≤目标 / 词根聚合）由代码用真实搜索词数据校验。低置信或语义不确定的候选不标。
 - 词级样本不足词（sample_insufficient_7d=true）可保留审阅（14 天仅辅助观察，不能独立触发动作）；活动级样本不足（SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT）的活动禁止输出候选。
 - 只输出语义相关且至少 R1 的正向候选；禁止编造输入外搜索词、禁止输出订单/花费/销售额/ACOS/CVR 等数值字段。
@@ -2097,20 +2095,11 @@ class LLMReasoner:
                 ]
             parsed["campaign_adjustments"] = adjustments
 
-            # 广泛流额外吐出“真实搜索词 -> 词根”候选；cid 与搜索词均由本层
-            # 校验/回填，后续策略层永不信任 LLM 自报的数值或活动身份。
+            # 广泛流额外吐出搜索词提精准候选；cid 与搜索词均由本层校验/回填。
+            # 词根由独立调用点 recommend_keyword_roots 统一产出，不在本层处理。
             promotion_candidates: list[dict] = []
             if task_type == "broad":
-                def _is_contiguous_root(root: str, term: str) -> bool:
-                    if not root:
-                        return True
-                    root_tokens = root.split()
-                    term_tokens = term.split()
-                    width = len(root_tokens)
-                    return any(term_tokens[i:i + width] == root_tokens
-                               for i in range(len(term_tokens) - width + 1))
-
-                seen_pairs: set[tuple[str, str, str]] = set()
+                seen_pairs: set[tuple[str, str]] = set()
                 for raw_candidate in parsed.get("exact_promotion_candidates") or []:
                     if not isinstance(raw_candidate, dict):
                         continue
@@ -2124,13 +2113,10 @@ class LLMReasoner:
                             asin, cid, raw_candidate.get("search_term"),
                         )
                         continue
-                    root = _norm_search_term(raw_candidate.get("keyword_root"))
-                    if not _is_contiguous_root(root, search_term):
-                        root = ""
                     relevance_tier = str(raw_candidate.get("relevance_tier") or "").strip().upper()
                     if relevance_tier != "R1":
                         continue
-                    pair = (cid, search_term, root)
+                    pair = (cid, search_term)
                     if pair in seen_pairs:
                         continue
                     seen_pairs.add(pair)
@@ -2139,7 +2125,6 @@ class LLMReasoner:
                         campaign_name=str(src.get("campaign_name") or ""),
                         campaign_match_type=str(src.get("match_type") or ""),
                         search_term=str(term.get("keyword") or search_term).strip(),
-                        keyword_root=root,
                         keyword_class=str(raw_candidate.get("keyword_class") or "").strip().lower(),
                         relevance_tier=relevance_tier,
                         reason=humanize_ops_text(self._sanitize_ops_text(
@@ -2429,6 +2414,141 @@ class LLMReasoner:
         except Exception as e:
             logger.warning("Campaign overview 失败 [%s]: %s", asin, e)
             return {"error": str(e)}
+
+    # ── 搜索词根提取 ──────────────────────────────────────────────────
+    async def recommend_keyword_roots(
+        self,
+        parent_asin: str,
+        search_terms: list[str],
+        *,
+        temperature: float = 0.1,
+        timeout_override: float | None = None,
+    ) -> dict[str, str]:
+        """一次 LLM 调用为所有去重搜索词提取关键词根。
+
+        返回 {search_term: keyword_root}。LLM 做语义匹配——拼写变体/词序差异归一到同一词根。
+        """
+        if not search_terms:
+            return {}
+
+        terms_text = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(search_terms))
+        kb_rules = kb.build("keyword_roots")
+        prompt = (
+            "你是搜索词根提取助手。为每个搜索词提取关键词根（keyword root）。\n\n"
+            "## 业务背景\n"
+            + kb_rules +
+            "\n\n## 词根提取规则\n"
+            "词根 = 去掉修饰成分后的核心产品词（1-3个词）。\n"
+            "修饰成分包括：颜色（black/red）、尺寸（plus size/xxl）、风格（sexy/cute）、\n"
+            "节日（halloween/christmas）、人群（women/men/kids）、材质（cotton/lace）、\n"
+            "活动词（buy/cheap/sale/deal）、意图词（for women/near me）。\n\n"
+            "## 示例（按品类）\n"
+            "### 内衣/bra\n"
+            "- strapless bra / straples bra / bra strapless → \"strapless bra\"（词序差异归一）\n"
+            "- push up bra / pushup bra / push up bras → \"push up bra\"（拼写变体）\n"
+            "- lace bra / lacy bra / lace push up bra → \"lace bra\" 或 \"bra\"（材质修饰可剥）\n"
+            "- sports bra / sport bra / sports bras for women → \"sports bra\"\n"
+            "- sticky bra / adhesive bra / backless sticky bra → \"sticky bra\"（同义归并）\n"
+            "- strapless bra adhesive / sticky bra nude → 归入 \"strapless bra\" / \"sticky bra\"\n"
+            "- plus size bra / large bra / full figured bra → \"bra\"（人群/尺寸修饰剥除）\n\n"
+            "### 泳装/bikini\n"
+            "- black bikini / sexy bikini / cute bikini → 全部 \"bikini\"\n"
+            "- bikni / bikinny / bikin → \"bikini\"（拼写容错）\n"
+            "- bikini for women / women bikini / womens bikini → \"bikini\"\n"
+            "- high waist bikini / high waisted bikini → \"high waist bikini\"\n"
+            "- bikini top / bikini bottom / bikini set → \"bikini top\" / \"bikini bottom\" / \"bikini set\"\n"
+            "- tankini / tankini swimsuit / tankini top → \"tankini\"\n"
+            "- swimsuit / swim suit / bathing suit / one piece swimsuit → \"swimsuit\"\n"
+            "- monokini / cut out swimsuit → \"monokini\"\n\n"
+            "### 裙子/dress\n"
+            "- bodycon dress / bodycon mini dress / bodycon → \"bodycon dress\"\n"
+            "- mini dress / mini dresses / short dress → \"mini dress\"\n"
+            "- midi dress / midi dresses / mid length dress → \"midi dress\"\n"
+            "- maxi dress / long dress / floor length dress → \"maxi dress\"\n"
+            "- slip dress / silk slip dress / satin slip dress → \"slip dress\"\n"
+            "- wrap dress / wrap mini dress → \"wrap dress\"\n"
+            "- sweater dress / knit dress → \"sweater dress\"\n"
+            "- cocktail dress / party dress → \"cocktail dress\"（注意：party 太泛不纳入根）\n"
+            "- velvet dress / sequin dress / lace dress → \"dress\"（材质修饰剥除）\n"
+            "- summer dress / spring dress / casual dress → \"dress\"（季节/场合剥除）\n\n"
+            "### 上衣/top\n"
+            "- crop top / cropped top / crop tops → \"crop top\"\n"
+            "- tank top / tank tops / ribbed tank top → \"tank top\"\n"
+            "- bodysuit / body suit / bodysuits → \"bodysuit\"\n"
+            "- lace top / lace blouse → \"lace top\" 或 \"top\"\n"
+            "- tube top / strapless top / bandeau top → \"tube top\"（同义归并优先选最常见名）\n"
+            "- corset top / corset / lace corset top → \"corset top\"\n"
+            "- off shoulder top / off the shoulder top → \"off shoulder top\"\n\n"
+            "### 下装/bottom\n"
+            "- leggings / legging / leggins → \"leggings\"\n"
+            "- yoga pants / yoga leggings / workout leggings → \"yoga pants\"（同功能归并）\n"
+            "- leather pants / leather legging → \"leather pants\"\n"
+            "- shorts / short pants / denim shorts → \"shorts\"\n"
+            "- skirt / mini skirt / midi skirt / pleated skirt → \"skirt\"\n"
+            "- tennis skirt / golf skirt / athletic skirt → \"tennis skirt\"\n\n"
+            "### 丝袜/hosiery\n"
+            "- fishnet stocking / fishnet tights / fishnets → \"fishnet\"\n"
+            "- stocking / stockings / thigh high stocking → \"stocking\"\n"
+            "- pantyhose / panty hose / tights → \"pantyhose\" 或 \"tights\"\n"
+            "- knee high sock / knee high socks → \"knee high sock\"\n\n"
+            "### 连体衣/jumpsuit\n"
+            "- jumpsuit / jump suit / jumpsuits for women → \"jumpsuit\"\n"
+            "- romper / rompers / romper jumpsuit → \"romper\"\n"
+            "- overalls / overall / denim overalls → \"overalls\"\n\n"
+            "### 睡衣/lingerie\n"
+            "- lingerie / sexy lingerie / lace lingerie → \"lingerie\"\n"
+            "- babydoll / baby doll / babydoll lingerie → \"babydoll\"\n"
+            "- chemise / silk chemise / lace chemise → \"chemise\"\n"
+            "- teddy / teddy lingerie / lace teddy → \"teddy\"\n"
+            "- garter belt / garter / suspender belt → \"garter belt\"\n\n"
+            "## 注意\n"
+            "- 优先保留多词核心（\"push up bra\" 而非 \"bra\"；\"crop top\" 而非 \"top\"）——仅当修饰成分明显时才剥。\n"
+            "- 不确定是否为核心时宁可多保留一个词，不要过度截断。\n"
+            "- 无法提取 → 填空字符串 \"\"。\n\n"
+            "输出 JSON（严格 schema）：{\"roots\": [{\"term_index\": 1, \"root\": \"bikini\"}, ...]}"
+        )
+        from app.config.settings import settings
+
+        user_msg = "## 搜索词列表\n" + terms_text
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_msg},
+        ]
+
+        timeout = max(timeout_override or 0, settings.llm_timeout)
+        try:
+            raw = await self.client.chat(
+                messages=messages,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+                timeout_override=timeout,
+                label="keyword_roots",
+            )
+            parsed = self._parse_json(raw)
+            root_items = parsed.get("roots", []) if isinstance(parsed, dict) else []
+            result: dict[str, str] = {}
+            for item in root_items:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("term_index")
+                root = str(item.get("root") or "").strip()
+                if isinstance(idx, int) and 1 <= idx <= len(search_terms) and root:
+                    term = search_terms[idx - 1]
+                    # 校验：root 必须是 search_term 的连续子序列
+                    root_tokens = root.split()
+                    term_tokens = term.split()
+                    w = len(root_tokens)
+                    if any(term_tokens[i:i + w] == root_tokens for i in range(len(term_tokens) - w + 1)):
+                        result[term] = root
+            logger.info(
+                "keyword_roots [%s]: %d terms → %d roots",
+                parent_asin, len(search_terms), len(set(result.values())),
+            )
+            return result
+        except Exception as e:
+            logger.warning("keyword_roots LLM 失败 [%s]: %s", parent_asin, e)
+            return {}
 
     # ── 核心词语义判定 ──────────────────────────────────────────────────
     async def recommend_semantic_core(

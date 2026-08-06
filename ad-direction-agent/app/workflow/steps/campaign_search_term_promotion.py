@@ -35,16 +35,16 @@ def _metrics(items: list[SearchTermPromotionCandidate]) -> tuple[int, float, flo
 
 
 def _evidence(channel: str, items: list[SearchTermPromotionCandidate]) -> list[str]:
+    """纯代码派生证据，不追加 LLM 原文。"""
     orders, cost, sales, acos = _metrics(items)
     source_names = ", ".join(sorted({item.campaign_name for item in items if item.campaign_name}))
+    terms = sorted({item.search_term for item in items})
     metrics = f"7天订单{orders}，花费${cost:.2f}，销售额${sales:.2f}"
     if acos is not None:
         metrics += f"，ACOS {acos:.2f}%"
     evidence = [f"搜索词提精{channel}：{metrics}" + (f"；来源活动：{source_names}" if source_names else "")]
-    for item in items:
-        for line in item.evidence:
-            if line and line not in evidence:
-                evidence.append(line)
+    if channel == "词根通道" and len(terms) >= 2:
+        evidence.append(f"聚合搜索词({len(terms)}个): {', '.join(terms)}")
     return evidence
 
 
@@ -54,13 +54,16 @@ def _decision(
     *,
     channel: str,
 ) -> NewCampaignDecision:
+    """代码生成 reason + evidence，不追加 LLM 原文。"""
     source = "SRC_CONVERTED" if any(item.orders > 0 for item in items) else "SRC_BROAD_DERIVED"
     first = items[0]
-    # 聚合全来源的 distinct reason（与 evidence 同理：多个活动的同词候选不应只保留首条）
-    reasons: list[str] = []
-    for item in items:
-        if item.reason and item.reason not in reasons:
-            reasons.append(item.reason)
+    orders, cost, sales, acos = _metrics(items)
+    reason = (
+        f"搜索词提精准（{channel}）：7天订单{orders}，"
+        f"花费${cost:.2f}，销售额${sales:.2f}"
+        + (f"，ACOS {acos:.2f}%" if acos is not None else "")
+        + ("，满足提精准条件" if orders >= 3 else "，词根聚合后满足条件")
+    )
     return NewCampaignDecision(
         keyword_text=keyword,
         keyword_class=first.keyword_class,
@@ -68,11 +71,21 @@ def _decision(
         source=source,
         trigger_scene="KEYWORD_PROMOTED_FROM_BROAD",
         prescribed_match_type="EXACT",
-        reason="；".join(reasons) if reasons else "",
+        reason=reason,
         evidence=_evidence(channel, items),
         confidence="high",
         review_level="MANUAL_REVIEW",
     )
+
+
+def _is_contiguous_root(root: str, term: str) -> bool:
+    """root 必须是 term 的连续子序列。"""
+    if not root:
+        return False
+    root_tokens = root.split()
+    term_tokens = term.split()
+    w = len(root_tokens)
+    return any(term_tokens[i:i + w] == root_tokens for i in range(len(term_tokens) - w + 1))
 
 
 def build_search_term_promotion_decisions(
@@ -80,13 +93,26 @@ def build_search_term_promotion_decisions(
     *,
     existing_exact_keywords: set[str],
     target_acos: float | None,
+    root_map: dict[str, str] | None = None,
 ) -> tuple[list[NewCampaignDecision], list[str]]:
     """按 KB23 §3.4 的当前可验证通道生成 EXACT 决策。
 
     订单通道需要订单和目标 ACOS；词根通道可由聚合订单独立触发。
     CVR 通道缺少品类基准，刻意不在此处伪造。
+
+    root_map: {search_term: keyword_root}，由 recommend_keyword_roots LLM 产出。
+    未提供时词根通道不生效。
     """
     existing = {_normalize(keyword) for keyword in existing_exact_keywords}
+
+    # 回填 root_map 到候选（用于词根聚合）
+    if root_map:
+        for c in candidates:
+            term_key = _normalize(c.search_term)
+            root = root_map.get(c.search_term) or root_map.get(term_key) or ""
+            if root and _is_contiguous_root(root, c.search_term):
+                c.keyword_root = root
+
     by_term = _aggregate(candidates, lambda item: item.search_term)
     decisions: dict[str, NewCampaignDecision] = {}
 
@@ -100,6 +126,8 @@ def build_search_term_promotion_decisions(
     by_root = _aggregate(candidates, lambda item: item.keyword_root)
     for root, items in by_root.items():
         if root in existing or root in decisions:
+            continue
+        if len(items) < 2:  # KB23 §3.4 信号二：「多个搜索词合计」
             continue
         orders, _cost, sales, acos = _metrics(items)
         acos_ok = target_acos is not None and sales > 0 and acos is not None and acos <= float(target_acos)

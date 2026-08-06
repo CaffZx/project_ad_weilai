@@ -309,6 +309,42 @@ MCP 工具在项目里有三种调用形态：
 }
 ```
 
+## Azlisting MCP 工具
+
+独立 MCP 服务（`azlisting_mcp_url`），与 StarRocks 数据 MCP 分开配置。由 `mcp_registry.py` 统一管理连接池和并发阀。
+
+| 工具名 | 用途 | 调用点 |
+|--------|------|--------|
+| `erp_listing_product_info` | 父 ASIN 下所有子体变体的五点、颜色、尺码、类目、搜索词 | `mcp_registry.py` `erp_listing_product_info()` → `campaign.py` `_run_new_campaigns_if_enabled` |
+| `erp_listing_asin_keyword_rank_history` | ASIN 关键词排名历史 | 核心词离线批跑 |
+
+**限流**：azlisting 全局 5req/10s，`settings.azlisting_mcp_max_in_flight` 控制进程内并发。
+
+**`erp_listing_product_info` 返回结构**：
+
+```json
+{
+  "data": [
+    {
+      "asin": "B0CQ562G5C",
+      "productColor": "Black5",
+      "productSize": "One Size",
+      "productPrice": 11.99,
+      "variationThemeName": "SIZE/COLOR",
+      "productName": "Buauty 3 pcs black fishnet stockings...",
+      "fiveBulletPoint1": "High-Waisted Elegance--...",
+      "fiveBulletPoint5": "Suitable for a variety of occasions--...",
+      "lastCategory": "[{\"title\":\"Women's Exotic Hosiery\"}]",
+      "genericKeyword": "fishnet stockings for women..."
+    }
+  ]
+}
+```
+
+- 父级字段（`productName`/`fiveBulletPoint1-5`/`lastCategory`/`genericKeyword`）每行相同，取第一行即可
+- 子体字段（`asin`/`productColor`/`productSize`/`productPrice`）每行不同，遍历收集
+- `call_tool` 返回已被 `unwrap_tool_payload` 解包为 `{"data": [...]}`，用 `_as_rows()` 提取
+
 ## 常见误区
 
 - `listing_inventory` 不是当前 `mcp_mapping.py` 中的库存工具名，当前使用 `parent_listing_stock_summary`。

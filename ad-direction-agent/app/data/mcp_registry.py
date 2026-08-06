@@ -174,20 +174,38 @@ async def erp_listing_product_info(
 
     fail-open: 失败返回 None。
     """
+    import asyncio as _asyncio
     import json as _json
+    import random as _random
 
-    try:
-        rt = registry.resolve("erp_listing_product_info")
-        raw = await rt.get_invoker().call_tool(
-            "erp_listing_product_info",
-            {"paramsJson": _json.dumps({
-                "shopAccount": shop_account,
-                "parentAsin": parent_asin,
-                "parentSellerSku": parent_seller_sku,
-            })},
-        )
-    except Exception:
-        logger.exception("erp_listing_product_info 失败 [%s]", parent_asin)
+    rt = registry.resolve("erp_listing_product_info")
+    retries = max(0, rt.config.retries)       # azlisting 默认 1 → 2 次总尝试
+    for attempt in range(retries + 1):
+        if attempt == 0:
+            await _asyncio.sleep(_random.uniform(0.01, 0.30))  # 首次前微小抖动
+        try:
+            async with rt._sem:
+                raw = await rt.get_invoker().call_tool(
+                    "erp_listing_product_info",
+                    {"paramsJson": _json.dumps({
+                        "shopAccount": shop_account,
+                        "parentAsin": parent_asin,
+                        "parentSellerSku": parent_seller_sku,
+                    })},
+                )
+            break
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "erp_listing_product_info 失败 [%s] attempt=%d/%d: %s",
+                parent_asin, attempt + 1, retries + 1, last_err,
+            )
+            if attempt < retries:
+                await _asyncio.sleep(
+                    0.5 * (attempt + 1) + _random.uniform(0.05, 0.2)
+                )
+    else:
+        logger.exception("erp_listing_product_info 最终失败 [%s]", parent_asin)
         return None
 
     rows = _as_rows(raw)

@@ -31,6 +31,8 @@
 | Campaign 报表 | `campaign_fetcher.py:352`、`:454`、`:501`、`:557` | basic/product/placement/search term |
 | 新增词源 | `campaign_fetcher.py:602`、`:665`、`:759` | flow/own/competitor/suggested bids |
 | 核心词判定 | `app/data/core_keyword_fetcher.py` | CoreKeywordFetcher：6 步 MCP，跨 StarRocks + Azlisting |
+| **新增活动 Listing 信息** | `app/data/mcp_registry.py` `erp_listing_product_info()` | `campaign.py` → `mcp_registry.resolve("erp_listing_product_info")`：五点+类目+颜色，注入新增流 prompt |
+| **新增活动颜色/节日标记** | `app/workflow/steps/campaign_new.py` `_normalize_color()` + `_build_color_asin_map()` | LLM 产出 `color_flags`/`holiday_flags` → 代码校验合法性 → 颜色→子 ASIN 指派 |
 | Advert 执行 | `workflow/steps/advert_execution.py:255`、`advert_exec_mapper.py:82` | `load_confirmed_pending()`、`build_exec_plan()` |
 
 ## 总链路
@@ -230,7 +232,7 @@ Azlisting 工具由 `CoreKeywordFetcher` 内部持独立 `StreamableHttpMcpInvok
 - 旧文档中出现的工具名如果不在 `mcp_mapping.py` 或 `advert_mcp_client.py` 中，应先查代码再引用。
 - ERP 写入和 Advert MCP 执行是两个阶段；写 pending 不代表已经动真实广告。
 - LLM 超时或护栏失败时，部分链路会 fail-open 或规则兜底，不应直接视为 MCP 失败。
-- Azlisting `erp_listing_product_info` 是核心词判定专用工具，参数为 camelCase（`shopAccount`/`parentAsin`/`parentSellerSku`），与 StarRocks 的 snake_case 不同。
+- Azlisting `erp_listing_product_info` 参数为 camelCase（`shopAccount`/`parentAsin`/`parentSellerSku`），与 StarRocks 的 snake_case 不同。已从核心词专用扩展为新增活动流共用：`mcp_registry.py` 统一管理连接，`campaign.py` 新增流调用取五点+类目+颜色。
 
 ## 更新检查清单
 
