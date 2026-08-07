@@ -1406,7 +1406,7 @@ class ErpDualWriterRepository:
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,
+            %s,
             'PENDING','PENDING',%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE

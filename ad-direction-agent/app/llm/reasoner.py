@@ -431,7 +431,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 - 每个否词必须来自该 cid 实际展示的搜索词，包含 keyword、match_type（仅允许 NEGATIVE_EXACT）、reason。reason/evidence 中凡引用数字，必须同时标明 7d 或 14d；14d 只能作为辅助观察，不能独立触发否词。
 
 ### 预算调整资格（必须遵守，代码已判定）
-- 加预算仅允许在活动级「加预算资格(代码判定)=✅」且策略上下文「库存≥30天」时；幅度按活动级「预算资格档位(代码判定)」：`>90%`→可大涨、`70-90%`→可小涨、`50-70%`→维持、`<50%`→不加预算。
+- 加预算仅允许在活动级「加预算资格(代码判定)=✅ 表现好才可加预算」且策略上下文「库存≥30天」时；幅度按活动级「预算资格档位(代码判定)」：`>90%`→可大涨、`70-90%`→可小涨、`50-70%`→维持、`<50%`→不加预算。
 - reason 中凡建议加预算，必须引用代码判定的资格字段与档位，不得自行推导门槛（如"表现好就加"）；`budget_increase_eligible=false` 或库存不足时不得加预算。
 
 ### 正向搜索词候选（新增精准活动接线）
@@ -1910,7 +1910,7 @@ class LLMReasoner:
             if s.get("budget_utilization_tier"):
                 camp_parts.append(f"  - 预算资格档位(代码判定): {s['budget_utilization_tier']}")
             if "budget_increase_eligible" in s:
-                camp_parts.append(f"  - 加预算资格(代码判定): {'✅ 可加预算' if s['budget_increase_eligible'] else '❌ 不可加预算'}")
+                camp_parts.append(f"  - 加预算资格(代码判定): {'✅ 表现好才可加预算' if s['budget_increase_eligible'] else '❌ 不可加预算'}")
             # 组合预算瓶颈感知 (KB23 §8.4)
             if s.get("_portfolio_group") and s.get("_portfolio_utilization") is not None:
                 _pg = s["_portfolio_group"]

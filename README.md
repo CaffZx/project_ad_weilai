@@ -210,7 +210,7 @@ MCP 上下文 → 预过滤 → basic_info + product_report 并行
 | [docs/Campaign分析引擎交接文档.md](docs/Campaign分析引擎交接文档.md) | ★ Campaign 引擎技术交接（v3.28，最全） |
 | [docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md](docs/knowledge_base/00-知识库总纲与切片覆盖矩阵.md) | KB 全景索引 + preset 权威定义（v3.4.8） |
 | [docs/精准组合确定性升降级实施方案.md](docs/精准组合确定性升降级实施方案.md) | 精准组合升降级方案 |
-| [docs/精准组合确定性升降级实施方案.md](docs/精准组合确定性升降级实施方案.md) | 精准组合升降级方案 |
 | [docs/复盘记忆系统实现方案.md](docs/复盘记忆系统实现方案.md) | 复盘记忆系统设计 |
+| [docs/否词知识库规则矛盾诊断报告与完善方案.md](docs/否词知识库规则矛盾诊断报告与完善方案.md) | 否词规则系统性缺陷诊断 + 改造方案 |
 | [docs/MCP工具接入架构范式.md](docs/MCP工具接入架构范式.md) | MCP 工具接入代码范式 |
 | [docs/AD-Agent Project Knowledge Graph/](docs/AD-Agent Project Knowledge Graph/) | 项目知识图谱（16 篇） |

@@ -672,6 +672,7 @@ async def _analyze_campaigns_impl(
 
     # 组合预算利用率（逐活动注入 prompt + 护栏 P12 消费）
     _pf_util: dict[str, float | None] = {}
+    _pf_budgets: dict[str, float] = {}      # 组合日预算（注入 prompt 展示用）
     if portfolio_data:
         for _g, _info in portfolio_data.items():
             _budget = _info.get("budget") if isinstance(_info, dict) else None
@@ -680,6 +681,8 @@ async def _analyze_campaigns_impl(
                 _pf_util[_g] = float(_spend_7d) / (float(_budget) * 7)
             else:
                 _pf_util[_g] = None
+            if _budget is not None:
+                _pf_budgets[_g] = float(_budget)
     if _pf_util:
         logger.info(
             "Campaign [%s] 组合利用率: %s",
@@ -728,13 +731,13 @@ async def _analyze_campaigns_impl(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
-            cancel_check=cancel_check, pf_util=_pf_util,
+            cancel_check=cancel_check, pf_util=_pf_util, pf_budgets=_pf_budgets,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
-            cancel_check=cancel_check, pf_util=_pf_util,
+            cancel_check=cancel_check, pf_util=_pf_util, pf_budgets=_pf_budgets,
         ),
         (_run_new_campaigns_if_enabled(finalize=False)),
         return_exceptions=True,
@@ -1793,6 +1796,7 @@ async def _analyze_one_stream(
     core_keyword_set: set[str] | None = None,
     cancel_check: Callable[[], Awaitable[None]] | None = None,
     pf_util: dict[str, float | None] | None = None,   # {组合名: 利用率}，注入逐活动 prompt
+    pf_budgets: dict[str, float] | None = None,       # {组合名: 日预算}，注入逐活动 prompt
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict], list[SearchTermPromotionCandidate]]:
     _core_set: set[str] = core_keyword_set or set()
     """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1 单轮 → 合并。
@@ -1829,10 +1833,8 @@ async def _analyze_one_stream(
             if _util is not None:
                 s["_portfolio_group"] = _group
                 s["_portfolio_utilization"] = round(_util, 4)
-                # 组合日预算（取 portfolio_data 中的 budget）
-                _budget = (portfolio_data or {}).get(_group, {})
-                if isinstance(_budget, dict):
-                    s["_portfolio_budget"] = _budget.get("budget")
+                if pf_budgets and _group in pf_budgets:
+                    s["_portfolio_budget"] = pf_budgets[_group]
 
     # 2. 预取（精准流只拉 placement，广泛流只拉 search_term）
     if task_type == "exact":

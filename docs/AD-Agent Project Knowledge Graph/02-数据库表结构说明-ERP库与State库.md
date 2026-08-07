@@ -1206,6 +1206,7 @@ CREATE TABLE `t_advert_agent_modify_suggest_card` (
   `batch_no` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '批次号',
   `suggest_category` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT 'ELIMINATE/ADJUST/KEEP',
   `campaign_group_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '活动分组：core-主推 auto_broad-广泛/自动 test-测试/新增 eliminate-淘汰',
+  `current_portfolio` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '当前组ERP码',
   `confidence_level` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '置信等级：high/medium/low',
   `campaign_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '活动ID',
   `campaign_name` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '广告活动名称',
