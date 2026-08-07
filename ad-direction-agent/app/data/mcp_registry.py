@@ -150,6 +150,7 @@ _STARROCKS_TOOLS = [
     "ad_campaign_list", "ad_campaign_basic_info_v2", "ad_campaign_basic_info",
     "ad_campaign_product_report", "ad_campaign_placement_report",
     "ad_campaign_search_term_report", "ad_portfolio_list",
+    "ad_auto_target_campaign_info",
     # 直接调用（campaign_fetcher）
     "seller_sprite_keyword_reverse", "whp_amazon_advert_keyword_suggest_bid",
 ]

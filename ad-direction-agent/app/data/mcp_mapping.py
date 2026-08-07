@@ -213,6 +213,7 @@ CAMPAIGN_TOOLS = [
     "ad_campaign_placement_report",     # + start_date, end_date (懒加载)
     "ad_campaign_search_term_report",   # + start_date, end_date (懒加载)
     "ad_portfolio_list",                # parent_asin → 广告组合预算 (2026-07-09)
+    "ad_auto_target_campaign_info",     # campaign_id_list → 自动活动四种匹配类型出价
 ]
 
 
@@ -254,6 +255,8 @@ def build_campaign_tool_args(
             if end_date:
                 base["end_date"] = end_date
     elif tool_name == "ad_campaign_basic_info_v2" and campaign_id_list:
+        base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
+    elif tool_name == "ad_auto_target_campaign_info" and campaign_id_list:
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
     elif tool_name == "ad_campaign_basic_info" and campaign_name_list:
         base = {"shop_account": shop_account, "campaign_name_list": campaign_name_list}

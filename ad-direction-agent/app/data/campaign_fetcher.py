@@ -386,6 +386,23 @@ class CampaignFetcher:
         ], return_exceptions=True)
         basic_dict = await basic_batch_task
 
+        # 识别自动广告活动（match_type 为空或 "auto" 即为自动投放）
+        auto_campaigns: list[tuple[str, str]] = []
+        for name in names:
+            b = basic_dict.get(name)
+            if b is not None:
+                mt = str(b.get("match_type") or "").strip().lower()
+                if not mt or mt == "auto":
+                    cid = campaign_name_to_id.get(name) or ""
+                    if cid:
+                        auto_campaigns.append((name, cid))
+        if auto_campaigns:
+            logger.info(
+                "auto_campaigns [%s]: detected=%d ids=%s",
+                parent_asin, len(auto_campaigns),
+                ",".join(cid for _, cid in auto_campaigns),
+            )
+
         for name in names:
             b = basic_dict.get(name)
             if b is not None:
@@ -409,6 +426,15 @@ class CampaignFetcher:
             except Exception as e:
                 logger.warning("自然排名等待失败 [%s]: %s (非阻塞)", parent_asin, e)
                 rank_map = {}
+
+        # 拉取自动活动的四种匹配类型出价
+        auto_targets: dict[str, list[dict]] = {}
+        if auto_campaigns:
+            auto_targets = await self._fetch_auto_targets(auto_campaigns, shop_account)
+            logger.info(
+                "auto_targets [%s]: fetched %d/%d auto campaigns",
+                parent_asin, len(auto_targets), len(auto_campaigns),
+            )
 
         fetch_source = "mcp" if mcp_fail == 0 else "partial"
         logger.info(
@@ -643,6 +669,7 @@ class CampaignFetcher:
                                 "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
                                 "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
                                 "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                                "match_type": str(row.get("关键词匹配类型") or ""),
                             }
                 else:
                     logger.warning("basic_info_v2 批量失败 [%d 活动]: %s", len(chunk), res.error)
@@ -652,6 +679,52 @@ class CampaignFetcher:
                 logger.debug("basic_info_v2 批量异常 ids: %s", ids)
 
         batches = [id_list[i:i + self._BASIC_BATCH_SIZE] for i in range(0, len(id_list), self._BASIC_BATCH_SIZE)]
+        await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
+        return results
+
+    _AUTO_BATCH_SIZE = 20  # ad_auto_target_campaign_info campaign_id_list 单次批量上限
+
+    async def _fetch_auto_targets(
+        self, auto_list: list[tuple[str, str]], shop_account: str,
+    ) -> dict[str, list[dict]]:
+        """批量拉取自动活动的四种匹配类型出价。
+
+        auto_list = [(campaign_name, campaign_id), ...]
+        返回 {campaign_name: [{target_type, target_code, target_id, bid}, ...]}
+        每项对应一种投放类型（紧密匹配/宽泛匹配/同类商品/关联商品）。
+        """
+        results: dict[str, list[dict]] = {}
+
+        async def _one(chunk: list[tuple[str, str]]):
+            ids = [cid for _, cid in chunk]
+            try:
+                res = await self._mcp().campaign_call_tool(
+                    "ad_auto_target_campaign_info", "", shop_account,
+                    campaign_id_list=",".join(ids),
+                    timeout=420.0,
+                )
+                if res.ok:
+                    row_by_name: dict[str, list[dict]] = {}
+                    for row in _as_rows(res.value):
+                        name = str(row.get("广告活动名称") or "").strip()
+                        if name:
+                            row_by_name.setdefault(name, []).append({
+                                "target_type": str(row.get("投放类型") or ""),
+                                "target_code": str(row.get("投放类型编码") or ""),
+                                "target_id": str(row.get("投放ID") or ""),
+                                "bid": _to_float(row.get("投放BID")) or 0.0,
+                            })
+                    for name, _ in chunk:
+                        if name in row_by_name:
+                            results[name] = row_by_name[name]
+                else:
+                    logger.warning(
+                        "auto_target 批量失败 [%d 活动]: %s", len(chunk), res.error,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("auto_target 批量异常 [%d 活动]: %s", len(chunk), e)
+
+        batches = [auto_list[i:i + self._AUTO_BATCH_SIZE] for i in range(0, len(auto_list), self._AUTO_BATCH_SIZE)]
         await asyncio.gather(*[_one(c) for c in batches], return_exceptions=True)
         return results
 
@@ -694,6 +767,7 @@ class CampaignFetcher:
                                 "tos_bid_pct": _to_float(row.get("头部位置加价比例")) or 0.0,
                                 "pp_bid_pct": _to_float(row.get("商品位置加价比例")) or 0.0,
                                 "ros_bid_pct": _to_float(row.get("其他位置加价比例")) or 0.0,
+                                "match_type": str(row.get("关键词匹配类型") or ""),
                             }
                 else:
                     logger.warning("basic_info 批量失败 [%d 活动]: %s", len(chunk), res.error)

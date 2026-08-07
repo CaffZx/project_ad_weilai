@@ -92,6 +92,7 @@ def apply_all(
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
+    pf_util: dict[str, float | None] | None = None,
 ) -> GuardrailPass:
     """对所有 adjustments 按优先级执行全部护栏规则。后执行规则看到前序修正后的值。"""
     gp = GuardrailPass()
@@ -104,7 +105,7 @@ def apply_all(
         )
         _p2_reactivation_protect(item, gp)
 
-    # 第二轮：裁决类 —— P3-P10
+    # 第二轮：裁决类 —— P3-P11
     for item in adjustments:
         _p3_force_eliminate(item, gp, product_stage=product_stage)
         _p5_protection_reversal(item, gp)
@@ -115,6 +116,7 @@ def apply_all(
         _p9_bid_cap(item, gp)
         _p10_placement_block(item, gp, inventory_days, refund_rate, rating)
         _p11_new_campaign_bid_protect(item, gp)
+        _p12_portfolio_bottleneck(item, gp, pf_util)
 
     return gp
 
@@ -510,6 +512,60 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
             f"可收敛到不超过 ${max_drop:.2f} 的降幅；也可按事实选择维持或其他轻量调整。"
         ),
     ))
+
+
+
+def _p12_portfolio_bottleneck(
+    item, gp: GuardrailPass, pf_util: dict[str, float | None] | None,
+) -> None:
+    """P12: 组合预算瓶颈 → 样本不足活动禁调 bid/预算，禁淘汰 (KB23 §8.4)。"""
+    if not pf_util:
+        return
+    _group = getattr(item, "ai_portfolio_class", "") or ""
+    _util = pf_util.get(_group) if _group else None
+    if _util is None or _util < 1.0:
+        return
+    perf = getattr(item, "perf_7d", {}) or {}
+    cost = float(perf.get("cost", 0) or 0)
+    clicks = int(perf.get("clicks", 0) or 0)
+    if cost >= 5.0 and clicks >= 10:
+        return
+    if item.action in ("eliminate_to_low_bid_pool", "paused"):
+        item.action = "keep"
+        item.proposed_budget = item.current_budget
+        item.proposed_bid = item.current_bid
+        item.placement_adjustments = []
+        gp.add(GuardrailResult(
+            rule_id="P12_PORTFOLIO_BOTTLENECK", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
+            message=(
+                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100%，"
+                f"样本不足(cost=${cost:.1f})，组合瓶颈→禁淘汰"
+            ),
+            retry_instruction=(
+                f"[{item.campaign_name}] 组合 {_group} 7天利用率 {_util:.0%}≥100%，"
+                "组合层预算可能是本活动低花费的真实原因。"
+                "禁止淘汰或降 bid/预算，应保持现状，建议运营提升组合预算。"
+            ),
+        ))
+    elif item.action != "keep":
+        item.action = "keep"
+        item.proposed_budget = item.current_budget
+        item.proposed_bid = item.current_bid
+        gp.add(GuardrailResult(
+            rule_id="P12_PORTFOLIO_BOTTLENECK", corrected=True,
+            campaign_key=getattr(item, "campaign_key", ""),
+            message=(
+                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100%，"
+                f"样本不足(cost=${cost:.1f})，组合瓶颈→保持现状"
+            ),
+            retry_instruction=(
+                f"[{item.campaign_name}] 组合 {_group} 7天利用率 {_util:.0%}≥100%，"
+                "组合层预算瓶颈可能导致本活动样本不足。"
+                "禁止调整 bid/预算，保持现状。建议运营提升组合预算或清理组内无效活动。"
+            ),
+        ))
+
 
 
 # ── helper ────────────────────────────────────────────

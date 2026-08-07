@@ -422,7 +422,7 @@ _CAMPAIGN_BROAD_PROMPT = (
 - 多维同时调整时 action 只能选一个主动作，其余靠 direction/proposed 数值表达
 
 ### triggered_rule 命名空间（必须遵守）
-- 只输出 **KB17 问题类型码**：BLOCKED_INVENTORY / STAGE_EXPIRED_TESTING / SAMPLE_INSUFFICIENT / CVR_WEAK / HIGH_ACOS_NO_ORDER / HIGH_ACOS_LOW_ORDER / HIGH_ACOS_WITH_ORDER / BUDGET_NO_SPEND / BUDGET_CANT_SPEND / BUDGET_EXHAUSTED / RANK_OPPORTUNITY / RANK_DROPPING / KEYWORD_POOL_DIRTY / KEYWORD_POOL_EXHAUSTED / PLACEMENT_INEFFICIENT / ALL_HEALTHY
+- 只输出 **KB17 问题类型码**：BLOCKED_INVENTORY / STAGE_EXPIRED_TESTING / SAMPLE_INSUFFICIENT / CVR_WEAK / HIGH_ACOS_NO_ORDER / HIGH_ACOS_LOW_ORDER / HIGH_ACOS_WITH_ORDER / BUDGET_NO_SPEND / BUDGET_CANT_SPEND / BUDGET_EXHAUSTED / RANK_OPPORTUNITY / RANK_DROPPING / KEYWORD_POOL_DIRTY / KEYWORD_POOL_EXHAUSTED / PLACEMENT_INEFFICIENT / PORTFOLIO_BOTTLENECK / ALL_HEALTHY
 - 禁止填入淘汰条件码（如 NO_CVR_HIGH_SPEND / IRRELEVANT_NO_IMPROVEMENT 等 KB21 condition_code）——那是另一命名空间
 
 ### review_level 枚举
@@ -1909,6 +1909,23 @@ class LLMReasoner:
                 camp_parts.append(f"  - 预算资格档位(代码判定): {s['budget_utilization_tier']}")
             if "budget_increase_eligible" in s:
                 camp_parts.append(f"  - 加预算资格(代码判定): {'✅ 可加预算' if s['budget_increase_eligible'] else '❌ 不可加预算'}")
+            # 组合预算瓶颈感知 (KB23 §8.4)
+            if s.get("_portfolio_group") and s.get("_portfolio_utilization") is not None:
+                _pg = s["_portfolio_group"]
+                _pu = s["_portfolio_utilization"]
+                _pb = s.get("_portfolio_budget")
+                _pb_str = f"${_pb:.0f}" if _pb is not None else "?"
+                camp_parts.append(
+                    f"  - ⚠️ 所属组合: {_pg} | 组合日预算: {_pb_str} | "
+                    f"组合7天利用率: {_pu:.0%}"
+                )
+                if _pu >= 1.0:
+                    camp_parts.append(
+                        f"     → 组合预算瓶颈! 利用率 {_pu:.0%} ≥ 100%，"
+                        "组合层预算可能是本活动低花费的真实原因。"
+                        "如本活动样本不足(SAMPLE_INSUFFICIENT)，禁止调 bid/预算、禁止淘汰，"
+                        "action=keep, triggered_rule=PORTFOLIO_BOTTLENECK。"
+                    )
             # 广告位加价比例 (KB 19 §5 决策矩阵 — 来自 basic_info，非 placement_report)
             ppcts = s.get("_placement_pcts", {})
             if ppcts:

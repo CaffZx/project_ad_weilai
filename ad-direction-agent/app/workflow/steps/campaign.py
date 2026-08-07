@@ -670,10 +670,27 @@ async def _analyze_campaigns_impl(
     except Exception as e:  # noqa: BLE001
         logger.warning("fetch_portfolio_list 异常 [%s]: %s (回退 60/20/20)", parent_asin, e)
 
+    # 组合预算利用率（逐活动注入 prompt + 护栏 P12 消费）
+    _pf_util: dict[str, float | None] = {}
+    if portfolio_data:
+        for _g, _info in portfolio_data.items():
+            _budget = _info.get("budget") if isinstance(_info, dict) else None
+            _spend_7d = _info.get("spend_7d") if isinstance(_info, dict) else None
+            if _budget and _spend_7d is not None and float(_budget) > 0:
+                _pf_util[_g] = float(_spend_7d) / (float(_budget) * 7)
+            else:
+                _pf_util[_g] = None
+    if _pf_util:
+        logger.info(
+            "Campaign [%s] 组合利用率: %s",
+            parent_asin,
+            ", ".join(f"{g}={v:.0%}" if v is not None else f"{g}=N/A" for g, v in _pf_util.items()),
+        )
+
     # ── 正常路径：有可分析活动 ──
     # 4. 按 match_type 分流
     exact_list = [cu for cu in llm_campaigns if cu.match_type == "EXACT"]
-    broad_list = [cu for cu in llm_campaigns if cu.match_type != "EXACT"]
+    broad_list = [cu for cu in llm_campaigns if cu.match_type in ("BROAD", "PHRASE")]
     _t(f"split: exact={len(exact_list)} broad={len(broad_list)}")
 
     # 4.1 组合预分类只反映当前真实归属；不再用旧 $5 规则推导精准活动的迁移目标。
@@ -711,13 +728,13 @@ async def _analyze_campaigns_impl(
             exact_list, "exact", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, exact_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
-            cancel_check=cancel_check,
+            cancel_check=cancel_check, pf_util=_pf_util,
         ),
         _analyze_one_stream(
             broad_list, "broad", reasoner, fetcher, parent_asin, days,
             strategy_context, keyword_class_map, bs, broad_sem, temperature, ctx_dict,
             overview_gate=overview_gate, core_keyword_set=core_keyword_set,
-            cancel_check=cancel_check,
+            cancel_check=cancel_check, pf_util=_pf_util,
         ),
         (_run_new_campaigns_if_enabled(finalize=False)),
         return_exceptions=True,
@@ -904,6 +921,7 @@ async def _analyze_campaigns_impl(
             inventory_days=strategy_context.inventory_days,
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
+            pf_util=_pf_util,
         )
         warnings_list.extend(budget_warnings)
 
@@ -1079,6 +1097,7 @@ async def _analyze_campaigns_impl(
             inventory_days=strategy_context.inventory_days,
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
+            pf_util=_pf_util,
         )
         warnings_list.extend(budget_warnings)
         logger.warning(
@@ -1773,6 +1792,7 @@ async def _analyze_one_stream(
     *,
     core_keyword_set: set[str] | None = None,
     cancel_check: Callable[[], Awaitable[None]] | None = None,
+    pf_util: dict[str, float | None] | None = None,   # {组合名: 利用率}，注入逐活动 prompt
 ) -> tuple[list[CampaignAdjustmentItem], dict, list[dict], list[dict], list[SearchTermPromotionCandidate]]:
     _core_set: set[str] = core_keyword_set or set()
     """单流全流程: summaries → unit_lookup → 预取 → (await overview_gate) → 分批 → R1 单轮 → 合并。
@@ -1800,6 +1820,19 @@ async def _analyze_one_stream(
         for cu in campaigns
     ]
     unit_lookup = _build_unit_lookup(campaigns)
+
+    # 逐活动注入组合预算利用率（Prompt + 护栏 P12 消费）
+    if pf_util:
+        for cu, s in zip(campaigns, summaries):
+            _group = getattr(cu, "portfolio", "") or ""
+            _util = pf_util.get(_group) if _group else None
+            if _util is not None:
+                s["_portfolio_group"] = _group
+                s["_portfolio_utilization"] = round(_util, 4)
+                # 组合日预算（取 portfolio_data 中的 budget）
+                _budget = (portfolio_data or {}).get(_group, {})
+                if isinstance(_budget, dict):
+                    s["_portfolio_budget"] = _budget.get("budget")
 
     # 2. 预取（精准流只拉 placement，广泛流只拉 search_term）
     if task_type == "exact":
@@ -2730,6 +2763,7 @@ def _apply_campaign_guardrails(
     inventory_days: float | None = None,
     refund_rate: float | None = None,
     rating: float | None = None,
+    pf_util: dict[str, float | None] | None = None,
 ):
     from app.workflow.steps.campaign_guardrails import GuardrailResult
     from app.workflow.steps.campaign_guardrails import apply_all as _apply_guardrails
@@ -2741,6 +2775,7 @@ def _apply_campaign_guardrails(
         inventory_days=inventory_days,
         refund_rate=refund_rate,
         rating=rating,
+        pf_util=pf_util,
     )
     warnings: list[str] = [r.message for r in gp.results if r.corrected]
     if gp.corrections > 0:
