@@ -621,7 +621,7 @@ function _renderPortfolioFilterPills(state) {
   PORTFOLIO_NAMES.forEach(n => { countByName[n] = 0; budgetByName[n] = { cur: 0, prop: 0 }; });
   state._campaignItems.forEach(it => {
     if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
-    const p = it.ai_portfolio_class || '自动广泛组';
+    const p = it.effective_portfolio || '自动广泛组';
     if (budgetByName[p] == null) return;
     countByName[p]++;
     budgetByName[p].cur += Number(it.current_budget) || 0;
@@ -870,7 +870,7 @@ function _renderBudgetSummary(state) {
   state._campaignItems.forEach(it => {
     if (it.item_type === 'prefiltered' || it.item_type === 'lost') return;
     totalCount++;
-    const p = it.ai_portfolio_class || '自动广泛组';
+    const p = it.effective_portfolio || '自动广泛组';
     if (state._selection.has(it.item_id)) {
       execTotal += it.action === 'paused' ? 0 : ((p === LOW_BID) ? 1.0 : (Number(it.proposed_budget) || Number(it.current_budget) || 0));
       selectedCount++;

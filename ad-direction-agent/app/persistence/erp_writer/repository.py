@@ -1400,11 +1400,13 @@ class ErpDualWriterRepository:
             asin, keyword, keyword_match_type, trigger_rule, description, evidence,
             keyword_class, review_level, is_core, perf_json, is_prefiltered, prefilter_reason,
             proposed_negetive_exact_keyword, proposed_negetive_phrase_keyword,
+            current_portfolio,
             confirm_status, execute_status, sort_order, create_time, update_time
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,
             'PENDING','PENDING',%s,%s,%s
         )
         ON DUPLICATE KEY UPDATE
@@ -1412,6 +1414,7 @@ class ErpDualWriterRepository:
             suggest_category=VALUES(suggest_category),
             confidence_level=VALUES(confidence_level),
             campaign_group_type=VALUES(campaign_group_type),
+            current_portfolio=VALUES(current_portfolio),
             campaign_id=VALUES(campaign_id),
             campaign_name=VALUES(campaign_name),
             asin=VALUES(asin),
@@ -1536,6 +1539,7 @@ class ErpDualWriterRepository:
                     card.prefilter_reason,
                     json.dumps(card.proposed_negetive_exact_keyword or [], ensure_ascii=False),
                     json.dumps(card.proposed_negetive_phrase_keyword or [], ensure_ascii=False),
+                    card.current_portfolio,
                     card.sort_order,
                     now,
                     now,

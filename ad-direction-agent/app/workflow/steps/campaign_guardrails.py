@@ -521,7 +521,7 @@ def _p12_portfolio_bottleneck(
     """P12: 组合预算瓶颈 → 样本不足活动禁调 bid/预算，禁淘汰 (KB23 §8.4)。"""
     if not pf_util:
         return
-    _group = getattr(item, "ai_portfolio_class", "") or ""
+    _group = getattr(item, "current_portfolio", "") or ""
     _util = pf_util.get(_group) if _group else None
     if _util is None or _util < 1.0:
         return

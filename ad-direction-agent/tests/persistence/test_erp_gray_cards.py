@@ -63,7 +63,7 @@ def test_write_full_keeps_create_and_gray_cards_without_campaign_id():
             "proposed_daily_budget": 5,
             "trigger_scene": "RANKING_OPPORTUNITY_NO_EXACT",
             "confidence": "medium",
-            "ai_portfolio_class": "精准测试组",
+            "current_portfolio": "精准测试组",
         }],
         "skipped_campaigns": [{
             "campaign_name": "multi-camp",

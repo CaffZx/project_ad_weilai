@@ -63,7 +63,7 @@ function _itemDefaults(item) {
     proposed_bid: _def(item.proposed_bid, null),
     placement_adjustments: _def(item.placement_adjustments, []),
     negative_keywords: _def(item.negative_keywords, []),
-    ai_portfolio_class: _def(item.ai_portfolio_class, ''),
+    effective_portfolio: _def(item.effective_portfolio, ''),
     triggered_rule: _def(item.triggered_rule, ''),
     review_level: _def(item.review_level, ''),
     is_core: _def(item.is_core, false),

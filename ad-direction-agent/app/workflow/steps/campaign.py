@@ -2191,7 +2191,7 @@ def _reconcile_portfolio_targets(
         current_groups = find_portfolio_group_matches(unit.current_portfolio_name)
         match_type = (unit.match_type or item.match_type or "").upper()
         if match_type in _BROAD_PORTFOLIO_MATCH_TYPES:
-            item.ai_portfolio_class = PORTFOLIO_BROAD
+            item.current_portfolio = PORTFOLIO_BROAD
             item.target_campaign_group_type = target_group_code_if_current_mismatch(
                 unit.current_portfolio_name,
                 PORTFOLIO_BROAD,
@@ -2211,8 +2211,8 @@ def _reconcile_portfolio_targets(
             else:
                 item.target_campaign_group_type = ""
             # 当前真实归属仍可供展示/预算回算读取。
-            item.ai_portfolio_class = current_groups[0] if current_groups else ""
-            unit.portfolio = item.ai_portfolio_class
+            item.current_portfolio = current_groups[0] if current_groups else ""
+            unit.portfolio = item.current_portfolio
 
         if campaign_id:
             adjusted_campaign_ids.add(campaign_id)
@@ -2280,7 +2280,7 @@ def _reconcile_portfolio_targets(
             evidence=[f"当前广告组合：{current_portfolio_name}"],
             current_budget=current_budget,
             current_bid=current_bid,
-            ai_portfolio_class=PORTFOLIO_BROAD,
+            current_portfolio=PORTFOLIO_BROAD,
             target_campaign_group_type=target,
             portfolio_or_group=current_portfolio_name,
             perf_7d=perf_7d,

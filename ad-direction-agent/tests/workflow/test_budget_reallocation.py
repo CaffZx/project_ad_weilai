@@ -29,7 +29,7 @@ from app.workflow.steps.campaign_portfolio import (
 def _adj(key, kw, cur, prop, group, action="adjust_budget", match="EXACT"):
     return CampaignAdjustmentItem(
         campaign_name=key, campaign_key=key, keyword_text=kw, match_type=match,
-        action=action, ai_portfolio_class=group,
+        action=action, current_portfolio=group,
         current_budget=cur, proposed_budget=prop,
     )
 

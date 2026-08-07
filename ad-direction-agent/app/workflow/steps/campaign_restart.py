@@ -177,6 +177,6 @@ def _build_item(
         negative_keywords=[],               # 占位
         review_level=review_level,
         days_online=cu.days_online,
-        ai_portfolio_class=_restart_group(cu.match_type),
+        current_portfolio=_restart_group(cu.match_type),
         perf_7d=cu.perf_7d.model_dump() if cu.perf_7d else {},
     )

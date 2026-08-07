@@ -117,7 +117,7 @@ def _portfolio_groups_from_payload(
     counts = {label: 0 for label in _PORTFOLIO_LABELS}
     budget_sums = {label: 0.0 for label in _PORTFOLIO_LABELS}
     for adj in adjustments:
-        label = (adj.get("ai_portfolio_class") or adj.get("portfolio") or "").strip()
+        label = (adj.get("current_portfolio") or adj.get("portfolio") or "").strip()
         if label not in counts:
             continue
         counts[label] += 1
@@ -453,7 +453,7 @@ def canonicalize_payload(
         evidence_list = primary_adj.get("evidence") or []
         evidence_text = "\n".join(str(x) for x in evidence_list if x)
         description = primary_adj.get("reason")
-        portfolio_label = (primary_adj.get("ai_portfolio_class") or primary_adj.get("portfolio") or "").strip()
+        portfolio_label = (primary_adj.get("current_portfolio") or primary_adj.get("portfolio") or "").strip()
         target_campaign_group_type = map_campaign_group_type(
             campaign_group_targets.get(campaign_id)
             or (primary_adj.get("target_campaign_group_type") or "").strip()
@@ -555,6 +555,7 @@ def canonicalize_payload(
                 suggest_category=_category_from_action(primary_adj.get("action")),
                 confidence_level=confidence,
                 campaign_group_type=campaign_group_type,
+                current_portfolio=map_campaign_group_type(portfolio_label) or None,
                 description=description,
                 evidence=evidence_text,
                 sort_order=sort_order,
@@ -615,7 +616,8 @@ def canonicalize_payload(
             trigger_rule=_clip(nc.get("trigger_scene"), 128),
             suggest_category="CREATE",
             confidence_level=str(nc.get("confidence") or "medium"),
-            campaign_group_type=map_campaign_group_type((nc.get("ai_portfolio_class") or "").strip()),
+            campaign_group_type=map_campaign_group_type((nc.get("current_portfolio") or "").strip()),
+            current_portfolio=map_campaign_group_type((nc.get("current_portfolio") or "").strip()) or None,
             description=nc.get("reason"),
             evidence="\n".join(str(x) for x in (nc.get("evidence") or []) if x),
             sort_order=900,
@@ -655,6 +657,7 @@ def canonicalize_payload(
             keyword_match_type=_normalize_match_type(sk.get("match_type")),
             trigger_rule=None, suggest_category=None, confidence_level="low",
             campaign_group_type=map_campaign_group_type((sk.get("portfolio") or "").strip()),
+            current_portfolio=map_campaign_group_type((sk.get("portfolio") or "").strip()) or None,
             description=None, evidence="", sort_order=950,
             current_budget=None, proposed_budget=None, current_bid=None, proposed_bid=None,
             campaign_key=ckey, is_prefiltered=True, prefilter_reason=_clip(reason, 255)))

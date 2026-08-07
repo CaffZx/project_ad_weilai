@@ -44,7 +44,7 @@ def _adjustment(*, keyword_id: str, keyword_text: str, match_type: str, negative
         "match_type": match_type,
         "child_asin": "B0CHILD",
         "action": "adjust",
-        "ai_portfolio_class": "精准主力组",
+        "current_portfolio": "精准主力组",
         "current_bid": 1.0,
         "proposed_bid": 0.8,
         "negative_keywords": negatives,

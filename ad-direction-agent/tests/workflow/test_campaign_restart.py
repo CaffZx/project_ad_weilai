@@ -33,7 +33,7 @@ def test_case_one_budget_only():
     assert it.proposed_budget == 3.0
     assert it.proposed_bid == 0.20
     assert it.review_level == "AUTO_BATCHABLE"
-    assert it.ai_portfolio_class == "精准测试组"
+    assert it.current_portfolio == "精准测试组"
     assert it.current_budget == 1.0 and it.current_bid == 0.20
     assert keys == {"camp-c1 x A1"}
 
@@ -49,7 +49,7 @@ def test_case_two_calibrated_bid():
     assert it.proposed_budget == 3.0
     assert it.proposed_bid == 0.35
     assert it.review_level == "MANUAL_REVIEW"
-    assert it.ai_portfolio_class == "自动广泛组"
+    assert it.current_portfolio == "自动广泛组"
 
 
 def test_case_two_bid_floor():

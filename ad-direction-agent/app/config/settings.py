@@ -131,8 +131,8 @@ class Settings(BaseSettings):
     # 在主链上，必须 fail-open；Windows 本机有 asyncio 取消缺陷风险，建议仅服务器(Linux)开启
     campaign_overview_enabled: bool = True   # 恢复(2026-06-08)：禁用根因(Win asyncio 取消挂死)已由 main.py SelectorEventLoopPolicy 根治；_run_overview 带 timeout_override=55 + fail-open
     # Campaign 组合(Portfolio)分类与预算汇总(2026-06-02)
-    # 4 类 AI 自造逻辑分类: 主推/广泛自动/测试新增/淘汰；非亚马逊后台 Portfolio。
-    # 关闭后 ai_portfolio_class 留空、result.budget_summary=None，行为退化到改前。
+    # 4 类组合分组（MCP portfolio 名称映射）：精准主力/自动广泛/精准测试/低价捡漏。
+    # 关闭后 current_portfolio 留空、result.budget_summary=None，行为退化到改前。
     campaign_portfolio_enabled: bool = True
     # daily_budget 兜底乘数: 当 override + asin_data.daily_budget 均不可用时
     # 用 (ad_data.spend / days) × multiplier 作兜底目标；与会议拍板的 1.15 一致

@@ -63,8 +63,8 @@ def _f(v, default: float = 0.0) -> float:
 
 
 def _current_group_of(item: CampaignAdjustmentItem) -> str:
-    """活动当前归属（来源组）：ai_portfolio_class 优先，action/match 兜底。"""
-    g = (item.ai_portfolio_class or "").strip()
+    """活动当前归属（来源组）：current_portfolio 优先，action/match 兜底。"""
+    g = (item.current_portfolio or "").strip()
     if g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE):
         return g
     if (item.action or "") == _ELIMINATE_ACTION:
@@ -73,7 +73,7 @@ def _current_group_of(item: CampaignAdjustmentItem) -> str:
     if mt in ("BROAD", "PHRASE", "AUTO"):
         return PORTFOLIO_BROAD
     if mt == "EXACT":
-        # 主路径恒由终态分类(按 proposed)设好 ai_portfolio_class，此兜底罕见命中；
+        # 主路径恒由终态分类(按 proposed)设好 current_portfolio，此兜底罕见命中；
         # 为一致性也按 proposed（缺省回落 current）判 $5 分界。
         eff = item.proposed_budget if item.proposed_budget is not None else item.current_budget
         return PORTFOLIO_TEST if _f(eff) < 5.0 else PORTFOLIO_MAIN
@@ -94,15 +94,15 @@ def _group_of(item: CampaignAdjustmentItem) -> str:
 
 
 def _group_of_new(nc: NewCampaignItem) -> str:
-    """新增活动归组（永不淘汰）：优先 ai_portfolio_class（campaign_new 已设测试/广泛），
+    """新增活动归组（永不淘汰）：优先 current_portfolio（campaign_new 已设测试/广泛），
     缺失时按 match_type 兜底——新 EXACT 一律进精准测试组（KB23 §3.4：<$5、未验证，不套 $5 分界）。"""
-    g = (nc.ai_portfolio_class or "").strip()
+    g = (nc.current_portfolio or "").strip()
     if g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD):
         return g
     mt = (nc.match_type or "").upper()
     if mt in ("BROAD", "PHRASE", "AUTO"):
         return PORTFOLIO_BROAD
-    return PORTFOLIO_TEST  # 新 EXACT（及未知）→ 测试组（兜底分支，ai_portfolio_class 通常已设）
+    return PORTFOLIO_TEST  # 新 EXACT（及未知）→ 测试组（兜底分支，current_portfolio 通常已设）
 
 
 def aggregate(

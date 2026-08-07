@@ -19,7 +19,7 @@ def test_pending_uses_doris_ids_not_stable_hash():
                 "match_type": "EXACT",
                 "child_asin": "B0CHILD",
                 "action": "adjust_bid",
-                "ai_portfolio_class": "精准主力组",
+                "current_portfolio": "精准主力组",
                 "current_bid": 1.0,
                 "proposed_bid": 0.8,
                 "confidence": 80,
@@ -52,7 +52,7 @@ def test_target_group_creates_campaign_pending_without_budget_change():
             "match_type": "EXACT",
             "action": "keep",
             # 旧 LLM 输出不能决定下游挪组；代码写入的 target 才是权威。
-            "ai_portfolio_class": "低价捡漏组",
+            "current_portfolio": "低价捡漏组",
             "target_campaign_group_type": "exact_testing_group",
         }],
     }
@@ -68,7 +68,7 @@ def test_target_group_creates_campaign_pending_without_budget_change():
     assert card.campaign_pending[0].target_campaign_group_type == "exact_testing_group"
 
 
-def test_legacy_ai_portfolio_class_does_not_create_move_pending():
+def test_legacy_current_portfolio_does_not_create_move_pending():
     payload = {
         "parent_asin": "B0TEST",
         "experiment_id": "exp-no-target-group",
@@ -82,7 +82,7 @@ def test_legacy_ai_portfolio_class_does_not_create_move_pending():
             "keyword_text": "fishnet tights",
             "match_type": "EXACT",
             "action": "keep",
-            "ai_portfolio_class": "低价捡漏组",
+            "current_portfolio": "低价捡漏组",
         }],
     }
 

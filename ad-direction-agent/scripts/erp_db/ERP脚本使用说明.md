@@ -99,7 +99,7 @@
       "negative_keywords": [
         {"keyword": "irrelevant term", "clicks_7d": 5, "orders_7d": 0, "reason": "不相关高点击"}
       ],
-      "ai_portfolio_class": "淘汰",
+      "current_portfolio": "淘汰",
       "review_level": "MANUAL_REVIEW"
     }
   ],
@@ -121,7 +121,7 @@
 | `parent_asin` | Y | 父 ASIN |
 | `adjustments[]` | Y | 每个活动一张卡片 |
 | `adjustments[].action` | Y | `eliminate_to_low_bid_pool` / `adjust_bid` / `adjust_budget` / `adjust_placement` / `keep` |
-| `adjustments[].ai_portfolio_class` | Y | `主推` / `广泛/自动` / `测试/新增` / `淘汰` |
+| `adjustments[].current_portfolio` | Y | `主推` / `广泛/自动` / `测试/新增` / `淘汰` |
 | `adjustments[].campaign_key` | Y | `活动名 × 子ASIN` 唯一标识 |
 | `summary` | Y | 汇总统计 |
 | `budget_summary.portfolio_constraints` | N | 3 组预算约束（缺则用默认） |

@@ -214,7 +214,7 @@ export function createCampaignState() {
       if (fa && it.action_klass !== fa) return false;
       if (fs && it.conf_klass !== fs) return false;
       if (fm && it.match_type !== fm) return false;
-      if (state._portfolioFilter && it.ai_portfolio_class !== state._portfolioFilter) return false;
+      if (state._portfolioFilter && it.effective_portfolio !== state._portfolioFilter) return false;
       if (pf) {
         // 预过滤/丢失非可复核项，待处理/已处理均不纳入（仅在「全部」下可见）
         if (it.item_type === 'prefiltered' || it.item_type === 'lost') return false;

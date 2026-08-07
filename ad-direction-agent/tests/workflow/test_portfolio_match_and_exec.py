@@ -124,7 +124,7 @@ def test_reconcile_portfolio_targets_only_moves_broad_campaigns_outside_broad_gr
     assert existing_broad.target_campaign_group_type == "auto_broad_group"
     assert existing_broad.proposed_bid == 0.7
     assert existing_exact.target_campaign_group_type == ""
-    assert existing_exact.ai_portfolio_class == PORTFOLIO_MAIN
+    assert existing_exact.current_portfolio == PORTFOLIO_MAIN
     added = [item for item in items if item.campaign_id == "broad-multi-id"]
     assert len(added) == 1
     assert added[0].action == "keep"

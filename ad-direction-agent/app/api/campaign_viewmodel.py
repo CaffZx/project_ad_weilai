@@ -244,7 +244,7 @@ def from_db_snapshot(snapshot: dict, *, mode: str = "readonly") -> dict:
             "negative_keywords": negative_keywords,
             "neg_keywords_brief": neg_keywords_brief,
             "neg_details": neg_details,
-            "ai_portfolio_class": _GROUP_CODE_TO_LABEL.get(grp_code, grp_code),
+            "effective_portfolio": _GROUP_CODE_TO_LABEL.get(grp_code, grp_code),
             "triggered_rule": card.get("trigger_rule") or "",
             "review_level": _REVIEW_LEVEL_LABELS.get(card.get("review_level") or "", card.get("review_level") or ""),
             "is_core": bool(card.get("is_core")),

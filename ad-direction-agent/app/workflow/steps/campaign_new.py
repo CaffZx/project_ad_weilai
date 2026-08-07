@@ -361,7 +361,7 @@ async def finalize_new_campaign_decisions(
             source=decision.source,
             reason=decision.reason,
             evidence=decision.evidence,
-            ai_portfolio_class=PORTFOLIO_TEST if is_exact else PORTFOLIO_BROAD,
+            current_portfolio=PORTFOLIO_TEST if is_exact else PORTFOLIO_BROAD,
             confidence=decision.confidence,
             review_level=decision.review_level,
             suggested_bid_source=bid_source,

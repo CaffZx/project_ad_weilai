@@ -162,8 +162,8 @@ class CampaignAdjustmentItem(BaseModel):
     elimination_values: dict | None = None
     round_votes: dict[str, str] = Field(default_factory=dict)
     review_level: str = "MANUAL_REVIEW"
-    # 组合分类(AI 自造 4 类,非后台 Portfolio): 精准主力组 / 自动广泛组 / 精准测试组 / 低价捡漏组
-    ai_portfolio_class: str = ""
+    # 当前组合归属（MCP portfolio 名称 → find_portfolio_group_matches 映射）
+    current_portfolio: str = ""
     # 代码规则判定的活动级目标组 ERP 码；空值表示本轮不执行挪组。
     target_campaign_group_type: str = ""
     # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
@@ -311,7 +311,7 @@ class NewCampaignItem(BaseModel):
     source: str = ""                        # 候选来源 flow/ranking_opportunity/competitor（输出排序 H5 用）
     reason: str = ""                        # LLM 文本
     evidence: list[str] = Field(default_factory=list)
-    ai_portfolio_class: str = ""            # 归组: 精准测试组 / 自动广泛组
+    current_portfolio: str = ""               # 当前归组: 精准测试组 / 自动广泛组
     confidence: str = "medium"              # 双轮 keyword_class 一致=high, 不一致=low
     review_level: str = "MANUAL_REVIEW"
     suggested_bid_source: str = "placeholder"   # "amazon_api" | "placeholder" | "actual_cpc"
