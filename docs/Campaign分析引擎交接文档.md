@@ -1,7 +1,7 @@
 # Campaign 广告活动分析引擎 — 交接文档
 
-> **最后更新**: 2026-08-06（版本日志见文末，最新 v3.27：预算护栏阈值/新增流match_type全面收口）
-> **版本**: v3.27
+> **最后更新**: 2026-08-07（版本日志见文末，最新 v3.28：组合预算瓶颈 P12 护栏 + 自动活动出价）
+> **版本**: v3.28
 > **分支**: chenv3.2
 
 ---
@@ -356,7 +356,9 @@ mcp_max_concurrency: int = 115       # MCP 工具并发（mcp_max_connections=12
 | 08-04 | **★ 搜索词精准扩词双来源 + 样本过滤** | `campaign_search_term_promotion.py`（新，104 行）：搜索词提精准确定性准入（KB23 §3.4 订单/词根两通道，CVR 缺品类基准刻意不伪造），产出 EXACT 决策（`SRC_CONVERTED`/`SRC_BROAD_DERIVED`）。`campaign_sample.py`（新，68 行）：KB17 活动级样本不足判定；样本不足活动搜索词取数标 `SKIPPED_CAMPAIGN_SAMPLE_INSUFFICIENT` 仅观察、不进提精准。`campaign_fetcher.py`（+284）：`build_search_term_bundle` 活动级 7d/14d 搜索词 bundle。`reasoner.py`（+207）：广泛流搜索词行渲染 + LLM 回吐 `exact_promotion_candidates` 按原始搜索词报表权威回填校验。`campaign_new.py`（+244）：`merge_new_campaign_decisions` 双来源合流（搜索词提精准覆盖同词 flow 探索项）+ `finalize_new_campaign_decisions` 统一组装一次；`_derive_match_type` 对 `source=flow` 候选一律先建 BROAD（词形分类不再决定 EXACT）。`models/campaign.py`（+37）：`SearchTermPromotionCandidate`/`NewCampaignDecision` 模型。`settings.py`（+4）：`search_term_llm_max_terms_per_campaign=20`、`campaign_new_max_creates 20→15`。`campaign.py`（+176）/`campaign_guardrails.py`（+51）：编排接入。测试 8 个（`test_campaign_search_term_promotion.py`+367、`test_campaign_dual_source_orchestration.py`+95、`test_campaign_search_term_bundle.py`+101 等）。20 files +1733/-166。 |
 | 08-05 | **★ 暂停活动（paused）接线** | `campaign.py`：`_normalize_action` 翻译 LLM 动作码 `paused_campaign` → `paused`（唯一翻译点，代码不推导覆盖）+ summary `to_paused` 计数。`mappers.py`：`paused`→`PAUSED` 分类（与淘汰同级优先级，防污染淘汰复评 `WHERE='ELIMINATE'`）；仅生成活动级 `new_state=paused` pending，不带预算/Bid/广告位/否词/组合迁移。`repository.py`：summary 表 `paused_count` 列 + `categorized_total` 纳入。`campaign_viewmodel.py`：`PAUSED`→`paused` 动作、`eliminate_or_paused` 中性样式、summary 计数。`campaign_guardrails.py`：注释对齐——BROAD/PHRASE/AUTO 退出=paused_campaign，**护栏当前不处理 paused（延后立项）**。前端 panel：淘汰/暂停合并标签 + 筛选 value `eliminate_or_paused`。`db_health_check.py`：VALID_CAT 加 `PAUSED`。ontology 5 YAML 清理 v3.4.0 注解。新增 `test_paused_campaign.py`（T1-T4）+ `广泛流stop_campaign接线方案.md`。17 files +448/-129。 |
 | 08-05 | **广泛流 prompt 大改 + 护栏覆盖 paused + KB 切片精细化** | `reasoner.py`：广泛流 prompt 全面改进——预算资格代码预判注入 LLM（`budget_utilization_tier`/`budget_increase_eligible`）；策略上下文透传（有效容忍上限/目标 CPA/平均订单金额/库存加预算门禁）；action 合法枚举约束 + triggered_rule 命名空间（KB17 码仅限）+ review_level 枚举；示例去误导化（eliminate→adjust_budget）；预算利用率注入改为 budget>0 即注入（含 0 花费显式 0.0%）。`campaign_guardrails.py`：P0/P1/P7/P8/P11 全线覆盖 paused 动作（核心词禁暂停、样本不足禁暂停、跳过 paused 的预算/bid/振幅护栏）。`campaign.py`：护栏后二次 action 归一化 + 预算硬下限（proposed<1→1）+ paused 强制 HIGH_RISK_REVIEW。`campaign_budget_reallocation.py`：paused 活动预算释放入可再分配池（`other_campaign_release`）。`mappers.py`：EXACT paused 静默丢弃。`kb_loader.py`：KB30 切片精化（仅 0,1,2 节→业务语义）、KB31 重切（决策要点 0,2,3,4,8,12,13,14）；Ontology 契约 fail-open（缺失/损坏返回空串不阻断分析）。文档同步 + 删除 `Campaign切除双轮投票方案.md`（-453 行）。38 files +435/-694。 |
-| 08-05~06 | **预算护栏阈值 50→70% + 新增流 match_type 全面收口** | `campaign_guardrails.py`：P7 花不完阈值从 `<50%` 改为 `<70%`，与 reasoner 预算资格门禁对齐（eligible≥70）。`reasoner.py`：预算资格三档（>90/70-90/<70）合为两档（>90/≥70/<70），去除维持档。`campaign_new.py` `_derive_match_type`：删除 `_CLASS_TO_MATCH_TYPE` 硬映射表（generic→BROAD/long_tail→EXACT 等 5 条），改为纯来源驱动——流量来源全链路（flow/ranking_opportunity/competitor）一律 BROAD，仅搜索词提精准（来源 B）可建 EXACT。护栏 P0/P1 在 `_force_keep` 前保存 `original_action`，防止被覆盖为 keep。`kb_loader.py`：budget_reallocation preset 补 KB23 §4.2（活动预算和≠花费）+§4.3（超配健康比）。前端 summary 补 `paused` 字段 + `eliminate_or_paused` badge CSS。`campaign_search_term_promotion.py`：_decision reason 聚合多活动同词候选的所有 distinct reason。6 commits，~10 files +20/-50。 |
+| 08-05~06 | **预算护栏阈值 50→70% + 新增流 match_type 全面收口** | `campaign_guardrails.py`：P7 花不完阈值从 `<50%` 改为 `<70%`，与 reasoner 预算资格门禁对齐（eligible≥70）。`reasoner.py`：预算资格三档（>90/70-90/<70）合为两档（>90/≥70/<70），去除维持档。`campaign_new.py` `_derive_match_type`：删除 `_CLASS_TO_MATCH_TYPE` 硬映射表（generic→BROAD/long_tail→EXACT 等 5 条），改为纯来源驱动——流量来源全链路（flow/ranking_opportunity/competitor）一律 BROAD，仅搜索词提精准（来源 B）可建 EXACT。护栏 P0/P1 在 `_force_keep` 前保存 `original_action`，防止被覆盖为 keep。`kb_loader.py`：budget_reallocation preset 补 KB23 §4.2（活动预算和≠花费）+§4.3（超配健康比）。前端 summary 补 `paused` 字段 + `eliminate_or_paused` badge CSS。`campaign_search_term_promotion.py`：_decision reason 聚合多活动同词候选的所有 distinct reason。 |
+| 08-06 | **新增流颜色词/节日词 + Listing 五点 + paused 预算归零** | `mcp_registry.py`：`erp_listing_product_info` 调 azlisting MCP 取父级类目/五点/子 ASIN 颜色尺码。`reasoner.py`：`_NEW_CAMPAIGN_PROMPT` 增 `color_flags`/`holiday_flags` 字段 + 五点锚点规则 + 节日词 >60 天 skip。`campaign_new.py`：`_normalize_color`/`_build_color_asin_map` 颜色→子 ASIN 指派；颜色非法→拒绝候选。`campaign.py`：paused `proposed_budget=0.0`（暂停=停止花费）+ 否词闸门日志（护栏前后）。前端 render.js：paused 预算显式判 0。新增 `test_campaign_new_color.py`。 |
+| 08-07 | **组合预算瓶颈 P12 + 自动活动出价 + current_portfolio 重命名** | `campaign_guardrails.py`：新增 P12_PORTFOLIO_BOTTLENECK——组合 7 天利用率 ≥100% 且样本不足→禁淘汰/禁调 bid 预算，`action=keep` + `triggered_rule=PORTFOLIO_BOTTLENECK`（KB23 §8.4）。`reasoner.py`：广泛流 prompt 注入逐活动组合利用率 + 瓶颈感知。`campaign.py`：`_pf_util` 计算+注入流分析/护栏；`broad_list` 改为 BROAD/PHRASE（排除 AUTO）+ Redis `_last_shop_account` 回写修复。`campaign_fetcher.py`：自动活动识别 + `_fetch_auto_targets` 批量拉四种匹配类型出价。`ai_portfolio_class` → `current_portfolio` 全量重命名（models/budget_realloc/mappers/frontend 22 文件）。新增 `migrate_card_current_portfolio.sql`。 |
 
 ---
 
@@ -589,6 +591,7 @@ EXACT 活动在四组间的确定性升降级逻辑：
 | P2 | 库存/退货/评分 | inventory_days/refund_rate/rating 硬护栏 |
 | P3 | 硬淘汰 | 无单且 bid≤$0.10 或 budget≤$1 → 强制淘汰（优先级 > P1） |
 | P4-P11 | 预算/Bid/广告位/否词 | 各维度边界修正 |
+| P12（v3.28） | 组合预算瓶颈 | 组合 7 天利用率 ≥100% 且活动样本不足（cost<$5 或 clicks<10）→ 禁淘汰/暂停/调 bid 预算，强制 keep + `PORTFOLIO_BOTTLENECK`（KB23 §8.4） |
 
 ### 10.2 R3/R4 LLM 重试编排
 
@@ -850,6 +853,10 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 *v3.7: 选词/投票质量 + 新增扩词治不准（2026-06-26 上线 chenv31，详见主交接 06-26 条）—— ①逐活动 **cid 句柄**根治 campaign_key 漂移（LLM 回吐 `C1..Cn`，代码 `cid_map` 权威回填结构/现状字段，越界/重复 cid 丢弃→进 R3）；②双轮投票**缺轮兜底**（单轮缺失=分歧送 R3=Level A；两轮都漏种占位送 R3、R3 仍缺删占位还原"未分析"不伪造 keep=Level B）；③删 LLM 自报 **confidence**（死字段，投票一致性已定档）；④新增扩词**接入 KB28**（`new_campaign` 预设 +`08`+`28:0,2,3`）：按 §2 综合权衡自然位+周排名+搜索量+标题属性判 R1-R4 `relevance_tier`，候选补 own_keyword_flow 周排名/周搜索量信号，目标词类型软引导；相关性/词类型判断**全交 LLM**，代码只记录不硬判；⑤推自然位删占比判据（recommender+thresholds，另一窗口）。待核：own_keyword_flow 三排名字段语义 live 终核；竞品源仍默认关（direct_competitors 无词字段，启用需配 KB28 §4.1）*
 最后更新：2026-07-17
+
+*v3.28: 组合预算瓶颈P12护栏 + 自动活动出价 + 新增流颜色词/节日词 + current_portfolio重命名（2026-08-06~07，本地未部署服务器）—— ①新增 P12_PORTFOLIO_BOTTLENECK：组合利用率≥100%且样本不足→禁淘汰/禁调bid预算，force keep ②广泛流 prompt 注入组合利用率+PORTFOLIO_BOTTLENECK感知 ③broad_list 改为BROAD/PHRASE（排除AUTO）④campaign_fetcher 自动活动识别+_fetch_auto_targets批量拉四种匹配类型出价 ⑤新增流颜色词/节日词标记+Listing五点注入（erp_listing_product_info）⑥paused proposed_budget=0.0 ⑦_derive_match_type 全来源→BROAD ⑧ai_portfolio_class→current_portfolio全量重命名(22文件) ⑨Redis _last_shop_account回写修复。*
+
+最后更新：2026-08-07
 
 *v3.27: 预算护栏阈值/新增流match_type收口 + 护栏paused覆盖 + KB切片精细化（2026-08-05~06，本地未部署服务器）—— ①P7 花不完阈值 50%→70%（与 reasoner 预算资格门禁 eligible≥70 对齐）；reasoner 预算资格三档→两档（>90/≥70/<70）②`_derive_match_type` 删除 `_CLASS_TO_MATCH_TYPE` 映射表，纯来源驱动：流量来源全链路一律 BROAD，仅搜索词提精准可建 EXACT ③护栏 P0/P1/P7/P8/P11 覆盖 paused + EXACT paused 静默丢弃 ④`campaign.py` 护栏后二次 action 归一化+预算硬下限（proposed<1→1）+paused 强制 HIGH_RISK_REVIEW ⑤`campaign_budget_reallocation.py` paused 预算释放入可再分配池 ⑥`kb_loader.py` KB30/KB31 切片精化+KB23 补 §4.2/§4.3+Ontology 契约 fail-open ⑦`reasoner.py` 广泛流 prompt 大改：预算资格/策略上下文代码预判注入+action 枚举约束+triggered_rule 命名空间 ⑧前端 summary paused 字段+eliminate_or_paused badge ⑨P0/P1 护栏保存 original_action 防覆盖 ⑩删除 `Campaign切除双轮投票方案.md`（-453 行）。~45 files 累计。*
 

@@ -2211,7 +2211,7 @@ def _reconcile_portfolio_targets(
             else:
                 item.target_campaign_group_type = ""
             # 当前真实归属仍可供展示/预算回算读取。
-            item.current_portfolio = current_groups[0] if current_groups else ""
+            item.current_portfolio = current_groups[0] if current_groups else (unit.current_portfolio_name or "")
             unit.portfolio = item.current_portfolio
 
         if campaign_id:

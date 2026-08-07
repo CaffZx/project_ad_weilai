@@ -68,6 +68,8 @@
 .camp-kv .k { color: var(--camp-muted-fg); }
 .camp-kv .v { font-weight: 500; }
 .camp-kv .v.empty { color: #9CA3AF; font-style: italic; font-weight: 400; }
+.camp-portfolio-transition .k { color: #16A34A; }
+.camp-portfolio-transition .v { color: #16A34A; }
 .camp-root .muted { color: var(--camp-muted-fg); }
 .camp-root .text-xs { font-size: 11px; }
 .camp-root .text-sm { font-size: 12px; }

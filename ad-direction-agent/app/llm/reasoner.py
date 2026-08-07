@@ -737,6 +737,7 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
   - `group_requested_delta` = 组内活动**想加/减多少**（净需求信号，不是绝对预算）
   - `new_requested_delta` = 其中来自本轮**新建活动**的需求（current=0 全是净增）；不得为新活动稀释推词预算
   - `campaign_budget_sum_after` = 本轮挪组+新增后，该组合内活动预算之和（统计值，可对比 `current_group_budget` 判断瓶颈：活动之和接近或超过组合预算 → 组合预算可能是瓶颈，加组合预算才有效）
+  - `group_budget_floor` = 挪组后该组合内**活动预算的最大值**（组合预算不得低于此值，否则最高预算活动无法运行）；无活动时为 0
 - `low_bid_group`：低价捡漏组，固定 $1、不参与分配（代码已处理，不要出现在输出中）。
 
 ## 你的任务
@@ -747,6 +748,7 @@ _BUDGET_REALLOC_PROMPT = """你是亚马逊广告预算回算专家。依据下�
 5. 每组在 `reason` 里用运营可读中文说明为什么这么分。
 
 ## 硬性约束（违反将被拒绝回落规则引擎）
+- 各组 `proposed_group_budget` **不得低于** `group_budget_floor`（组合预算不能低于组内最大活动预算，否则该活动无法运行。无活动时 floor=0，不限制）——**优先级最高**
 - 3 组 `proposed_group_budget` 之和 ≤ `budget_pool`（父目标硬顶）
 - 各组 `proposed_group_budget` ≥ 0
 - **低价捡漏组不得出现在 budget_groups 里**（KB GROUP-004）

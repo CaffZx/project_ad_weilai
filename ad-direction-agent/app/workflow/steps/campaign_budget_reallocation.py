@@ -168,6 +168,7 @@ def aggregate(
             "group_requested_delta": 0.0,
             "new_requested_delta": 0.0,
             "campaign_budget_sum_after": 0.0,   # 挪组后+新增后组内活动预算之和（统计值）
+            "group_budget_floor": 0.0,          # 挪组后组内活动预算的最大值（组合预算不得低于此值）
         }
 
     low_bid_release = 0.0
@@ -199,12 +200,14 @@ def aggregate(
             gd = groups[src]
             gd["group_requested_delta"] += proposed - cur
             gd["campaign_budget_sum_after"] += proposed
+            gd["group_budget_floor"] = max(gd["group_budget_floor"], proposed)
         else:
             # 跨组移动：来源组释放 -current，目标组新增 +proposed（两侧都记，避免误当组内降预算）
             groups[src]["group_requested_delta"] += -cur
             gd_dst = groups[dst]
             gd_dst["group_requested_delta"] += proposed
             gd_dst["campaign_budget_sum_after"] += proposed
+            gd_dst["group_budget_floor"] = max(gd_dst["group_budget_floor"], proposed)
 
     for nc in (new_campaigns or []):
         grp = _group_of_new(nc)
@@ -215,11 +218,13 @@ def aggregate(
         gd["group_requested_delta"] += proposed
         gd["new_requested_delta"] += proposed
         gd["campaign_budget_sum_after"] += proposed
+        gd["group_budget_floor"] = max(gd["group_budget_floor"], proposed)
 
     for g in _ACTIVE_GROUPS:
         groups[g]["group_requested_delta"] = round(groups[g]["group_requested_delta"], 2)
         groups[g]["new_requested_delta"] = round(groups[g]["new_requested_delta"], 2)
         groups[g]["campaign_budget_sum_after"] = round(groups[g]["campaign_budget_sum_after"], 2)
+        groups[g]["group_budget_floor"] = round(groups[g]["group_budget_floor"], 2)
 
     # ★ 3 活跃组全为零（不区分是否含低价捡漏）→ 跳过回算 LLM
     all_active_zero = all(groups[g]["current_group_budget"] <= 0 for g in _ACTIVE_GROUPS)

@@ -77,6 +77,7 @@ Campaign 引擎回答的是“现有广告活动和新增广告活动应该如�
 | **Listing 五点+类目+颜色** | `mcp_registry.py` `erp_listing_product_info()` | azlisting MCP，全局限流 5req/10s。父级字段（五点/类目）注入新增流 prompt 作相关性锚点；子体字段按 asin 收拢颜色/尺码，构建 `color_to_asin` 映射 |
 | **颜色/节日标记** | `campaign_new.py` `_normalize_color()` + `_build_color_asin_map()` | 从 listing 变体提取去重归一化颜色列表；LLM 产出 `color_flags`/`holiday_flags` 后校验合法性（非法颜色拒绝），合法则指派对应颜色花费最高子 ASIN。**不校验关键词拼写**（LLM 识别 `blak`→`black`）。节日 >60天 LLM 自行 skip |
 | **否词日志（护栏前/后）** | `campaign.py` L826(前) + L1075(后) | 两段日志分别记录护栏前 LLM 产出和护栏后终态，差值即 P3/P4 清除的淘汰活动否词 |
+| **组合预算下限** | `campaign_budget_reallocation.py` `aggregate()` + `reasoner.py` `_BUDGET_REALLOC_PROMPT` | 挪组后每组 `group_budget_floor` = 组内活动 proposed_budget 的最大值（无活动=0）。注入 LLM 回算 prompt：`proposed_group_budget ≥ group_budget_floor`（优先级最高）。 |
 | 精准升降级 | `campaign.py:1153` `_apply_exact_transition_rules()` → `campaign_exact_transition.py:172` `evaluate_exact_transition()` | 32号规则引擎：EXACT 单关键词活动的迁组/诊断，LLM 合并后护栏前执行 |
 | 组合目标收拢 | `campaign.py:2101` `_reconcile_portfolio_targets()` | 落库前唯一可信挪组 target：广泛→auto_broad，精准仅 EXACT_TRANSITION 结果可写 |
 | Ontology Card | `kb_loader.py:232` `build_ontology_card()` | 从 runtime_contract.yaml 拼装精简 Ontology Card 注入 prompt |
@@ -372,7 +373,7 @@ Prompt 组装细节：
 | broad/phrase/auto 调整 | `reasoner.py:366` `_build_campaign_system_prompt("broad")`；`:1589` `recommend_campaign_batch()` | `kb_loader.py:67` `campaign_adjustment_broad` | CampaignUnit、search terms、否定词证据、策略上下文、overview text | `CampaignAdjustmentItem[]` + `exact_promotion_candidates[]` |
 | new campaign | `reasoner.py:437` `_build_new_campaign_prompt()`；`:1813` `recommend_new_campaigns()` | `kb_loader.py:82` `new_campaign` | 流量来源候选词、自然排名、流量词、建议竞价、策略上下文、overview text、**产品五点+类目（erp_listing_product_info）**、**产品颜色列表（动态）**、**站点当地时间+节日参考** | 流量来源候选决策；LLM 标记颜色/节日 → 代码校验后合流 |
 | synthesis | `reasoner.py:488` `_build_campaign_synthesis_prompt()`；`:2011` `recommend_campaign_synthesis()` | Campaign synthesis 相关切片 | 已有活动调整、新建活动、预算摘要、策略总览 | reason groups / specials |
-| budget reallocation | `reasoner.py:578` `_build_budget_realloc_prompt()`；`:2101` `recommend_budget_reallocation()` | `kb_loader.py:85` `budget_reallocation` | portfolio 预算、组别预算、调整建议、父级净增约束 | 组合预算重分配建议 |
+| budget reallocation | `reasoner.py:718` `_build_budget_realloc_prompt()`；`:2711` `recommend_budget_reallocation()` | `kb_loader.py:85` `budget_reallocation` | portfolio 预算、组别预算、`group_budget_floor`（挪组后组内活动预算最大值的下限约束，优先级最高）、父级净增约束 | 组合预算重分配建议 |
 
 ## LLM 分批与单轮分析
 
@@ -702,7 +703,7 @@ Campaign 引擎维护四类组合语义：
 预算相关模块：
 
 - `campaign_budget_summary.py`：生成预算汇总，优先使用 `ad_portfolio_list` 真实 portfolio 预算+花费+ACOS；失败则按 60/20/20 兜底。输出 `portfolio_current_budget`（原始预算，仅 MCP 成功时）、`portfolio_spend_1d/3d/7d`、`portfolio_acos_1d/3d/7d`。早期返回分支同样输出看板字段。
-- `campaign_budget_reallocation.py`：按 KB23 做组合预算回算。`to_budget_summary()` 输出 `portfolio_current_budget`（仅 `constraint_basis=portfolio`）+ 看板 spend/acos map。看板字段不进入 `aggregate()` 或 LLM prompt。
+- `campaign_budget_reallocation.py`：按 KB23 做组合预算回算。`aggregate()` 计算 `group_budget_floor`（挪组后组内最大活动预算）→ 注入 LLM 为硬性下限约束。`to_budget_summary()` 输出 `portfolio_current_budget`（仅 `constraint_basis=portfolio`）+ 看板 spend/acos map。看板字段不进入 `aggregate()` 或 LLM prompt。
 - `campaign_parent_allowed_net_increase`：父级允许净增，当前默认 0，意味着预算增长要非常谨慎。
 
 低价捡漏组不参与主推/测试/广泛三组预算约束，通常按每活动 1 美元思路处理。
@@ -718,7 +719,7 @@ Campaign 引擎维护四类组合语义：
 
 **精准 EXACT → 仅确定性规则结果可授权挪组：**
 - 只有 `triggered_rule` 以 `"EXACT_TRANSITION:"` 开头的项才写 `target_campaign_group_type`
-- 旧的 $5 预算分界（`campaign_portfolio.py:classify()`）仅作展示标签（`ai_portfolio_class`），不授权实际的 portfolio 迁移
+- 旧的 $5 预算分界（`campaign_portfolio.py:classify()`）仅作展示标签（`current_portfolio`），不授权实际的 portfolio 迁移
 - 权威路由：ROUTE-003/004 由 exact_main_validation 决定 core/testing 归属
 
 **关键边界：**
@@ -854,6 +855,17 @@ Campaign viewmodel 主入口通常走“分析 → 落库 → 读回快照 → v
 
 前端不应直接依赖原始 `CampaignAnalysisResult`，而应消费 viewmodel。
 
+### 挪组记录前端显示
+
+Card 上显示当前组（`current_portfolio_class`）→ 目标组（`effective_portfolio`），仅两值不同时渲染。数据流：
+
+```
+CampaignAdjustmentItem.current_portfolio → card.current_portfolio → viewmodel 翻译 → current_portfolio_class
+CampaignAdjustmentItem.target_campaign_group_type → card.campaign_group_type → viewmodel 翻译 → effective_portfolio
+```
+
+`current_portfolio_class` 匹配不上 4 个枚举时兜底保留原文（MCP portfolio 名称）。前端 `render.js:403-408` 在卡片 values 区预算/Bid 上方渲染绿色挪组行：「组合迁移: A → B」。
+
 ## API 端点
 
 | 方法 | 路径 | 责任 |
@@ -918,7 +930,7 @@ Campaign 分析本身不直接动真实广告。
 - 不要把 `adjustments` 为空当成无结果，还要检查 `new_campaigns`、`budget_summary`、`skipped_campaigns` 和 `data_unavailable`。
 - 不要让前端直接拼 pending 逻辑；应优先通过 viewmodel。
 - 不要以为选了经营模式就自动生效。`IMMEDIATE_EXIT` 走确定性执行跳过 LLM，`CONTROLLED_CLEARANCE` 通过 `growth_analysis_enabled` 关闭增长流，其余模式通过 ACOS 容忍系数和 Ontology Card 间接约束——各模式的生效路径不同。
-- 不要把 `campaign_portfolio.classify()` 的旧 $5 分界当成挪组授权。精准活动的实际挪组仅由 32号确定性规则结果驱动；旧分界只产生 `ai_portfolio_class` 展示标签。
+- 不要把 `campaign_portfolio.classify()` 的旧 $5 分界当成挪组授权。精准活动的实际挪组仅由 32号确定性规则结果驱动；旧分界只产生 `current_portfolio` 展示标签；`effective_portfolio`（DB `campaign_group_type`）为目标优先有效组，前端据此筛选。
 - 不要把精准升降级当成护栏的子集。升降级在护栏前执行（step 6d），产出被护栏的 P0-P11 二次校验；两者是串行关系，不是替代关系。
 
 ## 更新检查清单

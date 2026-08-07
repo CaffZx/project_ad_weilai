@@ -64,6 +64,7 @@ function _itemDefaults(item) {
     placement_adjustments: _def(item.placement_adjustments, []),
     negative_keywords: _def(item.negative_keywords, []),
     effective_portfolio: _def(item.effective_portfolio, ''),
+    current_portfolio_class: _def(item.current_portfolio_class, ''),
     triggered_rule: _def(item.triggered_rule, ''),
     review_level: _def(item.review_level, ''),
     is_core: _def(item.is_core, false),

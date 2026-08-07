@@ -393,6 +393,14 @@ function _renderCards(state) {
 
     // values 行
     let vals = '';
+
+    // 挪组记录：current ≠ effective 时显示（预算/Bid 之前）
+    const _cur = (adj.current_portfolio_class || '').trim();
+    const _eff = (adj.effective_portfolio || '').trim();
+    if (_cur && _eff && _cur !== _eff) {
+      vals += `<span class="camp-kv camp-portfolio-transition"><span class="k">组合迁移</span> <span class="v">${_esc(_cur)} <span style="color:var(--camp-muted-fg);">→</span> ${_esc(_eff)}</span></span>`;
+    }
+
     if (adj.proposed_budget != null || adj.current_budget != null) {
       vals += `<span class="camp-kv"><span class="k">预算</span> <span class="v">${_fmtChange(adj.current_budget, adj.proposed_budget)}</span></span>`;
     }
