@@ -1921,12 +1921,10 @@ class LLMReasoner:
                     f"  - ⚠️ 所属组合: {_pg} | 组合日预算: {_pb_str} | "
                     f"组合7天利用率: {_pu:.0%}"
                 )
-                if _pu >= 1.0:
+                if _pu >= 1.0 and s.get("_sample_insufficient", False):
                     camp_parts.append(
-                        f"     → 组合预算瓶颈! 利用率 {_pu:.0%} ≥ 100%，"
-                        "组合层预算可能是本活动低花费的真实原因。"
-                        "如本活动样本不足(SAMPLE_INSUFFICIENT)，禁止调 bid/预算、禁止淘汰，"
-                        "action=keep, triggered_rule=PORTFOLIO_BOTTLENECK。"
+                        f"     → ⚠️ 组合预算瓶颈(利用率{_pu:.0%}) + 本活动样本不足(cost<5或clicks<10)，"
+                        "禁止调 bid/预算、禁止淘汰，action=keep。"
                     )
             # 广告位加价比例 (KB 19 §5 决策矩阵 — 来自 basic_info，非 placement_report)
             ppcts = s.get("_placement_pcts", {})

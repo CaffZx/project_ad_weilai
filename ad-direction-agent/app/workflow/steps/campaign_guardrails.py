@@ -93,6 +93,7 @@ def apply_all(
     refund_rate: float | None = None,
     rating: float | None = None,
     pf_util: dict[str, float | None] | None = None,
+    target_acos: float | None = None,
 ) -> GuardrailPass:
     """对所有 adjustments 按优先级执行全部护栏规则。后执行规则看到前序修正后的值。"""
     gp = GuardrailPass()
@@ -116,7 +117,7 @@ def apply_all(
         _p9_bid_cap(item, gp)
         _p10_placement_block(item, gp, inventory_days, refund_rate, rating)
         _p11_new_campaign_bid_protect(item, gp)
-        _p12_portfolio_bottleneck(item, gp, pf_util)
+        _p12_portfolio_bottleneck(item, gp, pf_util, target_acos)
 
     return gp
 
@@ -517,8 +518,12 @@ def _p11_new_campaign_bid_protect(item, gp: GuardrailPass) -> None:
 
 def _p12_portfolio_bottleneck(
     item, gp: GuardrailPass, pf_util: dict[str, float | None] | None,
+    target_acos: float | None = None,
 ) -> None:
-    """P12: 组合预算瓶颈 → 样本不足活动禁调 bid/预算，禁淘汰 (KB23 §8.4)。"""
+    """P12: 组合预算瓶颈 → 样本不足且表现不差的活动禁调 bid/预算，禁淘汰 (KB23 §8.4)。
+
+    仅保护「表现达标但被组合预算压抑」的活动。ACOS 超目标的活动（表现差）放行调整。
+    """
     if not pf_util:
         return
     _group = getattr(item, "current_portfolio", "") or ""
@@ -528,7 +533,11 @@ def _p12_portfolio_bottleneck(
     perf = getattr(item, "perf_7d", {}) or {}
     cost = float(perf.get("cost", 0) or 0)
     clicks = int(perf.get("clicks", 0) or 0)
+    item_acos = perf.get("acos")
     if cost >= 5.0 and clicks >= 10:
+        return
+    # 表现差（ACOS 超目标）→ 放行，允许调整
+    if item_acos is not None and target_acos is not None and item_acos > target_acos:
         return
     if item.action in ("eliminate_to_low_bid_pool", "paused"):
         item.action = "keep"
@@ -539,13 +548,13 @@ def _p12_portfolio_bottleneck(
             rule_id="P12_PORTFOLIO_BOTTLENECK", corrected=True,
             campaign_key=getattr(item, "campaign_key", ""),
             message=(
-                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100%，"
-                f"样本不足(cost=${cost:.1f})，组合瓶颈→禁淘汰"
+                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100% + 样本不足 "
+                f"(cost=${cost:.1f}) + ACOS达标，组合瓶颈→禁淘汰"
             ),
             retry_instruction=(
                 f"[{item.campaign_name}] 组合 {_group} 7天利用率 {_util:.0%}≥100%，"
-                "组合层预算可能是本活动低花费的真实原因。"
-                "禁止淘汰或降 bid/预算，应保持现状，建议运营提升组合预算。"
+                "组合层预算可能是本活动低花费的真实原因，且 ACOS 未超目标，"
+                "禁止淘汰或降 bid/预算，应保持现状。建议提升组合预算或清理组内无效活动。"
             ),
         ))
     elif item.action != "keep":
@@ -556,13 +565,13 @@ def _p12_portfolio_bottleneck(
             rule_id="P12_PORTFOLIO_BOTTLENECK", corrected=True,
             campaign_key=getattr(item, "campaign_key", ""),
             message=(
-                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100%，"
-                f"样本不足(cost=${cost:.1f})，组合瓶颈→保持现状"
+                f"[{item.campaign_name}] 组合{_group}利用率{_util:.0%}≥100% + 样本不足 "
+                f"(cost=${cost:.1f}) + ACOS达标，组合瓶颈→保持现状"
             ),
             retry_instruction=(
                 f"[{item.campaign_name}] 组合 {_group} 7天利用率 {_util:.0%}≥100%，"
-                "组合层预算瓶颈可能导致本活动样本不足。"
-                "禁止调整 bid/预算，保持现状。建议运营提升组合预算或清理组内无效活动。"
+                "组合层预算瓶颈可能导致本活动样本不足，且 ACOS 未超目标，"
+                "禁止调整 bid/预算，保持现状。建议提升组合预算或清理组内无效活动。"
             ),
         ))
 

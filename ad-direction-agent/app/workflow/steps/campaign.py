@@ -925,6 +925,7 @@ async def _analyze_campaigns_impl(
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
             pf_util=_pf_util,
+            target_acos=strategy_context.target_acos,
         )
         warnings_list.extend(budget_warnings)
 
@@ -1101,6 +1102,7 @@ async def _analyze_campaigns_impl(
             refund_rate=strategy_context.refund_rate,
             rating=strategy_context.rating,
             pf_util=_pf_util,
+            target_acos=strategy_context.target_acos,
         )
         warnings_list.extend(budget_warnings)
         logger.warning(
@@ -1825,9 +1827,14 @@ async def _analyze_one_stream(
     ]
     unit_lookup = _build_unit_lookup(campaigns)
 
-    # 逐活动注入组合预算利用率（Prompt + 护栏 P12 消费）
-    if pf_util:
-        for cu, s in zip(campaigns, summaries):
+    # 逐活动注入组合预算利用率 + 样本不足判定（Prompt + 护栏 P12 消费）
+    for cu, s in zip(campaigns, summaries):
+        # 样本不足：代码预判，LLM 不用猜（与 assess_campaign_sample 同口径）
+        _perf = getattr(cu, "perf_7d", None)
+        _cost = getattr(_perf, "cost", 0) or 0 if _perf else 0
+        _clicks = getattr(_perf, "clicks", 0) or 0 if _perf else 0
+        s["_sample_insufficient"] = (_cost < 5.0 or _clicks < 10)
+        if pf_util:
             _group = getattr(cu, "portfolio", "") or ""
             _util = pf_util.get(_group) if _group else None
             if _util is not None:
@@ -2773,6 +2780,7 @@ def _apply_campaign_guardrails(
     refund_rate: float | None = None,
     rating: float | None = None,
     pf_util: dict[str, float | None] | None = None,
+    target_acos: float | None = None,
 ):
     from app.workflow.steps.campaign_guardrails import GuardrailResult
     from app.workflow.steps.campaign_guardrails import apply_all as _apply_guardrails
@@ -2785,6 +2793,7 @@ def _apply_campaign_guardrails(
         refund_rate=refund_rate,
         rating=rating,
         pf_util=pf_util,
+        target_acos=target_acos,
     )
     warnings: list[str] = [r.message for r in gp.results if r.corrected]
     if gp.corrections > 0:
