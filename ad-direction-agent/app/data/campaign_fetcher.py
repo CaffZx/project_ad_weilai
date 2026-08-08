@@ -437,7 +437,10 @@ class CampaignFetcher:
         # 拉取自动活动的四种匹配类型出价
         auto_targets: dict[str, list[dict]] = {}
         if auto_campaigns:
-            auto_targets = await self._fetch_auto_targets(auto_campaigns, shop_account)
+            auto_targets = await self._fetch_auto_targets(
+                auto_campaigns, shop_account,
+                start_date=start_date, end_date=end_date,
+            )
             logger.info(
                 "auto_targets [%s]: fetched %d/%d auto campaigns",
                 parent_asin, len(auto_targets), len(auto_campaigns),
@@ -694,21 +697,32 @@ class CampaignFetcher:
 
     async def _fetch_auto_targets(
         self, auto_list: list[tuple[str, str]], shop_account: str,
+        start_date: str = "", end_date: str = "",
     ) -> dict[str, list[dict]]:
-        """批量拉取自动活动的四种匹配类型出价。
+        """批量拉取自动活动的四种匹配类型出价及效果数据。
 
         auto_list = [(campaign_name, campaign_id), ...]
-        返回 {campaign_name: [{target_type, target_code, target_id, bid}, ...]}
-        每项对应一种投放类型（紧密匹配/宽泛匹配/同类商品/关联商品）。
+        传 start_date/end_date 时附带曝光/点击/花费/销售额/订单量/ACOS/CTR/CVR/CPC。
+        返回 {campaign_name: [{target_type, target_code, target_id, bid,
+               impressions, clicks, cost, sales, orders, acos, ctr, cvr, cpc}, ...]}
         """
         results: dict[str, list[dict]] = {}
 
         async def _one(chunk: list[tuple[str, str]]):
             ids = [cid for _, cid in chunk]
+            args: dict = {
+                "shop_account": shop_account,
+                "campaign_id_list": ",".join(ids),
+            }
+            if start_date:
+                args["start_date"] = start_date
+            if end_date:
+                args["end_date"] = end_date
             try:
                 res = await self._mcp().campaign_call_tool(
                     "ad_auto_target_campaign_info", "", shop_account,
                     campaign_id_list=",".join(ids),
+                    start_date=start_date, end_date=end_date,
                     timeout=420.0,
                 )
                 if res.ok:
@@ -721,6 +735,15 @@ class CampaignFetcher:
                                 "target_code": str(row.get("投放类型编码") or ""),
                                 "target_id": str(row.get("投放ID") or ""),
                                 "bid": _to_float(row.get("投放BID")) or 0.0,
+                                "impressions": int(_to_float(row.get("曝光量")) or 0),
+                                "clicks": int(_to_float(row.get("点击量")) or 0),
+                                "cost": _to_float(row.get("花费")) or 0.0,
+                                "sales": _to_float(row.get("销售额")) or 0.0,
+                                "orders": int(_to_float(row.get("广告订单量")) or 0),
+                                "acos": _to_float(row.get("ACOS")),
+                                "ctr": _to_float(row.get("CTR")),
+                                "cvr": _to_float(row.get("CVR")),
+                                "cpc": _to_float(row.get("CPC")),
                             })
                     for name, _ in chunk:
                         if name in row_by_name:

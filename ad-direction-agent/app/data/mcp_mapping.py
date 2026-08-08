@@ -258,6 +258,10 @@ def build_campaign_tool_args(
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
     elif tool_name == "ad_auto_target_campaign_info" and campaign_id_list:
         base = {"shop_account": shop_account, "campaign_id_list": campaign_id_list}
+        if start_date:
+            base["start_date"] = start_date
+        if end_date:
+            base["end_date"] = end_date
     elif tool_name == "ad_campaign_basic_info" and campaign_name_list:
         base = {"shop_account": shop_account, "campaign_name_list": campaign_name_list}
     else:
