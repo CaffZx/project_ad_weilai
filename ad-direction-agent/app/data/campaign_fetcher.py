@@ -315,12 +315,19 @@ class CampaignFetcher:
 
         # ③ 代码硬过滤
         surviving, excluded = filter_campaigns(raw_campaigns)
+        cat_keys = set(campaign_catalog.keys()) if campaign_catalog else set()
+        pf_matched = 0
+        pf_total = 0
         for row in surviving + excluded:
             entry = campaign_catalog.get(str(row.get("campaign_name") or "")) or {}
-            row["current_portfolio_name"] = str(entry.get("portfolio_name") or "")
+            pn = str(entry.get("portfolio_name") or "")
+            row["current_portfolio_name"] = pn
+            pf_total += 1
+            if pn:
+                pf_matched += 1
         logger.info(
-            "Campaign prefilter [%s]: %d surviving, %d excluded",
-            parent_asin, len(surviving), len(excluded),
+            "Campaign prefilter [%s]: %d surviving, %d excluded | portfolio match %d/%d, catalog keys=%d",
+            parent_asin, len(surviving), len(excluded), pf_matched, pf_total, len(cat_keys),
         )
 
         if not surviving:
@@ -604,18 +611,19 @@ class CampaignFetcher:
                 return {}
             name_to_id: dict[str, str] = {}
             catalog: dict[str, dict[str, str]] = {}
+            portfolio_hits = 0
             for row in _as_rows(res.value):
                 n = str(row.get("广告活动名称") or "").strip()
                 cid = str(row.get("广告活动id") or "").strip()
                 if n and cid:
                     name_to_id[n] = cid
-                    # 广告组合名称字段待 MCP 同事补字段后生效；当前为空串
-                    catalog[n] = {
-                        "campaign_id": cid,
-                        "portfolio_name": str(row.get("广告组合名称") or "").strip(),
-                    }
+                    pn = str(row.get("广告组合名称") or "").strip()
+                    if pn:
+                        portfolio_hits += 1
+                    catalog[n] = {"campaign_id": cid, "portfolio_name": pn}
             logger.info(
-                "_fetch_campaign_list [%s]: %d 活动 (MCP)", parent_asin, len(name_to_id),
+                "_fetch_campaign_list [%s]: %d 活动, %d 有广告组合名称 (MCP)",
+                parent_asin, len(name_to_id), portfolio_hits,
             )
             return catalog if include_portfolio else name_to_id
         except Exception as e:  # noqa: BLE001

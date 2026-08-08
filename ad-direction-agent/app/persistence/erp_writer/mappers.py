@@ -453,7 +453,7 @@ def canonicalize_payload(
         evidence_list = primary_adj.get("evidence") or []
         evidence_text = "\n".join(str(x) for x in evidence_list if x)
         description = primary_adj.get("reason")
-        portfolio_label = (primary_adj.get("current_portfolio") or primary_adj.get("portfolio") or "").strip()
+        portfolio_label = (primary_adj.get("current_portfolio") or "").strip()
         target_campaign_group_type = map_campaign_group_type(
             campaign_group_targets.get(campaign_id)
             or (primary_adj.get("target_campaign_group_type") or "").strip()

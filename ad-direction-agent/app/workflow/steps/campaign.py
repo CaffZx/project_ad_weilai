@@ -2292,6 +2292,13 @@ def _reconcile_portfolio_targets(
     if added:
         logger.info("Campaign portfolio reconciliation: added %d broad move-only items", added)
 
+    # 诊断日志：current_portfolio 覆盖率
+    filled = sum(1 for a in adjustments if getattr(a, "current_portfolio", None))
+    logger.info(
+        "Campaign portfolio reconciliation totals: adjustments=%d current_portfolio_filled=%d/%d",
+        len(adjustments), filled, len(adjustments),
+    )
+
 
 # ── 懒加载 enrichment ────────────────────────────────────────────────────────
 
