@@ -99,6 +99,21 @@ def normalize_current_portfolio(raw_name: str | None) -> str:
     return GROUP_LABEL_TO_CODE[matches[0]]
 
 
+def effective_current_portfolio(raw_name: str | None, match_type: str | None) -> str:
+    """Return the current group used by the migration-era campaign flow.
+
+    A non-EXACT campaign already sitting in the standard low-bid portfolio is
+    an old-version broad campaign. Treat it as the standard auto-broad current
+    group so migration does not create a move-back pending item. Unknown,
+    non-standard portfolio names remain unchanged.
+    """
+    current = normalize_current_portfolio(raw_name)
+    if str(match_type or "").strip().upper() in _BROAD_MATCH_TYPES:
+        if current == GROUP_LABEL_TO_CODE[PORTFOLIO_ELIMINATE]:
+            return GROUP_LABEL_TO_CODE[PORTFOLIO_BROAD]
+    return current
+
+
 def default_target_group_code(match_type: str | None) -> str:
     """Return the deterministic fallback target for a campaign match type."""
     return "exact_testing_group" if str(match_type or "").strip().upper() == "EXACT" else "auto_broad_group"

@@ -19,7 +19,10 @@ from app.config.settings import settings
 from app.core.acos_constraints import compute_acos_tolerance
 from app.core.core_keyword_policy import normalize_core_keyword
 from app.data.campaign_fetcher import CampaignFetcher
-from app.data.campaign_prefilter import filter_eliminated_pool
+from app.data.campaign_prefilter import (
+    filter_eliminated_pool,
+    split_low_bid_non_exact_for_pause,
+)
 from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.analysis_run_guard import AnalysisRunCancelled
@@ -30,6 +33,7 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
     default_target_group_code,
+    effective_current_portfolio,
     group_code_to_label,
     is_strictly_in_low_bid_pool,
     normalize_current_portfolio,
@@ -63,7 +67,56 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+LOW_BID_POOL_AUTO_PAUSE_RULE = "LOW_BID_POOL_AUTO_PAUSE"
+
+
+def _guardrail_adjustments(
+    adjustments: list[CampaignAdjustmentItem],
+) -> list[CampaignAdjustmentItem]:
+    """Return LLM adjustments; deterministic migration pauses bypass guardrails."""
+    return [
+        item for item in adjustments
+        if item.triggered_rule != LOW_BID_POOL_AUTO_PAUSE_RULE
+    ]
+
+
 LLM_TIMEOUT = 60  # 单批 LLM 超时 (秒)
+
+LOW_BID_POOL_PAUSE_REASON = "检测到该广泛活动已入淘汰池但未被暂停，llm决定将本活动暂停。同意则直接执行，不同意清人工到后台修改！"
+
+
+def _build_low_bid_pool_pause_adjustments(
+    units: list[CampaignUnit],
+) -> list[CampaignAdjustmentItem]:
+    """Build deterministic paused cards for migrated non-EXACT low-bid units."""
+    return [
+        CampaignAdjustmentItem(
+            campaign_name=unit.campaign_name,
+            campaign_key=unit.campaign_key,
+            campaign_id=unit.campaign_id,
+            child_asin=unit.child_asin,
+            seller_sku=unit.seller_sku,
+            keyword_text=unit.keyword_text,
+            keyword_id=unit.keyword_id,
+            match_type=unit.match_type,
+            action="paused",
+            triggered_rule=LOW_BID_POOL_AUTO_PAUSE_RULE,
+            reason=LOW_BID_POOL_PAUSE_REASON,
+            evidence=[LOW_BID_POOL_PAUSE_REASON],
+            confidence="high",
+            review_level="HIGH_RISK_REVIEW",
+            current_budget=unit.current_budget,
+            current_bid=unit.current_bid,
+            current_portfolio=effective_current_portfolio(
+                unit.current_portfolio_name, unit.match_type,
+            ),
+            target_campaign_group_type=default_target_group_code(unit.match_type),
+            portfolio_or_group=unit.current_portfolio_name,
+            perf_7d=unit.perf_7d.model_dump() if unit.perf_7d else {},
+            days_online=unit.days_online,
+        )
+        for unit in units
+    ]
 
 # 进程级 LLM 全局并发已统一收口到 client 层（client._global_llm_sem，每个 chat() 过闸）。
 # campaign 仅保留 per-stream Semaphore(cc) 作单轮内公平限流（见 _analyze_one_stream）。
@@ -430,6 +483,13 @@ async def _analyze_campaigns_impl(
     #     → 已在 CampaignFetcher 硬过滤阶段排除 (campaign_prefilter.filter_campaigns)
     # 3b. 疑似已淘汰活动：Bid ≤ $0.20 且 预算 ≤ $1.00 → 不进 LLM (campaign_prefilter.filter_eliminated_pool)
     llm_campaigns, skipped_eliminated, pool_units = filter_eliminated_pool(campaign_data.campaigns)
+    llm_campaigns, low_bid_pause_units = split_low_bid_non_exact_for_pause(llm_campaigns)
+    auto_paused_adjustments = _build_low_bid_pool_pause_adjustments(low_bid_pause_units)
+    if auto_paused_adjustments:
+        logger.info(
+            "Campaign [%s] 版本迁移：%d 个标准低价捡漏组非精准活动跳过 LLM，直接生成 paused 卡",
+            parent_asin, len(auto_paused_adjustments),
+        )
 
     # 广告权限是本轮 Campaign 分析的运行时派生值，不进入战略上下文或持久化模型。
     # 新增/复活两个增长流只消费该权限，不直接以经营模式字符串做分支。
@@ -617,7 +677,7 @@ async def _analyze_campaigns_impl(
             warnings_list.append(f"淘汰复评失败: {type(e).__name__}: {e}")
             return [], set()
 
-    if total == 0:
+    if total == 0 and not auto_paused_adjustments:
         # ── 全预过滤：无活动可分析，但仍执行复评 + 新增活动分析 ──
         adjustments: list[CampaignAdjustmentItem] = []
         skipped = skipped_eliminated + (campaign_data.excluded or [])
@@ -701,7 +761,7 @@ async def _analyze_campaigns_impl(
     # 4.1 组合预分类只反映当前真实归属；不再用旧 $5 规则推导精准活动的迁移目标。
     if settings.campaign_portfolio_enabled:
         for cu in llm_campaigns:
-            current = normalize_current_portfolio(cu.current_portfolio_name)
+            current = effective_current_portfolio(cu.current_portfolio_name, cu.match_type)
             cu.current_group_type = current if current in GROUP_CODE_TO_LABEL else "UNKNOWN"
             cu.portfolio = group_code_to_label(current) or current
         # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
@@ -850,7 +910,7 @@ async def _analyze_campaigns_impl(
     # 6. 合并两流结果（含预过滤活动，供前端可见）
     #    skipped_eliminated(淘汰池) + campaign_data.excluded(多词等) 均带 __prefiltered，
     #    exact/broad_skipped 是 LLM 丢失项(不带标记)，前端按标记区分"预过滤"vs"已丢失"
-    adjustments = exact_adjustments + broad_adjustments
+    adjustments = auto_paused_adjustments + exact_adjustments + broad_adjustments
     skipped_campaigns = (
         exact_skipped + broad_skipped + skipped_eliminated + (campaign_data.excluded or [])
     )
@@ -918,7 +978,7 @@ async def _analyze_campaigns_impl(
     }
     for round_number, round_label in retry_rounds:
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
-            adjustments,
+            _guardrail_adjustments(adjustments),
             product_stage=strategy_context.product_stage,
             target_cpa=strategy_context.target_cpa,
             inventory_days=strategy_context.inventory_days,
@@ -1095,7 +1155,7 @@ async def _analyze_campaigns_impl(
             )
     else:
         guardrail_pass, budget_warnings = _apply_campaign_guardrails(
-            adjustments,
+            _guardrail_adjustments(adjustments),
             product_stage=strategy_context.product_stage,
             target_cpa=strategy_context.target_cpa,
             inventory_days=strategy_context.inventory_days,
@@ -2200,8 +2260,8 @@ def _reconcile_portfolio_targets(
             # target 是确定性产物，不依赖 LLM 是否带回完整的 CampaignUnit。
             # current 缺失时保留为空；落库层仍会把 target 写入 card，并按
             # current != target 生成待确认的活动级迁组项。
-            current = normalize_current_portfolio(item.current_portfolio)
             match_type = str(item.match_type or "").upper()
+            current = effective_current_portfolio(item.current_portfolio, match_type)
             target = ""
             if campaign_id and match_type == "EXACT":
                 candidate = str(exact_group_targets.get(campaign_id) or "").strip()
@@ -2217,8 +2277,8 @@ def _reconcile_portfolio_targets(
                 adjusted_campaign_ids.add(campaign_id)
             continue
 
-        current = normalize_current_portfolio(unit.current_portfolio_name)
         match_type = (unit.match_type or item.match_type or "").upper()
+        current = effective_current_portfolio(unit.current_portfolio_name, match_type)
         item.current_portfolio = current
         unit.current_group_type = current if current in GROUP_CODE_TO_LABEL else "UNKNOWN"
         unit.portfolio = group_code_to_label(current) or current
@@ -2283,7 +2343,7 @@ def _reconcile_portfolio_targets(
     ) in candidates:
         if campaign_id in adjusted_campaign_ids:
             continue
-        current = normalize_current_portfolio(current_portfolio_name)
+        current = effective_current_portfolio(current_portfolio_name, match_type)
         target = default_target_group_code(match_type)
         if current == target:
             continue

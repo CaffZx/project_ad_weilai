@@ -3,13 +3,16 @@
 """
 
 import pytest
-from app.data.campaign_prefilter import filter_eliminated_pool
+from app.data.campaign_prefilter import (
+    filter_eliminated_pool,
+    split_low_bid_non_exact_for_pause,
+)
 from app.models.campaign import CampaignUnit
 
 
 def _unit(name: str = "", bid: float | None = 0.0, budget: float | None = 0.0,
           campaign_key: str = "", child_asin: str = "", match_type: str = "",
-          keyword_text: str = "") -> CampaignUnit:
+          keyword_text: str = "", current_portfolio_name: str = "") -> CampaignUnit:
     return CampaignUnit(
         campaign_name=name,
         campaign_key=campaign_key or name,
@@ -18,6 +21,7 @@ def _unit(name: str = "", bid: float | None = 0.0, budget: float | None = 0.0,
         keyword_text=keyword_text,
         current_bid=bid,       # None 直传，不转为 0.0
         current_budget=budget,
+        current_portfolio_name=current_portfolio_name,
     )
 
 
@@ -119,3 +123,29 @@ def test_phrase_low_bid_campaign_is_not_prefiltered_as_eliminated():
     assert surviving == units
     assert skipped == []
     assert pool == []
+
+
+def test_non_exact_campaign_in_standard_low_bid_portfolio_is_split_for_pause():
+    unit = _unit(
+        "broad-low-bid", bid=0.20, budget=1.00, campaign_key="broad-low-bid",
+        child_asin="B0BROAD", match_type="BROAD", keyword_text="broad kw",
+        current_portfolio_name="US-低价捡漏组",
+    )
+
+    surviving, pause_units = split_low_bid_non_exact_for_pause([unit])
+
+    assert surviving == []
+    assert pause_units == [unit]
+
+
+def test_nonstandard_portfolio_is_not_split_for_pause():
+    unit = _unit(
+        "broad-custom", bid=0.20, budget=1.00, campaign_key="broad-custom",
+        child_asin="B0CUSTOM", match_type="BROAD", keyword_text="broad kw",
+        current_portfolio_name="legacy-custom-portfolio",
+    )
+
+    surviving, pause_units = split_low_bid_non_exact_for_pause([unit])
+
+    assert surviving == [unit]
+    assert pause_units == []

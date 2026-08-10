@@ -38,6 +38,7 @@ from app.workflow.steps.campaign_portfolio import (
     find_portfolio_group_matches,
     group_code_to_label,
     normalize_current_portfolio,
+    effective_current_portfolio,
     target_group_code_if_current_mismatch,
 )
 from app.workflow.steps.portfolio_execution import _match_portfolio, _pf_field
@@ -78,6 +79,13 @@ def test_current_and_target_helpers_keep_distinct_contracts():
     assert normalize_current_portfolio(f"US-{PORTFOLIO_BROAD}") == "auto_broad_group"
     assert normalize_current_portfolio("custom-portfolio-name") == "custom-portfolio-name"
     assert normalize_current_portfolio("") == ""
+
+
+def test_non_exact_low_bid_current_is_migrated_to_auto_broad():
+    assert effective_current_portfolio("US-低价捡漏组", "BROAD") == "auto_broad_group"
+    assert effective_current_portfolio("US-低价捡漏组", "PHRASE") == "auto_broad_group"
+    assert effective_current_portfolio("US-低价捡漏组", "EXACT") == "low_bid_retention_group"
+    assert effective_current_portfolio("legacy-custom-portfolio", "BROAD") == "legacy-custom-portfolio"
     assert default_target_group_code("EXACT") == "exact_testing_group"
     assert default_target_group_code("BROAD") == "auto_broad_group"
     assert group_code_to_label("auto_broad_group") == PORTFOLIO_BROAD
@@ -183,6 +191,31 @@ def test_reconcile_portfolio_targets_preserves_raw_current_and_always_sets_targe
     assert broad.target_campaign_group_type == "auto_broad_group"
     assert exact.current_portfolio == "exact_core_group"
     assert exact.target_campaign_group_type == "exact_testing_group"
+
+
+def test_reconcile_non_exact_low_bid_current_becomes_auto_broad_without_move():
+    item = CampaignAdjustmentItem(
+        campaign_name="broad-low-bid",
+        campaign_key="broad-low-bid-key",
+        campaign_id="broad-low-bid-id",
+        match_type="BROAD",
+        action="paused",
+    )
+    unit = CampaignUnit(
+        campaign_name="broad-low-bid",
+        campaign_key="broad-low-bid-key",
+        campaign_id="broad-low-bid-id",
+        child_asin="B0CHILD",
+        keyword_text="broad kw",
+        match_type="BROAD",
+        current_portfolio_name="US-低价捡漏组",
+    )
+
+    campaign_step._reconcile_portfolio_targets([item], [unit], [])
+
+    assert item.current_portfolio == "auto_broad_group"
+    assert item.target_campaign_group_type == "auto_broad_group"
+    assert unit.current_group_type == "auto_broad_group"
 
 
 def test_reconcile_portfolio_targets_does_not_use_clearance_permission_as_move_rule():

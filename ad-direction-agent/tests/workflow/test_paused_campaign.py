@@ -8,13 +8,15 @@
 """
 
 from app.api.campaign_viewmodel import _action_klass, _snapshot_action
-from app.models.campaign import CampaignAdjustmentItem
+from app.models.campaign import CampaignAdjustmentItem, CampaignUnit
 from app.persistence.erp_writer.mappers import (
     _ACTION_TO_CATEGORY,
     _CATEGORY_PRIORITY,
     _pending_lists_from_adjustment,
+    canonicalize_payload,
 )
 from app.workflow.steps.campaign import _normalize_action
+from app.workflow.steps import campaign as campaign_step
 
 
 def _adj(**kw) -> CampaignAdjustmentItem:
@@ -112,3 +114,63 @@ def test_snapshot_action_paused():
 def test_action_klass_paused():
     assert _action_klass("paused") == "eliminate_or_paused"
     assert _action_klass("eliminate_to_low_bid_pool") == "eliminate_or_paused"
+
+
+def test_low_bid_non_exact_builder_creates_fixed_paused_adjustment():
+    unit = CampaignUnit(
+        campaign_name="广泛活动",
+        campaign_key="broad-low-bid",
+        campaign_id="campaign-1",
+        keyword_id="keyword-1",
+        child_asin="B0CHILD",
+        seller_sku="SKU-1",
+        keyword_text="broad kw",
+        match_type="BROAD",
+        current_bid=0.2,
+        current_budget=1.0,
+        current_portfolio_name="US-低价捡漏组",
+    )
+
+    items = campaign_step._build_low_bid_pool_pause_adjustments([unit])
+
+    assert len(items) == 1
+    item = items[0]
+    expected = "检测到该广泛/词组/自动广告活动已入淘汰池但未被暂停，决定将本活动暂停。同意则直接执行，不同意请人工到后台修改！"
+    assert item.action == "paused"
+    assert item.reason == expected
+    assert item.evidence == [expected]
+    assert item.campaign_id == "campaign-1"
+    assert item.keyword_id == "keyword-1"
+    assert item.review_level == "HIGH_RISK_REVIEW"
+    assert item.current_portfolio == "auto_broad_group"
+    assert item.target_campaign_group_type == "auto_broad_group"
+
+
+def test_low_bid_pause_builder_reaches_campaign_card_and_pending():
+    unit = CampaignUnit(
+        campaign_name="广泛活动",
+        campaign_key="broad-low-bid",
+        campaign_id="campaign-1",
+        keyword_id="keyword-1",
+        child_asin="B0CHILD",
+        seller_sku="SKU-1",
+        keyword_text="broad kw",
+        match_type="BROAD",
+        current_bid=0.2,
+        current_budget=1.0,
+        current_portfolio_name="US-低价捡漏组",
+    )
+    item = campaign_step._build_low_bid_pool_pause_adjustments([unit])[0]
+
+    run = canonicalize_payload({
+        "experiment_id": "run-1",
+        "parent_asin": "B0PARENT",
+        "shop_id": 1,
+        "site_code": "Amazon_US",
+        "adjustments": [item.model_dump()],
+    })
+
+    assert len(run.cards) == 1
+    assert run.cards[0].campaign_pending[0].new_state == "paused"
+    assert run.cards[0].campaign_pending[0].new_budget is None
+    assert run.cards[0].keyword_pending == []

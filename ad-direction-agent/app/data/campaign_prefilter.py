@@ -13,6 +13,11 @@ from collections import Counter
 from typing import TYPE_CHECKING
 
 from app.workflow.steps.campaign_guardrails import is_strictly_in_low_bid_pool
+from app.workflow.steps.campaign_portfolio import (
+    GROUP_LABEL_TO_CODE,
+    PORTFOLIO_ELIMINATE,
+    normalize_current_portfolio,
+)
 
 if TYPE_CHECKING:
     from app.models.campaign import CampaignUnit
@@ -128,3 +133,20 @@ def filter_eliminated_pool(
             surviving.append(cu)
 
     return surviving, skipped, pool_units
+
+
+def split_low_bid_non_exact_for_pause(
+    units: list[CampaignUnit],
+) -> tuple[list[CampaignUnit], list[CampaignUnit]]:
+    """Split standard low-bid non-EXACT campaigns before any LLM call."""
+    low_bid_code = GROUP_LABEL_TO_CODE[PORTFOLIO_ELIMINATE]
+    surviving: list[CampaignUnit] = []
+    pause_units: list[CampaignUnit] = []
+    for unit in units:
+        match_type = str(unit.match_type or "").strip().upper()
+        current = normalize_current_portfolio(unit.current_portfolio_name)
+        if match_type in {"BROAD", "PHRASE", "AUTO"} and current == low_bid_code:
+            pause_units.append(unit)
+        else:
+            surviving.append(unit)
+    return surviving, pause_units
