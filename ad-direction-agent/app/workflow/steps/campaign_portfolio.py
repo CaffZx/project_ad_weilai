@@ -81,6 +81,34 @@ def find_portfolio_group_matches(portfolio_name: str) -> list[str]:
     return [group for group in PORTFOLIO_GROUP_MATCH_ORDER if group in name]
 
 
+def normalize_current_portfolio(raw_name: str | None) -> str:
+    """Normalize the current portfolio without confusing it with the target.
+
+    A standard portfolio name is represented by its ERP group code.  An
+    unrecognised non-empty name is preserved verbatim for display/audit, and
+    an empty value stays empty because no current portfolio was observed.
+    """
+    raw = str(raw_name or "").strip()
+    if not raw:
+        return ""
+    if raw in GROUP_CODE_TO_LABEL:
+        return raw
+    matches = find_portfolio_group_matches(raw)
+    if not matches:
+        return raw
+    return GROUP_LABEL_TO_CODE[matches[0]]
+
+
+def default_target_group_code(match_type: str | None) -> str:
+    """Return the deterministic fallback target for a campaign match type."""
+    return "exact_testing_group" if str(match_type or "").strip().upper() == "EXACT" else "auto_broad_group"
+
+
+def group_code_to_label(code: str | None) -> str:
+    """Map a known ERP group code to the existing Chinese internal group key."""
+    return GROUP_CODE_TO_LABEL.get(str(code or "").strip(), "")
+
+
 def find_portfolio_matches(group_name: str, portfolios: list[dict]) -> list[dict]:
     """按组合名子串匹配，保留 MCP 返回顺序。
 
@@ -126,9 +154,10 @@ def target_group_code_if_current_mismatch(
     """仅在当前真实组合可识别且与目标组不同时返回目标 ERP 码。"""
     label = GROUP_CODE_TO_LABEL.get(target_group, target_group)
     target_code = GROUP_LABEL_TO_CODE.get(label, "")
-    if not target_code or not (current_portfolio_name or "").strip():
+    current_code = normalize_current_portfolio(current_portfolio_name)
+    if not target_code or not current_code:
         return ""
-    if find_portfolio_matches(label, [{"portfolioName": current_portfolio_name}]):
+    if current_code == target_code:
         return ""
     return target_code
 

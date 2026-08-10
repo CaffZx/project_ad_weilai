@@ -9,10 +9,12 @@ logger = logging.getLogger(__name__)
 
 from app.workflow.steps.campaign_portfolio import (
     ALL_PORTFOLIOS,
+    GROUP_CODE_TO_LABEL,
     PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
+    normalize_current_portfolio,
 )
 
 from .text_utils import map_campaign_group_type
@@ -117,9 +119,21 @@ def _portfolio_groups_from_payload(
     counts = {label: 0 for label in _PORTFOLIO_LABELS}
     budget_sums = {label: 0.0 for label in _PORTFOLIO_LABELS}
     for adj in adjustments:
-        label = (adj.get("current_portfolio") or adj.get("portfolio") or "").strip()
+        raw_label = (adj.get("current_portfolio") or adj.get("portfolio") or "").strip()
+        normalized_label = normalize_current_portfolio(raw_label)
+        label = GROUP_CODE_TO_LABEL.get(normalized_label, normalized_label)
         if label not in counts:
-            continue
+            # 未知 current 不能作为统计键；使用同一 adjustment 的确定性
+            # target 归入结果组，避免该活动从 summary 静默消失。
+            target_raw = (
+                adj.get("target_campaign_group_type")
+                or adj.get("campaign_group_type")
+                or ""
+            )
+            target_code = map_campaign_group_type(str(target_raw).strip())
+            label = GROUP_CODE_TO_LABEL.get(target_code, "")
+            if label not in counts:
+                continue
         counts[label] += 1
         try:
             _action = str(adj.get("action") or "").strip().lower()
@@ -454,12 +468,14 @@ def canonicalize_payload(
         evidence_text = "\n".join(str(x) for x in evidence_list if x)
         description = primary_adj.get("reason")
         portfolio_label = (primary_adj.get("current_portfolio") or "").strip()
-        target_campaign_group_type = map_campaign_group_type(
-            campaign_group_targets.get(campaign_id)
-            or (primary_adj.get("target_campaign_group_type") or "").strip()
+        current_portfolio = normalize_current_portfolio(portfolio_label)
+        raw_target = (
+            (primary_adj.get("target_campaign_group_type") or "").strip()
+            or campaign_group_targets.get(campaign_id)
         )
-        # 卡片展示代码判定出的目标组；没有挪组时仍展示本轮归组，但不据此创建 pending。
-        campaign_group_type = target_campaign_group_type or map_campaign_group_type(portfolio_label)
+        target_campaign_group_type = map_campaign_group_type(raw_target)
+        # card.campaign_group_type 永远是确定性 target ERP 码；current 只写入独立字段。
+        campaign_group_type = target_campaign_group_type
 
         keyword_pending: list[KeywordPendingCanonical] = []
         campaign_pending: list[CampaignPendingCanonical] = []
@@ -528,18 +544,22 @@ def canonicalize_payload(
                 )
             )
 
-        # 目标组是活动级动作：即使本轮不改预算/状态，也必须生成一条
-        # campaign_pending，供确认、执行和状态回写复用既有活动级链路。
-        if target_campaign_group_type:
-            if not campaign_pending:
-                campaign_pending.append(CampaignPendingCanonical(
-                    old_state=None,
-                    new_state=None,
-                    old_budget=None,
-                    new_budget=None,
-                ))
-            for pending in campaign_pending:
-                pending.target_campaign_group_type = target_campaign_group_type
+        # target 始终落 card；只有 current 与 target 不同时才产生迁组 pending。
+        # 若本轮已有预算/状态 pending，将 target 合并到该行；否则创建 move-only 行。
+        if target_campaign_group_type and current_portfolio != target_campaign_group_type:
+            if campaign_pending:
+                for pending in campaign_pending:
+                    pending.target_campaign_group_type = target_campaign_group_type
+            else:
+                campaign_pending.append(
+                    CampaignPendingCanonical(
+                        old_state=None,
+                        new_state=None,
+                        old_budget=None,
+                        new_budget=None,
+                        target_campaign_group_type=target_campaign_group_type,
+                    )
+                )
 
         cards.append(
             SuggestCardCanonical(
@@ -555,7 +575,7 @@ def canonicalize_payload(
                 suggest_category=_category_from_action(primary_adj.get("action")),
                 confidence_level=confidence,
                 campaign_group_type=campaign_group_type,
-                current_portfolio=map_campaign_group_type(portfolio_label) or None,
+                current_portfolio=current_portfolio or None,
                 description=description,
                 evidence=evidence_text,
                 sort_order=sort_order,

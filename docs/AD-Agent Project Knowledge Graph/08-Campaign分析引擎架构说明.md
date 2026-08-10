@@ -710,22 +710,22 @@ Campaign 引擎维护四类组合语义：
 
 ### 组合目标收拢（`_reconcile_portfolio_targets`）
 
-`campaign.py:2101` 的 `_reconcile_portfolio_targets()` 是落库前唯一可信的挪组 target 生成点，在护栏后、ERP 落库前执行（step 7b）。其原则是「挪组授权不依赖 LLM」：
+`campaign.py` 的 `_reconcile_portfolio_targets()` 是落库前唯一可信的挪组 target 生成点，在护栏后、ERP 落库前执行（step 7b）。其原则是「挪组授权不依赖 LLM」；current 与 target 始终分列保存：
 
 **广泛/词组/自动 → 无条件收拢到自动广泛组：**
-- 不依赖 LLM 输出：只要当前真实组合确认不属于 `auto_broad_group`，就写入 `target_campaign_group_type`
+- 不依赖 LLM 输出：target 始终按匹配类型和确定性规则生成；current 仅用于比较，只有 current 与 target 不同才写入迁组 pending
 - 未被 LLM 返回的广泛活动（含多关键词预过滤活动）补一条纯挪组项：只改 portfolio，不改 bid/budget
 - 权威路由：`runtime_contract.yaml` ROUTE-001：`match_type in [BROAD, PHRASE, AUTO] → auto_broad_group`
 
 **精准 EXACT → 仅确定性规则结果可授权挪组：**
-- 只有 `triggered_rule` 以 `"EXACT_TRANSITION:"` 开头的项才写 `target_campaign_group_type`
-- 旧的 $5 预算分界（`campaign_portfolio.py:classify()`）仅作展示标签（`current_portfolio`），不授权实际的 portfolio 迁移
+- target 由精准确定性结果（如有）或当前标准组/匹配类型默认规则生成，始终落 card 的 `campaign_group_type`
+- 旧的 $5 预算分界（`campaign_portfolio.py:classify()`）不再把 target 回落为 current；`current_portfolio` 只记录真实 MCP 当前组合
 - 权威路由：ROUTE-003/004 由 exact_main_validation 决定 core/testing 归属
 
 **关键边界：**
 - 经营模式不参与此处迁组授权（代码注释：「经营模式只能影响前序分析与护栏」）
-- `target_campaign_group_type` 为空字符串时执行侧不发起挪组 MCP 调用
-- `match_unique_portfolio()` 要求子串匹配唯一命中；多命中或零命中均不写 target
+- `target_campaign_group_type` 为空字符串时执行侧不发起挪组 MCP 调用；card 的 `campaign_group_type` 不作为执行侧推断来源
+- 标准 current 使用唯一的子串匹配归一化为 ERP 码；未知非空 current 原样保留并视为与 target 不同，需进入待确认迁组
 
 ## 新建活动线
 
@@ -930,7 +930,7 @@ Campaign 分析本身不直接动真实广告。
 - 不要把 `adjustments` 为空当成无结果，还要检查 `new_campaigns`、`budget_summary`、`skipped_campaigns` 和 `data_unavailable`。
 - 不要让前端直接拼 pending 逻辑；应优先通过 viewmodel。
 - 不要以为选了经营模式就自动生效。`IMMEDIATE_EXIT` 走确定性执行跳过 LLM，`CONTROLLED_CLEARANCE` 通过 `growth_analysis_enabled` 关闭增长流，其余模式通过 ACOS 容忍系数和 Ontology Card 间接约束——各模式的生效路径不同。
-- 不要把 `campaign_portfolio.classify()` 的旧 $5 分界当成挪组授权。精准活动的实际挪组仅由 32号确定性规则结果驱动；旧分界只产生 `current_portfolio` 展示标签；`effective_portfolio`（DB `campaign_group_type`）为目标优先有效组，前端据此筛选。
+- 不要把 `campaign_portfolio.classify()` 的旧 $5 分界当成挪组授权。`current_portfolio` 保存真实 MCP 当前组合（标准组归一化为 ERP 码，未知名称保留原文），`campaign_group_type` 始终是确定性 target ERP 码；只有 current 与 target 不同时才生成 Pending 迁组动作。
 - 不要把精准升降级当成护栏的子集。升降级在护栏前执行（step 6d），产出被护栏的 P0-P11 二次校验；两者是串行关系，不是替代关系。
 
 ## 更新检查清单

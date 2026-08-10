@@ -113,7 +113,7 @@ class SuggestCardCanonical:
     campaign_pending: list[CampaignPendingCanonical] = field(default_factory=list)
     proposed_negetive_exact_keyword: list = field(default_factory=list)   # JSON: 否词精准文本列表
     proposed_negetive_phrase_keyword: list = field(default_factory=list)  # JSON: 否词词组文本列表
-    current_portfolio: str | None = None   # 当前组 ERP 码（MCP portfolio 名称映射，挪组前原归属）
+    current_portfolio: str | None = None   # 真实 MCP 当前组合：标准组为 ERP 码，未知名称原样保留
 
 
 @dataclass(slots=True)

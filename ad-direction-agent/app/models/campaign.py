@@ -163,9 +163,9 @@ class CampaignAdjustmentItem(BaseModel):
     round_votes: dict[str, str] = Field(default_factory=dict)
     review_level: str = "MANUAL_REVIEW"
     # 当前组合归属（MCP portfolio 名称 → find_portfolio_group_matches 映射）
-    current_portfolio: str = ""
+    current_portfolio: str = ""  # 真实 MCP 当前组合：标准组 ERP 码，未知名称原样保留
     # 代码规则判定的活动级目标组 ERP 码；空值表示本轮不执行挪组。
-    target_campaign_group_type: str = ""
+    target_campaign_group_type: str = ""  # 确定性目标组合 ERP 码；与 current 分离
     # KB 18/21 原字段(后台真实 Portfolio); 当前数据层无该字段,留空待后续接入
     portfolio_or_group: str = ""
     # 逐活动 7 天指标快照(代码回填自 CampaignUnit.perf_7d)→ 落 card.perf_json;

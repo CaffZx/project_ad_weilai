@@ -19,30 +19,21 @@ from datetime import date, datetime
 
 from app.config.settings import settings
 from app.models.campaign import CampaignAdjustmentItem, CampaignUnit
-from app.workflow.steps.campaign_portfolio import PORTFOLIO_BROAD, PORTFOLIO_TEST
+from app.workflow.steps.campaign_portfolio import (
+    default_target_group_code,
+    normalize_current_portfolio,
+)
 
 logger = logging.getLogger(__name__)
 
 REACTIVATE_BUDGET_ONLY = "reactivate_budget_only"
 REACTIVATE_WITH_CALIBRATED_BID = "reactivate_with_calibrated_bid"
-_BROAD_MATCH_TYPES = {"BROAD", "PHRASE", "AUTO"}
-
-
 def _as_date(v) -> date | None:
     if isinstance(v, datetime):
         return v.date()
     if isinstance(v, date):
         return v
     return None
-
-
-def _restart_group(match_type: str | None) -> str:
-    """重启后归组（KB §7 落精准测试/自动广泛组）。
-
-    不用 campaign_portfolio.classify()——它按当前 $1/$0.20 状态会把活动判回低价捡漏组；
-    复评后该活动离开淘汰池，按 match_type 直接定组。
-    """
-    return PORTFOLIO_BROAD if (match_type or "").upper() in _BROAD_MATCH_TYPES else PORTFOLIO_TEST
 
 
 def restart_orders_window_days(days_in_elimination: int) -> int:
@@ -177,6 +168,7 @@ def _build_item(
         negative_keywords=[],               # 占位
         review_level=review_level,
         days_online=cu.days_online,
-        current_portfolio=_restart_group(cu.match_type),
+        current_portfolio=normalize_current_portfolio(cu.current_portfolio_name),
+        target_campaign_group_type=default_target_group_code(cu.match_type),
         perf_7d=cu.perf_7d.model_dump() if cu.perf_7d else {},
     )

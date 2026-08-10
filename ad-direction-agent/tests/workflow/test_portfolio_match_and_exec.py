@@ -33,8 +33,11 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
     classify,
+    default_target_group_code,
     find_portfolio_matches,
     find_portfolio_group_matches,
+    group_code_to_label,
+    normalize_current_portfolio,
     target_group_code_if_current_mismatch,
 )
 from app.workflow.steps.portfolio_execution import _match_portfolio, _pf_field
@@ -69,6 +72,15 @@ def test_target_group_code_only_when_current_portfolio_is_confirmed_mismatch():
         "US-精准测试组", PORTFOLIO_BROAD,
     ) == "auto_broad_group"
     assert target_group_code_if_current_mismatch("", PORTFOLIO_BROAD) == ""
+
+
+def test_current_and_target_helpers_keep_distinct_contracts():
+    assert normalize_current_portfolio(f"US-{PORTFOLIO_BROAD}") == "auto_broad_group"
+    assert normalize_current_portfolio("custom-portfolio-name") == "custom-portfolio-name"
+    assert normalize_current_portfolio("") == ""
+    assert default_target_group_code("EXACT") == "exact_testing_group"
+    assert default_target_group_code("BROAD") == "auto_broad_group"
+    assert group_code_to_label("auto_broad_group") == PORTFOLIO_BROAD
 
 
 def test_reconcile_portfolio_targets_only_moves_broad_campaigns_outside_broad_group():
@@ -123,13 +135,54 @@ def test_reconcile_portfolio_targets_only_moves_broad_campaigns_outside_broad_gr
 
     assert existing_broad.target_campaign_group_type == "auto_broad_group"
     assert existing_broad.proposed_bid == 0.7
-    assert existing_exact.target_campaign_group_type == ""
-    assert existing_exact.current_portfolio == PORTFOLIO_MAIN
+    assert existing_exact.target_campaign_group_type == "exact_core_group"
+    assert existing_exact.current_portfolio == "exact_core_group"
     added = [item for item in items if item.campaign_id == "broad-multi-id"]
     assert len(added) == 1
     assert added[0].action == "keep"
     assert added[0].target_campaign_group_type == "auto_broad_group"
     assert not any(item.campaign_id == "broad-already-id" for item in items)
+
+
+def test_reconcile_portfolio_targets_preserves_raw_current_and_always_sets_target():
+    broad = CampaignAdjustmentItem(
+        campaign_name="broad-raw",
+        campaign_key="broad-raw-key",
+        campaign_id="broad-raw-id",
+        match_type="BROAD",
+        action="keep",
+    )
+    exact = CampaignAdjustmentItem(
+        campaign_name="exact-demote",
+        campaign_key="exact-demote-key",
+        campaign_id="exact-demote-id",
+        match_type="EXACT",
+        action="keep",
+    )
+    units = [
+        CampaignUnit(
+            campaign_name="broad-raw", campaign_key="broad-raw-key",
+            campaign_id="broad-raw-id", child_asin="B0CHILD",
+            keyword_text="broad kw", match_type="BROAD",
+            current_portfolio_name="custom-portfolio-name",
+        ),
+        CampaignUnit(
+            campaign_name="exact-demote", campaign_key="exact-demote-key",
+            campaign_id="exact-demote-id", child_asin="B0CHILD",
+            keyword_text="exact kw", match_type="EXACT",
+            current_portfolio_name=f"US-{PORTFOLIO_MAIN}",
+        ),
+    ]
+
+    campaign_step._reconcile_portfolio_targets(
+        [broad, exact], units, [],
+        exact_group_targets={"exact-demote-id": "exact_testing_group"},
+    )
+
+    assert broad.current_portfolio == "custom-portfolio-name"
+    assert broad.target_campaign_group_type == "auto_broad_group"
+    assert exact.current_portfolio == "exact_core_group"
+    assert exact.target_campaign_group_type == "exact_testing_group"
 
 
 def test_reconcile_portfolio_targets_does_not_use_clearance_permission_as_move_rule():
@@ -182,8 +235,8 @@ def test_reconcile_portfolio_targets_does_not_use_clearance_permission_as_move_r
         [],
     )
 
-    assert exact_to_eliminate.target_campaign_group_type == ""
-    assert exact_already_low_bid.target_campaign_group_type == ""
+    assert exact_to_eliminate.target_campaign_group_type == "exact_core_group"
+    assert exact_already_low_bid.target_campaign_group_type == "low_bid_retention_group"
     # 广泛/词组/自动始终归自动广泛组，不能因控制清货进入低价组。
     assert broad_to_eliminate.target_campaign_group_type == "auto_broad_group"
 

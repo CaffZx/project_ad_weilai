@@ -24,13 +24,15 @@ from app.models.asin_data import ASINData
 from app.persistence.redis_client import acquire_lock, get_redis, release_lock
 from app.workflow.analysis_run_guard import AnalysisRunCancelled
 from app.workflow.steps.campaign_portfolio import (
+    GROUP_CODE_TO_LABEL,
     LOW_BID_MAX,
     LOW_BUDGET_MAX,
     PORTFOLIO_BROAD,
     PORTFOLIO_ELIMINATE,
-    find_portfolio_group_matches,
+    default_target_group_code,
+    group_code_to_label,
     is_strictly_in_low_bid_pool,
-    target_group_code_if_current_mismatch,
+    normalize_current_portfolio,
 )
 from app.workflow.steps.campaign_restart import analyze_eliminated_restart
 from app.workflow.steps.campaign_new import (
@@ -699,11 +701,9 @@ async def _analyze_campaigns_impl(
     # 4.1 组合预分类只反映当前真实归属；不再用旧 $5 规则推导精准活动的迁移目标。
     if settings.campaign_portfolio_enabled:
         for cu in llm_campaigns:
-            current_groups = find_portfolio_group_matches(cu.current_portfolio_name)
-            if (cu.match_type or "").upper() in {"BROAD", "PHRASE", "AUTO"}:
-                cu.portfolio = PORTFOLIO_BROAD
-            else:
-                cu.portfolio = current_groups[0] if current_groups else ""
+            current = normalize_current_portfolio(cu.current_portfolio_name)
+            cu.current_group_type = current if current in GROUP_CODE_TO_LABEL else "UNKNOWN"
+            cu.portfolio = group_code_to_label(current) or current
         # skipped_eliminated 也归入淘汰组(用于汇总展示一致)
         for s in skipped_eliminated:
             s["portfolio"] = PORTFOLIO_ELIMINATE
@@ -1166,6 +1166,7 @@ async def _analyze_campaigns_impl(
             adjustments,
             campaign_data.campaigns,
             campaign_data.excluded or [],
+            exact_group_targets=exact_group_targets,
         )
 
     # 7c. 淘汰活动复评（KB 21 §7，确定性规则引擎，无 LLM）。
@@ -2174,13 +2175,16 @@ def _reconcile_portfolio_targets(
     adjustments: list[CampaignAdjustmentItem],
     units: list[CampaignUnit],
     excluded: list[dict],
+    *,
+    exact_group_targets: dict[str, str] | None = None,
 ) -> None:
     """在落库前生成唯一可信的活动级挪组 target。
 
-    广泛/词组/自动不依赖 LLM 输出：当前组合确认不属于自动广泛组才写 target。
-    精准活动仅消费 Rule 32 等明确分组规则的结果；均须确认当前组合与目标组
-    不一致才写 target。经营模式只能影响前序分析与护栏，不参与此处迁组授权。
+    current 只来自 CampaignUnit 的真实 MCP 组合名；target 由确定性规则生成，
+    两者分开保存。target 始终是 ERP 组合码，Pending 是否写入由 current/target
+    比较决定。经营模式只能影响前序分析与护栏，不参与此处迁组授权。
     """
+    exact_group_targets = exact_group_targets or {}
     units_by_id = {
         str(unit.campaign_id or "").strip(): unit
         for unit in units
@@ -2193,35 +2197,44 @@ def _reconcile_portfolio_targets(
         campaign_id = str(item.campaign_id or "").strip()
         unit = units_by_id.get(campaign_id) or units_by_key.get(item.campaign_key)
         if unit is None:
-            # LLM / 旧分类都不能直接授权挪组；缺少当前真实组合时也不写 target。
-            item.target_campaign_group_type = ""
+            # target 是确定性产物，不依赖 LLM 是否带回完整的 CampaignUnit。
+            # current 缺失时保留为空；落库层仍会把 target 写入 card，并按
+            # current != target 生成待确认的活动级迁组项。
+            current = normalize_current_portfolio(item.current_portfolio)
+            match_type = str(item.match_type or "").upper()
+            target = ""
+            if campaign_id and match_type == "EXACT":
+                candidate = str(exact_group_targets.get(campaign_id) or "").strip()
+                if candidate in GROUP_CODE_TO_LABEL:
+                    target = candidate
+            if not target and match_type in _BROAD_PORTFOLIO_MATCH_TYPES:
+                target = default_target_group_code(match_type)
+            if not target and current in GROUP_CODE_TO_LABEL:
+                target = current
+            item.current_portfolio = current
+            item.target_campaign_group_type = target or default_target_group_code(match_type)
+            if campaign_id:
+                adjusted_campaign_ids.add(campaign_id)
             continue
 
-        current_groups = find_portfolio_group_matches(unit.current_portfolio_name)
+        current = normalize_current_portfolio(unit.current_portfolio_name)
         match_type = (unit.match_type or item.match_type or "").upper()
-        if match_type in _BROAD_PORTFOLIO_MATCH_TYPES:
-            item.current_portfolio = PORTFOLIO_BROAD
-            item.target_campaign_group_type = target_group_code_if_current_mismatch(
-                unit.current_portfolio_name,
-                PORTFOLIO_BROAD,
-            )
-            unit.portfolio = PORTFOLIO_BROAD
-        else:
-            # 精准旧 $5 分类及 LLM 遗留字段都不能直接授权挪组；
-            # 仅明确分组规则的结果才可写 pending target。
-            is_exact_transition = str(item.triggered_rule or "").startswith(
-                "EXACT_TRANSITION:"
-            )
-            if match_type == "EXACT" and is_exact_transition:
-                item.target_campaign_group_type = target_group_code_if_current_mismatch(
-                    unit.current_portfolio_name,
-                    item.target_campaign_group_type,
-                )
-            else:
-                item.target_campaign_group_type = ""
-            # 当前真实归属仍可供展示/预算回算读取。
-            item.current_portfolio = current_groups[0] if current_groups else (unit.current_portfolio_name or "")
-            unit.portfolio = item.current_portfolio
+        item.current_portfolio = current
+        unit.current_group_type = current if current in GROUP_CODE_TO_LABEL else "UNKNOWN"
+        unit.portfolio = group_code_to_label(current) or current
+
+        target = ""
+        if campaign_id and match_type == "EXACT":
+            candidate = str(exact_group_targets.get(campaign_id) or "").strip()
+            if candidate in GROUP_CODE_TO_LABEL:
+                target = candidate
+        if not target and match_type in _BROAD_PORTFOLIO_MATCH_TYPES:
+            target = default_target_group_code(match_type)
+        if not target and current in GROUP_CODE_TO_LABEL:
+            target = current
+        if not target:
+            target = default_target_group_code(match_type)
+        item.target_campaign_group_type = target
 
         if campaign_id:
             adjusted_campaign_ids.add(campaign_id)
@@ -2270,11 +2283,9 @@ def _reconcile_portfolio_targets(
     ) in candidates:
         if campaign_id in adjusted_campaign_ids:
             continue
-        target = target_group_code_if_current_mismatch(
-            current_portfolio_name,
-            PORTFOLIO_BROAD,
-        )
-        if not target:
+        current = normalize_current_portfolio(current_portfolio_name)
+        target = default_target_group_code(match_type)
+        if current == target:
             continue
         adjustments.append(CampaignAdjustmentItem(
             campaign_name=campaign_name,
@@ -2289,7 +2300,7 @@ def _reconcile_portfolio_targets(
             evidence=[f"当前广告组合：{current_portfolio_name}"],
             current_budget=current_budget,
             current_bid=current_bid,
-            current_portfolio=PORTFOLIO_BROAD,
+            current_portfolio=current,
             target_campaign_group_type=target,
             portfolio_or_group=current_portfolio_name,
             perf_7d=perf_7d,

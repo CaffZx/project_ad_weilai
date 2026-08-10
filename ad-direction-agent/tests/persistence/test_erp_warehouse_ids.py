@@ -20,6 +20,7 @@ def test_pending_uses_doris_ids_not_stable_hash():
                 "child_asin": "B0CHILD",
                 "action": "adjust_bid",
                 "current_portfolio": "精准主力组",
+                "target_campaign_group_type": "exact_core_group",
                 "current_bid": 1.0,
                 "proposed_bid": 0.8,
                 "confidence": 80,
@@ -68,7 +69,7 @@ def test_target_group_creates_campaign_pending_without_budget_change():
     assert card.campaign_pending[0].target_campaign_group_type == "exact_testing_group"
 
 
-def test_legacy_current_portfolio_does_not_create_move_pending():
+def test_current_only_payload_does_not_fallback_to_target():
     payload = {
         "parent_asin": "B0TEST",
         "experiment_id": "exp-no-target-group",
@@ -88,6 +89,8 @@ def test_legacy_current_portfolio_does_not_create_move_pending():
 
     run = canonicalize_payload(payload, shop_id=1622)
 
+    assert run.cards[0].current_portfolio == "low_bid_retention_group"
+    assert run.cards[0].campaign_group_type is None
     assert run.cards[0].campaign_pending == []
 
 

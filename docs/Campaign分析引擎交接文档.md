@@ -858,6 +858,13 @@ MCP 拉关键词+listing → LLM recommend_semantic_core() (KB29)
 
 最后更新：2026-08-07
 
+### 2026-08-10 组合 current/target 语义修复
+
+- `CampaignUnit.current_portfolio_name` 是 MCP 返回的真实当前组合：标准四组通过唯一子串匹配归一化为 ERP 组合码，未知非空名称原样保留。
+- `CampaignAdjustmentItem.target_campaign_group_type` 由确定性代码生成，始终写入建议卡的 `campaign_group_type`；不再用 current 回落填充 target。
+- 只有 current 与 target 不一致时才生成 `campaign_pending.target_campaign_group_type`；预算/状态 pending 与迁组字段按列合并，执行侧仍只消费 confirmed Pending 的 target。
+- `t_advert_agent_modify_suggest_card.current_portfolio` 扩展为 `varchar(512)`，用于保存未知 MCP 组合原名；已有库执行 `scripts/erp_db/alter_card_current_portfolio_raw.sql`。
+
 *v3.27: 预算护栏阈值/新增流match_type收口 + 护栏paused覆盖 + KB切片精细化（2026-08-05~06，本地未部署服务器）—— ①P7 花不完阈值 50%→70%（与 reasoner 预算资格门禁 eligible≥70 对齐）；reasoner 预算资格三档→两档（>90/≥70/<70）②`_derive_match_type` 删除 `_CLASS_TO_MATCH_TYPE` 映射表，纯来源驱动：流量来源全链路一律 BROAD，仅搜索词提精准可建 EXACT ③护栏 P0/P1/P7/P8/P11 覆盖 paused + EXACT paused 静默丢弃 ④`campaign.py` 护栏后二次 action 归一化+预算硬下限（proposed<1→1）+paused 强制 HIGH_RISK_REVIEW ⑤`campaign_budget_reallocation.py` paused 预算释放入可再分配池 ⑥`kb_loader.py` KB30/KB31 切片精化+KB23 补 §4.2/§4.3+Ontology 契约 fail-open ⑦`reasoner.py` 广泛流 prompt 大改：预算资格/策略上下文代码预判注入+action 枚举约束+triggered_rule 命名空间 ⑧前端 summary paused 字段+eliminate_or_paused badge ⑨P0/P1 护栏保存 original_action 防覆盖 ⑩删除 `Campaign切除双轮投票方案.md`（-453 行）。~45 files 累计。*
 
 最后更新：2026-08-06

@@ -524,9 +524,16 @@ def _p12_portfolio_bottleneck(
 
     仅保护「表现达标但被组合预算压抑」的活动。ACOS 超目标的活动（表现差）放行调整。
     """
+    from app.workflow.steps.campaign_portfolio import (
+        group_code_to_label,
+        normalize_current_portfolio,
+    )
+
     if not pf_util:
         return
-    _group = getattr(item, "current_portfolio", "") or ""
+    raw_group = getattr(item, "current_portfolio", "") or ""
+    normalized_group = normalize_current_portfolio(raw_group)
+    _group = group_code_to_label(normalized_group) or normalized_group or raw_group
     _util = pf_util.get(_group) if _group else None
     if _util is None or _util < 1.0:
         return

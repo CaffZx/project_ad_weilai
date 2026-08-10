@@ -37,6 +37,8 @@ from app.workflow.steps.campaign_portfolio import (
     PORTFOLIO_ELIMINATE,
     PORTFOLIO_MAIN,
     PORTFOLIO_TEST,
+    group_code_to_label,
+    normalize_current_portfolio,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,7 +66,9 @@ def _f(v, default: float = 0.0) -> float:
 
 def _current_group_of(item: CampaignAdjustmentItem) -> str:
     """活动当前归属（来源组）：current_portfolio 优先，action/match 兜底。"""
-    g = (item.current_portfolio or "").strip()
+    raw = (item.current_portfolio or "").strip()
+    normalized = normalize_current_portfolio(raw)
+    g = group_code_to_label(normalized) or normalized or raw
     if g in (PORTFOLIO_MAIN, PORTFOLIO_TEST, PORTFOLIO_BROAD, PORTFOLIO_ELIMINATE):
         return g
     if (item.action or "") == _ELIMINATE_ACTION:
